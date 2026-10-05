@@ -4,146 +4,39 @@ icon: lucide/cloud
 
 # Deployment
 
-MindRoom can be deployed in various ways depending on your needs.
-
-Existing deployments moving from the previous Nio integration must follow the [Nio 1.0 cutover guide](nio-upgrade.md).
+This page helps you choose how to run MindRoom and lists what every deployment needs.
+Each option links to the page with its setup steps.
 
 ## Deployment Options
 
 | Method | Best For |
 |--------|----------|
-| [Hosted Matrix + local MindRoom](hosted-matrix.md) | Recommended and simplest: run only `uvx mindroom run` locally |
-| [NixOS LXC (Incus)](https://github.com/mindroom-ai/lxc-nixos) | Give a MindRoom agent full freedom over its own persistent NixOS virtual machine while the host controls what it sees |
-| [Sandbox Proxy Isolation](sandbox-proxy.md) | Run MindRoom locally while execution tools run in isolated workers |
-| [Approved Egress](approved-egress.md) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
-| Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [Docker (single container)](docker.md) | Single MindRoom runtime or when you already have Matrix |
+| [Your computer + MindRoom Chat (hosted Matrix)](hosted-matrix.md) | Recommended and simplest: run only `uvx mindroom run` locally |
+| [Full Stack (Docker Compose)](../getting-started.md#full-stack-docker-compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
+| [Agent-managed NixOS container (advanced)](../getting-started.md#advanced-agent-managed-nixos-container) | Give a MindRoom agent full freedom over its own persistent NixOS machine while the host controls what it sees |
+| [Docker (single container)](docker.md) | Single MindRoom runtime when you already have Matrix |
+| [Direct install](../getting-started.md#manual-install-with-your-own-matrix-homeserver) | Development and simple setups with your own Matrix homeserver |
 | [Kubernetes](kubernetes.md) | Production clusters: a runtime with optional Tuwunel, client, and MatrixRTC charts, or the multi-tenant SaaS platform |
-| [Trusted upstream browser auth](trusted-upstream-auth.md) | Hosted private agents behind an authenticated access layer |
-| Direct | Development, simple setups |
-
-## Bridges
-
-Connect external messaging platforms to Matrix:
-
-- [Bridges overview](bridges/index.md) - available bridges and how they work
-- [Telegram bridge](bridges/telegram.md) - bridge Telegram chats via mautrix-telegram
-
-## Google Services (Gmail/Calendar/Drive/Docs/Sheets/Tasks)
-
-Use these guides if you want users to connect Google accounts in the MindRoom frontend:
-
-- [Google Services OAuth (Admin Setup)](google-services-oauth.md) - optional custom setup for public and shared deployments
-- [Google Services OAuth (Local Install)](google-services-user-oauth.md) - connect Google locally without Cloud setup
-
-For private personal-agent tools, use the generic [OAuth Framework](../oauth-framework.md) and the Google Drive section in the individual setup guide.
-For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](trusted-upstream-auth.md) so agent-issued OAuth links authenticate as the requester that triggered them.
-
-## Quick Start
-
-### Hosted Matrix + local MindRoom (recommended)
-
-```bash
-# Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
-uvx mindroom config init
-$EDITOR ~/.mindroom/.env
-uvx mindroom run
-# Open the printed link or scan the QR code to approve pairing,
-# or enter the code in MindRoom Chat → Settings → Local MindRoom
-```
-
-Pairing happens automatically on first run.
-
-See [Hosted Matrix deployment](hosted-matrix.md) for the full walkthrough.
-If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](sandbox-proxy.md).
-
-### NixOS LXC container (preferred alternative, agent-controlled machine)
-
-Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with MindRoom, Tuwunel, MindRoom Chat, and Caddy plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
-It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
-It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
-
-```bash
-git clone https://github.com/mindroom-ai/lxc-nixos.git
-cd lxc-nixos
-incus launch images:nixos/unstable mindroom -c security.nesting=true
-incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
-```
-
-### Full Stack Docker Compose (all-local alternative)
-
-```bash
-git clone https://github.com/mindroom-ai/mindroom-stack
-cd mindroom-stack
-cp .env.example .env
-$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
-
-./scripts/quickstart.py
-```
-
-The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
-To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
-
-Raw `docker compose up -d` remains a manual fallback; the quickstart validates provider configuration, waits for readiness, and diagnoses common port and startup failures.
-
-The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
-The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
-If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
-
-### Direct (Development)
-
-```bash
-mindroom run --storage-path ./mindroom_data
-```
-
-The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
-
-For local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use the core MindRoom checkout's `local/matrix` directory:
-
-```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
-mindroom run --storage-path ./mindroom_data
-```
-
-### Docker (single container)
-
-Create `./mindroom_data` and grant write access to the container's UID/GID `1000:1000` before running this command; follow the [Docker guide's storage preparation](docker.md#quick-start) for your Docker user mapping.
-
-```bash
-docker run -d \
-  --name mindroom \
-  -p 8765:8765 \
-  -v ./config.yaml:/app/config.yaml:ro \
-  -v ./mindroom_data:/app/mindroom_data \
-  --env-file .env \
-  ghcr.io/mindroom-ai/mindroom:latest
-```
-
-Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
-
-See the [Docker deployment guide](docker.md) for the full single-container setup.
-
-### Kubernetes
-
-See the [Kubernetes deployment guide](kubernetes.md) for Helm chart configuration.
+| [Sandbox Proxy Isolation](sandbox-proxy.md) | Run MindRoom while execution tools run in isolated workers |
+| [Approved Egress](approved-egress.md) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
+| [Trusted upstream browser auth](trusted-upstream-auth.md) | Hosted multi-user private agents behind an authenticated access layer |
 
 ## Required Configuration
 
-Full stack:
+The full stack needs only a model provider key in its `.env`; see [Full Stack Docker Compose](../getting-started.md#full-stack-docker-compose).
 
-```bash
-# .env in the full stack repo
-ANTHROPIC_API_KEY=sk-ant-...
-# The default stack model uses Anthropic; selecting another provider also requires changing the model config.
-```
+Direct and single-container deployments need:
 
-Direct and single-container deployments:
+1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` and give MindRoom a way to create agent accounts (see [Matrix account provisioning](../getting-started.md#matrix-account-provisioning)).
+2. **Model credentials** - Configure credentials for the selected provider, using an API key or a supported CLI login (see [Model Configuration](../configuration/models.md#environment-variables)); containers must mount or provide the matching auth state.
+3. **Persistent storage** - Mount the storage directory (`mindroom_data/` by default) so agent state survives restarts (see [Data Storage](storage.md#data-persistence)).
 
-1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` and configure hosted provisioning, a registration/shared-secret token, or intentionally open registration for managed agent accounts
-2. **Model credentials** - Configure credentials that match the selected provider, using an API key or a supported CLI login; containers must mount or provide the corresponding auth state
-3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
+Hosted `mindroom.chat` installs also need the credentials that pairing saves; see [Hosted Matrix](hosted-matrix.md#what-pairing-saves).
+Every environment variable is listed in [Configuration — Environment Variables](../configuration/index.md#environment-variables).
 
-See the [Docker guide](docker.md#environment-variables) for the complete environment variable reference.
+## Related Setup
 
-Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
+- [Bridges](bridges/index.md) - connect Telegram and other messaging platforms to Matrix.
+- [Connect Google Accounts](google-services-user-oauth.md) - Google tools on a paired local install, with no Google Cloud setup.
+- [Google OAuth Apps & Scopes](google-services-oauth.md) - your own Google OAuth client for remote, public, or shared deployments.
+- [Upgrade Notes](upgrades.md) - required steps when upgrading, including the [Nio 1.0 cutover](upgrades.md#upgrading-to-nio-10).

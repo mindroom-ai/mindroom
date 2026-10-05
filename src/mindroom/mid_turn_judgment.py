@@ -9,8 +9,9 @@ from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.judgment.evaluator import create_judgment_evaluator
-from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
+from mindroom.judgment.state import JudgmentMessage
 from mindroom.logging_config import get_logger
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.mid_turn import MID_TURN_QUESTION, MidTurnGate, message_text_for_judgment
@@ -84,6 +85,25 @@ def create_mid_turn_gate(
     )
 
 
+def _judgment_text(message: ResolvedVisibleMessage) -> str | None:
+    """Show earlier media as a placeholder, since most threads hold a file and the judge never reads one."""
+    if holds_unresolved_sidecar(message.content):
+        # A long-text preview is not the whole message.
+        return None
+    msgtype = message.content.get("msgtype", "m.text")
+    # A tuple compares without hashing, so a malformed list or dict msgtype cannot raise.
+    if msgtype in ("m.text", "m.notice"):
+        if not message.body.strip():
+            return None
+        return f"{message.body}\n[with attachments]" if message.content.get(ATTACHMENT_IDS_KEY) else message.body
+    kind = (msgtype.removeprefix("m.") if isinstance(msgtype, str) else "") or "media"
+    filename = message.content.get("filename")
+    name = filename if isinstance(filename, str) and filename.strip() else message.body
+    label = f"[{kind}: {name}]" if name.strip() else f"[{kind}]"
+    # With its own file name, a media event's body is a caption the sender wrote.
+    return f"{label}\n{message.body}" if name != message.body and message.body.strip() else label
+
+
 def conversation_context_for_mid_turn(
     history: Sequence[ResolvedVisibleMessage],
     *,
@@ -94,8 +114,9 @@ def conversation_context_for_mid_turn(
 ) -> tuple[JudgmentMessage, ...] | None:
     """Keep complete public text before this turn's first source, never future queued input.
 
-    Preserve the conversation rather than guessing which old request is still active.
-    Missing, partial, media, or oversized history cannot authorize continued tool use.
+    Preserve the conversation rather than guessing which old request is still active; the gate
+    clips long messages and keeps the newest that fit. Missing or partial history cannot
+    authorize continued tool use.
     """
     if is_thread_history_degraded(history) or (
         isinstance(history, ThreadHistoryResult) and not history.is_full_history
@@ -106,21 +127,16 @@ def conversation_context_for_mid_turn(
         return () if thread_id in source_event_ids else None
     internal_senders = current_internal_sender_ids(config, runtime_paths)
     context: list[JudgmentMessage] = []
-    size = 0
     for message in history:
         if message.event_id in source_event_ids:
             return tuple(context)
-        if message.content.get("msgtype", "m.text") not in {"m.text", "m.notice"} or message.content.get(
-            ATTACHMENT_IDS_KEY,
-        ):
-            return None
-        size += len(message.body)
-        if not message.body.strip() or size > MAX_REQUEST_BYTES:
+        text = _judgment_text(message)
+        if text is None:
             return None
         role = (
             "assistant"
             if message.sender in internal_senders and not message.content.get(ORIGINAL_SENDER_KEY)
             else "user"
         )
-        context.append(JudgmentMessage(role, message.body))
+        context.append(JudgmentMessage(role, text))
     return None

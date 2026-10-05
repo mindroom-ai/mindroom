@@ -386,6 +386,11 @@ matchLabels:
 {{- if or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}true{{- end -}}
 {{- end -}}
 
+{{- /* Whether the worker NetworkPolicy fences worker egress; the Agent Vault policy follows the same gate. */ -}}
+{{- define "mindroom-runtime.workerEgressPolicyEnabled" -}}
+{{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.networkPolicy.create -}}true{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.egressProxyNamespace" -}}
 {{- if .Values.approvedEgress.enabled -}}
 {{- .Release.Namespace -}}
@@ -416,6 +421,29 @@ matchLabels:
 {{- else -}}
 {{- toYaml .Values.egressProxy.networkPolicy.proxyPodSelector -}}
 {{- end -}}
+{{- end -}}
+
+{{- /* NetworkPolicy peers for the egressProxy.networkPolicy.dns destination, shared by the worker and Agent Vault policies. */ -}}
+{{- define "mindroom-runtime.egressProxyDnsPeers" -}}
+{{- $dns := .Values.egressProxy.networkPolicy.dns -}}
+{{- $peers := list -}}
+{{- $selectorPeer := dict -}}
+{{- if kindIs "map" $dns.namespaceSelector -}}
+{{- $_ := set $selectorPeer "namespaceSelector" $dns.namespaceSelector -}}
+{{- else if kindIs "map" $dns.podSelector -}}
+{{- /* A pod-only peer means the policy's own namespace; pin it to the worker namespace so both policies select the same pods. */ -}}
+{{- $_ := set $selectorPeer "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" (include "mindroom-runtime.workerNamespace" .))) -}}
+{{- end -}}
+{{- if kindIs "map" $dns.podSelector -}}
+{{- $_ := set $selectorPeer "podSelector" $dns.podSelector -}}
+{{- end -}}
+{{- if $selectorPeer -}}
+{{- $peers = append $peers $selectorPeer -}}
+{{- end -}}
+{{- range $dns.ipBlocks -}}
+{{- $peers = append $peers (dict "ipBlock" .) -}}
+{{- end -}}
+{{- toYaml $peers -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.egressProxyUrl" -}}

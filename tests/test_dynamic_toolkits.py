@@ -1471,6 +1471,31 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     assert "open_panel(panel='members') shows the Members panel" in prompt
 
 
+@pytest.mark.parametrize(
+    ("options", "named"),
+    [
+        ({"enable_show_canvas": True}, False),
+        ({"enable_canvas_libraries": True}, False),
+        ({"enable_show_canvas": True, "enable_canvas_libraries": True}, True),
+        ({"enable_show_canvas": True, "enable_canvas_libraries": True, "exclude_tools": ["show_canvas"]}, False),
+    ],
+)
+def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases(
+    tmp_path: Path,
+    options: dict[str, object],
+    named: bool,
+) -> None:
+    """Pages that load libraries break where Chat blocks them, so the source is opt-in like canvases."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    prompt = _render_system_prompt(agent)
+
+    assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
+
+
 def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path) -> None:
     """An operator may exclude show_canvas defensively; that must not drop the other chat_ui functions."""
     raw = _base_config_data()

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from agno.db.sqlite import SqliteDb
 from agno.db.utils import deserialize_run, get_run_type
@@ -241,12 +241,27 @@ def compacted_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> 
     from the scope's latest summary-less generation onward. A legacy generation adds
     the seen ids captured with its summary, which are cleared when that summary is.
     """
+    return _replayed_archive_event_ids(storage, session_id=session_id, scope_key=scope_key, column="seen_event_ids")
+
+
+def redactable_compacted_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> set[str]:
+    """Return every Matrix event id the scope's replayed summary derives from, as redaction matches them."""
+    return _replayed_archive_event_ids(storage, session_id=session_id, scope_key=scope_key, column="event_ids")
+
+
+def _replayed_archive_event_ids(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    scope_key: str,
+    column: Literal["seen_event_ids", "event_ids"],
+) -> set[str]:
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
     with db.db_engine.begin() as connection:
         _ensure_tables(connection, db)
         rows = connection.exec_driver_sql(
-            f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.seen_event_ids) "  # noqa: S608
+            f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.{column}) "  # noqa: S608
             f"JOIN {compactions} AS generation ON generation.id = archived.compaction_id "
             "WHERE generation.session_id = ? AND generation.scope_key = ? AND generation.id > COALESCE("
             f"(SELECT MAX(id) FROM {compactions} WHERE session_id = ? AND scope_key = ? AND summary IS NULL), 0) "

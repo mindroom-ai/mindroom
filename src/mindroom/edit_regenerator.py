@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
-    from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
 
@@ -63,7 +62,6 @@ class EditRegeneratorDeps:
     generate_response: Callable[[ResponseRequest], Awaitable[str | None]]
     wait_for_turn_settled: Callable[[tuple[str, ...]], Awaitable[None]]
     receipt_order: Callable[[], Awaitable[int]]
-    interrupted_turn_rooms: InterruptedTurnRooms
     timestamp_formatter: Callable[[float | None], str | None]
 
 
@@ -386,12 +384,7 @@ class EditRegenerator:
             ),
         )
 
-        record_interrupted_turn, record_deferred_outcome, record_user_stop = self._settlement_callbacks(
-            room,
-            record=record,
-            driving_edit=driving_edit,
-            applied=applied,
-        )
+        record_deferred_outcome, record_user_stop = self._settlement_callbacks(record=record, applied=applied)
 
         stale_runs_removed = False
 
@@ -406,7 +399,7 @@ class EditRegenerator:
             )
             mailbox.rebuild_requested = result is EditPreparation.REBUILD
             if result is False and not stale_runs_removed:
-                self.deps.turn_store.remove_stale_runs_for_edit(
+                await self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=record,
                     requester_user_id=requester_id,
                 )
@@ -438,7 +431,6 @@ class EditRegenerator:
                 prepare_source_turn=prepare_snapshot,
                 prepared_edit_record=record,
                 source_handoff=asyncio.Event(),
-                on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=record_deferred_outcome,
                 on_user_stop_handled=record_user_stop,
@@ -482,27 +474,14 @@ class EditRegenerator:
 
     def _settlement_callbacks(
         self,
-        room: nio.MatrixRoom,
         *,
         record: TurnRecord,
-        driving_edit: _Edit,
         applied: dict[str, SourceEventRevision],
     ) -> tuple[
-        Callable[[], None],
         Callable[[str], Awaitable[None]],
         Callable[[str, int], Awaitable[None]],
     ]:
-        """Build the interrupted-turn and terminal-outcome callbacks for one regeneration.
-
-        Both outcome callbacks read ``applied`` when they fire rather than when
-        the request is built, because ``record_interrupted_turn`` can empty it
-        in between: an interrupted revision must stay uncommitted so the
-        replacement runtime re-drives it instead of treating it as applied.
-        """
-
-        def record_interrupted_turn() -> None:
-            if self.deps.interrupted_turn_rooms.register(driving_edit.revision[1], room_id=room.room_id):
-                applied.clear()
+        """Build the terminal-outcome callbacks that commit one regeneration's applied revisions."""
 
         async def record_deferred_outcome(response_event_id: str) -> None:
             if applied:
@@ -521,7 +500,7 @@ class EditRegenerator:
                     stop_receipt_order,
                 )
 
-        return record_interrupted_turn, record_deferred_outcome, record_user_stop
+        return record_deferred_outcome, record_user_stop
 
     @staticmethod
     def _discard(mailbox: _Mailbox, revisions: dict[str, SourceEventRevision]) -> None:

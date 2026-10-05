@@ -295,7 +295,7 @@ def oauth_connection_required(
     if reason == OAUTH_RESET_REQUIRED_REASON:
         instruction = (
             f"{context.provider.display_name} credentials for this requester cannot be read. "
-            "Use the authenticated MindRoom dashboard's Integrations page to reset this provider connection, "
+            "Use the Tools tab of the authenticated MindRoom dashboard to reset this provider connection, "
             "then reconnect and retry the request."
         )
         return OAuthConnectionRequired(

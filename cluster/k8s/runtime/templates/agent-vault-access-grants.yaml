@@ -67,8 +67,9 @@ spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
+      {{- /* Pod templates are immutable, so version labels stay on the Job and a version-only upgrade keeps the template. */}}
       labels:
-        {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 8 }}
+        {{- omit (include "mindroom-runtime.agentVaultAccessGrantsLabels" . | fromYaml) "helm.sh/chart" "app.kubernetes.io/version" | toYaml | nindent 8 }}
     spec:
       restartPolicy: OnFailure
       automountServiceAccountToken: false

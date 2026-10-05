@@ -16,6 +16,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Tell the agent its canvas pages may load libraries from https://cdn.jsdelivr.net/npm/. Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries).",
+          "label": "Enable Canvas Libraries",
+          "name": "enable_canvas_libraries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -7880,7 +7892,7 @@
       ],
       "description": "Create a single-use script that wakes this agent when background work finishes",
       "display_name": "Callback Manager",
-      "docs_url": "https://docs.mindroom.chat/agent-callbacks/",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/#agent-callbacks",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8345,7 +8357,7 @@
       ],
       "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -9213,7 +9225,9 @@
         "cancel_schedule",
         "edit_schedule",
         "list_schedules",
-        "schedule"
+        "run_scheduled_call",
+        "schedule",
+        "schedule_tool_call"
       ],
       "helper_text": null,
       "icon": "Calendar",

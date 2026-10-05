@@ -47,7 +47,6 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
 from mindroom.response_runner import ResponseRequest
-from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
 from mindroom.turn_record import EditPreparation
@@ -92,7 +91,6 @@ class _Harness:
     ingress_hook_runner: MagicMock
     generate_response: AsyncMock
     wait_for_turn_settled: AsyncMock
-    interrupted_turn_rooms: InterruptedTurnRooms
     config: Config
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
@@ -261,7 +259,7 @@ def _harness(
         async with response_lock:
             assert isinstance(request, ResponseRequest)
             event_id = await generate_response(request)
-            if event_id is not None and not interrupted_turn_rooms.contains(request.correlation_id or ""):
+            if event_id is not None:
                 await _acknowledge_test_edit(
                     tmp_path,
                     request,
@@ -272,7 +270,6 @@ def _harness(
             return event_id
 
     wait_for_turn_settled = AsyncMock()
-    interrupted_turn_rooms = InterruptedTurnRooms()
     regenerator = EditRegenerator(
         EditRegeneratorDeps(
             runtime=_RuntimeStub(client=AsyncMock(spec=nio.AsyncClient), config=config),
@@ -284,7 +281,6 @@ def _harness(
             generate_response=run_locked_response,
             wait_for_turn_settled=wait_for_turn_settled,
             receipt_order=AsyncMock(return_value=receipt_order),
-            interrupted_turn_rooms=interrupted_turn_rooms,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
         ),
     )
@@ -295,7 +291,6 @@ def _harness(
         ingress_hook_runner=ingress_hook_runner,
         generate_response=generate_response,
         wait_for_turn_settled=wait_for_turn_settled,
-        interrupted_turn_rooms=interrupted_turn_rooms,
         config=config,
         runtime_paths=runtime_paths,
         room=nio.MatrixRoom(room_id=ROOM_ID, own_user_id=f"@{AGENT_NAME}:example.org"),
@@ -365,6 +360,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert request.member_display_names == {USER_ID: "Banana Man"}
     assert request.existing_event_id == RESPONSE_EVENT_ID
     assert request.existing_event_is_placeholder is False
+    # A regeneration cut short by a restart starts over: a newer edit may have replaced its prompt.
+    assert request.existing_event_is_recovered is False
     assert request.user_id == USER_ID
     assert request.correlation_id == EDIT_EVENT_ID
     assert request.matrix_run_metadata == RUN_METADATA
@@ -1814,8 +1811,8 @@ async def test_generate_response_failure_propagates_without_recording(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp_path: Path) -> None:
-    """A replacement interruption must leave its revision for room-scoped recovery."""
+async def test_unsettled_cancellation_leaves_interrupted_edit_uncommitted(tmp_path: Path) -> None:
+    """A cancellation the runner never settled must leave its revision for journal replay."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
     attempts = 0
@@ -1825,10 +1822,6 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
         attempts += 1
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
-        assert request.on_interrupted_response_recoverable is not None
-        assert request.on_deferred_outcome_handled is not None
-        request.on_interrupted_response_recoverable()
-        await request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.generate_response.side_effect = interrupt
@@ -1838,8 +1831,8 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
         await _handle_edit(harness, event, event_info)
 
     assert attempts == 1
-    assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
     harness.turn_store.record_turn.assert_not_called()
+    harness.turn_store.record_responded_turn.assert_not_called()
     assert harness.regenerator._mailboxes == {}
     expected_record = replace(
         record,
@@ -1952,32 +1945,8 @@ async def test_restart_replays_durably_committed_interrupted_edit(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_swallowed_sync_restart_leaves_edit_uncommitted(tmp_path: Path) -> None:
-    """A runner-returned interruption marker must not consume the queued edit."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
-    attempts = 0
-
-    async def interrupt(request: ResponseRequest) -> str:
-        nonlocal attempts
-        attempts += 1
-        assert request.on_interrupted_response_recoverable is not None
-        request.on_interrupted_response_recoverable()
-        return "$interrupted:example.org"
-
-    harness.generate_response.side_effect = interrupt
-    event, event_info = _edit_event(new_body="latest after restart")
-
-    await _handle_edit(harness, event, event_info)
-
-    assert attempts == 1
-    assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
-    harness.turn_store.record_turn.assert_not_called()
-    assert harness.regenerator._mailboxes == {}
-
-
-@pytest.mark.asyncio
-async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tmp_path: Path) -> None:
-    """Restart cancellation must leave every source in the mailbox for recovery."""
+async def test_unsettled_cancellation_leaves_every_waiting_coalesced_source_uncommitted(tmp_path: Path) -> None:
+    """An unsettled cancellation must leave every source in the mailbox for journal replay."""
     first_event_id = "$m1:example.org"
     second_event_id = "$m2:example.org"
     harness = _harness(
@@ -2005,15 +1974,11 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
             sibling_hook_finished.set()
         return False
 
-    async def interrupt(request: ResponseRequest) -> str:
+    async def interrupt(_request: ResponseRequest) -> str:
         nonlocal attempts
         attempts += 1
         generation_started.set()
         await cancel_generation.wait()
-        assert request.on_interrupted_response_recoverable is not None
-        assert request.on_deferred_outcome_handled is not None
-        request.on_interrupted_response_recoverable()
-        await request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.ingress_hook_runner.emit_message_received_hooks.side_effect = hook
@@ -2044,10 +2009,10 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
 
     assert attempts == 1
     assert hook_calls == 2
-    assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
-    # Neither the driving edit nor its waiting sibling may commit, so replacement
-    # recovery re-drives the whole coalesced turn.
+    # Neither the driving edit nor its waiting sibling may commit, so journal
+    # replay re-drives the whole coalesced turn.
     harness.turn_store.record_turn.assert_not_called()
+    harness.turn_store.record_responded_turn.assert_not_called()
     assert harness.regenerator._mailboxes == {}
 
 
@@ -2300,7 +2265,6 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
     async def generate(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
-        assert not store.get_turn_record(first).pending_redaction_cleanup_event_ids
         prompts.append(request.prompt)
         await _acknowledge_test_edit(tmp_path, request, RESPONSE_EVENT_ID, store, journal_store=journal_store)
         return RESPONSE_EVENT_ID
@@ -2437,7 +2401,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
     assert owner.source_event_revisions[second] == (event.server_timestamp, event.event_id)
     assert owner.revision_watermark(first) == (10, "$deleted-edit")
     assert owner.revision_replay["$deleted-edit"].response_event_id == RESPONSE_EVENT_ID
-    assert not owner.revision_replay["$deleted-edit"].cleanup_pending
+    assert owner.revision_replay["$deleted-edit"].redacted
     assert harness.regenerator._mailboxes == {}
 
 

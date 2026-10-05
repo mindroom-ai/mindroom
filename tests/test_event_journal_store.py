@@ -5722,7 +5722,6 @@ class TestOutbox:
         assert persisted.revision_replay[driving].response_event_id == "$answer"
         assert persisted.revision_replay[later].redacted
         assert persisted.revision_replay[later].response_event_id is None
-        assert persisted.revision_replay[later].cleanup_pending == current.revision_replay[later].cleanup_pending
         assert tombstone.redacted_source_event_ids == (later,)
         delivered = await principal.load_matrix_delivery(delivery_id=driving, stage=DeliveryStage.FINAL)
         assert delivered is not None
@@ -8086,6 +8085,68 @@ class TestApprovalContinuations:
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
 
+    async def test_release_hands_interrupted_sources_back_to_replay(self, alice: PrincipalStore) -> None:
+        """A run a restart cut short gives its still-pending sources back to ordinary replay as a fresh attempt."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+
+        # Only a fenced continuation can be released; a live claim may still be running.
+        assert await alice.release_approval_continuation("approval-1", expected_generation=claimed.generation) is False
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "interrupted",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+        assert failing is not None
+
+        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is True
+
+        assert await alice.approval_continuation("approval-1") is None
+        assert await alice.approval_continuation_for_source("$source-1") is None
+        # Both sources are ordinary pending work again, even for the runtime that claimed them.
+        replayable = await alice.pending(runtime_generation="runtime-a")
+        assert [event.event_id for event in replayable] == ["$source-1", "$source-2"]
+
+        def attempt_count(transaction: Transaction) -> int:
+            row = transaction.fetchone(
+                "SELECT COUNT(*) AS count FROM response_attempts WHERE driving_event_id = ?",
+                ("$source-1",),
+            )
+            assert row is not None
+            return int(row["count"])
+
+        assert await alice._backend.read(attempt_count) == 0
+
+    async def test_release_refuses_once_a_final_exists(self, alice: PrincipalStore) -> None:
+        """A FINAL already owes the reply its terminal text, so the continuation settles instead."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "interrupted",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+        assert failing is not None
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("interrupted"),
+            edits_event_id="$waiting",
+        )
+
+        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is False
+        assert await alice.approval_continuation("approval-1") is not None
+
     async def test_finish_serializes_with_responder_departure(
         self,
         rival_stores: RivalStores,
@@ -10039,7 +10100,7 @@ async def test_resume_response_ownership_requires_current_attempted_delivery(
     journal_store: EventJournalStore,
     ended_by: str,
 ) -> None:
-    """History cannot create resume authority, and old memberships cannot retain it."""
+    """History cannot create response ownership, and old memberships cannot retain it."""
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.enqueue_matrix_delivery(
         delivery_id="$turn",
@@ -10050,7 +10111,7 @@ async def test_resume_response_ownership_requires_current_attempted_delivery(
     )
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.INITIAL)
-    # An unknown send result stays with outbox recovery, not a fresh resume relay.
+    # An unknown send result stays with outbox recovery until the send is acknowledged.
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.acknowledge_matrix_delivery(
         delivery_id="$turn",

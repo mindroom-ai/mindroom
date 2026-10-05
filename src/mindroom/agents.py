@@ -8,11 +8,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.db.base import BaseDb, SessionType
 from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_storage, constants, model_loading
@@ -78,6 +75,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
+    from agno.db.base import BaseDb
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
     from agno.skills import Skills
@@ -1194,83 +1192,6 @@ def enable_all_history_replay(entity: Agent | Team) -> None:
     entity.num_history_runs = None
 
 
-def remove_run_by_event_id(
-    storage: BaseDb,
-    session_id: str,
-    event_id: str,
-    *,
-    session_type: SessionType = SessionType.AGENT,
-    include_seen_event_ids: bool = False,
-    remove_following_runs: bool = False,
-) -> bool:
-    """Remove a run whose Matrix source identity or consumed history matches.
-
-    Redaction cleanup can also remove the causal suffix after the first match,
-    because later model output may depend on content from the matching run.
-    Returns True if any run was removed.
-    """
-    session = (
-        agent_storage.get_team_session(storage, session_id)
-        if session_type is SessionType.TEAM
-        else agent_storage.get_agent_session(
-            storage,
-            session_id,
-        )
-    )
-    if session is None or not session.runs:
-        return False
-    removed_runs: list[RunOutput | TeamRunOutput] = []
-    matched_run = False
-    for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)):
-            continue
-        if matched_run and remove_following_runs:
-            removed_runs.append(run)
-            continue
-        if not run.metadata:
-            continue
-        raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        raw_discovery_event_ids = run.metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
-        raw_seen_event_ids = run.metadata.get(constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
-        source_event_ids = (
-            [candidate for candidate in raw_source_event_ids if isinstance(candidate, str)]
-            if isinstance(raw_source_event_ids, list)
-            else []
-        )
-        discovery_event_ids = (
-            [candidate for candidate in raw_discovery_event_ids if isinstance(candidate, str)]
-            if isinstance(raw_discovery_event_ids, list)
-            else []
-        )
-        seen_event_ids = (
-            [candidate for candidate in raw_seen_event_ids if isinstance(candidate, str)]
-            if include_seen_event_ids and isinstance(raw_seen_event_ids, list)
-            else []
-        )
-        revisions = run.metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
-        if include_seen_event_ids and isinstance(revisions, dict):
-            seen_event_ids.extend(
-                revision[1]
-                for revision in revisions.values()
-                if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
-            )
-        matches_event_id = run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
-        if (
-            matches_event_id
-            or event_id in source_event_ids
-            or event_id in discovery_event_ids
-            or event_id in seen_event_ids
-        ):
-            matched_run = True
-            removed_runs.append(run)
-    if not removed_runs:
-        return False
-    # Team member runs hang off the team run through parent_run_id and go with it.
-    kept = agent_storage.runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
-    agent_storage.replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
-    return True
-
-
 @timed("system_prompt_assembly.agent_create.load_plugins")
 def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
     return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
@@ -1333,7 +1254,13 @@ def apply_tool_approval_capability(
             and function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
             and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
         )
-        return not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name)
+        # A scheduled call runs only with the approval its requester gave when it was scheduled.
+        is_scheduled_call_runner = registered_tool_name == "scheduler" and function.name == "run_scheduled_call"
+        return (
+            not is_matrix_room_runtime_function
+            and not is_scheduled_call_runner
+            and tool_may_require_approval(config, function.name)
+        )
 
     if supports_native_tool_approval:
         for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
@@ -2233,7 +2160,6 @@ __all__ = [
     "enable_all_history_replay",
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
-    "remove_run_by_event_id",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
 ]

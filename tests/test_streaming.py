@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import streaming as streaming_mod
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
@@ -39,19 +39,23 @@ from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingLifecycleSuspensionError,
     StreamingResponse,
+    UnfinishedStreamedReply,
     send_streaming_response,
     stream_progress_edits,
 )
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry, tool_trace_from_content
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
+    push_stream_chunk,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -340,7 +344,7 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
     streaming.tool_trace = [ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")]
     client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
     with patch("mindroom.streaming.send_message_result", new=delayed_send):
-        delivery = asyncio.create_task(streaming.update_content("Published reply", client))
+        delivery = asyncio.create_task(push_stream_chunk(streaming, "Published reply", client))
         try:
             await entered.wait()
             assert visible == []
@@ -1049,3 +1053,207 @@ async def test_progress_edits_show_worker_warmup_of_the_resumed_tool(config: Con
     assert get_worker_progress_pump() is None
     assert gateway.ops[1].display_text.startswith("Before.\n\n")
     assert "shell" in gateway.ops[1].display_text
+
+
+_STOPPED_TRACE = (
+    ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+)
+_STOPPED_REPLY = UnfinishedStreamedReply(
+    visible_text="🔧 `counter` [1]\n\nHalf of the report",
+    tool_trace=_STOPPED_TRACE,
+)
+_RESUMED_PREFIX = f"🔧 `counter` [1]\n\nHalf of the report\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n"
+
+
+async def _run_resumed_stream(
+    config: Config,
+    response_stream: AsyncIterator[object],
+    *,
+    streaming_cls: type[StreamingResponse] = StreamingResponse,
+) -> StreamTransportOutcome:
+    return await send_streaming_response(
+        client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$source"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        response_stream=response_stream,
+        streaming_cls=streaming_cls,
+        existing_event_id="$reply",
+        adopt_existing_placeholder=True,
+        resumed=_STOPPED_REPLY,
+    )
+
+
+def _trace_names(content: dict[str, Any]) -> list[str]:
+    return [entry.tool_name for entry in tool_trace_from_content(content)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_resumed_stream_continues_below_the_stopped_text(config: Config) -> None:
+    """The stopped text and its tool calls stay, the restart note follows, and new tools number after the old ones."""
+    gateway = _FakeGateway()
+
+    async def continuation() -> AsyncIterator[object]:
+        yield RunContentEvent(content="The second half.")
+        yield ToolCallStartedEvent(tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}))
+        yield ToolCallCompletedEvent(
+            tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}, result="ok"),
+        )
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        await _run_resumed_stream(config, continuation())
+
+    assert {op.kind for op in gateway.ops} == {"edit"}
+    assert all(op.display_text.startswith(_RESUMED_PREFIX) for op in gateway.ops)
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert final.display_text.startswith(f"{_RESUMED_PREFIX}The second half.")
+    assert "🔧 `search_web` [2]" in final.display_text
+    assert _trace_names(final.content) == ["counter", "search_web"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_resumed_team_stream_numbers_its_tools_after_the_stopped_ones(config: Config) -> None:
+    """Team snapshots replace only the continuation, so the stopped text and calls survive every snapshot."""
+    gateway = _FakeGateway()
+    lookup = ToolTraceEntry(type="tool_call_completed", tool_name="lookup", args_preview="{}", result_preview="x")
+
+    async def team_snapshots() -> AsyncIterator[object]:
+        yield StructuredStreamChunk(content="**GeneralAgent**: Checking.")
+        yield StructuredStreamChunk(
+            content="**GeneralAgent**: Checking.\n\n🔧 `lookup` [1]\n\nDone.",
+            tool_trace=[lookup],
+        )
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        await _run_resumed_stream(config, team_snapshots(), streaming_cls=ReplacementStreamingResponse)
+
+    final = gateway.ops[-1]
+    assert final.display_text == f"{_RESUMED_PREFIX}**GeneralAgent**: Checking.\n\n🔧 `lookup` [2]\n\nDone."
+    assert _trace_names(final.content) == ["counter", "lookup"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_stopping_a_resumed_stream_keeps_the_stopped_text(config: Config) -> None:
+    """A user stop during the continuation ends the whole reply, earlier attempt included."""
+    gateway = _FakeGateway()
+
+    async def stopped_continuation() -> AsyncIterator[object]:
+        yield RunContentEvent(content="The second")
+        await gateway.wait_for_ops(1)
+        raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
+
+    with (
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingDeliveryError) as raised,
+    ):
+        await _run_resumed_stream(config, stopped_continuation())
+
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
+    assert final.display_text == f"{_RESUMED_PREFIX}The second\n\n{_CANCELLED_RESPONSE_NOTE}"
+    assert _trace_names(final.content) == ["counter"]
+    assert raised.value.accumulated_text.startswith(_RESUMED_PREFIX)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_failed_first_resumed_edit_keeps_the_stopped_text(config: Config) -> None:
+    """A rollback after a failed edit returns to what Matrix shows, which includes the stopped attempt."""
+    gateway = _FakeGateway()
+    edits = 0
+
+    async def edit_failing_first(*args: object, **kwargs: object) -> DeliveredMatrixEvent | None:
+        nonlocal edits
+        edits += 1
+        if edits == 1:
+            return None
+        return await gateway.edit(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def failing_continuation() -> AsyncIterator[object]:
+        yield RunContentEvent(content="The second")
+        message = "Provider failed"
+        raise RuntimeError(message)
+
+    with (
+        patch("mindroom.streaming.edit_message_result", new=edit_failing_first),
+        pytest.raises(StreamingDeliveryError),
+    ):
+        await _run_resumed_stream(config, failing_continuation())
+
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    assert final.display_text.startswith(_RESUMED_PREFIX)
+    assert _trace_names(final.content) == ["counter"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_resumed_team_pause_hands_off_the_teams_own_presentation(config: Config) -> None:
+    """The team's approval snapshot must reproduce its own document, so the stopped part stays out of it."""
+    gateway = _FakeGateway()
+    suspension = StreamingLifecycleSuspensionError("paused")
+    lookup = ToolTraceEntry(type="tool_call_started", tool_name="lookup", args_preview="{}")
+    state = {"kind": "team_stream", "members": []}
+
+    async def paused_team() -> AsyncIterator[object]:
+        yield StructuredStreamChunk(
+            content="**GeneralAgent**: Checking.\n\n🔧 `lookup` [1] ⏳",
+            tool_trace=[lookup],
+            presentation_state=state,
+        )
+        await gateway.wait_for_ops(1)
+        raise suspension
+
+    with (
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingLifecycleSuspensionError) as raised,
+    ):
+        await _run_resumed_stream(config, paused_team(), streaming_cls=ReplacementStreamingResponse)
+
+    assert gateway.ops[0].display_text.startswith(_RESUMED_PREFIX)
+    presentation = raised.value.presentation
+    assert presentation is not None
+    assert presentation.response_text == "**GeneralAgent**: Checking.\n\n🔧 `lookup` [1] ⏳"
+    assert presentation.rendered_response_text is None
+    assert [entry.tool_name for entry in presentation.tool_trace] == ["lookup"]
+    assert presentation.state == state
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_resumed_stream_that_adds_nothing_shows_the_stopped_text_once(config: Config) -> None:
+    """A continuation that ends without any output, such as a declined participation, completes below the restart note."""
+    gateway = _FakeGateway()
+
+    async def nothing() -> AsyncIterator[object]:
+        if False:
+            yield None
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        await _run_resumed_stream(config, nothing())
+
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert final.display_text.rstrip() == _RESUMED_PREFIX.rstrip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_resumed_final_event_only_answer_lands_below_the_stopped_text(config: Config) -> None:
+    """A continuation that arrives only as its final event still goes below the stopped attempt."""
+    gateway = _FakeGateway()
+
+    async def final_only() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content="The second half.")
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        outcome = await _run_resumed_stream(config, final_only())
+
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert final.display_text == f"{_RESUMED_PREFIX}The second half."
+    assert outcome.visible_body_state == "visible_body"

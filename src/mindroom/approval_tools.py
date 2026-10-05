@@ -106,8 +106,10 @@ def _refuse_unapproved_executions(run: RunOutput, calls: Sequence[ApprovalCall])
             if not continuation_executes(tool):
                 continue
             call = approved.get(tool.tool_call_id or "")
+            # MindRoom never pauses for user input, and Agno would overwrite the checked arguments with stored input.
             if (
                 call is None
+                or tool.requires_user_input is True
                 or call.tool_call_id in matched
                 or tool.tool_name != call.tool_name
                 or not call.binds_arguments(tool.tool_args)

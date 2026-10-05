@@ -75,7 +75,7 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
             "config": config,
             "runtime_paths": runtime_paths,
         }
-        bot = make_test_team_bot(**kwargs, team_model="other") if name == "team" else make_test_agent_bot(**kwargs)
+        bot = make_test_team_bot(**kwargs) if name == "team" else make_test_agent_bot(**kwargs)
         bot.orchestrator = orchestrator
         bot.running = True
         orchestrator.agent_bots[name] = bot
@@ -267,3 +267,29 @@ async def test_context_window_reload_preserves_explicit_replay_cap(runtime: _Mul
     assert plan.replay_window_tokens == 3000
     assert plan.compaction_context_window == 64000
     assert plan.text_compaction_available
+
+
+@pytest.mark.asyncio
+async def test_agent_and_team_edits_reach_the_next_response_without_restarting_bots(
+    runtime: _MultiAgentOrchestrator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Instruction, model, tool, and team mode edits reach running bots and the config:reloaded hook."""
+    emit_config_reloaded = AsyncMock()
+    monkeypatch.setattr(runtime, "_emit_config_reloaded", emit_config_reloaded)
+    old = runtime.config
+    assert old is not None
+    new = old.model_copy(deep=True)
+    new.agents["general"].instructions = ["Answer in one sentence."]
+    new.agents["general"].model = "other"
+    new.agents["general"].tools = ["calculator"]
+    new.teams["team"].mode = "collaborate"
+    await _reload(runtime, new)
+
+    with _materialize(runtime) as (agent, _member, _team, _router):
+        assert agent.model is not None
+        assert agent.model.id == "other-model"
+        assert "Answer in one sentence." in agent.instructions
+        assert "calculator" in {tool.name for tool in agent.tools}
+    assert runtime.agent_bots["team"].config.teams["team"].mode == "collaborate"
+    assert emit_config_reloaded.await_args.kwargs["changed_entities"] == {"general", "team"}

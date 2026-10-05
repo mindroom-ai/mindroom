@@ -736,14 +736,11 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         assert expected_reply in send_response.await_args.args[0]
 
 
-def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:
-    """The docs index summary should stay in sync with the supported command set."""
-    docs_index = Path(__file__).resolve().parents[1] / "docs" / "index.md"
-    contents = docs_index.read_text(encoding="utf-8")
-    table_row = next(line for line in contents.splitlines() if line.startswith("| **Chat Commands** |"))
-    doc_link = next(line for line in contents.splitlines() if line.startswith("- [Chat Commands]("))
+def test_chat_commands_page_lists_all_supported_commands() -> None:
+    """The chat commands docs page should document every supported command syntax."""
+    chat_commands = Path(__file__).resolve().parents[1] / "docs" / "chat-commands.md"
+    # Table cells escape literal pipes in command syntax as "\|".
+    contents = chat_commands.read_text(encoding="utf-8").replace("\\|", "|")
 
     for syntax, _description in _COMMAND_DOCS.values():
-        # Table cells escape literal pipes in command syntax as "\|".
-        assert syntax in table_row.replace("\\|", "|")
-        assert syntax in doc_link
+        assert syntax in contents

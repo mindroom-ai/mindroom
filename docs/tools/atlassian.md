@@ -1,46 +1,46 @@
 ---
-icon: lucide/layout-list
+icon: simple/atlassian
 ---
 
 # Atlassian Cloud
 
-The `atlassian` tool works with Jira and Confluence Cloud as the person who asked.
-Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so agents see and change only what that person can see and change in Atlassian.
-MindRoom owns the OAuth state, callback, token refresh, and credential storage through its [OAuth framework](../oauth-framework.md).
+The `atlassian` tool searches, reads, and updates Jira and Confluence Cloud as the person who asked.
+Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so agents see and change only what that person can in Atlassian.
 Additional Atlassian sites can be added as separate, independently connected tools through a small plugin.
+OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](../oauth-framework.md).
 
-<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/0dee9f09-80e1-4244-bac3-4da13072bab4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a2f812aa-bd2c-4996-bc13-f41b2f3a8f94#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%" poster="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-light="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-dark="https://github.com/user-attachments/assets/95022cb5-336c-4abc-93e3-430d7dd8eb07">
+  <source src="https://github.com/user-attachments/assets/e0f957e4-d610-4408-b30b-87b9e553ee53" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a5a4917a-a373-499e-95d2-e8c30f354368" type="video/mp4">
 </video>
+
+The separate `jira` and `confluence` tools on [Project Management](project-management.md) use a shared API token or password and also support Jira and Confluence Data Center.
+Their function names do not collide with the `atlassian` functions, so an agent can have both.
 
 ## What It Does
 
 | Function | Product | Changes data | Purpose |
 | --- | --- | --- | --- |
 | `jira_search_issues` | Jira | no | Search issues with JQL, with `next_page_token` paging. |
-| `jira_get_issue` | Jira | no | Read one issue's summary fields and description, or the requested `fields`, with the transitions available from its current status. |
+| `jira_get_issue` | Jira | no | Read one issue's summary fields and description, or the requested `fields` (`["*all"]` for every field), with the transitions available from its current status. |
 | `jira_create_issue` | Jira | yes | Create an issue from a project key, summary, issue type, optional plain-text description, and optional extra fields. |
 | `jira_update_issue` | Jira | yes | Update the summary, description, or other fields of an issue. |
 | `jira_add_comment` | Jira | yes | Add a plain-text comment to an issue. |
 | `jira_transition_issue` | Jira | yes | Move an issue through its workflow by transition ID, transition name, or target status name. |
 | `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging, naming who created, owns, and last edited each result and when it was created. |
 | `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, current version number, and who created, owns, and last edited it. |
-| `confluence_list_attachments` | Confluence | no | List a page's attachments with media type, size, and version, with `cursor` paging. |
-| `confluence_download_attachment` | Confluence | no | Download one page attachment into the conversation as a context attachment. |
+| `confluence_list_attachments` | Confluence | no | List a page's attachments with ID, title, media type, size, comment, and version, with `cursor` paging. |
+| `confluence_download_attachment` | Confluence | no | Download one page attachment into the conversation, see [Attachments](#attachments). |
 | `confluence_create_page` | Confluence | yes | Create and publish a page in a space, optionally under a parent page. |
-| `confluence_update_page` | Confluence | yes | Replace a page's title and body as a new version. |
+| `confluence_update_page` | Confluence | yes | Replace a page's title and whole body as a new version. |
 | `confluence_add_comment` | Confluence | yes | Add a footer comment to a page. |
 
-Plain-text Jira descriptions and comments are converted to Atlassian Document Format, with blank lines separating paragraphs.
-`jira_transition_issue` picks an exact transition ID first, then a transition name, then a target status that only one transition leads to, and name and status matches ignore case.
-When several transitions share that name or target status, it returns `transition_ambiguous` with the candidates and changes nothing.
+Jira descriptions and comments are plain text, with blank lines separating paragraphs.
 Confluence bodies use the Confluence storage format, which is XHTML such as `<p>Hello</p>`.
-Every result is a JSON object with `status` set to `ok` or `error`.
-Successful results name the `product` and the `site` that answered.
-
-The existing `jira` and `confluence` tools are separate integrations that use a shared API token or password.
-They are unchanged, and their function names do not collide with the `atlassian` functions, so an agent can have both.
+`confluence_update_page` needs the page's current version number plus one, taken from `confluence_get_page`.
+`jira_transition_issue` matches an exact transition ID first, then a transition name, then a target status that only one transition leads to, ignoring case for names and statuses.
+When several transitions share that name or target status, it returns `transition_ambiguous` with the candidates and changes nothing.
+Every result is a JSON object with `status` set to `ok` or `error`, and successful results name the `product` and the `site` that answered.
 
 ## Set Up The Atlassian App
 
@@ -53,11 +53,11 @@ An administrator creates one Atlassian OAuth 2.0 (3LO) app for the MindRoom inst
 5. Under **Settings**, copy the client ID and secret.
 
 For a local installation, the callback URL is `http://localhost:8765/api/oauth/atlassian/callback`.
-MindRoom derives callback URLs from `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, so set one of them for a hosted installation.
-The callback URL registered on the app must match exactly.
+A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives the callback URL, and the URL registered on the app must match exactly.
+MindRoom always uses this callback and ignores any `redirect_uri` stored with the app credentials.
 
 Store the client ID and secret in the `atlassian_oauth_client` credential service through the dashboard credentials page.
-For non-interactive deployments, seed it at startup with a [credential seed](../configuration/index.md#credential-seeds):
+For non-interactive deployments, seed it at startup with a [credential seed](../oauth-framework.md#credential-seeds):
 
 ```json
 [
@@ -71,14 +71,10 @@ For non-interactive deployments, seed it at startup with a [credential seed](../
 ]
 ```
 
-The client configuration stays in the primary runtime and is never mirrored into worker containers.
-MindRoom ignores any stored `redirect_uri` on this service and always uses each provider's own callback.
-
 ## Scopes
 
-MindRoom requests only the scopes that the enabled functions call, plus `offline_access` so that tokens can be refreshed.
-Atlassian recommends classic scopes, and MindRoom uses them for every API that accepts them.
-Confluence page and comment writes exist only in the Confluence v2 API, which accepts granular scopes only, so those three scopes are granular.
+MindRoom requests only the scopes that the enabled functions call, plus `offline_access` for token refresh.
+Scopes are classic wherever the API accepts them; Confluence page and comment writes accept only granular scopes.
 
 | Scope | Type | Used by |
 | --- | --- | --- |
@@ -92,8 +88,8 @@ Confluence page and comment writes exist only in the Confluence v2 API, which ac
 | `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
 | `write:comment:confluence` | granular | `confluence_add_comment` |
 
-MindRoom treats a stored grant that lacks any requested scope as disconnected, and the tool asks the requester to connect again.
-Changing a connection's products or write access therefore requires every user of that connection to reconnect once.
+A stored connection that lacks any requested scope counts as disconnected, and the tool asks the requester to connect again.
+Adding a product or enabling writes therefore requires each user whose connection lacks the new scopes to reconnect once, while removing a product or disabling writes does not.
 
 ## Configure The Default Connection
 
@@ -109,35 +105,34 @@ agents:
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `site_url` | `url` | `null` | Atlassian Cloud site to use, as its `https://<name>.atlassian.net` URL such as `https://example.atlassian.net`; any path such as `/wiki` is ignored. |
-| `cloud_id` | `text` | `null` | Atlassian cloud ID of the site; when `site_url` is also set, both must name the same site. |
+| `site_url` | `url` | `null` | Atlassian Cloud site as its `https://<name>.atlassian.net` URL; any path such as `/wiki` is ignored. |
+| `cloud_id` | `text` | `null` | Atlassian cloud ID (a UUID) of the site; when `site_url` is also set, the site must match both. |
 
-Both options are optional and can also be set once for every agent through `defaults.tools` or the tool's dashboard settings.
-When neither is set and the connected account can reach exactly one Jira or Confluence site, the tool uses that site.
-When the account can reach several sites, the tool returns `site_selection_required` with the available sites instead of choosing one.
-When a configured site is not reachable with the connected account, the tool returns `site_not_found` and never falls back to a different site.
-Atlassian reports every site by its `https://<name>.atlassian.net` URL, even when the site is served under a custom domain, so a custom-domain `site_url` never matches.
-Use the site's atlassian.net URL or its `cloud_id` instead.
-The `available_sites` in a `site_not_found` result list the URLs and cloud IDs that Atlassian reports.
-When both `site_url` and `cloud_id` are set, the site must match both, and a mismatch returns `site_not_found`.
-Site URLs must use HTTPS, and cloud IDs must be UUIDs, so a misconfigured value keeps the tool from loading and logs a warning.
+Both options are optional and can also be set for every agent through `defaults.tools` or the tool's dashboard settings.
+A site URL that is not HTTPS or a cloud ID that is not a UUID keeps the tool from loading and logs a warning.
+
+Which site the tool uses:
+
+- With neither option set, Jira and Confluence calls each use the only site of that product the connected account can reach, so one Jira site and a different Confluence site work without a pin.
+- When the account can reach several sites for the product being called, it returns `site_selection_required` with the available sites; set `site_url` or `cloud_id` to choose one.
+- When the configured site is not reachable with the connected account, or `site_url` and `cloud_id` name different sites, it returns `site_not_found` with the `available_sites` Atlassian reports and never falls back to another site.
+
+Atlassian reports every site by its atlassian.net URL, so a custom-domain `site_url` never matches; use the site's atlassian.net URL or its `cloud_id` instead.
 
 ## Connect An Account
 
-When a requester has not connected Atlassian yet, every function returns a structured result with `oauth_connection_required: true` and a `connect_url` for that requester.
+When a requester has not connected Atlassian yet, every function returns `oauth_connection_required: true` with a `connect_url` for that requester.
 The requester opens the link, signs in to Atlassian, approves the requested scopes, and retries the request.
 Users can also connect and disconnect from the dashboard Integrations page.
 
-Tokens are stored per requester in that person's `user` credential scope, like GitHub.
-They are never stored in a shared or global scope, and a call without a concrete requester always asks for a connection instead of using another account.
-Atlassian rotates refresh tokens, and MindRoom stores each new refresh token through its OAuth lifecycle.
-A refresh token that has not been used for 90 days expires, and the requester then reconnects.
+Tokens belong to the requester and are never shared with other users or stored globally.
+A call without a concrete requester always asks for a connection instead of using another account.
+A connection that has not been used for 90 days expires, and the requester then reconnects.
 
 ## Add More Connections
 
 Use `AtlassianConnectionConfig` to add another Atlassian site, such as a partner's Confluence, next to the default connection.
-Each connection gets its own OAuth provider, stored credentials, site pin, requested scopes, and prefixed function names.
-The default `atlassian` tool and its stored connections are unchanged, and no credential ever crosses connections.
+Each connection gets its own OAuth provider, stored credentials, site pin, requested scopes, and prefixed function names, and no credential ever crosses connections.
 
 A plugin can use one module for both registrations:
 
@@ -193,10 +188,10 @@ agents:
 | `name` | required | Lowercase letters, digits, and underscores, starting with a letter, at most 16 characters. |
 | `display_name` | required | Name shown on connect links and the Integrations page. |
 | `site_url` | `null` | The site's `https://<name>.atlassian.net` URL, not a custom domain; only its origin is kept. |
-| `cloud_id` | `null` | Cloud ID of the site; when `site_url` is also set, both must name the same site. |
-| `products` | `("jira", "confluence")` | Products whose functions and scopes this connection enables. |
+| `cloud_id` | `null` | Cloud ID (a UUID) of the site; when `site_url` is also set, both must name the same site. |
+| `products` | `("jira", "confluence")` | Non-empty, duplicate-free products whose functions and scopes this connection enables. |
 | `write` | `True` | Set to `False` to register only read functions and request only read scopes. |
-| `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret. |
+| `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret; the name must end in `_oauth_client`. |
 
 Every connection requires `site_url` or `cloud_id`, so a named connection always acts on one pinned site.
 The `name` determines every identifier, so keep it stable once users have connected.
@@ -211,19 +206,17 @@ The `name` determines every identifier, so keep it stable once users have connec
 
 By default, each connection uses its own Atlassian app, because Atlassian documents one callback URL per app.
 Create an app for the connection as in [Set Up The Atlassian App](#set-up-the-atlassian-app), register the connection's callback URL on it, and store its client ID and secret in the connection's app client service.
-A connection that never received its own client credentials stays unconfigured and never falls back to the default app.
+A connection without its own client credentials stays unconfigured and never falls back to the default app.
 
 To reuse the default app instead, set `client_config_service="atlassian_oauth_client"` and register the connection's callback URL on that app, if the developer console accepts an additional one.
-A shared app has two side effects.
-Atlassian records consent per user and app, so the default connection can then also reach the other site, and an unpinned `atlassian` tool starts returning `site_selection_required` until it gets a `site_url` or `cloud_id`.
+Atlassian records consent per user and app, so with a shared app the default connection can also reach the other site, and an unpinned `atlassian` tool returns `site_selection_required` until it gets a `site_url` or `cloud_id`.
 Revoking the shared app in Atlassian disconnects every connection that uses it.
 
-Each connection has its own card on the Integrations page, and its functions return their own connect link when they need a login.
+Each connection has its own card on the Integrations page and its own connect link.
 
 ## Approvals For Writes
 
-Functions that create, update, comment on, or transition Atlassian data are listed as changing data in [What It Does](#what-it-does).
-Use MindRoom's `tool_approval` rules to require a Matrix approval card for them while reads run immediately:
+Use [tool approval](../tool-approval.md) rules to require a Matrix approval card for the functions that change data while reads run immediately:
 
 ```yaml
 tool_approval:
@@ -244,56 +237,53 @@ tool_approval:
       action: require_approval
 ```
 
-The leading `*` makes each rule also match the prefixed functions of additional connections, such as `partner_confluence_create_page`.
-To approve reads automatically under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
-To give an agent read access only, use `exclude_tools` for the write functions, or register a connection with `write=False` so that it never requests write scopes.
+The leading `*` also matches the prefixed functions of additional connections, such as `partner_confluence_create_page`.
+Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
+To give an agent read access only, hide the write functions with [`exclude_tools`](index.md#filtering-toolkit-functions), or register a connection with `write=False` so that it never requests write scopes.
 
 ## Attachments
 
-`confluence_list_attachments` returns each attachment's ID, such as `att123456`, with its title, media type, size, comment, and version.
-When more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged, and a `warning` if Atlassian linked another page without a usable cursor.
+`confluence_list_attachments` returns attachment IDs such as `att123456`; when more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged.
 
-`confluence_download_attachment` stores the file in MindRoom's managed attachment storage for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
+`confluence_download_attachment` stores the file in MindRoom's [attachment storage](../attachments.md) for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
 The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
-Downloads require a conversation with attachment storage and return `attachment_context_unavailable` otherwise.
-A download of an attachment that does not exist, or that the connected account may not view, returns `attachment_unavailable`.
-The display filename comes from the RFC 5987 `filename*` parameter when present, then `filename`, then the optional `filename` argument, and it is stripped of directories and control characters.
-The stored file name is always generated from the attachment ID.
 
-## Security Notes
-
-- The tool always runs in the primary MindRoom runtime, so worker containers never receive OAuth client configuration or user tokens.
-- The tool takes no local file paths and reads or writes no workspace files; downloads go only to MindRoom's managed attachment storage.
-- The bearer goes only to `https://api.atlassian.com/oauth/token/accessible-resources` to find the connected sites and to `https://api.atlassian.com/ex/{product}/{cloud_id}/...` for the pinned site, and cloud IDs from Atlassian are accepted only in UUID form.
-- Page, attachment, issue, and cursor arguments are validated before any authentication or network access, so they cannot change a request path.
-- The OAuth bearer is sent only to the pinned site's gateway path for the product being called, never to the Atlassian media service or any other host.
-- Downloads follow at most three redirects, only over HTTPS on the default port without URL credentials, and only to that gateway path or `api.media.atlassian.com`.
-- A gateway path containing dot segments, encoded or repeatedly encoded slashes, backslashes, or `;` parameters is treated as foreign and rejected.
-- Cookies are cleared before every download hop, so a cookie set by one hop never reaches another.
-- Every download hop asks for `Accept-Encoding: identity`, and content-encoded responses are rejected instead of decoded.
-- Error results carry a code, a fixed message, and a status code, and never a request URL, signed download link, token, or raw response body.
-- HTTP request logs drop the signature query from media service URLs.
-- At debug level, each download hop logs only its host, its path with identifiers masked and without query or parameters, its status, and whether the bearer was sent.
-- Jira and Confluence error messages are kept for failed API requests, with URLs replaced and control characters removed.
-- A gateway 401 whose message reports a scope mismatch returns `scope_mismatch` with Atlassian's message and no reconnect link, because reconnecting grants the same scopes again.
-- Any other gateway 401, for an API call or a download, returns a reconnect link instead of Atlassian's error text.
+Downloads are limited to the inline attachment size, 16 MiB by default, which an operator raises with [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](../deployment/sandbox-proxy.md#environment-variable-reference).
+The 64 MiB limit for [registered files](../attachments.md) still applies and cannot be raised.
 
 ## Limits
 
 - Search and listing functions return at most 50 results per call.
-- Each Jira or Confluence API call other than an attachment download must finish within 60 seconds and return at most 32 MiB, and a larger response returns `response_too_large`.
-- Attachment downloads are limited to the inline worker transfer size, 16 MiB by default, and many real attachments are larger.
-- A larger attachment returns `attachment_too_large`, whose message names the limit and the `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` setting that raises it.
-- Raising that setting also raises the inline limit for `get_attachment(..., mindroom_output_path=...)`, and MindRoom's fixed 64 MiB limit for [registered files](../attachments.md) still applies.
-- A download must finish within 120 seconds, including every redirect.
-- Page reads and attachment listings go through Confluence search, so they see only content that search has indexed.
-- A page or attachment created moments ago can take a short time to appear, so `confluence_get_page` returns `page_not_found` and `confluence_list_attachments` omits the new attachment until the index catches up.
+- Each API call other than an attachment download must finish within 60 seconds and return at most 32 MiB; an attachment download must finish within 120 seconds.
+- Page reads and attachment listings go through Confluence search, so a page or attachment created moments ago can be missing briefly.
 - Archived and draft pages are not returned.
-- `confluence_get_page` reads pages only, and the ID of a blog post or other content returns `not_a_page` with its `content_type`.
-- Only Atlassian Cloud is supported; Jira and Confluence Data Center use the existing `jira` and `confluence` tools.
+- Only Atlassian Cloud is supported.
 - The tool does not upload attachments, delete content, or manage spaces and projects.
-- `confluence_update_page` replaces the whole body and needs the page's current version number plus one from `confluence_get_page`.
+
+## Troubleshooting
+
+| Result | Cause and fix |
+| --- | --- |
+| `scope_mismatch` | Atlassian rejected a request for a scope the app does not grant; reconnecting grants the same scopes again, so an administrator must add the scopes in [Scopes](#scopes) to the app. |
+| `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
+| `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
+| `response_too_large` | The API response exceeded the size limit; narrow the request, for example with fewer fields or a smaller limit. |
+| `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit and the setting that raises it. |
+| `attachment_unavailable` | The attachment does not exist or the connected account may not view it. |
+| `attachment_context_unavailable` | The call ran outside a conversation with attachment storage. |
+
+Connection and site results are described in [Configure The Default Connection](#configure-the-default-connection) and [Connect An Account](#connect-an-account).
+When Atlassian rejects the connection's access token, the result includes a reconnect link.
+`permission_denied` means the connected account lacks Atlassian access to that project, space, or item, which reconnecting does not fix.
+Other Atlassian errors keep Atlassian's message with URLs removed.
+
+## Security Notes
+
+- The tool runs in the primary MindRoom runtime, so worker containers never receive the app client configuration or user tokens.
+- The tool takes no local file paths and writes no workspace files; downloads go only to MindRoom's attachment storage.
+- Tokens are sent only to Atlassian's API for the pinned site, never to another host.
+- Error results never contain tokens, signed download links, or raw response bodies.
 
 ## Related Docs
 

@@ -1,11 +1,10 @@
 # Approved Egress
 
-Approved egress lets worker-routed tools reach external hostnames through a policy-enforcing HTTP proxy.
-Use it when dedicated Kubernetes workers should be blocked from direct internet egress unless a hostname is statically allowlisted or temporarily approved by a human.
+Approved egress blocks direct internet access from dedicated Kubernetes workers and sends their traffic through a policy-enforcing HTTP proxy.
+A worker can reach a hostname only when it is on the static allowlist or a human has approved a temporary grant in Matrix.
+Use it when worker-routed tools such as `shell` and `python` must not reach arbitrary hosts.
 
-## Runtime Chart
-
-The runtime chart can deploy the proxy and wire MindRoom to the built-in `approved_egress` toolkit.
+## Enable with the Runtime Chart
 
 ```yaml
 workers:
@@ -23,36 +22,103 @@ approvedEgress:
     domains:
       - example.com
       - .docs.example.com
+  maxTtlSeconds: 21600
 ```
 
-The chart renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist ConfigMap, persistence PVC, worker egress NetworkPolicy, and proxy ingress NetworkPolicy.
-The chart also sets `MINDROOM_APPROVED_EGRESS_ENABLED`, `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` on the MindRoom container.
-When `MINDROOM_APPROVED_EGRESS_ENABLED=true`, MindRoom adds `approved_egress` to defaults and requires Matrix approval for blocked-host `request_network_access` grant requests at runtime.
-The overlay preserves configured default tools, including the implicit `scheduler` when `defaults.tools` is omitted.
-An explicit `defaults.tools: []` receives only `approved_egress`; agents with `include_default_tools: false` do not inherit the overlay toolkit.
-Requests where every hostname is static-allowlisted skip the approval card and return that no temporary grant is needed.
-These runtime-derived entries are not written back to `config.yaml` by dashboard or API saves.
-Structured saves preserve an explicitly authored empty tool list, so disabling the overlay does not restore implicit tools that were deliberately disabled.
-Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
+The chart deploys the proxy, points worker proxy settings at it, and adds NetworkPolicies so workers cannot bypass it.
+Approved egress requires `workers.backend: kubernetes`, a pinned `approvedEgress.image.tag` or `approvedEgress.image.digest`, and a token from `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
+Use proxy image `v0.1.10` or later, because browser tools tunnel every connection with `CONNECT` and older images refuse plain-HTTP pages with `TCP_DENIED/403`.
+`approvedEgress.maxTtlSeconds` caps every temporary grant and defaults to `21600` (6 hours).
 
-The proxy and MindRoom read the static allowlist only at startup; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) describes which allowlist changes roll the proxy and when to restart it or MindRoom.
+The chart also enables the built-in `approved_egress` toolkit at runtime, including with `config.data` or `config.existingConfigMap`, so you do not edit `config.yaml`.
+It appends `approved_egress` to `defaults.tools`, or to the built-in default tools when `defaults.tools` is omitted, and adds a `tool_approval` rule that requires Matrix approval for `request_network_access`.
+Agents with `include_default_tools: false` do not get the toolkit.
+These runtime additions are not written to `config.yaml` when you save from the dashboard or API.
+Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring without these additions, for example when your config assigns `approved_egress` to specific agents.
+
+### Static Allowlist
+
+Set allowlist entries in `approvedEgress.allowlist.domains`, or provide them in `approvedEgress.allowlist.existingConfigMap` under the key named by `approvedEgress.allowlist.key` (default `allowed-domains.txt`); you cannot set both.
+A plain hostname matches exactly, and a leading dot such as `.docs.example.com` matches the domain and all its subdomains.
+Allowlisted hostnames never need approval.
+Changing `approvedEgress.allowlist.domains` restarts the proxy automatically when you apply the chart, but edits to an `existingConfigMap` reach the proxy only after you restart it.
+MindRoom keeps the allowlist it started with until its own pod restarts, so a removed domain is still reported as allowed and gets no grant in the meantime; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) names the Deployments to restart.
+
+## Requesting Access
+
+Agents call `request_network_access(hostnames, ttl_minutes, reason)` with every blocked external hostname the task needs, up to 20 per call, and one Matrix approval covers the whole batch.
+Hostnames must be exact external DNS names; schemes, ports, paths, wildcards, IP literals, single-label names, `localhost`, cluster-local names, and cloud metadata hostnames are rejected, and one invalid hostname rejects the whole request.
+Hostnames already on the static allowlist are skipped, and when every requested hostname is allowlisted the tool replies that no grant is needed without asking for approval.
+The granted TTL is the requested `ttl_minutes`, capped at the deployment maximum, and the reply says when the cap applied.
+
+Who a grant covers depends on the agent's effective [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes), which comes from `private.per` for private agents, then the agent's `worker_scope`, then `defaults.worker_scope`:
+
+| Effective scope | Grant applies to |
+|---|---|
+| `user_agent` | The requester's own worker for that agent |
+| `shared` or unset | That agent's worker |
+| `user` | Not supported; the request fails with `approved egress is not supported for worker_scope=user` |
+
+### Temporary Full Access
+
+The `allow_full_access` tool option defaults to `false`.
+Enable it in the tool's settings or in an authored tool entry, on `defaults.tools` or on an individual agent:
+
+```yaml
+defaults:
+  tools:
+    - approved_egress:
+        allow_full_access: true
+```
+
+Agents can then call `request_network_access(hostnames=["*"], ttl_minutes=5, reason="Install dependencies")`.
+The `"*"` must be the only entry.
+Full-access requests always require Matrix approval, use the same TTL cap, and apply to the same workers as hostname grants.
+They open all public hostnames on ports 80 and 443 through the proxy, while private networks, internal hostnames, and other ports and protocols stay blocked.
+The proxy image must support full-access grants; older images reject them.
+When a grant expires, new connections need an allowlist match or another grant, but established connections, including HTTPS tunnels, stay open.
+
+## Without the Runtime Chart
+
+Enable the toolkit by setting `MINDROOM_APPROVED_EGRESS_ENABLED=true`, or author the same configuration yourself:
+
+```yaml
+defaults:
+  tools:
+    - approved_egress
+
+tool_approval:
+  default: auto_approve
+  rules:
+    - match: request_network_access
+      action: require_approval
+```
+
+You can assign `approved_egress` to individual agents instead of `defaults.tools`.
+The toolkit reads these environment variables, which the runtime chart sets for you:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `MINDROOM_APPROVED_EGRESS_ENABLED` | Add the toolkit and approval rule at runtime, as described above | unset |
+| `MINDROOM_APPROVED_EGRESS_API_URL` | Proxy policy API URL; plain `http` is allowed only for loopback or in-cluster service names | `http://mindroom-egress-proxy:8080` |
+| `MINDROOM_APPROVED_EGRESS_TOKEN` | Bearer token for the policy API | required |
+| `MINDROOM_APPROVED_EGRESS_ALLOWLIST` | Comma-separated static allowlist, used instead of the file when set | unset |
+| `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH` | Static allowlist file with one entry per line and `#` comments | `/etc/mindroom-egress/allowed-domains.txt` |
+| `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` | Maximum grant TTL | `21600` |
 
 ## Agent Vault Chaining
 
-When approved egress and Agent Vault are used together, the correct chain is:
+When approved egress and [Agent Vault](https://docs.mindroom.chat/deployment/sandbox-proxy/) are used together, the chain must be:
 
 ```text
 worker -> approved egress (Squid) -> Agent Vault MITM parent -> internet
 ```
 
-Squid must be first.
-Dynamic `request_network_access` grants are keyed to the worker that made the request, and the approved egress helper resolves that worker from the proxy client's source IP.
-If traffic goes `worker -> Agent Vault -> Squid`, Squid only sees the Agent Vault pod IP, so the grant lookup cannot match the worker and dynamic grants fail even though static allowlist entries can still work.
+Squid must be first because temporary grants are matched to the worker by its source IP.
+If traffic goes through Agent Vault first, Squid sees only the vault's IP, so temporary grants never match while static allowlist entries still work.
 
-Use `approvedEgress.parentProxy` to make the chart render a layered Squid config and point Agent Vault tool traffic at approved egress first:
-
-Before enabling the server and bootstrap job, create `workers.kubernetes.agentVault.bootstrapSecretName` (default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
-Create the Secret in the worker namespace too when it differs from the release namespace.
+Before enabling the Agent Vault server and bootstrap job, create the Secret named by `workers.kubernetes.agentVault.bootstrapSecretName` (default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
+Create it in the worker namespace too when that differs from the release namespace.
 
 ```yaml
 workers:
@@ -83,11 +149,10 @@ approvedEgress:
     port: 14322
 ```
 
-When `parentProxy.enabled` is true, workers use the approved egress Service for `MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL`.
-Squid enforces the allowlist and dynamic grants, then forwards requests that carry `Proxy-Authorization` to the Agent Vault parent with `login=PASSTHRU` so the vault still validates the worker's proxy-role token and injects credentials.
-Tokenless traffic remains direct from Squid after the policy check.
+With `approvedEgress.parentProxy.enabled: true`, workers send Agent Vault traffic to approved egress first.
+After the allowlist and grant check, requests carrying the worker's Agent Vault token go on to the vault, which still validates the token and injects credentials, while requests without a token go directly to the internet.
 
-Use `approvedEgress.parentProxy.bypassDomains` for signed URLs that must skip the credential-injecting parent:
+Use `approvedEgress.parentProxy.bypassDomains` (default empty) for destinations such as signed URLs that must skip credential injection:
 
 ```yaml
 approvedEgress:
@@ -98,77 +163,19 @@ approvedEgress:
       - .objects.example.test
 ```
 
-The default empty list preserves the normal parent routing.
-Plain hostnames match exactly; a leading dot includes the domain and its subdomains.
-Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace; matching does not perform reverse DNS lookups.
-These destinations still pass the normal allowlist or dynamic-grant checks and destination/port restrictions before Squid connects directly.
-Changing bypass domains updates the chart-managed config checksum so the proxy restarts with the new routing rules.
+Entries match like allowlist entries: exact hostnames, or a leading dot for a domain and its subdomains.
+Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace.
+Bypassed destinations still need an allowlist match or grant, and changing `bypassDomains` restarts the proxy automatically.
 
-Do not leave Agent Vault tool traffic pointed directly at the chart-managed Agent Vault MITM Service when chart-managed approved egress is enabled.
-That path either bypasses Squid, or forces Squid behind the vault where worker identity is lost.
-The chart rejects direct URLs to the chart-managed Agent Vault proxy Service, including short and cluster-local DNS names, unless `approvedEgress.parentProxy` is enabled.
-Truly external/custom proxy URLs remain an explicit escape hatch.
-
-## Custom Config
-
-The runtime chart handles custom `config.data` and `config.existingConfigMap` through `MINDROOM_APPROVED_EGRESS_ENABLED=true`, so you do not need to duplicate this block there.
-Use this block only when enabling the built-in toolkit outside the runtime chart.
-
-```yaml
-defaults:
-  tools:
-    - approved_egress
-
-tool_approval:
-  default: auto_approve
-  rules:
-    - match: request_network_access
-      action: require_approval
-```
-
-You can assign `approved_egress` to individual agents instead of `defaults.tools` if only some agents should request network access.
-The toolkit is built into MindRoom and uses the chart-provided policy API URL, token, allowlist path, and TTL settings.
-
-### Temporary Full Access
-
-The `allow_full_access` tool option defaults to `false`.
-Enable it in the tool's settings or an authored tool entry to allow temporary access to all public hostnames:
-
-```yaml
-defaults:
-  tools:
-    - approved_egress:
-        allow_full_access: true
-```
-
-The same option can be set on an individual agent's `approved_egress` tool entry.
-With this option enabled, agents can call `request_network_access(hostnames=["*"], ttl_minutes=5, reason="Install dependencies")`.
-The `"*"` must be the only entry; partial wildcards and mixed hostname batches are rejected.
-Full-access requests use the same Matrix approval rule and deployment TTL cap as hostname requests, and never qualify for the static-allowlist approval exemption.
-The grant applies only to the requesting agent or requester-owned worker, using the same scope rules as hostname grants.
-
-This requires an approved egress proxy build that supports `hostname: "*"` grants; older proxy images reject these requests.
-It opens access to all public hostnames through the HTTP proxy on its allowed ports (80 and 443), while retaining private-network, internal-hostname, and DNS destination checks.
-It does not enable arbitrary protocols or ports.
-After the TTL expires, new requests need a static allowlist match or another active grant; already established connections, including HTTPS CONNECT tunnels, are not forcibly closed.
-
-## Runtime Behavior
-
-Agents call `request_network_access(hostnames, ttl_minutes, reason)` with every blocked external hostname the task needs, and a single Matrix approval covers the whole batch.
-For exact-host requests, the tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API, and one bad hostname fails the whole batch before any grant is created.
-The tool creates one policy grant per blocked hostname and skips hostnames the static allowlist already covers.
-If every requested hostname already matches the static allowlist, the tool reports that no dynamic grant is needed without sending a Matrix approval card.
-When `worker_scope: user_agent` is active, the tool creates a `worker_key` grant for the exact requester-owned worker.
-Shared or unscoped workers receive an `agent` grant.
-Requests for `worker_scope: user` are rejected because one user-scoped worker can serve multiple agents.
+Do not point Agent Vault tool traffic directly at the chart-managed Agent Vault proxy while approved egress is enabled.
+The chart refuses that combination with `approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly`.
+An external or custom `workers.kubernetes.agentVault.proxyUrl` remains allowed.
 
 ## Secure Minimum
 
-Use `workers.backend: kubernetes`.
-Keep `workers.kubernetes.networkPolicy.create`, `egressProxy.networkPolicy.create`, and `approvedEgress.networkPolicy.create` enabled.
-Provide `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
-Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
-Browser tools tunnel every connection, plain HTTP included, with `CONNECT`, which requires mindroom-egress-proxy v0.1.10 or later; set `approvedEgress.image.tag: v0.1.10`, because older images refuse plain-HTTP pages with `TCP_DENIED/403`.
-Keep `request_network_access` behind `tool_approval`.
-Use a static allowlist for hostnames that should never require approval.
-Use short `approvedEgress.maxTtlSeconds` values for temporary grants.
+Beyond the chart's required settings:
+
+- Keep `workers.kubernetes.networkPolicy.create`, `egressProxy.networkPolicy.create`, and `approvedEgress.networkPolicy.create` enabled.
+- Keep `request_network_access` behind `tool_approval`.
+- Put hostnames that should never need approval on the static allowlist.
+- Keep `approvedEgress.maxTtlSeconds` short.

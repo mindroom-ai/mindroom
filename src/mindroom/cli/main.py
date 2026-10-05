@@ -38,6 +38,7 @@ from .config_bundle import (
     initialize_runtime_bundle,
 )
 from .config_reload import config_check_applied, config_fingerprint
+from .debug_report import debug_report
 from .desktop import desktop_app
 from .local_stack import local_stack_setup
 from .migrate import config_migrate
@@ -97,6 +98,7 @@ app.add_typer(journal_app, name="journal")
 app.add_typer(service_app, name="service")
 app.add_typer(trigger_app, name="trigger")
 app.command()(check_active_responses)
+app.command("debug-report")(debug_report)
 
 
 @app.command()

@@ -355,6 +355,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
         self._on_started = on_started
+        self.received_signal_name: str | None = None
 
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
         """Publish the API address only after Uvicorn successfully binds it."""
@@ -378,11 +379,9 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
         del frame
         signal_number = int(sig)
-        logger.info(
-            "embedded_api_server_signal_received",
-            signal_number=signal_number,
-            signal_name=_signal_name(signal_number),
-        )
+        # A signal handler can interrupt a log write, which is not reentrant, so it
+        # only records the signal; the serve loop's exit log reports it.
+        self.received_signal_name = _signal_name(signal_number)
         if self._shutdown_requested is not None:
             self._shutdown_requested.set()
         if self.should_exit and signal_number == int(signal.SIGINT):
@@ -423,7 +422,6 @@ class _MultiAgentOrchestrator:
     _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_mcp_catalog_restarts: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
-    _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
     plugin_watch: PluginWatchState = field(init=False)
     agent_cli_registry: TurnToolRegistry = field(default_factory=TurnToolRegistry, init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
@@ -526,13 +524,10 @@ class _MultiAgentOrchestrator:
             ),
         )
         self._startup_maintenance = StartupMaintenanceController(
-            recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
-                self._recover_stale_streams_after_restart(
-                    bots,
-                    config,
-                    startup_cutoff_ms,
-                    scanned_room_ids,
-                )
+            recover_stale_streams=lambda bots, config, startup_cutoff_ms: self._recover_stale_streams_after_restart(
+                bots,
+                config,
+                startup_cutoff_ms,
             ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
@@ -896,11 +891,6 @@ class _MultiAgentOrchestrator:
             if first_error is not None:
                 raise first_error
 
-    def request_interrupted_turn_recovery(self, entity_name: str, room_id: str) -> None:
-        """Coalesce settled interruption notifications with existing dispatch recovery."""
-        self._pending_replacement_recovery_room_ids.setdefault(entity_name, set()).add(room_id)
-        self._schedule_ready_turn_dispatch_recovery()
-
     def _schedule_ready_turn_dispatch_recovery(self) -> None:
         """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
         if not self._runtime_ready_event.is_set():
@@ -928,9 +918,6 @@ class _MultiAgentOrchestrator:
             if not self._runtime_ready_event.is_set():
                 return
             await self._recover_ready_turn_journal_events()
-            await self._response_admission_gate.wait_until_open()
-            if self._runtime_ready_event.is_set() and self.config is not None:
-                await self._recover_pending_replacement_rooms(self.config)
 
         current_task = asyncio.current_task()
         try:
@@ -997,8 +984,6 @@ class _MultiAgentOrchestrator:
                             permanent_error_check=is_permanent_startup_error,
                             update_runtime_state=False,
                         )
-                    if config is not None:
-                        await self._recover_pending_replacement_rooms(config)
                     self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
                     self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
                     return
@@ -1503,11 +1488,8 @@ class _MultiAgentOrchestrator:
         bots: list[AgentBot | TeamBot],
         config: Config,
         startup_cutoff_ms: int | None,
-        scanned_room_ids: set[str],
-        *,
-        target_room_ids: set[str] | None = None,
     ) -> None:
-        """Recover interrupted responses identified by the durable delivery outbox."""
+        """Finish orphaned streams identified by the durable delivery outbox."""
         actors: dict[str, nio.AsyncClient] = {}
         for bot in bots:
             if bot.client is None or not bot.agent_user.user_id:
@@ -1515,7 +1497,6 @@ class _MultiAgentOrchestrator:
             actors[bot.agent_user.user_id] = bot.client
         if not actors:
             return
-        router_bot = self._router_bot()
 
         recovery_bots = {bot.agent_name: bot for bot in bots if bot.client is not None}
 
@@ -1527,90 +1508,16 @@ class _MultiAgentOrchestrator:
             principals={
                 bot.agent_user.user_id: bot.journal_principal() for bot in bots if bot.agent_user.user_id in actors
             },
-            resume_client=router_bot.client if router_bot is not None else None,
             response_recovery_scope=response_recovery_scope,
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,
-            scanned_room_ids=scanned_room_ids,
-            target_room_ids=target_room_ids,
         )
         logger.info(
             "Completed stale stream recovery",
             room_count=result.room_count,
             cleaned_count=result.cleaned_count,
-            resumed_count=result.resumed_count,
         )
-
-    def _capture_replacement_recovery_rooms(
-        self,
-        replaced_bots: dict[str, AgentBot | TeamBot],
-    ) -> None:
-        """Retain interrupted rooms after their old bot generation stops."""
-        for entity_name, bot in replaced_bots.items():
-            room_ids = set(bot.pending_sync_restart_retry_room_ids)
-            if room_ids:
-                self._pending_replacement_recovery_room_ids.setdefault(entity_name, set()).update(room_ids)
-
-    def _replacement_bots(self, entity_names: set[str]) -> dict[str, AgentBot | TeamBot]:
-        """Retain bot references across replacement shutdown."""
-        return {
-            entity_name: self.agent_bots[entity_name] for entity_name in entity_names if entity_name in self.agent_bots
-        }
-
-    def _restore_pending_replacement_rooms(
-        self,
-        claimed_room_ids: dict[str, frozenset[str]],
-        scanned_room_ids: set[str],
-    ) -> None:
-        """Requeue claimed handoffs that were not successfully scanned."""
-        for entity_name, room_ids in claimed_room_ids.items():
-            unscanned_room_ids = room_ids - scanned_room_ids
-            if unscanned_room_ids:
-                self._pending_replacement_recovery_room_ids.setdefault(entity_name, set()).update(unscanned_room_ids)
-
-    async def _recover_pending_replacement_rooms(self, config: Config) -> None:
-        """Recover captured interruption markers through currently running replacements."""
-        if not self._pending_replacement_recovery_room_ids:
-            return
-        if not config.defaults.auto_resume_after_restart:
-            self._pending_replacement_recovery_room_ids.clear()
-            return
-
-        router_bot = self._router_bot()
-        if router_bot is None or not router_bot.running:
-            return
-        recovery_bots = [
-            bot
-            for bot in self._running_bots_for_entities(self._pending_replacement_recovery_room_ids)
-            if bot.client is not None and bot.agent_user.user_id
-        ]
-        if not recovery_bots:
-            return
-        claimed_room_ids = {
-            bot.agent_name: frozenset(self._pending_replacement_recovery_room_ids[bot.agent_name])
-            for bot in recovery_bots
-        }
-        for entity_name, room_ids in claimed_room_ids.items():
-            pending_room_ids = self._pending_replacement_recovery_room_ids.get(entity_name)
-            if pending_room_ids is None:
-                continue
-            pending_room_ids.difference_update(room_ids)
-            if not pending_room_ids:
-                del self._pending_replacement_recovery_room_ids[entity_name]
-        scanned_room_ids: set[str] = set()
-        try:
-            await self._recover_stale_streams_after_restart(
-                recovery_bots,
-                config,
-                None,
-                scanned_room_ids,
-                target_room_ids=set().union(*claimed_room_ids.values()),
-            )
-        except BaseException:
-            self._restore_pending_replacement_rooms(claimed_room_ids, set())
-            raise
-        self._restore_pending_replacement_rooms(claimed_room_ids, scanned_room_ids)
 
     def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
         """Resolve currently known room aliases into each bot's configured room IDs."""
@@ -1890,7 +1797,6 @@ class _MultiAgentOrchestrator:
         self._computer_runtime.unbind_for_entity_changes(removed_entities)
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
-            self._pending_replacement_recovery_room_ids.pop(entity_name, None)
 
             bot = self.agent_bots.get(entity_name)
             if bot is not None:
@@ -1932,14 +1838,12 @@ class _MultiAgentOrchestrator:
 
         self._external_trigger_runtime.unbind_for_entity_changes(affected_entities)
         self._computer_runtime.unbind_for_entity_changes(affected_entities)
-        replaced_bots = self._replacement_bots(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
         await self._stop_runtime_entities(
             affected_entities,
             restart_entities=affected_entities & set(configured_entity_names(new_config)),
         )
-        self._capture_replacement_recovery_rooms(replaced_bots)
         return affected_entities
 
     async def _restart_changed_entities(
@@ -1953,7 +1857,6 @@ class _MultiAgentOrchestrator:
             plan.entities_to_restart | plan.new_entities | plan.removed_entities,
         )
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
-        replaced_bots = self._replacement_bots(plan.entities_to_restart)
         if entities_to_stop:
             self._external_trigger_runtime.unbind_for_entity_changes(entities_to_stop)
             self._computer_runtime.unbind_for_entity_changes(entities_to_stop)
@@ -1964,7 +1867,6 @@ class _MultiAgentOrchestrator:
                 restart_entities=entities_to_stop & plan.configured_entities,
             )
 
-        self._capture_replacement_recovery_rooms(replaced_bots)
         entities_to_recreate = plan.entities_to_restart & plan.configured_entities
         changed_entities = entities_to_recreate | plan.new_entities
         start_results = await self._create_and_start_entities(
@@ -1975,7 +1877,6 @@ class _MultiAgentOrchestrator:
 
         removed_restarted_entities = plan.entities_to_restart - plan.configured_entities
         for entity_name in removed_restarted_entities:
-            self._pending_replacement_recovery_room_ids.pop(entity_name, None)
             self.agent_bots.pop(entity_name, None)
 
         await self._remove_deleted_entities(plan.removed_entities)
@@ -2036,14 +1937,12 @@ class _MultiAgentOrchestrator:
             self._permanently_failed_entities.difference_update(changed_entities)
             self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
             self._computer_runtime.unbind_for_entity_changes(changed_entities)
-            replaced_bots = self._replacement_bots(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
             await self._stop_runtime_entities(
                 changed_entities,
                 restart_entities=changed_entities,
             )
-            self._capture_replacement_recovery_rooms(replaced_bots)
             start_results = await self._create_and_start_entities(
                 changed_entities,
                 self.config,
@@ -2052,7 +1951,6 @@ class _MultiAgentOrchestrator:
             self._schedule_ready_turn_dispatch_recovery()
             if start_results.started_bots:
                 await self._setup_rooms_and_memberships(start_results.started_bots)
-            await self._recover_pending_replacement_rooms(self.config)
             self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
             self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
             for entity_name in start_results.retryable_entities:
@@ -2125,6 +2023,27 @@ class _MultiAgentOrchestrator:
             plugin_changes=plugin_changes,
         )
 
+    async def _restart_refreshed_mcp_dependents(
+        self,
+        plan: ConfigUpdatePlan,
+        changed_server_ids: set[str],
+    ) -> ConfigUpdatePlan:
+        """Restart entities using MCP catalogs that the config apply refreshed."""
+        if not changed_server_ids:
+            return plan
+        if not plan.requires_response_drain:
+            # Replies may still be running, so restart dependents behind their own drain.
+            for server_id in sorted(changed_server_ids):
+                await self._notify_mcp_catalog_change(server_id)
+            return plan
+        return replace(
+            plan,
+            entities_to_restart=plan.entities_to_restart
+            | plan.new_config.get_entities_referencing_tools(
+                {mcp_tool_name(server_id) for server_id in changed_server_ids},
+            ),
+        )
+
     async def _apply_config_update_plan(
         self,
         current_config: Config,
@@ -2173,14 +2092,7 @@ class _MultiAgentOrchestrator:
             warn_about_config_risks(new_config, self.runtime_paths)
             self._computer_runtime.unbind()
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
-            if changed_runtime_mcp_servers:
-                plan = replace(
-                    plan,
-                    entities_to_restart=plan.entities_to_restart
-                    | new_config.get_entities_referencing_tools(
-                        {mcp_tool_name(server_id) for server_id in changed_runtime_mcp_servers},
-                    ),
-                )
+            plan = await self._restart_refreshed_mcp_dependents(plan, changed_runtime_mcp_servers)
             await self._update_unchanged_bots(plan)
             if router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.entities_to_restart:
                 router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
@@ -2191,7 +2103,7 @@ class _MultiAgentOrchestrator:
                 await self._finalize_config_reload(
                     new_config=new_config,
                     current_config=current_config,
-                    changed_entities=set(),
+                    changed_entities=plan.live_updated_entities,
                     added_entities=plan.added_entities,
                     removed_entities=plan.removed_entities,
                     plugin_changes=plugin_changes,
@@ -2203,7 +2115,6 @@ class _MultiAgentOrchestrator:
                 already_stopped_entities=pre_stopped_mcp_entities,
             )
             await self._reconcile_post_update_rooms(plan, changed_entities)
-            await self._recover_pending_replacement_rooms(new_config)
 
             for entity_name in retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
@@ -2217,7 +2128,7 @@ class _MultiAgentOrchestrator:
             await self._finalize_config_reload(
                 new_config=new_config,
                 current_config=current_config,
-                changed_entities=changed_entities,
+                changed_entities=changed_entities | plan.live_updated_entities,
                 added_entities=plan.added_entities,
                 removed_entities=plan.removed_entities,
                 plugin_changes=plugin_changes,
@@ -2803,6 +2714,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
         shutdown_expected=shutdown_expected,
         server_should_exit=server.should_exit,
         server_force_exit=server.force_exit,
+        received_signal=server.received_signal_name,
     )
     if not shutdown_expected:
         _raise_embedded_api_server_exit(

@@ -13,6 +13,7 @@ desktop_native_app  # Typer dispatches the native desktop helper command (src/mi
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 _.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)
 _._save_file_to_disk  # FileGenerationTools save step overridden to write inside the workspace (src/mindroom/tools/agno_compat_file_generation.py)
+_._run_context  # Agno reads the run context bound on a prepared Function (src/mindroom/agno_compat_prepared_tools.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)
@@ -353,6 +354,7 @@ execute_tool_call  # unused function (src/mindroom/api/sandbox_runner.py)
 cancel_tool_call  # unused function (src/mindroom/api/sandbox_runner.py)
 view_file_in_worker  # FastAPI route (src/mindroom/api/sandbox_runner.py)
 config_init  # unused function (src/mindroom/cli/config.py)
+config_use_local_model  # Typer command (src/mindroom/cli/config.py)
 chat_completions  # unused function (src/mindroom/api/openai_compat.py)
 AgentVaultAccessTools  # unused class (src/mindroom/custom_tools/agent_vault_access.py)
 _agent_vault_access_tools  # unused function (src/mindroom/tools/__init__.py)
@@ -406,6 +408,7 @@ _.image_to_image  # FalTools registers this override as an image-editing tool (s
 _.generate_media  # FalTools registers this override as a media-generation tool (src/mindroom/custom_tools/fal.py)
 _.download_file_from_sandbox  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
 _.upload_file  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
+_.read_file_content  # E2BTools registers this override as a sandbox file-read tool (src/mindroom/custom_tools/e2b.py)
 _.download_chart_data  # E2BTools registers this override as a chart-export tool (src/mindroom/custom_tools/e2b.py)
 _.transcribe_audio  # OpenAITools and GroqTools register these file_access overrides (src/mindroom/tools/agno_compat_openai.py, src/mindroom/tools/agno_compat_groq.py)
 _.translate_audio  # GroqTools registers this file_access override (src/mindroom/tools/agno_compat_groq.py)

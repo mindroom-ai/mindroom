@@ -692,7 +692,12 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> RoomJoinOutcome:
 
 async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | None:
     """Get the current members of a room, or ``None`` when the fetch fails."""
-    response = await client.joined_members(room_id)
+    try:
+        response = await client.joined_members(room_id)
+    except nio.LocalProtocolError as error:
+        # The durable client refuses a member list that a concurrent membership change made stale.
+        logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(error))
+        return None
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
     logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(response))

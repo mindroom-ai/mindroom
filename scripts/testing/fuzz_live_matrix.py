@@ -50,8 +50,7 @@ import nio
 import yaml
 
 import mindroom
-from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, STREAM_STATUS_KEY
-from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.constants import AI_RUN_METADATA_KEY, STREAM_STATUS_KEY
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.prompts import AGENT_IDENTITY_CONTEXT_TEMPLATE
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
@@ -65,6 +64,7 @@ if TYPE_CHECKING:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
+INSTANCE_ENV_DIR = INSTANCE_REGISTRY.parent / "envs"
 DEFAULT_LIVE_FUZZ_STATE_ROOT = Path.home() / ".mindroom" / "live-fuzz"
 MODEL_ID = "mindroom-live-fuzz"
 RESTART_MODEL_ID = "mindroom-live-fuzz-replacement"
@@ -2916,6 +2916,17 @@ class PendingLaneReport:
         return f"journal: pending per room {lanes}{head}"
 
 
+def _instance_registration_token(instance_name: str) -> str:
+    """Return the registration token deploy.py generated for one instance's homeserver."""
+    env_file = INSTANCE_ENV_DIR / f"{instance_name}.env"
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "MATRIX_REGISTRATION_TOKEN" and value.strip():
+            return value.strip()
+    msg = f"{env_file} has no MATRIX_REGISTRATION_TOKEN"
+    raise RuntimeError(msg)
+
+
 class ManagedTuwunelStack:
     """Disposable Tuwunel plus the current worktree's MindRoom runtime."""
 
@@ -2968,6 +2979,7 @@ class ManagedTuwunelStack:
         self.api_port = 0
         self.homeserver = ""
         self.server_name = ""
+        self.registration_token = ""
         self.room_keys = room_keys
         self.room_ids: dict[str, str] = {}
         self.room_id = ""
@@ -3175,6 +3187,7 @@ class ManagedTuwunelStack:
         domain = str(instance["domain"])
         self.homeserver = f"http://127.0.0.1:{matrix_port}"
         self.server_name = f"m-{domain}"
+        self.registration_token = _instance_registration_token(self.instance_name)
         self.agent_id = f"@mindroom_{AGENT_NAME}_{self.namespace}:{self.server_name}"
         self.load_sender_id = f"@mindroom_load_sender_{self.namespace}:{self.server_name}"
         self.router_id = f"@mindroom_router_{self.namespace}:{self.server_name}"
@@ -3198,6 +3211,7 @@ class ManagedTuwunelStack:
         environment = {
             **os.environ,
             "MATRIX_HOMESERVER": self.homeserver,
+            "MATRIX_REGISTRATION_TOKEN": self.registration_token,
             "MATRIX_SERVER_NAME": self.server_name,
             "MATRIX_SSL_VERIFY": "false",
             "MINDROOM_CONFIG_PATH": str(self.config_path),
@@ -3860,6 +3874,9 @@ class ManagedTuwunelStack:
             config["agents"][AGENT_NAME]["model"] = "synthetic"
             config["agents"][AGENT_NAME]["tools"] = ["shell"]
             config["agents"][AGENT_NAME]["worker_tools"] = []
+            # The managed load sender is an agent, so without this its workload roots would stop
+            # waking the responder once they reach the consecutive agent-reply limit.
+            cast("dict[str, Any]", config["defaults"])["max_consecutive_agent_replies"] = 1_000_000
             config["agents"]["load_sender"] = {
                 "display_name": "Live Fuzz Load Sender",
                 "role": "Author deterministic managed-load workload roots.",
@@ -4135,10 +4152,18 @@ class _SentPayload:
 class LiveMatrixClient:
     """Minimal real Matrix client used by the live fuzzer."""
 
-    def __init__(self, homeserver: str, room_id: str, *, room_ids: tuple[str, ...] | None = None) -> None:
+    def __init__(
+        self,
+        homeserver: str,
+        room_id: str,
+        *,
+        room_ids: tuple[str, ...] | None = None,
+        registration_token: str = "",
+    ) -> None:
         self.homeserver = homeserver.rstrip("/")
         self.room_id = room_id
         self.room_ids = room_ids or (room_id,)
+        self.registration_token = registration_token
         self.http = httpx.AsyncClient(timeout=30)
         self.access_token = ""
         self.user_id = ""
@@ -4154,11 +4179,13 @@ class LiveMatrixClient:
         """Register one disposable account without exposing its token."""
         username = f"livefuzz{secrets.token_hex(6)}"
         password = secrets.token_urlsafe(24)
-        payload: dict[str, Any] = {
-            "auth": {"type": "m.login.dummy"},
-            "username": username,
-            "password": password,
-        }
+        # A homeserver created by deploy.py admits new accounts only with its registration token.
+        auth = (
+            {"type": "m.login.registration_token", "token": self.registration_token}
+            if self.registration_token
+            else {"type": "m.login.dummy"}
+        )
+        payload: dict[str, Any] = {"auth": auth, "username": username, "password": password}
         response = await self.http.post(f"{self.homeserver}/_matrix/client/v3/register", json=payload)
         if response.status_code == HTTPStatus.UNAUTHORIZED:
             session = response.json().get("session")
@@ -4499,8 +4526,8 @@ def read_ledger_records(
     audits use strict mode and reject every unreadable, malformed, or
     non-terminal entry instead of letting corruption look like an empty ledger.
     A fully redacted record is a durable tombstone even when ``completed``
-    remains false. Session cleanup may remain pending until the next response;
-    explicit cleanup probes audit that separate obligation.
+    remains false. Session history is cleaned when a response next opens it;
+    explicit cleanup probes audit that separately.
     Live tombstone observation may include unfinished owners; strict final
     audits still reject their unfinished live sources.
     """
@@ -4561,7 +4588,7 @@ def _decode_ledger_rows(
     strict: bool,
     include_incomplete: bool = False,
 ) -> dict[str, TurnRecord]:
-    """Retain completed turns and durable tombstones, including deferred session cleanup."""
+    """Retain completed turns and durable tombstones."""
     records: dict[str, TurnRecord] = {}
     decoded_records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
@@ -4571,9 +4598,9 @@ def _decode_ledger_rows(
             continue
         decoded_records[event_id] = record
         fully_redacted = not record.replay_source_event_ids
-        # Redaction callbacks commit tombstones; the next response in this
-        # session removes the saved run and clears pending cleanup. An idle
-        # tombstoned session is therefore settled without eager cleanup.
+        # Redaction callbacks commit tombstones; the next response that opens
+        # an affected history removes the saved run. An idle tombstoned
+        # session is therefore settled without eager cleanup.
         if not record.completed and not fully_redacted and (strict or not include_incomplete):
             _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
             continue
@@ -4611,22 +4638,6 @@ class SupersessionProof:
 
 
 @dataclass(frozen=True)
-class RecoveryProof:
-    """One original source continued by its exact durably completed trusted relay."""
-
-    source_event_id: str
-    interrupted_response_event_id: str
-    relay_event_id: str
-    response_event_id: str
-    final_event_id: str
-    call_id: int
-    principal_id: str
-    room_id: str
-    thread_id: str
-    requester_user_id: str
-
-
-@dataclass(frozen=True)
 class _SettledJournalSource:
     event_id: str
     room_id: str
@@ -4656,44 +4667,6 @@ class _SupersessionSnapshot:
     records: Mapping[str, TurnRecord]
     sources: Mapping[str, _SettledJournalSource]
     pending_deliveries: tuple[_PendingSupersessionDelivery, ...]
-    acknowledged_finals: Mapping[str, _AcknowledgedRecoveryFinal]
-
-
-@dataclass(frozen=True)
-class _AcknowledgedRecoveryFinal:
-    """The exact successful FINAL facts consumed by restart recovery proof."""
-
-    room_id: str
-    thread_id: str
-    response_event_id: str | None
-    event_id: str
-    payload: Mapping[str, Any]
-
-
-def _read_recovery_finals(database: sqlite3.Connection, principal_id: str) -> dict[str, _AcknowledgedRecoveryFinal]:
-    """Read acknowledged FINAL ownership within the caller's consistent transaction."""
-    rows = database.execute(
-        "SELECT delivery_id, room_id, thread_id, edits_event_id, acknowledged_event_id, payload_json "
-        "FROM matrix_delivery_outbox WHERE principal_id = ? AND stage = 'final' "
-        "AND acknowledged_event_id IS NOT NULL AND event_type = 'm.room.message' "
-        "AND attempted = 1 AND retired = 0 AND edit_target_pending = 0 AND permanent_failure_reason IS NULL",
-        (principal_id,),
-    ).fetchall()
-    finals = {}
-    for delivery_id, room, thread, response, event_id, raw in rows:
-        if any(not isinstance(value, str) for value in (delivery_id, room, thread, event_id, raw)) or (
-            response is not None and not isinstance(response, str)
-        ):
-            msg = "malformed recovery FINAL identity"
-            raise AssertionError(msg)
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            msg = "malformed recovery FINAL payload"
-            raise AssertionError(msg) from exc
-        assert isinstance(payload, dict), "malformed recovery FINAL payload"
-        finals[delivery_id] = _AcknowledgedRecoveryFinal(room, thread, response, event_id, payload)
-    return finals
 
 
 def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionSnapshot:
@@ -4735,7 +4708,6 @@ def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionS
                 records,
                 sources,
                 tuple(_PendingSupersessionDelivery(*row) for row in pending),
-                _read_recovery_finals(database, principal_id),
             )
     except sqlite3.Error as exc:
         msg = f"supersession journal snapshot failed: {exc}"
@@ -4790,9 +4762,6 @@ class _CanonicalResponseView:
     body: str
     stream_status: str | None
     completed: bool
-    event_id: str | None
-    timestamp: int | None
-    payload: Mapping[str, Any]
 
 
 def _response_payload_completed(payload: object) -> bool:
@@ -4843,15 +4812,12 @@ def _canonical_response_view(
                 body,
                 status if isinstance(status, str) else None,
                 _response_payload_completed(payload),
-                event_id,
-                candidate.get("origin_server_ts") if isinstance(candidate.get("origin_server_ts"), int) else None,
-                payload if isinstance(payload, Mapping) else {},
             )
             candidates.append((_replacement_order(event_id, candidate.get("origin_server_ts"), is_edit=edit), view))
     return (
         max(candidates, key=lambda candidate: candidate[0])[1]
         if candidates
-        else _CanonicalResponseView("", None, False, None, None, {})
+        else _CanonicalResponseView("", None, False)
     )
 
 
@@ -4874,14 +4840,12 @@ class ExactReplyOracle:
         client: LiveMatrixClient,
         agent_id: str,
         *,
-        internal_relay_senders: Collection[str] = (),
         coalescing_threads: bool = False,
         ledger_path: Path | None = None,
         expected_body_for: Callable[[int], str] = _ModelHandler.response_text_for,
     ) -> None:
         self.client = client
         self.agent_id = agent_id
-        self.internal_relay_senders = frozenset(internal_relay_senders)
         self.coalescing_threads = coalescing_threads
         self.ledger_path = ledger_path
         self.expected_body_for = expected_body_for
@@ -4894,10 +4858,15 @@ class ExactReplyOracle:
         self.observed_markers_for = _ModelHandler.observed_markers_for
         self.full_request_markers_for = _ModelHandler.full_request_markers_for
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
+        # Sources whose pending edits MindRoom settled without anything to regenerate.
+        self.declined_edit_sources: frozenset[str] = frozenset()
+        # Admission state of every event MindRoom's agent principal journaled.
+        self.journal_event_states: Mapping[str, str] = {}
+        # Settles the runner's edit debts from each refreshed ledger view, so a reply
+        # wait can see the debts that block a supersession proof clear.
+        self.after_ledger_refresh: Callable[[], None] | None = None
         self.supersession_proofs: dict[str, SupersessionProof] = {}
-        self.recovery_proofs: dict[str, RecoveryProof] = {}
         self.canonical_events: dict[str, Mapping[str, Any]] = {}
-        self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
         self.optional_sources: set[str] = set()
@@ -4968,7 +4937,8 @@ class ExactReplyOracle:
             return
         self._ledger_read_at = now
         self.supersession_proofs = {}
-        self.recovery_proofs = {}
+        self.declined_edit_sources = frozenset()
+        self.journal_event_states = {}
         if self.log_path is None:
             self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
         else:
@@ -4990,18 +4960,34 @@ class ExactReplyOracle:
             except (AssertionError, OSError):
                 # A concurrent write may invalidate this poll, never final qualification.
                 self.supersession_proofs = {}
-                self.recovery_proofs = {}
+                self.declined_edit_sources = frozenset()
+                self.journal_event_states = {}
                 self._ledger_observations = {}
         self._ledger_records = {
             event_id: record
             for event_id, record in self._ledger_observations.items()
             if record.completed or not record.replay_source_event_ids
         }
+        if self.after_ledger_refresh is not None:
+            self.after_ledger_refresh()
 
     def ledger_response(self, event_id: str) -> str | None:
         """Return the durable response one source's completed record attributes."""
         record = self._ledger_records.get(event_id)
         return record.response_event_id if record is not None else None
+
+    def saw_only_deleted(self, source_event_id: str, redaction_event_id: str | None) -> bool:
+        """Return whether MindRoom settled a redaction of a source it never journaled.
+
+        MindRoom reads each room in order, so it only ever saw that source already
+        deleted, started no turn for it, and owes it no tombstone.
+        """
+        states = self.journal_event_states
+        return (
+            source_event_id not in states
+            and redaction_event_id is not None
+            and states.get(redaction_event_id) == "settled"
+        )
 
     def source_tombstoned(self, event_id: str) -> bool:
         """Return whether one source has its exact durable redaction tombstone."""
@@ -5020,11 +5006,7 @@ class ExactReplyOracle:
     def directly_settled(self, event_id: str) -> bool:
         """Return whether one source has its own reply or response-backed record."""
         if self.coalescing_threads and self.log_path is not None:
-            return (
-                self.ledger_response(event_id) is not None
-                or self._supersession_proven(event_id)
-                or event_id in self.recovery_proofs
-            )
+            return self.ledger_response(event_id) is not None or self._supersession_proven(event_id)
         return len(self.response_ids.get(event_id, ())) == 1 or self.ledger_response(event_id) is not None
 
     def settled_sources(self) -> set[str]:
@@ -5294,32 +5276,6 @@ class ExactReplyOracle:
         }
         if event_id in self.expected_sources:
             self.observed_sources.add(event_id)
-        if event.get("sender") in self.internal_relay_senders:
-            # Only a structurally valid auto-resume relay may exempt an agent
-            # reply from the wrong-reply invariant. Blanket-trusting every
-            # router-authored event (a greeting, topic chatter, a malformed
-            # recovery) would mask agent/router reply loops, so require the
-            # canonical relay shape production emits: a threaded resume message.
-            relay_target = _auto_resume_relay_target(
-                event,
-                relay_senders=self.internal_relay_senders,
-            )
-            target = self.event_summaries.get(relay_target[0], {}) if relay_target is not None else {}
-            target_relation = target.get("relates_to")
-            target_root = target_relation.get("event_id") if isinstance(target_relation, dict) else None
-            latest_target_body = self.latest_reply_bodies.get(relay_target[0]) if relay_target is not None else None
-            if (
-                relay_target is not None
-                and target.get("sender") == self.agent_id
-                and target.get("type") == "m.room.message"
-                and target_root == relay_target[1]
-                and latest_target_body is not None
-                and latest_target_body[1].endswith(
-                    (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
-                )
-            ):
-                self.internal_source_ids.add(event_id)
-            return
         if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
             return
         content = event.get("content")
@@ -5387,16 +5343,18 @@ class ExactReplyOracle:
             self.latest_reply_bodies[reply_event_id] = (order, body)
         return True
 
-    def _reply_body_complete(self, body: str) -> bool:
+    def _reply_body_complete(self, body: str, *, source_event_id: str) -> bool:
         """Return whether one reply body is a settled terminal state.
 
-        A body is terminal when it is the exact completed stream for its model
-        call, or a by-design interrupted note (restart recovery and the final
-        audit own the validity of those). Placeholders and partial streams are
-        not terminal, so they must keep settlement open.
+        A body is terminal when its newest attempt is the exact completed stream
+        for its model call. Replay continues an interrupted reply in place, so a
+        body ending in an interruption note is terminal only once deliberate
+        supersession is proven for its source. Placeholders and partial streams
+        are not terminal, so they must keep settlement open.
         """
         if body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
-            return True
+            return self._supersession_proven(source_event_id)
+        body = _final_attempt_body(body)
         call_id = _body_call_id(body)
         return call_id is not None and body == self.expected_body_for(call_id)
 
@@ -5417,7 +5375,7 @@ class ExactReplyOracle:
             if reply_event_id is None:
                 continue
             latest = self.latest_reply_bodies.get(reply_event_id)
-            if latest is None or not self._reply_body_complete(latest[1]):
+            if latest is None or not self._reply_body_complete(latest[1], source_event_id=event_id):
                 blocking.append(event_id)
         return blocking
 
@@ -5441,7 +5399,7 @@ class ExactReplyOracle:
         unexpected = {
             source: sorted(event_ids)
             for source, event_ids in self.response_ids.items()
-            if event_ids and source not in self.expected_sources and source not in self.internal_source_ids
+            if event_ids and source not in self.expected_sources
         }
         if duplicates or unexpected:
             details = {
@@ -5650,33 +5608,20 @@ def _response_view_diagnostic(
     }
 
 
-def _auto_resume_relay_target(
-    event: Mapping[str, Any],
-    *,
-    relay_senders: Collection[str],
-) -> tuple[str, str] | None:
-    """Return the interrupted target and thread root for one exact resume relay."""
-    if event.get("sender") not in relay_senders or event.get("type") != "m.room.message":
-        return None
-    content = event.get("content")
-    if not isinstance(content, dict) or content.get(SOURCE_KIND_KEY) != TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
-        return None
-    body = content.get("body")
-    if not isinstance(body, str) or AUTO_RESUME_MESSAGE not in body:
-        return None
-    relation = content.get("m.relates_to")
-    if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
-        return None
-    root = relation.get("event_id")
-    in_reply_to = relation.get("m.in_reply_to")
-    target = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
-    if not isinstance(root, str) or not isinstance(target, str):
-        return None
-    return target, root
+def _final_attempt_body(body: str) -> str:
+    """Return the newest attempt in a reply continued in place after restarts.
+
+    A restart keeps the stopped attempt's text, ends it with the restart note,
+    and streams the continuation below; only that last part is one model call's
+    exact completed stream.
+    """
+    _stopped, separator, continuation = body.rpartition(RESTART_INTERRUPTED_RESPONSE_NOTE)
+    return continuation.strip() if separator and continuation.strip() else body
 
 
 def _body_call_id(body: str) -> int | None:
-    """Parse the model call ID a completed response body must embed."""
+    """Parse the model call ID a completed response body must embed, from its newest attempt."""
+    body = _final_attempt_body(body)
     if not body.startswith(_CALL_ID_PREFIX):
         return None
     digits = body[len(_CALL_ID_PREFIX) :].split(" ", 1)[0]
@@ -5784,7 +5729,7 @@ def _redaction_target_state(
     records: Mapping[str, TurnRecord],
     source_revision_markers: Mapping[str, Mapping[str, str]],
 ) -> tuple[bool, bool]:
-    """Join exact event invalidation and cleanup debt across every response owner."""
+    """Join exact event invalidation, and whether any registered owner has yet to reconcile it."""
     source_id = next((source for source, edits in source_revision_markers.items() if target_id in edits), None)
     physical = records.get(target_id)
     revisions = [
@@ -5796,11 +5741,8 @@ def _redaction_target_state(
     tombstoned = (physical is not None and target_id in physical.redacted_source_event_ids) or any(
         revision.redacted for revision in revisions
     )
-    # Reconciliation joins physical invalidation into every registered owner
-    # before locked cleanup acknowledges that owner's debt independently.
-    pending = (physical is not None and target_id in physical.pending_redaction_cleanup_event_ids) or any(
-        revision.cleanup_pending or (tombstoned and not revision.redacted) for revision in revisions
-    )
+    # Reconciliation joins physical invalidation into every registered owner.
+    pending = any(tombstoned and not revision.redacted for revision in revisions)
     return tombstoned, pending
 
 
@@ -5850,7 +5792,6 @@ class FinalStateAuditor:
         self.runtime_redaction_path = runtime_redaction_path
         self.pending_edit_markers = {source: dict(edits) for source, edits in (pending_edit_markers or {}).items()}
         self.supersession_proofs: dict[str, SupersessionProof] = {}
-        self.recovery_proofs: dict[str, RecoveryProof] = {}
 
     def _observe_supersession(
         self,
@@ -5863,12 +5804,22 @@ class FinalStateAuditor:
         assert self.ledger_path is not None
         snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
         decisions = _supersession_decisions(self.oracle.log_path)
+        self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
+        # A message MindRoom never answered, such as one it superseded, has no reply to
+        # regenerate, so MindRoom settles each edit of it without any visible effect.
+        self.oracle.declined_edit_sources = frozenset(
+            source
+            for source, edits in self.pending_edit_markers.items()
+            if source not in snapshot.records
+            and all(
+                (row := snapshot.sources.get(event_id)) is not None and row.state == "settled"
+                for event_id in (source, *edits)
+            )
+        )
         # Final audit already validated this view; live polling must validate
         # with the same retained ancestry before joining durable ownership.
         replies = self._canonical_agent_replies(events, sent_records=sent_records) if replies is None else replies
         authored = {record.event_id: record for record in sent_records}
-        self.recovery_proofs = self._observe_recovery(snapshot, events, replies, authored)
-        self.oracle.recovery_proofs = self.recovery_proofs
         proofs: dict[str, SupersessionProof] = {}
         for chain in self.oracle.chains.values():
             for index in range(len(chain) - 1, -1, -1):
@@ -5895,11 +5846,7 @@ class FinalStateAuditor:
         # discharge another live source's generation or mutation debt.
         for source, proof in tuple(proofs.items()):
             record = snapshot.records.get(source)
-            if record is not None and (
-                any(owned not in proofs for owned in record.replay_source_event_ids)
-                or record.pending_redaction_cleanup_event_ids
-                or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
-            ):
+            if record is not None and any(owned not in proofs for owned in record.replay_source_event_ids):
                 proofs.pop(proof.source_event_id, None)
         # Removing one incomplete owner also invalidates every chain depending on it.
         for source in tuple(proofs):
@@ -5909,222 +5856,6 @@ class FinalStateAuditor:
         self.supersession_proofs = proofs
         self.oracle.supersession_proofs = proofs
         return snapshot.records
-
-    def _observe_recovery(
-        self,
-        snapshot: _SupersessionSnapshot,
-        events: Mapping[str, Mapping[str, Any]],
-        replies: Mapping[str, set[str]],
-        sent_records: Mapping[str, _SentRecord],
-    ) -> dict[str, RecoveryProof]:
-        """Join complete recovery chains once for every consumer of interrupted work."""
-        interrupted_targets = {
-            target[0]
-            for event in events.values()
-            if (target := _auto_resume_relay_target(event, relay_senders=self.oracle.internal_relay_senders))
-            is not None
-        }
-        proofs = {
-            source: proof
-            for source in self.oracle.expected_sources
-            if (record := snapshot.records.get(source)) is not None
-            and record.response_event_id in interrupted_targets
-            and (proof := self._prove_recovery(source, snapshot, events, replies, sent_records)) is not None
-        }
-        # Coalesced original ownership remains indivisible even after interruption.
-        return {
-            source: proof
-            for source, proof in proofs.items()
-            if all(owned in proofs for owned in snapshot.records[source].replay_source_event_ids)
-        }
-
-    def _prove_recovery(
-        self,
-        source: str,
-        snapshot: _SupersessionSnapshot,
-        events: Mapping[str, Mapping[str, Any]],
-        replies: Mapping[str, set[str]],
-        sent_records: Mapping[str, _SentRecord],
-    ) -> RecoveryProof | None:
-        """Bind one admitted original interruption to its unique trusted continuation."""
-        old = snapshot.records.get(source)
-        row = snapshot.sources.get(source)
-        root = self._source_thread_root(source, events, sent_records, seen=set())
-        if (
-            old is None
-            or row is None
-            or root is None
-            or row.state != "settled"
-            or source not in old.replay_source_event_ids
-            or old.response_event_id is None
-            or old.requester_id_for_source(source) != row.sender
-            or not self._journal_source_matches(row, events, root)
-            or not self._record_sources_share_thread(old)
-        ):
-            return None
-        interrupted = old.response_event_id
-        old_view = _canonical_response_view(events, interrupted, self.agent_id)
-        relays = [relay_id for relay_id, event in events.items() if self._relay_replies_to(event, root, interrupted)]
-        if len(relays) != 1 or not self._recovery_interruption_valid(source, old, old_view, replies):
-            return None
-        relay = relays[0]
-        continuation = self._completed_recovery_relay(relay, row, root, snapshot, events, replies)
-        if continuation is None:
-            return None
-        answer, view = continuation
-        relay_row = snapshot.sources[relay]
-        if (
-            old_view.timestamp is None
-            or old_view.timestamp < row.timestamp
-            or relay_row.timestamp < old_view.timestamp
-            or self._recovery_has_debt((old, snapshot.records[relay]), snapshot, row.room_id, root)
-        ):
-            return None
-        call = _body_call_id(view.body)
-        marker = self.source_current_markers.get(source)
-        if call is None or marker is None or marker not in self.full_request_markers_for(call):
-            return None
-        assert view.event_id is not None
-        return RecoveryProof(
-            source,
-            interrupted,
-            relay,
-            answer,
-            view.event_id,
-            call,
-            f"{AGENT_NAME}@{self.agent_id}",
-            row.room_id,
-            root,
-            row.sender,
-        )
-
-    def _recovery_interruption_valid(
-        self,
-        source: str,
-        record: TurnRecord,
-        view: _CanonicalResponseView,
-        replies: Mapping[str, set[str]],
-    ) -> bool:
-        """Retain exact original reply and any already-published model obligations."""
-        if (
-            self._visible_record_reply_ids(record, replies) != {record.response_event_id}
-            or view.stream_status != "error"
-            or not view.body.endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
-        ):
-            return False
-        published = view.body.removesuffix(RESTART_INTERRUPTED_RESPONSE_NOTE).rstrip()
-        if not published:
-            return True
-        call = _body_call_id(published)
-        return (
-            call is not None
-            and self.expected_body_for(call).startswith(published)
-            and self.source_current_markers.get(source) in self.observed_markers_for(call)
-        )
-
-    def _completed_recovery_relay(
-        self,
-        relay: str,
-        original: _SettledJournalSource,
-        root: str,
-        snapshot: _SupersessionSnapshot,
-        events: Mapping[str, Mapping[str, Any]],
-        replies: Mapping[str, set[str]],
-    ) -> tuple[str, _CanonicalResponseView] | None:
-        """Require the relay's own settled identity, requester and completed response."""
-        row = snapshot.sources.get(relay)
-        turn = snapshot.records.get(relay)
-        content = events[relay].get("content", {})
-        if (
-            row is None
-            or turn is None
-            or row.state != "settled"
-            or row.room_id != original.room_id
-            or row.timestamp <= original.timestamp
-            or not self._journal_source_matches(row, events, root)
-            or content.get(ORIGINAL_SENDER_KEY) != original.sender
-            or turn.requester_id_for_source(relay) != original.sender
-            or turn.source_event_ids != (relay,)
-            or turn.replay_source_event_ids != (relay,)
-            or not turn.completed
-            or turn.response_event_id is None
-        ):
-            return None
-        answer = turn.response_event_id
-        view = _canonical_response_view(events, answer, self.agent_id)
-        call = _body_call_id(view.body)
-        answer_timestamp = events.get(answer, {}).get("origin_server_ts")
-        if (
-            replies.get(relay) != {answer}
-            or events.get(answer, {}).get("_audit_room_id") != original.room_id
-            or self._thread_root(events.get(answer, {})) != root
-            or not isinstance(answer_timestamp, int)
-            or answer_timestamp < row.timestamp
-            or view.timestamp is None
-            or view.timestamp < answer_timestamp
-            or not view.completed
-            or call is None
-            or view.body != self.expected_body_for(call)
-            or not self._recovery_final_matches(turn, view, snapshot, original.room_id, root)
-        ):
-            return None
-        return answer, view
-
-    @staticmethod
-    def _recovery_final_matches(
-        turn: TurnRecord,
-        view: _CanonicalResponseView,
-        snapshot: _SupersessionSnapshot,
-        room_id: str,
-        root: str,
-    ) -> bool:
-        """The acknowledged FINAL must be the selected canonical completed payload."""
-        final = snapshot.acknowledged_finals.get(turn.anchor_event_id or "")
-        if final is None:
-            return False
-        payload = final.payload.get("m.new_content") if final.response_event_id is not None else final.payload
-        relation = final.payload.get("m.relates_to")
-        target_matches = (
-            (
-                isinstance(relation, Mapping)
-                and relation.get("rel_type") == "m.replace"
-                and relation.get("event_id") == turn.response_event_id
-            )
-            if final.response_event_id is not None
-            else final.event_id == turn.response_event_id
-        )
-        return (
-            final.room_id == room_id
-            and final.thread_id == root
-            and final.response_event_id in {None, turn.response_event_id}
-            and final.event_id == view.event_id
-            and target_matches
-            and payload == view.payload
-        )
-
-    def _recovery_has_debt(
-        self,
-        owners: Collection[TurnRecord],
-        snapshot: _SupersessionSnapshot,
-        room_id: str,
-        root: str,
-    ) -> bool:
-        """Recovery cannot discharge source mutation, cleanup or visible delivery debt."""
-        source_ids = {source for record in owners for source in record.indexed_event_ids}
-        response_ids = {record.response_event_id for record in owners}
-        return (
-            any(self.pending_edit_markers.get(source) for source in source_ids)
-            or any(record.pending_redaction_cleanup_event_ids for record in owners)
-            or any(
-                revision.cleanup_pending for record in owners for revision in (record.revision_replay or {}).values()
-            )
-            or any(
-                (delivery.room_id == room_id and delivery.thread_id in {root, ""})
-                or delivery.delivery_id in source_ids
-                or delivery.edits_event_id in response_ids
-                for delivery in snapshot.pending_deliveries
-            )
-        )
 
     def _prove_supersession(
         self,
@@ -6157,7 +5888,6 @@ class FinalStateAuditor:
             or old_view is None
             or old_view.stream_status != "error"
             or not old_view.body.endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
-            or any(self._relay_replies_to(event, root, old_response) for event in events.values())
         ):
             return None
         anchor = self._completed_supersession_anchor(newer, snapshot.records, events, replies)
@@ -6207,7 +5937,7 @@ class FinalStateAuditor:
                 for delivery in snapshot.pending_deliveries
             )
             or not all(self._journal_source_matches(item, events, root) for item in (row, next_row))
-            or self.pending_edit_markers.get(source)
+            or (self.pending_edit_markers.get(source) and source not in self.oracle.declined_edit_sources)
             or self.pending_edit_markers.get(newer)
         ):
             return None
@@ -6236,13 +5966,7 @@ class FinalStateAuditor:
     ) -> tuple[str, str] | None:
         """Require exact durable completion and visible current-source model consumption."""
         record = records.get(source)
-        if (
-            record is None
-            or not record.completed
-            or source not in record.source_event_ids
-            or record.pending_redaction_cleanup_event_ids
-            or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
-        ):
+        if record is None or not record.completed or source not in record.source_event_ids:
             return None
         response = record.response_event_id
         if response is None or response not in self._visible_record_reply_ids(record, replies):
@@ -6250,7 +5974,7 @@ class FinalStateAuditor:
         view = _canonical_response_view(events, response, self.agent_id)
         if not self._record_sources_share_thread(record) or not view.completed:
             return None
-        body = view.body
+        body = _final_attempt_body(view.body)
         call = _body_call_id(body)
         marker = self.source_current_markers.get(source)
         if (
@@ -6296,15 +6020,19 @@ class FinalStateAuditor:
             assert records is not None
             for event_id, record in records.items():
                 if not record.completed and any(
-                    source not in self.supersession_proofs and source not in self.recovery_proofs
-                    for source in record.replay_source_event_ids
+                    source not in self.supersession_proofs for source in record.replay_source_event_ids
                 ):
                     _invalid_ledger(
                         self.ledger_path,
-                        f"record {event_id!r} is incomplete without exact supersession proof or recovery proof",
+                        f"record {event_id!r} is incomplete without exact supersession proof",
                         strict=True,
                     )
-            redacted_sources = set(redacted) & set(self.oracle.expected_sources)
+            # A source MindRoom only ever saw deleted started no turn, so it has no tombstone to audit.
+            redacted_sources = {
+                source
+                for source in set(redacted) & set(self.oracle.expected_sources)
+                if not self.oracle.saw_only_deleted(source, redacted[source] or None)
+            }
             ledger_metrics = self._assert_ledger_attribution(
                 replies,
                 records=records,
@@ -6316,7 +6044,7 @@ class FinalStateAuditor:
                 redacted_source_event_ids=redacted_sources,
                 redacted_targets=redacted,
             )
-            ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records))
+            ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records, redacted_targets=redacted))
         else:
             self._assert_direct_reply_model_sources(events, replies)
         return {
@@ -6326,16 +6054,15 @@ class FinalStateAuditor:
             "superseded_interrupted_bodies": len(
                 {proof.interrupted_response_event_id for proof in self.supersession_proofs.values()} - {None},
             ),
-            "recovered_interrupted_bodies": len(
-                {proof.interrupted_response_event_id for proof in self.recovery_proofs.values()},
-            ),
             **ledger_metrics,
         }
 
-    def _assert_redaction_cleanup_probes(
+    def _assert_redaction_cleanup_probes(  # noqa: C901
         self,
         events: Mapping[str, Mapping[str, Any]],
         records: Mapping[str, TurnRecord],
+        *,
+        redacted_targets: Mapping[str, str] | None = None,
     ) -> dict[str, int]:
         """Dedicated probes owe responses; ordinary sources retain their own terminal contract."""
         uncovered = 0
@@ -6364,10 +6091,14 @@ class FinalStateAuditor:
             if call_id is not None:
                 calls.add(call_id)
             for source_id in source_ids:
+                redaction_event_id = (redacted_targets or {}).get(source_id)
+                # A source MindRoom only ever saw deleted started no turn, so there is nothing to clean up.
+                if redaction_event_id and self.oracle.saw_only_deleted(source_id, redaction_event_id):
+                    continue
                 tombstoned, pending = _redaction_target_state(source_id, records, self.source_revision_markers)
                 is_edit = any(source_id in revisions for revisions in self.source_revision_markers.values())
-                # Edit acknowledgement is monotonic before model admission.
-                # Original-source callbacks can re-arm debt after an ordinary call.
+                # Every registered owner reconciles an edit tombstone before model admission;
+                # an original source's callback may still be reconciling after an ordinary call.
                 requires_cleanup = probe_id in self.cleanup_probes or (bool(calls) and is_edit)
                 if not tombstoned or (pending and requires_cleanup):
                     msg = (
@@ -6569,16 +6300,19 @@ class FinalStateAuditor:
             raise AssertionError(msg)
         return replies
 
-    @classmethod
     def _source_thread_root(
-        cls,
+        self,
         event_id: str,
         events: Mapping[str, Mapping[str, Any]],
         records: Mapping[str, _SentRecord],
         *,
         seen: set[str],
     ) -> str | None:
-        """Resolve one source's canonical thread root through reply ancestry."""
+        """Resolve one source's canonical thread root through reply ancestry.
+
+        A redaction strips an ancestor's relation, so a redacted ancestor keeps the
+        relation the oracle saw while it was live, which is what MindRoom resolved.
+        """
         if event_id in seen:
             return None
         seen.add(event_id)
@@ -6588,6 +6322,9 @@ class FinalStateAuditor:
         if not isinstance(content, dict):
             return None
         relation = content.get("m.relates_to")
+        unsigned = event.get("unsigned")
+        if relation is None and isinstance(unsigned, dict) and unsigned.get("redacted_because"):
+            relation = self.oracle.event_summaries.get(event_id, {}).get("relates_to")
         if not isinstance(relation, dict):
             return event_id
         root = relation.get("event_id")
@@ -6596,7 +6333,7 @@ class FinalStateAuditor:
         reply = relation.get("m.in_reply_to")
         target = reply.get("event_id") if isinstance(reply, dict) else None
         if isinstance(target, str):
-            return cls._source_thread_root(target, events, records, seen=seen)
+            return self._source_thread_root(target, events, records, seen=seen)
         return event_id
 
     def _assert_reply_cardinality(self, replies: Mapping[str, set[str]]) -> None:
@@ -6616,7 +6353,7 @@ class FinalStateAuditor:
                     f"source {logical_ref} has no canonical reply in its Matrix thread",
                 )
         for source_event_id, reply_ids in replies.items():
-            if source_event_id in oracle.expected_sources or source_event_id in oracle.internal_source_ids:
+            if source_event_id in oracle.expected_sources:
                 continue
             problems.append(f"unexpected agent replies to {source_event_id}: {sorted(reply_ids)}")
         if problems:
@@ -6690,7 +6427,6 @@ class FinalStateAuditor:
         return {
             "ledger_attributed_sources": attributed,
             "ledger_superseded_sources": superseded,
-            "ledger_recovered_sources": len(self.recovery_proofs),
         }
 
     def _attribute_required_replies(
@@ -6722,10 +6458,9 @@ class FinalStateAuditor:
                     )
                     record = None
                 proof = self.supersession_proofs.get(source_event_id)
-                recovery = self.recovery_proofs.get(source_event_id)
                 if (
                     record is not None
-                    and (record.completed or proof is not None or recovery is not None)
+                    and (record.completed or proof is not None)
                     and record.response_event_id is not None
                 ):
                     visible_record_reply_ids = self._visible_record_reply_ids(record, replies)
@@ -6736,7 +6471,7 @@ class FinalStateAuditor:
                         )
                     else:
                         response_ids.add(record.response_event_id)
-                        attributed += int(proof is None and recovery is None)
+                        attributed += int(proof is None)
                         superseded += int(proof is not None)
                         anchored = True
                 elif proof is not None or (
@@ -6899,9 +6634,7 @@ class FinalStateAuditor:
             live_sources = covered_sources - harness_redacted
             body = self._latest_agent_body(events, record.response_event_id)
             call_id = _body_call_id(body)
-            if call_id is None and (
-                source_event_id in self.supersession_proofs or source_event_id in self.recovery_proofs
-            ):
+            if call_id is None and source_event_id in self.supersession_proofs:
                 # A terminal interrupted placeholder never published model output.
                 # Its exact proof closes semantic debt without claiming generation.
                 continue
@@ -7017,32 +6750,28 @@ class FinalStateAuditor:
         events: Mapping[str, Mapping[str, Any]],
         replies: Mapping[str, set[str]],
     ) -> int:
-        """Every required reply ends as one exact completed stream or a recovered interruption.
+        """Every required reply ends as one exact completed stream or a superseded interruption.
 
-        A restart may terminate a stream into a visible interrupted note by
-        design, with exact auto-resume recovery or independently proven deliberate
-        supersession. Superseded interruptions are counted separately from
-        completed generation; unfinished partial streams still fail.
+        A restart may leave a stream on a visible interrupted note only when
+        independently proven deliberate supersession closes it; otherwise
+        replay continues the interrupted reply in the same message. Superseded
+        interruptions are counted separately from completed generation;
+        unfinished partial streams still fail.
         """
         problems: list[str] = []
         checked = 0
         # Optional sources permit *zero* replies after a redaction race, but any
-        # reply that still exists must pass the same canonical/recovered-terminal
+        # reply that still exists must pass the same canonical/superseded-terminal
         # checks — a frozen ``Thinking...`` placeholder, a partial stream, or an
-        # unrecovered interruption left visible is still a failure. The inner
+        # unsuperseded interruption left visible is still a failure. The inner
         # ``replies.get(source_event_id, ())`` loop naturally tolerates the
         # zero-reply case, so every expected source is audited here.
-        audited_sources = list(self.oracle.expected_sources.items())
-        audited_sources.extend((relay_id, f"relay:{relay_id}") for relay_id in self.oracle.internal_source_ids)
-        for source_event_id, logical_ref in audited_sources:
+        for source_event_id, logical_ref in self.oracle.expected_sources.items():
             for reply_event_id in replies.get(source_event_id, ()):
                 proof = self.supersession_proofs.get(source_event_id)
                 if proof is not None and proof.interrupted_response_event_id == reply_event_id:
                     continue
-                recovery = self.recovery_proofs.get(source_event_id)
-                if recovery is not None and recovery.interrupted_response_event_id == reply_event_id:
-                    continue
-                body = self._latest_agent_body(events, reply_event_id)
+                body = _final_attempt_body(self._latest_agent_body(events, reply_event_id))
                 call_id = _body_call_id(body)
                 if call_id is not None and body == self.expected_body_for(call_id):
                     checked += 1
@@ -7054,31 +6783,6 @@ class FinalStateAuditor:
             msg = f"final response body audit failed: {problems}"
             raise AssertionError(msg)
         return checked
-
-    def _relay_replies_to(
-        self,
-        relay: Mapping[str, Any],
-        thread_root: str,
-        interrupted_event_id: str,
-    ) -> bool:
-        """A relay proves recovery only if it replies to ``interrupted_event_id``."""
-        target = _auto_resume_relay_target(
-            relay,
-            relay_senders=self.oracle.internal_relay_senders,
-        )
-        return target == (interrupted_event_id, thread_root)
-
-    @staticmethod
-    def _thread_root(event: Mapping[str, Any]) -> str | None:
-        """Return the thread root of one event, if any."""
-        content = event.get("content")
-        if not isinstance(content, dict):
-            return None
-        relation = content.get("m.relates_to")
-        if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
-            return None
-        root = relation.get("event_id")
-        return root if isinstance(root, str) else None
 
     def _latest_agent_body(self, events: Mapping[str, Mapping[str, Any]], reply_event_id: str) -> str:
         """Return the newest visible body for one agent reply."""
@@ -7134,7 +6838,6 @@ class LiveFuzzRunner:
         self.oracle = ExactReplyOracle(
             self.client,
             stack.agent_id,
-            internal_relay_senders=(stack.router_id,),
             coalescing_threads=scenario.profile == "chaos",
             ledger_path=stack.storage_path / "tracking" / "event_journal.db",
             expected_body_for=_ModelHandler.response_text_for,
@@ -7174,6 +6877,7 @@ class LiveFuzzRunner:
         self.oracle.log_path = stack.log_path
         self.oracle.source_current_markers = self.source_current_markers
         self.oracle.pending_edit_markers = self._pending_edit_markers
+        self.oracle.after_ledger_refresh = self._reconcile_edit_debts
         self._pending_source_tombstones: set[str] = set()
         self.operation_count = 0
         # Monotonic sequence for the realized journal, spanning both mutations
@@ -8329,9 +8033,9 @@ class LiveFuzzRunner:
         *,
         room_id: str,
     ) -> set[str]:
-        """Require one direct answer or one exact interrupted-response resume chain."""
+        """Require one direct answer; replay continues an interrupted reply in that same message."""
         direct_response_ids = set(agent_responses.get(source_event_id, set()))
-        # Cardinality is evidence: one relay must never hide several originals.
+        # Cardinality is evidence: a restart must never add a second reply.
         if len(direct_response_ids) > 1:
             return direct_response_ids
         # /sync omits room_id; ingestion annotates its enclosing room timeline.
@@ -8343,33 +8047,7 @@ class LiveFuzzRunner:
         proven_responses = self._canonical_response_ids(room_events, root_event_id=source_event_id)
         if direct_response_ids != proven_responses.get(source_event_id, set()):
             return set()
-        relay_response_ids: set[str] = set()
-        for event in events:
-            event_id = event.get("event_id")
-            if not isinstance(event_id, str):
-                continue
-            relay_target = _auto_resume_relay_target(
-                event,
-                relay_senders=(self.stack.router_id,),
-            )
-            if relay_target is not None and relay_target[1] == source_event_id:
-                answers = agent_responses.get(event_id, set())
-                if not answers:
-                    continue
-                interrupted_id = relay_target[0]
-                if (
-                    direct_response_ids != {interrupted_id}
-                    or event not in room_events
-                    or answers != proven_responses.get(event_id, set())
-                    or not _latest_response_body(room_events, interrupted_id, sender_id=self.stack.agent_id).endswith(
-                        (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
-                    )
-                ):
-                    return set()
-                relay_response_ids.update(answers)
-        if not relay_response_ids:
-            return direct_response_ids
-        return relay_response_ids
+        return direct_response_ids
 
     @staticmethod
     def _latest_event_body(
@@ -8683,12 +8361,16 @@ class LiveFuzzRunner:
             self._pending_source_tombstones.difference_update(
                 source_event_id
                 for source_event_id in tuple(self._pending_source_tombstones)
-                if _redaction_target_state(
-                    source_event_id,
-                    self.oracle._ledger_observations,
-                    self.source_revision_markers,
-                )[0]
+                if self._source_tombstone_settled(source_event_id)
             )
+
+    def _source_tombstone_settled(self, target_event_id: str) -> bool:
+        """Return whether MindRoom durably settled one redaction target."""
+        if self.oracle.saw_only_deleted(target_event_id, self.redacted_targets.get(target_event_id)):
+            return True
+        return _redaction_target_state(target_event_id, self.oracle._ledger_observations, self.source_revision_markers)[
+            0
+        ]
 
     def _current_pending_edit_marker(self, source_id: str) -> str | None:
         """Choose the newest observed live debt by canonical Matrix replacement order."""
@@ -8703,10 +8385,14 @@ class LiveFuzzRunner:
     def _reconcile_edit_debts(self) -> None:
         """Only exact visible terminal consumption can discharge or supersede live edit debt."""
         for source_id, pending in tuple(self._pending_edit_markers.items()):
+            # An edit of a redacted source, or one MindRoom declined, can change no reply.
+            if self.oracle.source_tombstoned(source_id) or source_id in self.oracle.declined_edit_sources:
+                del self._pending_edit_markers[source_id]
+                continue
             record = self.oracle._ledger_records.get(source_id)
             if record is None or not record.completed or source_id not in record.source_event_ids:
                 continue
-            if self.oracle.source_tombstoned(source_id) or self.oracle.source_completed_without_response(source_id):
+            if self.oracle.source_completed_without_response(source_id):
                 del self._pending_edit_markers[source_id]
                 continue
             latest = self.oracle.latest_reply_bodies.get(record.response_event_id or "")
@@ -9169,11 +8855,7 @@ class LiveFuzzRunner:
         targets = tuple(self.event_ids[source] for source in operation.cleanup_sources)
         while True:
             self.oracle.refresh_ledger_attributions(min_interval=0.0)
-            observed = {
-                target
-                for target in targets
-                if _redaction_target_state(target, self.oracle._ledger_observations, self.source_revision_markers)[0]
-            }
+            observed = {target for target in targets if self._source_tombstone_settled(target)}
             self._pending_source_tombstones.difference_update(observed)
             if len(observed) == len(targets):
                 break
@@ -9417,7 +9099,15 @@ async def _run_live(
         else scenario.client_count
     )
     room_ids = tuple(stack.room_ids.get(room_key, stack.room_id) for room_key in stack.room_keys)
-    clients = tuple(LiveMatrixClient(stack.homeserver, stack.room_id, room_ids=room_ids) for _ in range(client_count))
+    clients = tuple(
+        LiveMatrixClient(
+            stack.homeserver,
+            stack.room_id,
+            room_ids=room_ids,
+            registration_token=stack.registration_token,
+        )
+        for _ in range(client_count)
+    )
     if scenario.profile == "chaos":
         for client in clients:
             client.transport_retry_seconds = 45.0
@@ -9864,10 +9554,8 @@ def _sanitized_oracle_snapshot(oracle: ExactReplyOracle) -> dict[str, object]:
         "observed_sources": sorted(oracle.observed_sources),
         "unsettled_required_sources": sorted(oracle.unsettled_required_sources()),
         "response_ids": {source: sorted(ids) for source, ids in oracle.response_ids.items()},
-        "internal_source_ids": sorted(oracle.internal_source_ids),
         "reply_latencies": {source: round(latency, 3) for source, latency in oracle.reply_latencies.items()},
         "supersession_proofs": {source: asdict(proof) for source, proof in oracle.supersession_proofs.items()},
-        "recovery_proofs": {source: asdict(proof) for source, proof in oracle.recovery_proofs.items()},
         "response_views": {
             response: _response_view_diagnostic(tuple(oracle.canonical_events.values()), response)
             for replies in oracle.response_ids.values()
@@ -10132,8 +9820,13 @@ def _capture_error_text(artifact: str, error: BaseException) -> str:
 
 
 def _durable_store_paths(storage_path: Path) -> tuple[Path, ...]:
-    """Find the managed accounts' durable Nio SQLite stores."""
-    return tuple(sorted((storage_path / "encryption_keys").rglob("*.db")))
+    """Find the managed accounts' durable Nio SQLite stores; an account that never ingested durably has none."""
+    paths = []
+    for path in sorted((storage_path / "encryption_keys").rglob("*.db")):
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='NioDurableMeta'").fetchone():
+                paths.append(path)
+    return tuple(paths)
 
 
 def _reset_durable_sync_cursors(storage_path: Path) -> None:
@@ -10163,9 +9856,6 @@ def _nio_recovery_snapshot(storage_path: Path) -> dict[str, object]:
     stores: dict[str, object] = {}
     for path in _durable_store_paths(storage_path):
         with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
-            tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "NioDurableMeta" not in tables:
-                continue
             version_number, stream_id, acknowledged, cursor_present = database.execute(
                 "SELECT version, stream_id, acked_sequence, cursor IS NOT NULL FROM NioDurableMeta WHERE id=1",
             ).fetchone()

@@ -134,6 +134,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
 | `event_journal/response_attempts.py` | Normalized durable response ownership registration, binding, and exact lookup queries |
 | `event_journal/legacy_response_attempts.py` | One-time transactional adoption of released response ownership snapshots |
+| `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
@@ -142,7 +143,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `sync_restart_retry.py` | Exact sources with committed replacement or orderly terminal interruptions, available to replacement or next-startup recovery |
+| `sync_restart_retry.py` | Whether an edit regeneration of an already committed revision may run again, decided from persisted history |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
 | `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |
@@ -203,6 +204,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling.py` | Cron and natural-language task scheduling |
+| `scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
 | `tools/` | 100+ tool integrations |
@@ -326,10 +328,12 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | StopManager for cancelling in-progress responses |
 | `topic_generator.py` | AI-generated room topics |
+| `debug_report.py` | Read-only collection of what the backend stored about one reported conversation: event journal, Agno runs, tool-call and LLM request logs, and log lines |
 | `cli/main.py` | Main CLI entry point (Typer app) |
 | `cli/banner.py` | CLI startup banner |
 | `cli/config.py` | Config subcommand logic |
 | `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
+| `cli/debug_report.py` | `mindroom debug-report` command: bug report parsing, config-only storage location, and JSON output |
 | `cli/doctor.py` | Doctor command implementation |
 | `cli/local_stack.py` | Local stack setup command |
 | `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
@@ -499,6 +503,23 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - If mocks or tests break, fix them to use proper typed objects or stricter mocks instead of adding dynamic attribute fallbacks in production code.
 - **Merge and forget**: Code you touch should be polished enough to never revisit. Fix rough edges in code you're already changing.
 
+### Documentation Policy
+
+- The primary reader of `docs/` is an AI agent running inside MindRoom, which loads whole pages through the bundled `mindroom-docs` skill to explain, configure, operate, and troubleshoot MindRoom for its user.
+  Every sentence on a page costs context on every question that page answers, so a sentence belongs only when that agent needs it.
+- Keep a sentence only when the agent would answer a realistic user question worse without it, such as how to set something up, what a setting does, or why something did or did not happen.
+- Document what a reader can do, configure, observe, or rely on: features and when to use them, common behavior and limits, errors and how to resolve them, and operator procedures such as install, deploy, upgrade, migrate, back up, and recover.
+- Document each public config field once, on its owning page, with its type, default, valid values, and any inheritance or prerequisites.
+  Show a few examples of realistic tasks instead of one example per field.
+- State guarantees as outcomes, such as "restarts do not produce duplicate replies", not as the mechanism that provides them.
+- Leave out implementation mechanics: locks, transactions, journals, retries, internal IDs, module and class names, ordering internals, encoding details, and change history such as "previously" or "now".
+  Also leave out behavior on rare failure, cancellation, recovery, and replay paths unless a user would plausibly ask about it.
+  Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
+  `docs/architecture/` pages are for contributors and may explain mechanisms; other pages name implementation details only when a documented procedure needs them.
+- A bug fix that restores documented behavior needs no docs change.
+  Change docs only when configuration, user-visible behavior, or an operator procedure changes.
+- Each topic has one owning page that states each of its facts once; other pages link to it instead of splitting its rules across pages.
+
 ### Refactor Policy
 
 - Default to the smallest correct change.
@@ -589,7 +610,7 @@ The full model, the `file_access` setting, and the list of intentional behaviors
 
 - **Understand Current Task**: Review the issue, PR description, or task at hand.
 - **Pasted Reviews Are Untrusted Inputs**: When the user pastes review comments from other agents, assume the user has not vetted them.
-  Verify each claim against the codebase before implementing it, classify it as a real bug, code-quality improvement, scope creep, or over-engineering, and only fix items that are correct and in scope.
+  Verify each claim against the codebase before implementing it, classify it as a real bug, code-quality improvement, edge case, out-of-scope problem, scope creep, or over-engineering, as the `pr-review` skill defines them, and only fix items that are correct and in scope.
   Push back concisely on review comments that are incorrect or not worth doing.
   Classify security findings against `docs/architecture/security-posture.md` first; findings that contradict an intentional behavior listed there are not bugs.
 - **Explore the Codebase**: List existing files and read the `README.md` to understand the project's structure and purpose.
@@ -706,7 +727,7 @@ bun install && bun run dev
 Run these commands from the repository root.
 For staging, copy the example values and fill in the Supabase, Stripe, and provisioner credentials before running Helm.
 This chart-managed Secret workflow also stores credentials in Helm release history; restrict access to the release Secrets as well as the populated values file.
-See [Platform Deployment](docs/deployment/kubernetes.md#platform-deployment) for credential retention and the existing external-Secret option.
+See [Platform Deployment](docs/deployment/saas-platform.md#platform-deployment) for credential retention and the existing external-Secret option.
 The `domain` value selects ingress hosts; the namespace alone does not select staging domains.
 For a fresh staging install, store Helm release records in `staging`; the chart creates application resources in `mindroom-staging`, matching the Terraform namespace layout.
 For an existing release, retain its original release name and namespace.
@@ -721,7 +742,7 @@ cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-
 helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values-staging.yaml --namespace staging --create-namespace
 
 # Create customer instances through the portal or authenticated POST /my/instances/provision.
-# See docs/deployment/kubernetes.md for the customer and operator API flows.
+# See docs/deployment/saas-platform.md for the customer and operator API flows.
 # The CLI provision <id> command sends fixed test metadata; use only with existing test fixtures.
 
 # The provisioner:
@@ -736,7 +757,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 #   -f values-with-secrets.yaml  # Never commit this file!
 
 # Deploy a release tag: platform Helm upgrade, then re-provision instances
-# (see docs/deployment/kubernetes.md#release-deployment)
+# (see docs/deployment/saas-platform.md#release-deployment)
 ./cluster/scripts/deploy-release.sh v2026.9.351 --dry-run
 ./cluster/scripts/deploy-release.sh v2026.9.351 --instances running  # or all, none, 1,7
 

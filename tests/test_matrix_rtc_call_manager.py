@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
-from types import SimpleNamespace
+from datetime import timedelta
+from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,12 +30,20 @@ from mindroom.config.voice import SpeechServiceConfig
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import (
+    _LIVE_VOICE_INSTRUCTIONS,
     _MAX_PENDING_KEYS_PER_ROOM,
     _PENDING_KEY_TTL_MS,
+    _VOICE_STYLE_ADDENDUM,
     CallManager,
     _build_call_instructions,
     _build_live_instructions,
     maybe_build_call_manager,
+)
+from mindroom.matrix_rtc.call_origin import (
+    AGENT_CALL_STATE_EVENT_TYPE,
+    CallOrigin,
+    CallOriginContext,
+    _CallBriefMessage,
 )
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
 from mindroom.matrix_rtc.call_tools import CallAgentResponse, CallAgentTooling
@@ -52,6 +61,7 @@ from mindroom.matrix_rtc.events import (
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.frame_keys import _SharedWith
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
+from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     CascadedVoiceAgentOptions,
@@ -260,6 +270,7 @@ def _config(*, enabled: bool = True, credentials_service: str = "openai") -> Con
                 instructions=["Be kind."],
                 rooms=[ROOM_ID],
                 access=ResponderAccessConfig(users=["@alice:example.org"]),
+                memory_backend="none",
             ),
         },
         models={},
@@ -1647,8 +1658,24 @@ async def test_call_start_holds_response_admission_through_session_handoff(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: Path) -> None:
-    """Activity reporting sees a call from its first SFU step until the agent leaves it."""
+async def test_active_call_requesters_cover_starting_and_joined_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Activity reporting sees a call from tool materialization until the agent leaves it."""
+    tools_started = asyncio.Event()
+    release_tools = asyncio.Event()
+
+    async def blocking_tools(**kwargs: object) -> CallAgentTooling:
+        tools_started.set()
+        await release_tools.wait()
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", blocking_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = _BlockingConnectBridge()
@@ -1656,6 +1683,9 @@ async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: 
     assert manager.active_call_requesters == ()
 
     reconcile = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(tools_started.wait(), timeout=1)
+    assert manager.active_call_requesters == ("@alice:example.org",)
+    release_tools.set()
     await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
     assert manager.active_call_requesters == ("@alice:example.org",)
     bridge.release_connect.set()
@@ -1677,12 +1707,67 @@ async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_call_admitted_before_forced_replacement_joins_with_published_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call whose state fetch outlives a forced replacement's planning joins only with the published config."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_RETRY_DELAYS_S", (0.0,))
+    tool_configs: list[Config] = []
+    tools_built = asyncio.Event()
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tool_configs.append(cast("Config", kwargs["config"]))
+        tools_built.set()
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def paused_state(_room_id: str) -> nio.RoomGetStateResponse:
+        fetch_started.set()
+        await release_fetch.wait()
+        return _state_response(_remote_member_event())
+
+    client = _client()
+    client.room_get_state.side_effect = paused_state
+    gate = ResponseAdmissionGate()
+    manager = _manager(client, FakeBridge(), tmp_path, response_admission_gate=gate)
+
+    reconcile = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(fetch_started.wait(), timeout=1)
+    gate.close()
+    assert manager.active_call_requesters == ()
+    release_fetch.set()
+    await reconcile
+    assert tool_configs == []
+
+    published_config = _config()
+    manager.update_config(published_config)
+    gate.reopen()
+    await asyncio.wait_for(tools_built.wait(), timeout=1)
+
+    assert len(tool_configs) == 1
+    assert tool_configs[0] is published_config
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: Path) -> None:
-    """Revocation is control-plane cleanup and must not wait for positive admission."""
+async def test_reply_revocation_stops_call_while_admission_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Revocation never waits for admission; the origin write-back does, and runs once admission reopens."""
+    post, access = _patch_call_writeback(monkeypatch)
     grant_room_id = "!grant:example.org"
     client = _client()
-    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
@@ -1704,11 +1789,13 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
         bridge,
         tmp_path,
         config,
+        tool_support=_origin_tool_support(),
         agent_reply_memberships=memberships,
         response_admission_gate=gate,
     )
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is GRANT
+    _record_two_minute_exchange(bridge)
     assert gate.close_if_idle()
 
     memberships.apply_member_event(
@@ -1732,7 +1819,13 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
 
     assert bridge.closed
     assert gate.closed
+    access.assert_not_awaited()
+    post.assert_not_awaited()
     gate.reopen()
+    await asyncio.wait_for(_drain_background_tasks(manager), timeout=1)
+    access.assert_awaited_once()
+    post.assert_awaited_once()
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2354,6 +2447,532 @@ def test_build_live_instructions_preserves_prompt_that_fits() -> None:
     assert text.startswith(f"{system_prompt}\n\n")
     assert "context was omitted" not in text
     assert "Never claim to have checked information or completed work" in text
+
+
+def _agent_call_state_event(*, sender: str = "@alice:example.org") -> dict:
+    return {
+        "type": AGENT_CALL_STATE_EVENT_TYPE,
+        "state_key": "",
+        "sender": sender,
+        "origin_server_ts": int(time.time() * 1000),
+        "content": {
+            "version": 1,
+            "agent_user_id": BOT_USER,
+            "creator_user_id": "@alice:example.org",
+            "ephemeral": True,
+            "origin": {"room_id": "!origin:example.org", "thread_id": "$root"},
+        },
+    }
+
+
+_ORIGIN_CONTEXT = CallOriginContext(
+    origin=CallOrigin(room_id="!origin:example.org", thread_id="$root"),
+    room_name="Lobby",
+    thread_title="Trip planning",
+    messages=(_CallBriefMessage(label="Alice", body="Book the 9am train"),),
+)
+
+
+def _origin_tool_support() -> SimpleNamespace:
+    return SimpleNamespace(build_context=lambda *_args, **_kwargs: object())
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_instructions_include_validated_origin_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The caller's stamped origin is resolved as the caller and briefed to the realtime model."""
+    resolver = AsyncMock(return_value=_ORIGIN_CONTEXT)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.resolve_call_origin_context", resolver)
+    origin_tool_context = object()
+    build_context = MagicMock(return_value=origin_tool_context)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=SimpleNamespace(build_context=build_context))
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.connected_grant == GRANT
+    assert isinstance(bridge.agent_options, VoiceAgentOptions)
+    instructions = bridge.agent_options.instructions
+    assert instructions.startswith("You are Helper.")
+    assert "Book the 9am train" in instructions
+    assert instructions.endswith("lists, or other written formatting.")
+    assert "never use markdown" in instructions
+    assert "Starting work from this call" not in instructions
+    resolver.assert_awaited_once()
+    assert resolver.await_args.args == (CallOrigin(room_id="!origin:example.org", thread_id="$root"),)
+    assert resolver.await_args.kwargs == {"context": origin_tool_context}
+    target = build_context.call_args.args[0]
+    assert target.room_id == ROOM_ID
+    assert build_context.call_args.kwargs["user_id"] == "@alice:example.org"
+    assert build_context.call_args.kwargs["agent_name"] == "helper"
+    assert client.room_get_state.await_count == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_realtime_agent_with_matrix_message_learns_to_start_work_in_the_origin_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An agent that can message is told to start longer work in the origin thread, after the brief."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(return_value=_ORIGIN_CONTEXT),
+    )
+    config = _config()
+    config.agents["helper"].tools = ["matrix_message"]
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config, tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert isinstance(bridge.agent_options, VoiceAgentOptions)
+    instructions = bridge.agent_options.instructions
+    assert 'room_id "!origin:example.org", thread_id "$root"' in instructions
+    assert 'recipient="helper"' in instructions
+    brief_at = instructions.index("Book the 9am train")
+    assert brief_at < instructions.index("Starting work from this call") < instructions.index(_VOICE_STYLE_ADDENDUM)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_call_without_origin_asks_the_caller_where_to_start_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without an origin, an agent that can message asks which room to use instead of the call room."""
+    tooling_kwargs: dict[str, object] = {}
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    config = _cascaded_config()
+    config.agents["helper"].tools = ["matrix_message"]
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config, tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
+    note = cast("str", tooling_kwargs["origin_brief"])
+    assert note.startswith("## Starting work from this call")
+    assert "ask which one" in note
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_without_agent_call_state_skips_origin_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A call with no origin stamp keeps today's instructions and reads nothing extra."""
+    resolver = AsyncMock(return_value=_ORIGIN_CONTEXT)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.resolve_call_origin_context", resolver)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.agent_options is not None
+    assert "Helper" in bridge.agent_options.instructions
+    assert "Conversation this call is about" not in bridge.agent_options.instructions
+    resolver.assert_not_awaited()
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_origin_stamped_by_someone_else_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the sole caller may choose which conversation the agent reads."""
+    resolver = AsyncMock(return_value=_ORIGIN_CONTEXT)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.resolve_call_origin_context", resolver)
+    client = _client()
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(),
+        _agent_call_state_event(sender="@mallory:example.org"),
+    )
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.connected_grant == GRANT
+    resolver.assert_not_awaited()
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_rejected_origin_does_not_block_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An origin the caller may not read is dropped and the call proceeds without a brief."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(return_value=None),
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.connected_grant == GRANT
+    assert bridge.agent_options is not None
+    assert "Conversation this call is about" not in bridge.agent_options.instructions
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_origin_resolution_error_does_not_block_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unexpected origin failure is logged and the call still connects."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(side_effect=RuntimeError("origin read exploded")),
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+
+    with capture_logs() as logs:
+        await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.connected_grant == GRANT
+    assert any(log["event"] == "call_origin_resolution_failed" for log in logs)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_slow_origin_resolution_does_not_delay_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An origin read that never answers is abandoned after the time limit and the call connects without it."""
+
+    async def never_resolves(*_args: object, **_kwargs: object) -> CallOriginContext:
+        await asyncio.Event().wait()
+        msg = "origin resolution unexpectedly resumed"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.resolve_call_origin_context", never_resolves)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._ORIGIN_RESOLUTION_TIMEOUT_S", 0.01)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+
+    with capture_logs() as logs:
+        await asyncio.wait_for(
+            _deliver(manager, manager.on_room_event(_room(), _member_unknown_event())),
+            timeout=5,
+        )
+
+    assert bridge.connected_grant == GRANT
+    assert bridge.agent_options is not None
+    assert "Conversation this call is about" not in bridge.agent_options.instructions
+    assert [log["event"] for log in logs if log["event"].startswith("call_origin_resolution")] == [
+        "call_origin_resolution_timed_out",
+    ]
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_delegate_receives_origin_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The cascaded delegate agent gets the origin brief as call enrichment."""
+    tooling_kwargs: dict[str, object] = {}
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(return_value=_ORIGIN_CONTEXT),
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _cascaded_config(), tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
+    assert "Book the 9am train" in cast("str", tooling_kwargs["origin_brief"])
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_live_call_instructions_and_delegate_include_origin_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Live calls brief both the speaking model and its delegate agent."""
+    tooling_kwargs: dict[str, object] = {}
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
+            get_system_prompt=AsyncMock(return_value="You are Helper."),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(return_value=_ORIGIN_CONTEXT),
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _live_config(), tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    live_instructions = await options.get_instructions()
+    assert live_instructions.startswith("You are Helper.\n\n")
+    assert "Book the 9am train" in live_instructions
+    assert live_instructions.endswith(_LIVE_VOICE_INSTRUCTIONS)
+    assert "Book the 9am train" in cast("str", tooling_kwargs["origin_brief"])
+    await manager.shutdown()
+
+
+def test_live_instructions_include_origin_brief_within_limit() -> None:
+    """The live brief fits between prompt and voice rules without exceeding the instruction limit."""
+    text = _build_live_instructions("You are Helper.", agent_display_name="Helper", origin_context=_ORIGIN_CONTEXT)
+
+    assert text.startswith("You are Helper.\n\n")
+    assert "Book the 9am train" in text
+    assert text.endswith(_LIVE_VOICE_INSTRUCTIONS)
+    assert approximate_o200k_tokens(text) <= 16_000
+
+    # A large prompt makes the remaining instruction budget, not the brief cap, the binding limit.
+    large_prompt = "You are Helper. Caller-scoped background context for this agent.\n" * 900
+    assert 9_000 < approximate_o200k_tokens(large_prompt) < 14_000
+    long_context = CallOriginContext(
+        origin=_ORIGIN_CONTEXT.origin,
+        room_name="Lobby",
+        thread_title=None,
+        messages=tuple(
+            _CallBriefMessage(label="Alice", body=f"Note {index}: " + "details about the plan " * 40)
+            for index in range(2_000)
+        ),
+    )
+    text = _build_live_instructions(large_prompt, agent_display_name="Helper", origin_context=long_context)
+
+    assert approximate_o200k_tokens(text) <= 16_000
+    assert "Note 1999:" in text
+    assert "earlier messages omitted" in text
+    assert text.endswith(_LIVE_VOICE_INSTRUCTIONS)
+
+    # A prompt that leaves no room for a useful brief keeps today's output exactly.
+    full_prompt = "Caller-scoped background context. " * 2_640
+    no_brief = _build_live_instructions(full_prompt, agent_display_name="Helper")
+    assert 15_700 < approximate_o200k_tokens(no_brief) <= 16_000
+    assert _build_live_instructions(full_prompt, agent_display_name="Helper", origin_context=long_context) == no_brief
+
+
+def test_build_call_instructions_places_origin_brief_before_voice_guidance() -> None:
+    """The realtime prompt keeps the chat prompt first and voice guidance last, with no empty sections."""
+    assert _build_call_instructions("CHAT", "BRIEF").startswith("CHAT\n\nBRIEF\n\n")
+    assert _build_call_instructions("CHAT", "") == _build_call_instructions("CHAT")
+    assert "\n\n\n" not in _build_call_instructions("CHAT", "")
+
+
+def _patch_call_writeback(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    access_allowed: bool = True,
+    post: AsyncMock | None = None,
+) -> tuple[AsyncMock, AsyncMock]:
+    """Stub origin resolution, the hang-up access check, and posting; return ``(post, access)``."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(return_value=_ORIGIN_CONTEXT),
+    )
+    access = AsyncMock(return_value=access_allowed)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.room_access_allowed", access)
+    post = post or AsyncMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.post_call_writeback", post)
+    return post, access
+
+
+def _record_two_minute_exchange(bridge: FakeBridge) -> None:
+    """Record one spoken exchange in the live call and backdate its start by two minutes."""
+    assert bridge.agent_options is not None
+    on_turn = bridge.agent_options.on_conversation_turn
+    assert isinstance(on_turn, MethodType)
+    transcript = on_turn.__self__
+    assert isinstance(transcript, CallTranscript)
+    on_turn("user", "Book the train")
+    on_turn("assistant", "Booked")
+    transcript.started_at -= timedelta(minutes=2)
+
+
+async def _drain_background_tasks(manager: CallManager) -> None:
+    """Wait for background work the manager scheduled, such as a transcript write-back."""
+    while tasks := tuple(manager._background_tasks):
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _talk_then_hang_up(manager: CallManager, client: AsyncMock, bridge: FakeBridge) -> None:
+    """Record one exchange in a two-minute call, end it through the room's call state, and await the write-back."""
+    _record_two_minute_exchange(bridge)
+    client.room_get_state.return_value = _state_response()
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    await _drain_background_tasks(manager)
+
+
+@pytest.mark.asyncio
+async def test_call_stop_posts_transcript_to_validated_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hanging up posts what was said into the conversation the call was started from."""
+    post, _ = _patch_call_writeback(monkeypatch)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    origin_room = _room(room_id=_ORIGIN_CONTEXT.origin.room_id)
+    origin_room.add_member("@alice:example.org", "Alice", None)
+    client.rooms = {origin_room.room_id: origin_room}
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    await _talk_then_hang_up(manager, client, bridge)
+
+    assert bridge.closed is True
+    post.assert_awaited_once()
+    assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
+    body = post.await_args.kwargs["body"]
+    assert body.startswith("📞 Voice call · 2 min")
+    assert "**Alice**: Book the train" in body
+    assert "**Helper**: Booked" in body
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_ended_by_shutdown_posts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A call that ends because MindRoom shuts down posts no transcript."""
+    post, _ = _patch_call_writeback(monkeypatch)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    _record_two_minute_exchange(bridge)
+
+    await manager.shutdown()
+    await _drain_background_tasks(manager)
+
+    assert bridge.closed is True
+    post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_call_stop_without_origin_posts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A call that was not started from a conversation has nowhere to post its transcript."""
+    post, _ = _patch_call_writeback(monkeypatch)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    await _talk_then_hang_up(manager, client, bridge)
+
+    assert bridge.closed is True
+    post.assert_not_awaited()
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_stop_skips_writeback_when_origin_access_was_revoked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A caller who lost access to the origin during the call gets nothing posted there."""
+    post, _ = _patch_call_writeback(monkeypatch, access_allowed=False)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    with capture_logs() as logs:
+        await _talk_then_hang_up(manager, client, bridge)
+
+    post.assert_not_awaited()
+    assert any(log["event"] == "call_writeback_skipped_access_revoked" for log in logs)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_writeback_failure_does_not_break_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed transcript post is logged and the call still leaves cleanly."""
+    post, _ = _patch_call_writeback(monkeypatch, post=AsyncMock(side_effect=RuntimeError("homeserver exploded")))
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    with capture_logs() as logs:
+        await _talk_then_hang_up(manager, client, bridge)
+
+    post.assert_awaited_once()
+    assert bridge.closed is True
+    assert ROOM_ID not in manager._sessions
+    failures = [log for log in logs if log["event"] == "call_writeback_failed"]
+    assert [failure["error"] for failure in failures] == ["homeserver exploded"]
+    assert not any(log["event"] == "call_session_stop_failed" for log in logs)
+    await manager.shutdown()
 
 
 def _member(
@@ -3631,8 +4250,8 @@ async def test_call_events_cannot_bypass_pending_join_backoff(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["cascaded", "live"])
-async def test_delegated_call_retries_reuse_logical_call_session_id(
+@pytest.mark.parametrize("backend", ["realtime", "cascaded", "live"])
+async def test_call_retries_reuse_per_call_session_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     backend: str,
@@ -3652,11 +4271,17 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    config = _live_config() if backend == "live" else _cascaded_config()
+    config = {"realtime": _config, "cascaded": _cascaded_config, "live": _live_config}[backend]()
     manager = _manager(client, FakeBridge(), tmp_path, config)
     results = iter(("retry", "joined", "joined"))
 
-    async def fake_join(room: nio.MatrixRoom, members: list[CallMember]) -> str:
+    async def fake_join(
+        room: nio.MatrixRoom,
+        members: list[CallMember],
+        *,
+        agent_call_events: tuple[dict, ...],
+    ) -> str:
+        assert agent_call_events == ()
         await manager._build_tooling(room.room_id, requester_id=members[0].user_id)
         return next(results)
 
@@ -3670,6 +4295,7 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
 
     assert len(session_ids) == 2
     assert session_ids[0] == session_ids[1]
+    assert session_ids[0].startswith(f"{ROOM_ID}:call:")
 
     client.room_get_state.return_value = _state_response()
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))

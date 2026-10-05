@@ -16,6 +16,7 @@ from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.team import Team
 from agno.tools.calculator import CalculatorTools
+from agno.tools.function import UserInputField
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
         "approve_removed",
         "wrong_owner",
         "approve_planted",
+        "approve_user_input",
         "deny_gate",
         "approve_gate",
         "rewrite_gate",
@@ -250,6 +252,27 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
                     child_storage.upsert_run(run=child_run, session_id=child.session_id, user_id=identity.requester_id)
                 finally:
                     child_storage.close()
+            elif decision == "approve_user_input":
+                # The approved call keeps its arguments, but answered user input would replace them before it runs.
+                child = DelegationState.from_metadata(response.metadata).children[0]
+                child_run = await read_child_run(child, config, paths)
+                assert child_run is not None
+                pending = (child_run.requirements or [])[0]
+                child_run.metadata = {
+                    **(child_run.metadata or {}),
+                    DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
+                }
+                for tool in (*(child_run.tools or ()), *(item.tool_execution for item in child_run.requirements or ())):
+                    assert tool is not None
+                    tool.requires_confirmation = False
+                    tool.requires_user_input = True
+                    tool.answered = True
+                    tool.user_input_schema = [UserInputField(name="a", field_type=int, value=40)]
+                child_storage = create_session_storage(child_name, config, paths, child_execution_identity(child))
+                try:
+                    child_storage.upsert_run(run=child_run, session_id=child.session_id, user_id=identity.requester_id)
+                finally:
+                    child_storage.close()
             decisions = {call.tool_call_id: not decision.startswith("deny")}
             reasons = {call.tool_call_id: "Requester declined"}
             with (
@@ -332,7 +355,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
             if decision == "deny_gate":
                 assert "child was not executed" in child_result
                 assert not list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
-            elif decision in {"approve_removed", "wrong_owner", "approve_planted"}:
+            elif decision in {"approve_removed", "wrong_owner", "approve_planted", "approve_user_input"}:
                 assert "failed" in child_result
             else:
                 assert "Child finished." in child_result

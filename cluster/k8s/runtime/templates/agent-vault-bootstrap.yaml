@@ -108,11 +108,16 @@ spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
+      {{- /* Pod templates are immutable, so version labels stay on the Job and a version-only upgrade keeps the template. */}}
       labels:
-        {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 8 }}
+        {{- omit (include "mindroom-runtime.agentVaultBootstrapLabels" . | fromYaml) "helm.sh/chart" "app.kubernetes.io/version" | toYaml | nindent 8 }}
     spec:
       restartPolicy: OnFailure
       serviceAccountName: {{ $name }}
+      {{- with $bs.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         - name: bootstrap-owner
           image: {{ include "mindroom-runtime.agentVaultBootstrapImage" . | quote }}
@@ -180,6 +185,10 @@ spec:
               value: {{ $bs.allowedDomains | quote }}
           resources:
             {{- toYaml $bs.resources | nindent 12 }}
+          {{- with $bs.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: work
               mountPath: /work
@@ -214,6 +223,10 @@ spec:
                   fieldPath: metadata.namespace
           resources:
             {{- toYaml $bs.resources | nindent 12 }}
+          {{- with $bs.kubectlSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: work
               mountPath: /work

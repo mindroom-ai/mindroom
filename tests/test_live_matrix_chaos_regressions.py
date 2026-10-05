@@ -295,14 +295,14 @@ async def test_supersession_uses_real_settled_journal_owner(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_poll", [False, True])
 @pytest.mark.parametrize("redacted_source", ["$old", "$new"])
-@pytest.mark.parametrize("defect", [None, "pending_cleanup", "missing_guard", "incomplete_anchor"])
+@pytest.mark.parametrize("defect", [None, "missing_guard", "incomplete_anchor"])
 async def test_supersession_survives_later_source_redaction(
     tmp_path: Path,
     live_poll: bool,
     redacted_source: str,
     defect: str | None,
 ) -> None:
-    """A later tombstone cannot erase proven supersession or excuse missing proof and cleanup debt."""
+    """A later tombstone cannot erase proven supersession or excuse missing proof."""
     case = await _supersession_case(tmp_path, visible_old=False, old_record=False, plain_reply=True)
     try:
         case.oracle.refresh_ledger_attributions(min_interval=0)
@@ -331,16 +331,13 @@ async def test_supersession_survives_later_source_redaction(
         if defect == "missing_guard":
             assert case.oracle.log_path is not None
             case.oracle.log_path.write_text("")
-        elif defect in {"incomplete_anchor", "pending_cleanup"}:
-            target = "$new" if defect == "incomplete_anchor" else redacted_source
-            record = live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)[target]
-            record = (
-                replace(record, completed=False)
-                if defect == "incomplete_anchor"
-                else replace(record, pending_redaction_cleanup_event_ids=(target,))
+        elif defect == "incomplete_anchor":
+            target = "$new"
+            record = replace(
+                live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)[target],
+                completed=False,
             )
-            # Normal upserts preserve committed completion and cleanup;
-            # deliberately corrupt the stored proof for each negative case.
+            # Normal upserts preserve committed completion; deliberately corrupt the stored proof.
             await case.journal.backend.write(
                 lambda tx: tx.execute(
                     "UPDATE turn_records SET record_json = ? WHERE index_event_id = ?",
@@ -404,10 +401,8 @@ async def test_supersession_survives_later_source_redaction(
         "canonical_streaming_old",
         "missing_old_attribution",
         "duplicate_reply",
-        "unrelated_recovery",
-        "duplicate_relay",
+        "router_relay_answer",
         "wrong_old_marker",
-        "pending_cleanup",
         "wrong_log_thread",
         "truncated_log",
         "unproved_owned_source",
@@ -458,16 +453,12 @@ async def test_supersession_rejects_missing_or_foreign_ownership(tmp_path: Path,
         with closing(sqlite3.connect(ledger)) as database:
             database.execute(updates[defect])
             database.commit()
-    if defect in {"unfinished_anchor", "conflicting_ledger", "pending_cleanup", "unproved_owned_source"}:
+    if defect in {"unfinished_anchor", "conflicting_ledger", "unproved_owned_source"}:
         records = live_fuzz.read_ledger_records(ledger, include_incomplete=True)
-        record = records["$old" if defect in {"pending_cleanup", "unproved_owned_source"} else "$new"]
+        record = records["$old" if defect == "unproved_owned_source" else "$new"]
         raw = live_fuzz.TurnRecordCodec._to_ledger_record(record)
         if defect == "unfinished_anchor":
             raw["completed"] = False
-        elif defect == "pending_cleanup":
-            raw["revision_replay"] = {
-                "$edit": RevisionReplay("$old", 100, redacted=True, cleanup_pending=True).to_record(),
-            }
         elif defect == "unproved_owned_source":
             raw["source_event_ids"] = ["$old", "$unproved"]
         else:
@@ -504,33 +495,31 @@ async def test_supersession_rejects_missing_or_foreign_ownership(tmp_path: Path,
         case.auditor.pending_edit_markers = {"$old": {"$edit": "new revision"}}
     if defect == "duplicate_reply":
         case.events["$duplicate"] = {**case.events["$old-reply"], "event_id": "$duplicate"}
-    if defect in {"unrelated_recovery", "duplicate_relay"}:
-        case.oracle.internal_relay_senders = frozenset({"@router:example"})
-        for relay in ("$relay", "$duplicate-relay") if defect == "duplicate_relay" else ("$relay",):
-            case.events[relay] = {
-                **case.events["$old-reply"],
-                "event_id": relay,
-                "sender": "@router:example",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": live_fuzz.AUTO_RESUME_MESSAGE,
-                    live_fuzz.SOURCE_KIND_KEY: live_fuzz.TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$root",
-                        "m.in_reply_to": {"event_id": "$old-reply"},
-                    },
+    if defect == "router_relay_answer":
+        # No router message continues interrupted work, so an agent answer to one is a wrong reply.
+        case.events["$relay"] = {
+            **case.events["$old-reply"],
+            "event_id": "$relay",
+            "sender": "@router:example",
+            "content": {
+                "msgtype": "m.text",
+                "body": "@general continue",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root",
+                    "m.in_reply_to": {"event_id": "$old-reply"},
                 },
-            }
-        case.events["$unrelated"] = {
+            },
+        }
+        case.events["$relay-answer"] = {
             **case.events["$new-reply"],
-            "event_id": "$unrelated",
+            "event_id": "$relay-answer",
             "content": {
                 **case.events["$new-reply"]["content"],
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "$root",
-                    "m.in_reply_to": {"event_id": "$other-relay"},
+                    "m.in_reply_to": {"event_id": "$relay"},
                 },
             },
         }
@@ -760,10 +749,65 @@ async def test_supersession_cannot_borrow_blocking_terminal_metadata(
 
 
 @pytest.mark.asyncio
+async def test_ledger_refresh_settles_edit_debts_before_the_next_proof(tmp_path: Path) -> None:
+    """Edit debts settle on every ledger refresh, so a reply wait can unblock a supersession whose anchor was edited."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
+    seen: list[dict[str, Any]] = []
+    case.oracle.after_ledger_refresh = lambda: seen.append(dict(case.oracle.supersession_proofs))
+    case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
+    try:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert len(seen) == 1
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["declined", "edit_unsettled", "old_answered"])
+async def test_settled_edit_of_superseded_source_is_a_declined_no_op(tmp_path: Path, variant: str) -> None:
+    """MindRoom settles an edit of a message it superseded without regenerating anything, so the edit owes nothing."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=variant == "old_answered")
+    principal = case.journal.principal("general@@agent:example")
+    edit = {
+        **case.events["$old"],
+        "event_id": "$edit",
+        "origin_server_ts": 25,
+        "content": {
+            "msgtype": "m.text",
+            "body": "* edit",
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$old"},
+        },
+    }
+    await principal.admit(
+        InboundEvent(
+            "$edit",
+            "!room:example",
+            "$root",
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            "@user:example",
+            25,
+            edit,
+        ),
+    )
+    if variant != "edit_unsettled":
+        await principal.settle_many(("$edit",))
+    case.oracle.pending_edit_markers = {"$old": {"$edit": "MRK[src=op:1;rev=edit:3]"}}
+    case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
+    try:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert ("$old" in case.oracle.declined_edit_sources) is (variant == "declined")
+        # A declined edit owes nothing, so it no longer blocks proof that MindRoom superseded the message.
+        assert ("$old" in case.oracle.supersession_proofs) is (variant == "declined")
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("live_poll", [False, True])
 @pytest.mark.parametrize(
     "defect",
-    ["unacknowledged_final", "pending_edit", "wrong_marker", "unfinished_turn", "pending_cleanup", "wrong_source"],
+    ["unacknowledged_final", "pending_edit", "wrong_marker", "unfinished_turn", "wrong_source"],
 )
 async def test_supersession_blocking_terminal_keeps_independent_ownership_checks(
     tmp_path: Path,
@@ -796,9 +840,6 @@ async def test_supersession_blocking_terminal_keeps_independent_ownership_checks
             ("$new",),
             response_event_id="$new-reply",
             completed=defect != "unfinished_turn",
-            revision_replay={"$edit": RevisionReplay("$new", 100, redacted=True, cleanup_pending=True).to_record()}
-            if defect == "pending_cleanup"
-            else None,
         )
         await case.journal.turn_records("general").forget(index_event_ids=("$new",))
         await case.journal.turn_records("general").upsert(
@@ -808,9 +849,6 @@ async def test_supersession_blocking_terminal_keeps_independent_ownership_checks
         )
         stored = live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)["$new"]
         assert stored.completed is (defect != "unfinished_turn")
-        if defect == "pending_cleanup":
-            assert stored.revision_replay is not None
-            assert stored.revision_replay["$edit"].cleanup_pending
     try:
         await _assert_terminal_supersession(case, live_poll=live_poll, accepted=False)
     finally:
@@ -821,15 +859,13 @@ async def test_supersession_blocking_terminal_keeps_independent_ownership_checks
 @pytest.mark.parametrize("live_poll", [False, True])
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("cleanup_kind", ["revision", "source"])
-@pytest.mark.parametrize("pending", [False, True])
-async def test_supersession_completed_anchor_requires_settled_cleanup(
+async def test_supersession_completed_anchor_accepts_redaction_tombstones(
     tmp_path: Path,
     live_poll: bool,
     streaming: bool,
     cleanup_kind: str,
-    pending: bool,
 ) -> None:
-    """Both terminal forms need an anchor free of authoritative revision and source cleanup debt."""
+    """Both terminal forms accept an anchor that carries a revision or source tombstone."""
     case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
     final = _blocking_supersession_final(case)
     if streaming:
@@ -840,8 +876,7 @@ async def test_supersession_completed_anchor_requires_settled_cleanup(
         completed=True,
         discovery_event_ids=("$removed",) if cleanup_kind == "source" else (),
         redacted_source_event_ids=("$removed",) if cleanup_kind == "source" else (),
-        pending_redaction_cleanup_event_ids=("$removed",) if pending and cleanup_kind == "source" else (),
-        revision_replay={"$edit": RevisionReplay("$new", 100, redacted=True, cleanup_pending=pending).to_record()}
+        revision_replay={"$edit": RevisionReplay("$new", 100, redacted=True).to_record()}
         if cleanup_kind == "revision"
         else None,
     )
@@ -856,11 +891,11 @@ async def test_supersession_completed_anchor_requires_settled_cleanup(
     assert stored.completed
     if cleanup_kind == "revision":
         assert stored.revision_replay is not None
-        assert stored.revision_replay["$edit"].cleanup_pending is pending
+        assert stored.revision_replay["$edit"].redacted
     else:
-        assert stored.pending_redaction_cleanup_event_ids == (("$removed",) if pending else ())
+        assert stored.redacted_source_event_ids == ("$removed",)
     try:
-        await _assert_terminal_supersession(case, live_poll=live_poll, accepted=not pending)
+        await _assert_terminal_supersession(case, live_poll=live_poll, accepted=True)
     finally:
         await case.journal.close()
 
@@ -1776,17 +1811,16 @@ async def test_bundled_final_edit_retains_timestamp_against_older_standalone_edi
 
 
 @pytest.mark.parametrize("sources", [("$source",), ("$source", "$live")])
-def test_completed_turn_preserves_lazy_redaction_cleanup(
+def test_completed_turn_decodes_its_redaction_tombstone(
     tmp_path: Path,
     sources: tuple[str, ...],
 ) -> None:
-    """A durable tombstone may defer session cleanup until the next response."""
+    """A completed turn's durable tombstone reads back exactly under the strict ledger decoder."""
     record = live_fuzz.TurnRecord.create(
         source_event_ids=sources,
         response_event_id="$reply",
         completed=True,
         redacted_source_event_ids=("$source",),
-        pending_redaction_cleanup_event_ids=("$source",),
     )
     rows = {"$source": live_fuzz.TurnRecordCodec._to_ledger_record(record)}
     assert live_fuzz._decode_ledger_rows(tmp_path / "event_journal.db", rows, strict=True) == {"$source": record}
@@ -1845,6 +1879,42 @@ def test_saved_trace_loading_never_adds_cleanup_operations(tmp_path: Path) -> No
     assert trace.read_bytes() == saved
 
 
+@pytest.mark.parametrize("seen_only_deleted", [True, False])
+def test_cleanup_probe_owes_no_tombstone_for_a_source_mindroom_only_saw_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+    seen_only_deleted: bool,
+) -> None:
+    """A source redacted before MindRoom read it never started a turn, so the probe has nothing to clean up."""
+    probe = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
+    oracle = Mock(spec=live_fuzz.ExactReplyOracle)
+    oracle.expected_sources = {"$old": "root:0", "$probe": "op:1"}
+    oracle.saw_only_deleted.return_value = seen_only_deleted
+    monkeypatch.setattr(live_fuzz._ModelHandler, "observations_snapshot", lambda: {2: [probe]})
+    auditor = live_fuzz.FinalStateAuditor(
+        Mock(spec=live_fuzz.LiveMatrixClient),
+        oracle,
+        agent_id="@agent:test",
+        expected_body_for=lambda _: "unused",
+        cleanup_probes={"$probe": ("$old",)},
+        full_request_markers_for=lambda _call: frozenset({probe}),
+    )
+    records = {"$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply")}
+    events = {
+        "$reply": {
+            "event_id": "$reply",
+            "sender": "@agent:test",
+            "type": "m.room.message",
+            "content": {"body": "LIVE-FUZZ call=2 END call=2"},
+        },
+    }
+    if seen_only_deleted:
+        auditor._assert_redaction_cleanup_probes(events, records, redacted_targets={"$old": "$redaction"})
+        oracle.saw_only_deleted.assert_called_with("$old", "$redaction")
+    else:
+        with pytest.raises(AssertionError, match="missing tombstone cleanup for \\$old"):
+            auditor._assert_redaction_cleanup_probes(events, records, redacted_targets={"$old": "$redaction"})
+
+
 def test_cleanup_probe_rejects_contaminated_attempt_before_clean_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed first request leaking removed history cannot hide behind a clean retry."""
     old = live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)
@@ -1877,13 +1947,11 @@ def test_cleanup_probe_rejects_contaminated_attempt_before_clean_retry(monkeypat
 
 
 @pytest.mark.parametrize("evidence", ["current", "visible", "none"])
-@pytest.mark.parametrize("pending", [False, True])
-def test_ordinary_edit_cleanup_requires_acknowledgement_for_any_call(
+def test_ordinary_edit_cleanup_checks_any_call(
     monkeypatch: pytest.MonkeyPatch,
     evidence: str,
-    pending: bool,
 ) -> None:
-    """Actual edit-cleanup requests require monotonic acknowledgement even without a terminal reply."""
+    """Actual edit-cleanup requests are checked even without a terminal reply."""
     removed = live_fuzz._source_marker("root:0", "edit:0")
     later = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
     oracle = Mock(spec=live_fuzz.ExactReplyOracle)
@@ -1905,7 +1973,7 @@ def test_ordinary_edit_cleanup_requires_acknowledgement_for_any_call(
     records = {
         "$root": live_fuzz.TurnRecord.create(
             source_event_ids=("$root",),
-            revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=pending)},
+            revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True)},
         ),
         "$probe": live_fuzz.TurnRecord.create(
             source_event_ids=("$probe",),
@@ -1922,25 +1990,19 @@ def test_ordinary_edit_cleanup_requires_acknowledgement_for_any_call(
             "content": {"body": "LIVE-FUZZ call=7 END call=7"},
         },
     }
-    if pending and evidence != "none":
-        with pytest.raises(AssertionError, match="pending or missing tombstone cleanup"):
-            auditor._assert_redaction_cleanup_probes(events, records)
-    else:
-        result = auditor._assert_redaction_cleanup_probes(events, records)
-        assert result["redaction_cleanup_uncovered_sources"] == int(evidence == "none")
-        assert result["redaction_cleanup_checked_calls"] == int(evidence != "none")
+    result = auditor._assert_redaction_cleanup_probes(events, records)
+    assert result["redaction_cleanup_uncovered_sources"] == int(evidence == "none")
+    assert result["redaction_cleanup_checked_calls"] == int(evidence != "none")
 
 
 @pytest.mark.parametrize("dedicated", [False, True])
-@pytest.mark.parametrize("pending", [False, True])
 @pytest.mark.parametrize("contaminated", [False, True])
-def test_original_source_cleanup_distinguishes_ordinary_calls_from_dedicated_probes(
+def test_original_source_cleanup_checks_ordinary_calls_and_dedicated_probes(
     monkeypatch: pytest.MonkeyPatch,
     dedicated: bool,
-    pending: bool,
     contaminated: bool,
 ) -> None:
-    """Repeated source callbacks may re-arm final debt; actual inputs and dedicated probes stay strict."""
+    """Actual model inputs must not carry the redacted source, for ordinary calls and dedicated probes alike."""
     removed = live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)
     later = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
     oracle = Mock(spec=live_fuzz.ExactReplyOracle)
@@ -1960,7 +2022,6 @@ def test_original_source_cleanup_distinguishes_ordinary_calls_from_dedicated_pro
         "$root": live_fuzz.TurnRecord.create(
             source_event_ids=("$root",),
             redacted_source_event_ids=("$root",),
-            pending_redaction_cleanup_event_ids=("$root",) if pending else (),
         ),
         "$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply"),
     }
@@ -1972,10 +2033,7 @@ def test_original_source_cleanup_distinguishes_ordinary_calls_from_dedicated_pro
             "content": {"body": "LIVE-FUZZ call=7 END call=7"},
         },
     }
-    if dedicated and pending:
-        with pytest.raises(AssertionError, match="pending or missing tombstone cleanup"):
-            auditor._assert_redaction_cleanup_probes(events, records)
-    elif contaminated:
+    if contaminated:
         with pytest.raises(AssertionError, match="redacted history"):
             auditor._assert_redaction_cleanup_probes(events, records)
     else:
@@ -2020,7 +2078,7 @@ def test_ordinary_cleanup_checks_visible_call_even_when_redacted_owner_is_incomp
         auditor._assert_redaction_cleanup_probes(events, records)
 
 
-@pytest.mark.parametrize("failure", [None, "history", "pending", "missing", "source", "original_only"])
+@pytest.mark.parametrize("failure", [None, "history", "missing", "source", "original_only"])
 def test_edit_cleanup_probe_forbids_only_removed_revision(failure: str | None) -> None:
     """Edit cleanup must be exact; original and surviving revision history stay legal."""
     oracle = Mock(spec=live_fuzz.ExactReplyOracle)
@@ -2051,9 +2109,8 @@ def test_edit_cleanup_probe_forbids_only_removed_revision(failure: str | None) -
                     "$wrong" if failure == "source" else "$root",
                     100,
                     redacted=True,
-                    cleanup_pending=failure == "pending",
                 ),
-                "$unrelated": RevisionReplay("$root", 200, redacted=True, cleanup_pending=True),
+                "$unrelated": RevisionReplay("$root", 200, redacted=True),
             },
         ),
         "$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply"),
@@ -2103,7 +2160,7 @@ async def test_saved_later_message_qualifies_only_after_observed_tombstone(
     async def send(operation: live_fuzz.LiveOperation, *_args: object) -> str:
         runner.oracle._ledger_records["$root"] = live_fuzz.TurnRecord.create(
             source_event_ids=("$root",),
-            revision_replay={"$a": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+            revision_replay={"$a": RevisionReplay("$root", 100, redacted=True)},
         )
         return f"$later-{operation.operation_id}"
 
@@ -2200,10 +2257,10 @@ def test_cleanup_probe_rejects_unredacted_or_unknown_sources(bad_source: str) ->
 
 @pytest.mark.parametrize(
     "failure",
-    ["pending", "history", "edit_history", "missing_observation", "unrelated_pending", "edited_probe", None],
+    ["history", "edit_history", "missing_observation", "edited_probe", None],
 )
-def test_cleanup_probe_requires_session_cleanup_and_absent_full_request_markers(failure: str | None) -> None:
-    """A clean current turn alone cannot hide stale historical input or deferred cleanup."""
+def test_cleanup_probe_requires_absent_full_request_markers(failure: str | None) -> None:
+    """A clean current turn alone cannot hide stale historical input."""
     oracle = Mock(spec=live_fuzz.ExactReplyOracle)
     oracle.expected_sources = {"$source": "root:0", "$probe": "op:1"}
     old_marker = live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)
@@ -2233,17 +2290,9 @@ def test_cleanup_probe_requires_session_cleanup_and_absent_full_request_markers(
             source_event_ids=("$source",),
             completed=True,
             redacted_source_event_ids=("$source",),
-            pending_redaction_cleanup_event_ids=("$source",) if failure == "pending" else (),
         ),
         "$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply", completed=True),
     }
-    if failure == "unrelated_pending":
-        records["$source"] = live_fuzz.TurnRecord.create(
-            source_event_ids=("$source", "$later"),
-            completed=True,
-            redacted_source_event_ids=("$source", "$later"),
-            pending_redaction_cleanup_event_ids=("$later",),
-        )
     events = {
         "$reply": {
             "event_id": "$reply",
@@ -2252,7 +2301,7 @@ def test_cleanup_probe_requires_session_cleanup_and_absent_full_request_markers(
             "content": {"body": "LIVE-FUZZ call=1 END call=1"},
         },
     }
-    if failure in {None, "unrelated_pending", "edited_probe"}:
+    if failure in {None, "edited_probe"}:
         auditor._assert_redaction_cleanup_probes(events, records)
     else:
         with pytest.raises(AssertionError, match="redaction cleanup probe"):
@@ -2320,10 +2369,7 @@ async def test_fuzz_cleanup_probe_waits_for_durable_tombstone_before_send(
         source_event_ids=("$old",),
         completed=True,
         redacted_source_event_ids=("$old",),
-        pending_redaction_cleanup_event_ids=("$old",),
-        revision_replay={"$edit": RevisionReplay("$old", 100, redacted=True, cleanup_pending=True)}
-        if edit_target
-        else {},
+        revision_replay={"$edit": RevisionReplay("$old", 100, redacted=True)} if edit_target else {},
     )
     pumps = 0
 

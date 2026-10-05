@@ -4,26 +4,17 @@ icon: lucide/mouse-pointer-click
 
 # Interactive Q&A
 
-MindRoom agents can present clickable multiple-choice questions to users using Matrix reactions.
-When an agent's response contains a specially formatted JSON block, MindRoom automatically renders it as a numbered list with emoji reactions that users can click to respond.
+Agents can ask users a multiple-choice question that they answer by clicking an emoji reaction or typing the option number.
+Use this when an agent needs the user to pick between a few concrete options before it continues.
 
-<video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/14da1dfa-9892-4ce8-a2ed-ad67673ea4b5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/9cef359e-15d0-4f0a-810a-ec34811cf561#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%" poster="https://github.com/user-attachments/assets/0a47822d-348e-4ca1-9ab6-a704861f1327" data-poster-light="https://github.com/user-attachments/assets/0a47822d-348e-4ca1-9ab6-a704861f1327" data-poster-dark="https://github.com/user-attachments/assets/ba161463-03d9-41f7-bd99-7369c5542619">
+  <source src="https://github.com/user-attachments/assets/f49c4ff4-b0fe-4f4f-a36b-b8a3481f8147" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/6f31e382-0a78-4415-a610-a207744d4b73" type="video/mp4">
 </video>
 
-## How It Works
+## Asking a Question
 
-1. An agent includes an `interactive` code block in its response.
-2. MindRoom parses the JSON, formats the options as a numbered list, and adds emoji reactions to the message.
-3. The user clicks a reaction emoji or types the option number.
-4. MindRoom captures the selection and feeds the agent structured selection context containing the question event, thread, question text, and selected option key, label, and value.
-
-The entire flow happens within the thread where the original question was asked.
-
-## JSON Format
-
-Agents emit interactive questions by wrapping JSON in an `interactive` code block:
+Any agent can ask a question without extra tools or configuration by including an `interactive` code block with JSON in its response:
 
 ````markdown
 ```interactive
@@ -37,22 +28,7 @@ Agents emit interactive questions by wrapping JSON in an `interactive` code bloc
 ```
 ````
 
-### Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `question` | string | No | The question text shown above options. Defaults to `"Please choose an option:"`. |
-| `options` | array | Yes | List of option objects (max 5). |
-| `options[].emoji` | string | No | Emoji shown as a reaction button. Defaults to `"❓"`. |
-| `options[].label` | string | No | Human-readable label for the option. Defaults to `"Option"`. |
-| `options[].value` | string | No | Value passed back to the agent when selected. Defaults to the label in lowercase. |
-
-Use a unique emoji for every option when reaction buttons must distinguish the choices.
-Duplicate emoji keys, including repeated default `❓` values, collapse in the reaction map; numeric replies remain available as a fallback.
-
-### Rendered Output
-
-The JSON block is replaced with a formatted message:
+MindRoom replaces the block with a numbered list and adds each option's emoji as a reaction button:
 
 ```
 What approach would you prefer?
@@ -63,25 +39,9 @@ What approach would you prefer?
 React with an emoji or type the number to respond.
 ```
 
-The corresponding emoji reactions are added to the message as clickable buttons.
-While a streamed response is still arriving, an `interactive` block that has not closed yet is left out of the progressive edits, so its partial JSON does not show.
-The text before it stays visible, and the formatted question appears as soon as the block's closing fence streams in.
-A response that stops before the block closes ends with the text as the agent wrote it.
+While a response streams, the question appears once its code block is complete.
 
-## User Response Methods
-
-Users can respond in two ways:
-
-- **Reaction**: Click one of the emoji reactions added to the message.
-- **Text**: Send a message with a single-digit option number (e.g., `1` or `2`) in the same thread. Only digits 1–5 are recognized; multi-digit numbers like `10` are ignored.
-
-Both methods trigger the same follow-up behavior: the agent receives the selected value and continues the conversation.
-
-## Agent Integration
-
-Agents don't need any special tools or configuration to use interactive questions.
-Any agent can include an `interactive` code block in its response text.
-You can guide agents to use this feature through their `instructions` or `role`:
+To make an agent use questions, describe the format in its `instructions` or `role`:
 
 ```yaml
 agents:
@@ -95,13 +55,32 @@ agents:
         (each with emoji, label, and value fields).
 ```
 
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `question` | string | No | Question text shown above the options. Defaults to `"Please choose an option:"`. |
+| `options` | array | Yes | Option objects; options beyond the fifth are dropped without warning. |
+| `options[].emoji` | string | No | Reaction button for the option. Defaults to `"❓"`. |
+| `options[].label` | string | No | Text shown for the option. Defaults to `"Option"`. |
+| `options[].value` | string | No | Value passed back to the agent. Defaults to the label in lowercase. |
+
+Give every option a different emoji; reacting with an emoji that several options share, including the default `❓`, selects the last of them, so the others can only be chosen by number.
+
+## Answering a Question
+
+Users answer where the question was asked, in its thread or in the main room, in either of two ways:
+
+- **Reaction**: click one of the option emojis on the question.
+- **Text**: send just the option number, a single digit from `1` to `5`.
+  When several questions there are unanswered, a number answers the oldest question from each agent that asked one; react to answer a specific question.
+
+Either way, the agent that asked receives the question text and the selected option's label and value, and continues the conversation there.
+Each question accepts one answer, and questions stay answerable across restarts.
+Only human users can answer; reactions and messages from agents are ignored.
+
 ## Limitations
 
-- Maximum of **5 options** per question. Additional options are silently truncated.
-- Only **one active question per message**.
-  The first valid block receives interactive metadata and reaction buttons; later valid blocks render as plain, non-interactive question text.
-- Questions and in-flight selections persist across restarts in the event journal and remain tied to the prompt revision current when the answer is admitted.
-- Interactive metadata over 8,000 bytes is omitted, so the formatted question remains visible without reaction buttons or numeric selection.
-- Interactive blocks are supported in normal agent responses; direct `matrix_message` sends and edits reject them because those operations have no durable response identity.
-- Only human users can respond; reactions from other agents are ignored.
-- Only the agent that created the question processes reactions to it.
+- Only the first valid question in a response gets reaction buttons and numeric answers; later ones are shown as plain text.
+- A very large question, roughly a few thousand characters of question text, option labels, and option values, is shown without reaction buttons and cannot be answered by number; shorten the question, labels, or values to keep it answerable.
+- Questions only work in an agent's normal responses; sending or editing one with the `matrix_message` tool fails with `Interactive prompts are only supported in normal agent responses.`

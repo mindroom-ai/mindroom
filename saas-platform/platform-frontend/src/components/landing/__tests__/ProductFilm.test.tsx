@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { ProductFilm } from '../ProductFilm'
 
@@ -14,8 +14,8 @@ describe('ProductFilm', () => {
     render(<ProductFilm />)
 
     expect(film().tagName).toBe('VIDEO')
-    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/383e9556-af82-4b4c-bdd4-8ba894481eec')
-    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/e3ce6dae-b730-41cc-a1e9-a7292e8e5766')
+    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/f35866c4-c226-408a-9f1f-b7588f76c564')
+    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/88accc8b-6666-494b-a415-6f7effaaf751')
     expect(film()).toHaveAttribute('controls')
     expect(film()).toHaveAttribute('preload', 'none')
   })
@@ -27,7 +27,21 @@ describe('ProductFilm', () => {
     ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: true })
     rerender(<ProductFilm />)
 
-    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/2c3227cf-0cea-475f-8c27-959a21504348')
-    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/70e6d774-5f5c-4d2c-862d-a992136dfd73')
+    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/f99556da-f289-49fe-a365-7c2a8bb93c77')
+    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/7c8011bd-22b7-4795-8d4d-ab2864c7b118')
+  })
+
+  it('keeps the film the reader started when the page turns dark', () => {
+    ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
+    const { rerender } = render(<ProductFilm />)
+    const started = film()
+    fireEvent.play(started)
+
+    ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: true })
+    rerender(<ProductFilm />)
+
+    expect(film()).toBe(started)
+    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/f35866c4-c226-408a-9f1f-b7588f76c564')
+    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/88accc8b-6666-494b-a415-6f7effaaf751')
   })
 })

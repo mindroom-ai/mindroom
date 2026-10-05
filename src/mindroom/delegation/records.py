@@ -21,6 +21,7 @@ from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import primary_records_dir
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, write_file_within_root
 from mindroom.redaction import redact_sensitive_data
 from mindroom.runtime_resolution import resolve_agent_storage
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 type _DelegationActiveStatus = Literal["running", "paused"]
 type DelegationTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
@@ -307,7 +310,7 @@ class DelegationRecordOwner:
         if len(_json_bytes(state.run)) + _FINISH_RUN_HEADROOM_BYTES > _MAX_RUN_BYTES:
             msg = "Delegation record exceeds its size limit"
             raise DelegationRecordLimitError(msg)
-        with _record_lock(handle), _record_directory(handle, create=True) as record_fd:
+        with _record_lock(handle):
             if (handle.state_dir / _STATE_FILE).exists():
                 msg = f"Delegation record already exists: {resolved_id}"
                 raise FileExistsError(msg)
@@ -324,7 +327,7 @@ class DelegationRecordOwner:
                     event_id="delegation_started",
                 ),
             )
-            _write_exports(handle, record_fd, state, line)
+            _write_exports(handle, state, line)
         return handle
 
     def _reopen(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
@@ -339,21 +342,21 @@ class DelegationRecordOwner:
             state = _load_state(handle)
             if state is None:
                 return
-            with _record_directory(handle, create=True) as record_fd:
-                if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
-                    _write_exports(handle, record_fd, state)
-                    return
-                _ensure_active(state.run)
-                sequence = state.run["event_count"] + 1
-                payload = _event_payload(
-                    sequence=sequence,
-                    timestamp=event.timestamp or _utc_timestamp(),
-                    kind=event.kind,
-                    data=_redacted_event_data(record_fd, sequence=sequence, data=event.data),
-                    status=event.status,
-                    event_id=event.event_id,
-                )
-                _write_exports(handle, record_fd, state, _commit_event(handle, state, payload))
+            if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
+                _write_exports(handle, state)
+                return
+            _ensure_active(state.run)
+            sequence = state.run["event_count"] + 1
+            data, artifacts = _redacted_event_data(sequence=sequence, data=event.data)
+            payload = _event_payload(
+                sequence=sequence,
+                timestamp=event.timestamp or _utc_timestamp(),
+                kind=event.kind,
+                data=data,
+                status=event.status,
+                event_id=event.event_id,
+            )
+            _write_exports(handle, state, _commit_event(handle, state, payload), artifacts)
 
     def _finish(
         self,
@@ -372,27 +375,26 @@ class DelegationRecordOwner:
             state = _load_state(handle)
             if state is None:
                 return
-            with _record_directory(handle, create=True) as record_fd:
-                line = b""
-                if state.run["status"] != status:
-                    _ensure_active(state.run)
-                    sequence = state.run["event_count"] + 1
-                    terminal_data = _redacted_event_data(
-                        record_fd,
-                        sequence=sequence,
-                        data={"status": status, "output": output, "error": error, "usage": usage},
-                    )
-                    payload = _event_payload(
-                        sequence=sequence,
-                        timestamp=_utc_timestamp(),
-                        kind="delegation_finished",
-                        data=terminal_data,
-                        status=None,
-                        event_id="delegation_finished",
-                    )
-                    line = _commit_event(handle, state, payload, terminal=True)
-                # Every finish, a replayed one included, rewrites the exports and renders transcript.md.
-                _write_exports(handle, record_fd, state, line, final=True)
+            line = b""
+            artifacts: dict[str, bytes] = {}
+            # The first terminal outcome stands, so a later finish, even with another status, only refreshes exports.
+            if state.run["status"] not in _TERMINAL_STATUSES:
+                sequence = state.run["event_count"] + 1
+                terminal_data, artifacts = _redacted_event_data(
+                    sequence=sequence,
+                    data={"status": status, "output": output, "error": error, "usage": usage},
+                )
+                payload = _event_payload(
+                    sequence=sequence,
+                    timestamp=_utc_timestamp(),
+                    kind="delegation_finished",
+                    data=terminal_data,
+                    status=None,
+                    event_id="delegation_finished",
+                )
+                line = _commit_event(handle, state, payload, terminal=True)
+            # Every finish, a replayed one included, rewrites the exports and renders transcript.md.
+            _write_exports(handle, state, line, artifacts, final=True)
 
     def _resolve_handle(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         delegation_id = _validated_id(locator.delegation_id)
@@ -643,20 +645,34 @@ def _apply_event(run: dict[str, Any], event: Mapping[str, Any]) -> None:
 
 def _write_exports(
     handle: DelegationRecordHandle,
-    record_fd: int,
     state: _RecordState,
     line: bytes = b"",
+    artifacts: Mapping[str, bytes] | None = None,
     *,
     final: bool = False,
 ) -> None:
-    """Rewrite the workspace exports and the caller's receipt from the committed state, never reading them back."""
-    atomic_write_bytes_at(record_fd, "run.json", _json_bytes(state.run))
-    if final or not _append_export(record_fd, line, size_before=state.log_bytes - len(line)):
-        with atomic_write_file_at(record_fd, _EVENT_LOG) as export:
-            export.writelines(_committed_lines(handle, state))
-    if final:
-        _write_transcript(handle, record_fd, state)
-    _write_receipt(handle, state.run)
+    """Rewrite the workspace exports and the caller's receipt from the committed state, never reading them back.
+
+    Worker code can replace these files or their directories at will, so a failed write is only logged.
+    """
+    try:
+        with _record_directory(handle, create=True) as record_fd:
+            if artifacts:
+                with open_directory_within_root(record_fd, "artifacts", create=True, mode=0o700) as artifacts_fd:
+                    for artifact_name, encoded in artifacts.items():
+                        atomic_write_bytes_at(artifacts_fd, artifact_name, encoded)
+            atomic_write_bytes_at(record_fd, "run.json", _json_bytes(state.run))
+            if final or not _append_export(record_fd, line, size_before=state.log_bytes - len(line)):
+                with atomic_write_file_at(record_fd, _EVENT_LOG) as export:
+                    export.writelines(_committed_lines(handle, state))
+            if final:
+                _write_transcript(handle, record_fd, state)
+    except (OSError, ValueError) as exc:
+        logger.warning("delegation_record_export_failed", delegation_id=handle.locator.delegation_id, error=str(exc))
+    try:
+        _write_receipt(handle, state.run)
+    except (OSError, ValueError) as exc:
+        logger.warning("delegation_receipt_export_failed", delegation_id=handle.locator.delegation_id, error=str(exc))
 
 
 def _append_export(record_fd: int, line: bytes, *, size_before: int) -> bool:
@@ -682,15 +698,16 @@ def _committed_lines(handle: DelegationRecordHandle, state: _RecordState) -> Ite
 
 
 def _redacted_event_data(
-    record_fd: int,
     *,
     sequence: int,
     data: Mapping[str, object],
-) -> dict[str, _JsonValue]:
+) -> tuple[dict[str, _JsonValue], dict[str, bytes]]:
+    """Return the event's redacted data and the oversized values it references, which export as artifacts."""
     redacted = redact_sensitive_data(data)
     if not isinstance(redacted, dict):
-        return {"value": cast("_JsonValue", redacted)}
+        return {"value": cast("_JsonValue", redacted)}, {}
     materialized: dict[str, _JsonValue] = {}
+    artifacts: dict[str, bytes] = {}
     for index, (field_name, value) in enumerate(redacted.items(), start=1):
         encoded = json.dumps(value, sort_keys=True).encode("utf-8")
         if len(encoded) <= _MAX_INLINE_VALUE_BYTES:
@@ -698,8 +715,7 @@ def _redacted_event_data(
             continue
         artifact_name = f"{sequence:06d}-{index:02d}-{_safe_artifact_label(field_name)}.json"
         artifact_relative_path = Path("artifacts") / artifact_name
-        with open_directory_within_root(record_fd, "artifacts", create=True, mode=0o700) as artifacts_fd:
-            atomic_write_bytes_at(artifacts_fd, artifact_name, encoded)
+        artifacts[artifact_name] = encoded
         materialized[field_name] = {
             "artifact_path": artifact_relative_path.as_posix(),
             "byte_count": len(encoded),
@@ -707,7 +723,7 @@ def _redacted_event_data(
             "oversized": True,
             "redacted": True,
         }
-    return materialized
+    return materialized, artifacts
 
 
 def _safe_artifact_label(value: str) -> str:

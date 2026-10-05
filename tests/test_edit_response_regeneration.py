@@ -21,7 +21,6 @@ from agno.session.team import TeamSession
 
 from mindroom import interactive
 from mindroom.agent_storage import get_agent_session
-from mindroom.agents import remove_run_by_event_id
 from mindroom.coalescing_batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
@@ -43,6 +42,7 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind, Inbound
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
+from mindroom.history.storage import remove_run_by_event_id
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.event_info import EventInfo
@@ -53,6 +53,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
+from mindroom.teams import TeamMode, TeamOutcome, TeamResolution
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
@@ -1021,7 +1022,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
-        team_mode="coordinate",
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
     replace_edit_regenerator_deps(bot)
@@ -1163,6 +1163,61 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         ),
     ]
     mock_team_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) -> None:
+    """A team mode edit published without a restart reaches the next edit regeneration."""
+    config = _team_test_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    bot = make_test_team_bot(
+        agent_user=AgentMatrixUser(
+            agent_name="test_team",
+            user_id="@mindroom_test_team:example.com",
+            display_name="Test Team",
+            password="test_password",  # noqa: S106
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
+    live_config = config.model_copy(deep=True)
+    live_config.teams["test_team"].mode = "collaborate"
+    bot.config = live_config
+    rejection = TeamResolution(
+        intent=None,
+        requested_members=[],
+        member_statuses=[],
+        eligible_members=[],
+        outcome=TeamOutcome.REJECT,
+        reason="No team members are available.",
+    )
+    team_response = AsyncMock(return_value=None)
+
+    with (
+        patch("mindroom.bot.resolve_configured_team", return_value=rejection) as resolve_team,
+        patch.object(bot._response_runner, "generate_team_response_helper", team_response),
+    ):
+        await bot._run_regenerated_response(
+            ResponseRequest(
+                sources=ResponseSources(pending_event_ids=("$original",), logical_source_event_ids=("$original",)),
+                thread_history=[],
+                prompt="redo that",
+                user_id="@user:example.com",
+                response_envelope=request_envelope(
+                    room_id="!test:example.com",
+                    reply_to_event_id="$original",
+                    prompt="redo that",
+                    user_id="@user:example.com",
+                    agent_name="test_team",
+                ),
+            ),
+        )
+
+    assert resolve_team.call_args.args[2] is TeamMode.COLLABORATE
+    assert team_response.await_args.kwargs["team_mode"] == "collaborate"
 
 
 @pytest.mark.asyncio
@@ -2706,7 +2761,6 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
-        team_mode="coordinate",
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
     replace_edit_regenerator_deps(bot)
@@ -3459,6 +3513,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
+        patch("mindroom.turn_store.remove_history_of_redacted_events", new=AsyncMock(return_value=[])),
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -3771,6 +3826,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
+        patch("mindroom.turn_store.remove_history_of_redacted_events", new=AsyncMock(return_value=[])),
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,

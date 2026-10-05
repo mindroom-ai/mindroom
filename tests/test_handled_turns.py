@@ -82,12 +82,10 @@ class _ScanCountingRecords(dict[str, TurnRecord]):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reloaded", [False, True])
-@pytest.mark.parametrize("lookup", ["conversation", "cleanup"])
 async def test_scoped_lookup_does_not_scan_unrelated_history(
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
     reloaded: bool,
-    lookup: str,
 ) -> None:
     """Ordinary lookups must visit relevant records only, including after restart."""
     ledger = await _open_ledger(journal_store, "scoped_lookup")
@@ -105,7 +103,6 @@ async def test_scoped_lookup_does_not_scan_unrelated_history(
             ["$one", "$two"],
             discovery_event_ids=["$alias"],
             redacted_source_event_ids=["$one"],
-            pending_redaction_cleanup_event_ids=["$one"],
             conversation_target=target,
             completed=False,
         ),
@@ -115,18 +112,15 @@ async def test_scoped_lookup_does_not_scan_unrelated_history(
     counted = _ScanCountingRecords(ledger._responses)
     monkeypatch.setattr(ledger._state, "responses", counted)
 
-    if lookup == "conversation":
-        records = ledger.turn_records_for_conversation(session_id=target.session_id)
-        assert len(records) == 1
-        assert records[0].source_event_ids == ("$one", "$two")
-    else:
-        assert ledger.pending_redaction_cleanup_event_ids() == ("$one",)
+    records = ledger.turn_records_for_conversation(session_id=target.session_id)
+    assert len(records) == 1
+    assert records[0].source_event_ids == ("$one", "$two")
     assert counted.scanned_records == 0
 
 
 @pytest.mark.asyncio
 async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJournalStore) -> None:
-    """Moving a turn and clearing cleanup must reach siblings, reloads, and eviction."""
+    """Moving a turn must reach siblings, reloads, and eviction."""
     ledger = await _open_ledger(journal_store, "scoped_updates")
     sibling = await _open_ledger(journal_store, "scoped_updates")
     original = MessageTarget.resolve("!room:example.org", "$old-thread", "$one")
@@ -134,19 +128,16 @@ async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJo
     await ledger.record_handled_turn(
         TurnRecord.create(
             ["$one", "$two"],
-            redacted_source_event_ids=["$one"],
-            pending_redaction_cleanup_event_ids=["$one"],
             conversation_target=original,
             completed=False,
         ),
     )
-    assert sibling.pending_redaction_cleanup_event_ids() == ("$one",)
+    assert len(sibling.turn_records_for_conversation(session_id=original.session_id)) == 1
     await ledger.update_handled_turn(
         ("$one",),
         lambda current: replace(
             current["$one"],
             conversation_target=moved,
-            pending_redaction_cleanup_event_ids=(),
             response_event_id="$reply",
             completed=True,
             timestamp=0,
@@ -154,7 +145,6 @@ async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJo
     )
     for reader in (sibling, await _reload_ledger(journal_store, "scoped_updates")):
         assert reader.turn_records_for_conversation(session_id=original.session_id) == ()
-        assert reader.pending_redaction_cleanup_event_ids() == ()
         records = reader.turn_records_for_conversation(session_id=moved.session_id)
         assert len(records) == 1
         assert records[0].response_event_id == "$reply"
@@ -379,7 +369,6 @@ def test_turn_record_create_normalizes_coupled_source_state() -> None:
         ["source", "source", ""],
         discovery_event_ids=["source", "edit", "edit"],
         redacted_source_event_ids=["missing", "edit"],
-        pending_redaction_cleanup_event_ids=["source", "edit"],
         source_event_prompts={"source": "prompt"},
         source_event_revisions={"edit": [4, "edit-event"]},
     )
@@ -387,7 +376,6 @@ def test_turn_record_create_normalizes_coupled_source_state() -> None:
     assert record.source_event_ids == ("source",)
     assert record.discovery_event_ids == ("edit",)
     assert record.redacted_source_event_ids == ("edit",)
-    assert record.pending_redaction_cleanup_event_ids == ("edit",)
     assert record.source_event_prompts == {"source": "prompt"}
     assert record.source_event_revisions is None
 
@@ -402,11 +390,9 @@ def test_canonicalize_turn_record_prunes_new_redactions() -> None:
     updated = canonicalize_turn_record(
         record,
         redacted_source_event_ids=("first",),
-        pending_redaction_cleanup_event_ids=("first", "second"),
     )
 
     assert updated.redacted_source_event_ids == ("first",)
-    assert updated.pending_redaction_cleanup_event_ids == ("first",)
     assert updated.source_event_prompts == {"second": "two"}
 
 
@@ -1194,7 +1180,6 @@ async def test_scoped_lookup_tracks_provisional_write_outcome(
                 current["$slow"],
                 conversation_target=moved,
                 redacted_source_event_ids=("$slow",),
-                pending_redaction_cleanup_event_ids=("$slow",),
                 timestamp=0,
             ),
         ),
@@ -1203,7 +1188,6 @@ async def test_scoped_lookup_tracks_provisional_write_outcome(
         await asyncio.wait_for(records.started.wait(), timeout=5)
         assert sibling.turn_records_for_conversation(session_id=original.session_id) == ()
         assert len(sibling.turn_records_for_conversation(session_id=moved.session_id)) == 1
-        assert sibling.pending_redaction_cleanup_event_ids() == ("$slow",)
         if cancel:
             writing.cancel()
             await asyncio.sleep(0)
@@ -1220,7 +1204,7 @@ async def test_scoped_lookup_tracks_provisional_write_outcome(
             kept, removed = (original, moved) if fail else (moved, original)
             assert reader.turn_records_for_conversation(session_id=removed.session_id) == ()
             assert len(reader.turn_records_for_conversation(session_id=kept.session_id)) == 1
-            assert reader.pending_redaction_cleanup_event_ids() == (() if fail else ("$slow",))
+            assert reader.get_turn_record("$slow").redacted_source_event_ids == (() if fail else ("$slow",))
     finally:
         records.released.set()
         await asyncio.gather(writing, return_exceptions=True)
@@ -1606,15 +1590,78 @@ async def test_discovery_alias_persists_without_becoming_a_coalesced_source(
 
 
 @pytest.mark.asyncio
-async def test_discovery_alias_redaction_and_cleanup_intent_persist(journal_store: EventJournalStore) -> None:
-    """Selection aliases must retain both their tombstone and owed cleanup across restart."""
+@pytest.mark.parametrize("retention", ["age", "count"])
+async def test_retention_keeps_conversation_redaction_tombstones(
+    journal_store: EventJournalStore,
+    retention: str,
+) -> None:
+    """History cleanup derives from these tombstones when the journal no longer has them."""
+    tracker = await _open_ledger(journal_store, f"tombstone_retention_{retention}")
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$source")
+    old_timestamp = time.time() - (40 * 24 * 60 * 60) if retention == "age" else time.time() - 10
+    await tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$source"],
+            redacted_source_event_ids=["$source"],
+            conversation_target=target,
+            timestamp=old_timestamp,
+        ),
+    )
+    await tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$edited"],
+            response_event_id="$edited-reply",
+            revision_replay={"$edit": RevisionReplay("$edited", 100, redacted=True)},
+            conversation_target=target,
+            timestamp=old_timestamp,
+        ),
+    )
+    await tracker.record_handled_turn(
+        TurnRecord.create(["$ordinary"], conversation_target=target, timestamp=old_timestamp),
+    )
+
+    await tracker._cleanup_old_events(max_events=100 if retention == "age" else 0, max_age_days=30)
+
+    assert tracker.get_turn_record("$source") is not None
+    assert tracker.get_turn_record("$edited") is not None
+    assert tracker.get_turn_record("$ordinary") is None
+
+
+@pytest.mark.asyncio
+async def test_stored_cleanup_obligations_are_ignored_on_read(journal_store: EventJournalStore) -> None:
+    """Records an earlier release stored with cleanup obligations load as plain tombstones."""
+    record = TurnRecord.create(["$source"], redacted_source_event_ids=["$source"], completed=False)
+    raw = TurnRecordCodec._to_ledger_record(record)
+    raw["pending_redaction_cleanup_event_ids"] = ["$source"]
+    raw["revision_replay"] = {
+        "$edit": {"source_event_id": "$source", "timestamp_ms": 10, "redacted": True, "cleanup_pending": True},
+    }
+    await journal_store.turn_records("legacy_obligations").upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id="$source",
+        record_json=json.dumps(raw),
+    )
+
+    ledger = await _reload_ledger(journal_store, "legacy_obligations")
+    loaded = ledger.get_turn_record("$source")
+
+    assert loaded is not None
+    assert loaded.redacted_source_event_ids == ("$source",)
+    assert loaded.revision_replay["$edit"].redacted
+    rewritten = TurnRecordCodec._to_ledger_record(loaded)
+    assert "pending_redaction_cleanup_event_ids" not in rewritten
+    assert "cleanup_pending" not in rewritten["revision_replay"]["$edit"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_alias_redaction_persists(journal_store: EventJournalStore) -> None:
+    """Selection aliases must retain their tombstone across restart."""
     tracker = await _open_ledger(journal_store, "test_discovery_redaction")
     await tracker.record_handled_turn(
         TurnRecord.create(
             ["$question"],
             discovery_event_ids=["$selection"],
             redacted_source_event_ids=["$selection"],
-            pending_redaction_cleanup_event_ids=["$selection"],
             completed=False,
         ),
     )
@@ -1624,8 +1671,6 @@ async def test_discovery_alias_redaction_and_cleanup_intent_persist(journal_stor
 
     assert record is not None
     assert record.redacted_source_event_ids == ("$selection",)
-    assert record.pending_redaction_cleanup_event_ids == ("$selection",)
-    assert reloaded.pending_redaction_cleanup_event_ids() == ("$selection",)
     assert reloaded.has_responded("$selection") is True
     assert reloaded.has_responded("$question") is False
 
@@ -1865,28 +1910,6 @@ async def test_cleanup_by_age_removes_old_records(journal_store: EventJournalSto
 
 
 @pytest.mark.asyncio
-async def test_cleanup_by_age_retains_pending_redaction_intent(journal_store: EventJournalStore) -> None:
-    """Age retention must not discard cleanup work before the next response."""
-    tracker = await _open_ledger(journal_store, "test_pending_age_cleanup")
-    old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$pending"],
-            redacted_source_event_ids=["$pending"],
-            pending_redaction_cleanup_event_ids=["$pending"],
-            timestamp=old_timestamp,
-        ),
-    )
-    await tracker.record_handled_turn(TurnRecord.create(["$ordinary"], timestamp=old_timestamp))
-
-    await tracker._cleanup_old_events(max_events=100, max_age_days=30)
-
-    assert tracker.get_turn_record("$pending") is not None
-    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
-    assert tracker.get_turn_record("$ordinary") is None
-
-
-@pytest.mark.asyncio
 async def test_cleanup_by_age_retains_incomplete_turn(journal_store: EventJournalStore) -> None:
     """Age cleanup must not discard a turn whose durable work is unfinished."""
     tracker = await _open_ledger(journal_store, "test_incomplete_age_cleanup")
@@ -1977,27 +2000,6 @@ async def test_cleanup_by_age_removes_terminal_redaction_only_turn(journal_store
     await tracker.cleanup()
 
     assert tracker.get_turn_record("$redacted") is None
-
-
-@pytest.mark.asyncio
-async def test_cleanup_by_count_retains_pending_redaction_intent(journal_store: EventJournalStore) -> None:
-    """Count retention may exceed its limit rather than lose owed cleanup work."""
-    tracker = await _open_ledger(journal_store, "test_pending_count_cleanup")
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$pending"],
-            redacted_source_event_ids=["$pending"],
-            pending_redaction_cleanup_event_ids=["$pending"],
-            timestamp=time.time() - 2,
-        ),
-    )
-    await tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
-
-    await tracker._cleanup_old_events(max_events=1, max_age_days=30)
-
-    assert tracker.get_turn_record("$pending") is not None
-    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
-    assert tracker.get_turn_record("$newest") is not None
 
 
 @pytest.mark.asyncio

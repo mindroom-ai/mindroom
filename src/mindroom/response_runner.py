@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections import Counter
 from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -47,7 +46,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body, is_automation_source_kind
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -61,7 +60,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot, render_stopped_attempt
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
+from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
 from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
@@ -122,6 +121,7 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
+    UnfinishedStreamedReply,
     build_cancelled_response_update,
     clean_partial_reply_text,
     strip_visible_tool_markers,
@@ -140,7 +140,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import deserialize_tool_trace, earlier_tool_trace_content, serialize_tool_trace
+from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -186,8 +186,6 @@ _INTERRUPTED_APPROVAL_RECOVERY_REASON = (
 
 def _approval_interruption_cancel_source(reason: str) -> Literal["sync_restart", "interrupted"] | None:
     """Recover the cancellation provenance persisted for an interrupted approval."""
-    if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
-        return "sync_restart"
     cancel_source = cancel_source_from_failure_reason(reason)
     if cancel_source == "user_stop" or cancel_failure_reason(cancel_source) != reason:
         return None
@@ -235,28 +233,17 @@ _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
-    "Your previous attempt at replying to the current message was interrupted, and this reply replaces "
-    "everything it showed. What it had shown before stopping is below: tool calls it lists as finished already "
-    "ran, and those it lists as still running may have finished too. Calls hidden from the conversation or made "
-    "just before it stopped may be missing, so before repeating any tool call with side effects, check whether "
-    "it already took effect."
+    "Your reply to the current message was interrupted by a restart before it finished. The user still sees what "
+    "it had shown, which is below, and your reply continues it in the same message after a restart note. Continue "
+    "naturally from where it stopped without repeating what it already said; you may briefly acknowledge the "
+    "interruption first. Build on the tool results it shows: tool calls it lists as finished already ran, and those "
+    "it lists as still running may have finished too. Calls hidden from the conversation or made just before it "
+    "stopped may be missing, so before repeating any tool call with side effects, check whether it already took effect."
 )
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
     "is unknown. Before repeating any tool call with side effects, check whether it already took effect."
 )
-
-
-def _already_called_line(tools: Sequence[ToolTraceEntry]) -> str | None:
-    """Name finished calls in one closing line, which models follow even when the message asks for them again.
-
-    Calls still running at the stop stay out: listing them kept models from re-running ones whose result was lost.
-    """
-    counts = Counter(tool.tool_name for tool in tools)
-    if not counts:
-        return None
-    listed = ", ".join(f"`{name}` ({count} call{'' if count == 1 else 's'})" for name, count in counts.items())
-    return f"Already called for the current message, so do not repeat: {listed}."
 
 
 async def _cancel_pending_responses(
@@ -273,7 +260,7 @@ async def _cancel_pending_responses(
             request_task_cancel(
                 task,
                 cancel_source=shutdown_intent.cancel_source,
-                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+                process_shutdown=shutdown_intent.hands_off_unfinished_work,
             )
         remaining_seconds = max(0.0, deadline - loop.time())
         window_expired = remaining_seconds == 0.0
@@ -289,14 +276,12 @@ async def _cancel_pending_responses(
 def _merge_response_extra_content(
     extra_content: dict[str, Any] | None,
     attachment_ids: Sequence[str] | None,
-    earlier_tool_trace: Sequence[ToolTraceEntry] = (),
 ) -> dict[str, Any] | None:
-    """Merge optional attachment IDs and carried tool calls into response metadata."""
+    """Merge optional attachment IDs into response metadata."""
     merged_extra_content = extra_content if extra_content is not None else {}
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
-    merged_extra_content.update(earlier_tool_trace_content(earlier_tool_trace))
-    return merged_extra_content if extra_content is not None or attachment_ids or earlier_tool_trace else None
+    return merged_extra_content if extra_content is not None or attachment_ids else None
 
 
 def _paused_with_committed_presentation(
@@ -328,6 +313,31 @@ def _require_frozen_tool_visibility(show_tool_calls: bool | None) -> bool:
         msg = "Approval suspension requires turn-frozen tool visibility"
         raise RuntimeError(msg)
     return show_tool_calls
+
+
+def _interruption_note_landed(final_outcome: FinalDeliveryOutcome) -> bool:
+    """Return whether a cancellation ended its turn with the interruption note visible in Matrix.
+
+    That note is the turn's terminal outcome, since nothing resumes it; a note
+    that never landed leaves the turn to replay.
+    """
+    if final_outcome.terminal_status != "cancelled" or final_outcome.delivery_kind is None:
+        return False
+    note = (
+        RESTART_INTERRUPTED_RESPONSE_NOTE
+        if final_outcome.resolved_cancel_source == "sync_restart"
+        else INTERRUPTED_RESPONSE_NOTE
+    )
+    body = final_outcome.final_visible_body
+    return body is not None and body.rstrip().endswith(note)
+
+
+def _replaceable_placeholder(request: ResponseRequest) -> bool:
+    """Return whether the adopted event holds only a placeholder that terminal handling may replace or redact.
+
+    A resumed reply shows its stopped attempt's work, which no failure may remove.
+    """
+    return request.existing_event_is_placeholder and request.resumed_reply is None
 
 
 def _split_delivery_tool_trace(
@@ -530,8 +540,8 @@ class ResponseRequest:
     existing_event_is_placeholder: bool = False
     # Set when replay adopts the reply an earlier attempt at this turn left behind.
     existing_event_is_recovered: bool = False
-    # Tool calls the stopped attempts had shown, carried on this attempt's streamed reply.
-    earlier_tool_trace: tuple[ToolTraceEntry, ...] = ()
+    # What the stopped attempt at the adopted reply showed; this attempt streams below it.
+    resumed_reply: UnfinishedStreamedReply | None = None
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -553,7 +563,6 @@ class ResponseRequest:
     ) = None
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
-    on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
@@ -873,7 +882,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
-    register_approval_interruption: Callable[[str, str], None]
+    redacted_history_events: Callable[[MessageTarget, tuple[str, ...]], Awaitable[Mapping[str, str | None]]]
 
 
 @dataclass(frozen=True)
@@ -905,17 +914,13 @@ class _InboxResponseOwnership:
     proof_task: asyncio.Task[bool] | None = None
 
 
-def _requested_by_a_person(origin: TurnOrigin, body: str) -> bool:
+def _requested_by_a_person(origin: TurnOrigin) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs, restart resumes, and replies to other agents never count toward
-    a review; they have no human to learn from.
+    Like Hermes skipping cron reviews, automated runs and replies to other agents never count toward a review; they
+    have no human to learn from.
     """
-    return (
-        origin.requester_kind == SenderKind.USER
-        and not is_automation_source_kind(origin.source_kind)
-        and not is_auto_resume_relay_body(body)
-    )
+    return origin.requester_kind == SenderKind.USER and not is_automation_source_kind(origin.source_kind)
 
 
 @dataclass
@@ -1901,12 +1906,33 @@ class ResponseRunner:
                 _INTERRUPTED_APPROVAL_RECOVERY_REASON,
             )
             return claimed.response_event_id if settled else None
-        settled = await self._settle_interrupted_approval_recovery(
-            claimed,
-            reason=_INTERRUPTED_APPROVAL_RECOVERY_REASON,
-            cancel_source="sync_restart",
+        return await self._release_interrupted_approval(claimed, reason=_INTERRUPTED_APPROVAL_RECOVERY_REASON)
+
+    async def _release_interrupted_approval(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        reason: str,
+    ) -> str | None:
+        """Hand an approved run a restart cut short back to replay, which continues its reply.
+
+        Before a FINAL the reply is still the unfinished stream of one turn, so
+        the replayed turn adopts it like any reply a restart left streaming. A
+        hand-back that cannot finish yet, such as cards that did not expire, is
+        retried by the next recovery pass. A deleted reply, or a FINAL already
+        owed, settles the continuation as a failure instead.
+        """
+        initial = await self.deps.approval_store.load_matrix_delivery(
+            delivery_id=continuation.source_event_ids[0],
+            stage=DeliveryStage.INITIAL,
         )
-        return claimed.response_event_id if settled else None
+        if (initial is not None and initial.retired) or await self._approval_responses.final_delivery(
+            continuation,
+        ) is not None:
+            settled = await self._approval_responses.settle_failure(continuation, reason)
+            return continuation.response_event_id if settled else None
+        await self._approval_responses.release_to_replay(continuation, reason)
+        return None
 
     async def _settle_interrupted_approval_recovery(
         self,
@@ -1935,19 +1961,7 @@ class ResponseRunner:
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        settled = await self._approval_responses.settle_failure(
-            failing,
-            reason,
-            visible_text=update,
-            stream_status=STREAM_STATUS_ERROR,
-        )
-        if settled and await self.deps.approval_store.approval_interruption_is_recoverable(
-            failing.source_event_ids[0],
-            visible_text=update,
-            failure_reason=failing.failure_reason,
-        ):
-            self.deps.register_approval_interruption(failing.source_event_ids[0], failing.room_id)
-        return settled
+        return await self._approval_responses.settle_failure(failing, reason, visible_text=update)
 
     async def _approval_interruption_update(
         self,
@@ -2148,7 +2162,7 @@ class ResponseRunner:
         reviews = orchestrator.skill_reviews
         agent_name = self.deps.agent_name
         reviews.cancel(config, agent_name=agent_name, session_id=session_id, identity=execution_identity)
-        if not _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body):
+        if not _requested_by_a_person(request.response_envelope.origin):
             return None, runtime
         capture = SkillReviewCapture()
 
@@ -2477,7 +2491,7 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     extra_content=extra_content,
                     existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                 ),
             )
         self._note_final_delivery_timing(request, delivery)
@@ -2582,10 +2596,15 @@ class ResponseRunner:
         recorder: TurnRecorder,
         accumulated_text: str,
         tool_trace: Sequence[ToolTraceEntry],
+        resumed: UnfinishedStreamedReply | None,
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
         if recorder.outcome != "pending":
             return recorder.outcome == "interrupted"
+        if resumed is not None:
+            # The stopped attempt shown above this one is already in the turn's saved account.
+            accumulated_text = accumulated_text.removeprefix(resumed.resumed_text)
+            tool_trace = tool_trace[len(resumed.tool_trace) :]
         partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
@@ -2948,7 +2967,13 @@ class ResponseRunner:
         try:
             outcome = await self._run_claimed_approval_lifecycle(claimed, target=target)
         except asyncio.CancelledError as error:
-            reason = cancel_failure_reason(classify_cancel_source(error))
+            # A shutdown that hands this run to a successor runtime records it as
+            # restart-interrupted, which that runtime hands back to replay.
+            reason = (
+                _INTERRUPTED_APPROVAL_RECOVERY_REASON
+                if current_task_is_process_shutdown()
+                else cancel_failure_reason(classify_cancel_source(error))
+            )
             owns_final, event_id, _failing = await run_coroutine_until_complete(
                 self._recover_or_request_claimed_failure(
                     claimed,
@@ -3066,7 +3091,7 @@ class ResponseRunner:
             signal_queued_message=False,
         )
 
-    async def _recover_nonready_approval(  # noqa: PLR0911 - explicit approval states have independent terminal outcomes
+    async def _recover_nonready_approval(
         self,
         owned: ApprovalContinuation,
         *,
@@ -3098,22 +3123,33 @@ class ResponseRunner:
         if owned.state == "claimed":
             return True, await self._recover_claimed_approval_lifecycle(owned, target=target)
         if owned.state == "failing":
-            if await self._approval_responses.successful_final_delivery(owned, recover=True) is not None:
-                owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
-                return True, event_id if owns_final else None
-            reason = owned.failure_reason or "Tool approval continuation failed safely."
-            cancel_source = _approval_interruption_cancel_source(reason)
-            settled = (
-                await self._settle_interrupted_approval_recovery(
-                    owned,
-                    reason=reason,
-                    cancel_source=cancel_source,
-                )
-                if cancel_source is not None
-                else await self._approval_responses.settle_failure(owned, reason)
-            )
-            return True, owned.response_event_id if settled else None
+            return True, await self._recover_failing_approval(owned, target=target)
         return False, None
+
+    async def _recover_failing_approval(
+        self,
+        failing: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> str | None:
+        """Finish a fenced continuation through its frozen FINAL, replay after a restart, or its failure note."""
+        if await self._approval_responses.successful_final_delivery(failing, recover=True) is not None:
+            owns_final, event_id = await self._recover_frozen_approval_final(failing, target=target)
+            return event_id if owns_final else None
+        reason = failing.failure_reason or "Tool approval continuation failed safely."
+        if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
+            return await self._release_interrupted_approval(failing, reason=reason)
+        cancel_source = _approval_interruption_cancel_source(reason)
+        settled = (
+            await self._settle_interrupted_approval_recovery(
+                failing,
+                reason=reason,
+                cancel_source=cancel_source,
+            )
+            if cancel_source is not None
+            else await self._approval_responses.settle_failure(failing, reason)
+        )
+        return failing.response_event_id if settled else None
 
     async def _finalize_early_placeholder_cancellation(
         self,
@@ -3434,40 +3470,8 @@ class ResponseRunner:
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
+            redacted_history_events=partial(self.deps.redacted_history_events, runtime.resolved_target),
         )
-
-    def _notify_interrupted_response_recoverable(
-        self,
-        request: ResponseRequest,
-        final_outcome: FinalDeliveryOutcome,
-    ) -> bool:
-        """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
-
-        Only turns whose terminal interruption update reached Matrix are
-        reported: restart cleanup can discover that note, while the handled-turn
-        ledger prevents source replay from answering it twice. Explicit user
-        stops are terminal user intent and must never schedule recovery.
-        """
-        if request.on_interrupted_response_recoverable is None or final_outcome.terminal_status != "cancelled":
-            return False
-        if (
-            not final_outcome.mark_handled
-            or final_outcome.delivery_kind is None
-            or request.response_envelope.target.resolved_thread_id is None
-        ):
-            return False
-        cancel_source = final_outcome.resolved_cancel_source
-        if cancel_source == "user_stop":
-            return False
-        expected_note = (
-            RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
-        )
-        if final_outcome.final_visible_body is None or not final_outcome.final_visible_body.rstrip().endswith(
-            expected_note,
-        ):
-            return False
-        request.on_interrupted_response_recoverable()
-        return True
 
     async def _record_user_stop_handled(
         self,
@@ -3586,14 +3590,14 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
     ) -> ResponseRequest:
-        """Tell a replayed turn what its stopped attempt already showed and ran.
+        """Continue a replayed turn below what its stopped attempt already showed and ran.
 
-        A process that stops mid-stream, whether it crashes or shuts down in
-        order, leaves its reply streaming and its sources pending, so replay
-        adopts that reply and answers again in place. The reply in Matrix is
-        the only account of the stopped attempt, so its visible text and tool
-        trace go to the new attempt as transient context that keeps it from
-        repeating finished tools.
+        A restart, whether a crash, an orderly shutdown, an entity replacement
+        or an approved run cut short, leaves the reply streaming and its sources
+        pending, so replay adopts that reply. The reply in Matrix is the only
+        account of the stopped attempt: its visible text and tool trace stay in
+        the message with the new attempt streaming below them, and the same
+        account goes into the new attempt's prompt, where later turns keep it.
         """
         event_id = request.existing_event_id
         if event_id is None or not request.existing_event_is_recovered:
@@ -3618,11 +3622,13 @@ class ResponseRunner:
                 completed_tools=completed_tools,
                 interrupted_tools=interrupted_tools,
             )
-            already_called = _already_called_line(completed_tools)
-            instruction = "\n\n".join(
-                part for part in (_INTERRUPTED_ATTEMPT_INSTRUCTION, attempt, already_called) if part is not None
-            )
-        elif message is None or message.stream_status in {None, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+        elif message is None or message.stream_status in {
+            None,
+            STREAM_STATUS_PENDING,
+            STREAM_STATUS_STREAMING,
+            STREAM_STATUS_APPROVAL_PENDING,
+        }:
             # Unreadable, or stopped before showing anything (an acknowledgement,
             # hidden or non-streamed tool calls): unknown work, not absent work.
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
@@ -3633,13 +3639,12 @@ class ResponseRunner:
             response_event_id=event_id,
             attempt_shown=unfinished is not None,
         )
+        account = render_enrichment_block([EnrichmentItem(key="interrupted_attempt", text=instruction)])
+        model_prompt = request.model_prompt if request.model_prompt is not None else request.prompt
         return replace(
             request,
-            transient_enrichment_items=(
-                *request.transient_enrichment_items,
-                EnrichmentItem(key="interrupted_attempt", text=instruction, persist=False, minimal_required=True),
-            ),
-            earlier_tool_trace=() if unfinished is None else unfinished.tool_trace,
+            model_prompt=f"{model_prompt.rstrip()}\n\n{account}",
+            resumed_reply=unfinished,
         )
 
     async def _prepare_locked_source(
@@ -3836,7 +3841,7 @@ class ResponseRunner:
             tracked_event_id=progress.tracked_event_id,
             run_message_id=placeholder_run_message_id,
             existing_event_id=request.existing_event_id,
-            existing_event_is_placeholder=request.existing_event_is_placeholder,
+            existing_event_is_placeholder=_replaceable_placeholder(request),
         )
         if pending.terminal_event_id is None:
             return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
@@ -3857,7 +3862,8 @@ class ResponseRunner:
                 tool_trace=None,
                 extra_content=None,
                 existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
+                existing_event_is_placeholder=_replaceable_placeholder(request),
+                resumed=request.resumed_reply,
             ),
         )
 
@@ -4098,13 +4104,12 @@ class ResponseRunner:
                 await on_suppressed()
         if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
             request.source_handoff.set()
-        interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
         cancel_source = final_outcome.resolved_cancel_source
         source_handled = final_outcome.mark_handled and (
             request.on_deferred_outcome_handled is None
             or cancel_source is None
             or cancel_source == "user_stop"
-            or interruption_recovery_registered
+            or _interruption_note_landed(final_outcome)
         )
         await self._record_user_stop_handled(
             request,
@@ -4298,7 +4303,7 @@ class ResponseRunner:
                         FinalDeliveryRequest(
                             target=resolved_target,
                             existing_event_id=message_id,
-                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                            existing_event_is_placeholder=_replaceable_placeholder(request),
                             response_text=reason,
                             identity=response_identity,
                             tool_trace=None,
@@ -4331,11 +4336,15 @@ class ResponseRunner:
         assert turn_models is not None
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
-        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
-            self._client(),
-            request.room_id,
-            requester_user_id=requester_user_id,
-            enable_streaming=self.deps.runtime.enable_streaming,
+        # A resumed reply is a stream, and a blocking answer would replace what it already showed.
+        use_streaming = request.resumed_reply is not None or (
+            not _is_silent_schedule_response(request)
+            and await should_use_streaming(
+                self._client(),
+                request.room_id,
+                requester_user_id=requester_user_id,
+                enable_streaming=self.deps.runtime.enable_streaming,
+            )
         )
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
@@ -4432,6 +4441,7 @@ class ResponseRunner:
             system_enrichment_items=request.system_enrichment_items,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
+            redacted_history_events=partial(self.deps.redacted_history_events, resolved_target),
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=prepared_prompt,
@@ -4540,7 +4550,7 @@ class ResponseRunner:
                                 existing_event_id=delivery_request.existing_event_id,
                                 adopt_existing_placeholder=bool(delivery_request.existing_event_id)
                                 and delivery_request.existing_event_is_placeholder,
-                                header=None,
+                                resumed=delivery_request.resumed_reply,
                                 show_tool_calls=show_tool_calls,
                                 # The live collector dict: the turn driver fills it
                                 # at terminal settle, before the stream's final
@@ -4550,7 +4560,6 @@ class ResponseRunner:
                                 extra_content=_merge_response_extra_content(
                                     team_run_metadata_content,
                                     request.attachment_ids,
-                                    request.earlier_tool_trace,
                                 ),
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
@@ -4663,7 +4672,7 @@ class ResponseRunner:
                             exc,
                             message_id=message_id,
                             delivery_target=delivery_target,
-                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            existing_event_is_placeholder=_replaceable_placeholder(delivery_request),
                             response_identity=response_identity,
                             restart_message="Team non-streaming response interrupted by sync restart",
                             user_stop_message="Team non-streaming response cancelled by user",
@@ -4681,7 +4690,7 @@ class ResponseRunner:
                             if team_turn_recorder.outcome == "completed"
                             else None,
                             existing_event_id=message_id,
-                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            existing_event_is_placeholder=_replaceable_placeholder(delivery_request),
                             response_text=response_text,
                             identity=response_identity,
                             tool_trace=None,
@@ -4726,6 +4735,7 @@ class ResponseRunner:
                 recorder=team_turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
+                resumed=request.resumed_reply,
             ):
                 await self._persist_interrupted_recorder_off_loop(
                     recorder=team_turn_recorder,
@@ -4748,7 +4758,7 @@ class ResponseRunner:
                         request.attachment_ids,
                     ),
                     existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                 ),
             )
 
@@ -5070,7 +5080,6 @@ class ResponseRunner:
                 response_extra_content = _merge_response_extra_content(
                     run_metadata_content,
                     request.attachment_ids,
-                    request.earlier_tool_trace,
                 )
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
@@ -5083,6 +5092,7 @@ class ResponseRunner:
                         existing_event_id=request.existing_event_id,
                         adopt_existing_placeholder=bool(request.existing_event_id)
                         and request.existing_event_is_placeholder,
+                        resumed=request.resumed_reply,
                         show_tool_calls=runtime.show_tool_calls,
                         extra_content=response_extra_content,
                         tool_trace_collector=tool_trace,
@@ -5214,7 +5224,7 @@ class ResponseRunner:
                     exc,
                     message_id=request.existing_event_id,
                     delivery_target=runtime.resolved_target,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                     response_identity=response_identity,
                     restart_message="Non-streaming response interrupted by sync restart",
                     user_stop_message="Non-streaming response cancelled by user",
@@ -5242,7 +5252,7 @@ class ResponseRunner:
                     target=runtime.resolved_target,
                     prepared_edit_record=request.prepared_edit_record if turn_recorder.outcome == "completed" else None,
                     existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                     response_text=generation.response_text,
                     identity=response_identity,
                     tool_trace=generation.tool_trace if runtime.show_tool_calls else None,
@@ -5368,6 +5378,7 @@ class ResponseRunner:
                 recorder=turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
+                resumed=request.resumed_reply,
             ):
                 await self._persist_interrupted_recorder_off_loop(
                     recorder=turn_recorder,
@@ -5392,7 +5403,7 @@ class ResponseRunner:
                         tool_trace=error.tool_trace if runtime.show_tool_calls else None,
                         extra_content=response_extra_content,
                         existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        existing_event_is_placeholder=_replaceable_placeholder(request),
                     ),
                 ),
             )
@@ -5423,7 +5434,7 @@ class ResponseRunner:
                                 tracked_event_id=request.existing_event_id,
                                 run_message_id=None,
                                 existing_event_id=request.existing_event_id,
-                                existing_event_is_placeholder=request.existing_event_is_placeholder,
+                                existing_event_is_placeholder=_replaceable_placeholder(request),
                             ),
                             terminal_status="error",
                             failure_reason=str(error),
@@ -5437,7 +5448,8 @@ class ResponseRunner:
                             request.attachment_ids,
                         ),
                         existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        existing_event_is_placeholder=_replaceable_placeholder(request),
+                        resumed=request.resumed_reply,
                     ),
                 ),
             )
@@ -5601,11 +5613,15 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
-            self._client(),
-            request.room_id,
-            requester_user_id=request.user_id,
-            enable_streaming=self.deps.runtime.enable_streaming,
+        # A resumed reply is a stream, and a blocking answer would replace what it already showed.
+        use_streaming = request.resumed_reply is not None or (
+            not _is_silent_schedule_response(request)
+            and await should_use_streaming(
+                self._client(),
+                request.room_id,
+                requester_user_id=request.user_id,
+                enable_streaming=self.deps.runtime.enable_streaming,
+            )
         )
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         generation: _ResponseGenerationOutcome | None = None

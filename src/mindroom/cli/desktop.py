@@ -154,7 +154,7 @@ def desktop_login(
         DesktopLoginMethod.AUTO,
         "--login-method",
         case_sensitive=False,
-        help="Matrix login method. Auto uses password when advertised, otherwise browser SSO.",
+        help="Matrix login method. Auto uses browser SSO when advertised, otherwise password.",
     ),
     sso_idp: str | None = typer.Option(
         None,

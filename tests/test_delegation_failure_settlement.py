@@ -10,6 +10,7 @@ import pytest
 from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.approval_response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
+from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
 from mindroom.response_sources import ResponseSources
@@ -111,6 +112,46 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
     assert api_key not in visible
     assert password not in visible
     assert "Incorrect API key provided" in visible
+
+
+@pytest.mark.parametrize(
+    ("reason", "visible_text", "stream_status"),
+    [
+        ("cancelled_by_user", "**[Response cancelled by user]**", STREAM_STATUS_CANCELLED),
+        ("Paused run is no longer available", "Paused run is no longer available", STREAM_STATUS_ERROR),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failure_reply_is_marked_interrupted(
+    tmp_path: Path,
+    reason: str,
+    visible_text: str,
+    stream_status: str,
+) -> None:
+    """Clients and later turns treat a stopped or failed continuation as interrupted, not as a finished reply."""
+    continuation = _continuation()
+    store = MagicMock(spec=PrincipalStore)
+    store.approval_continuation = AsyncMock(return_value=continuation)
+    store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
+    gateway = MagicMock(spec=DeliveryGateway)
+    gateway.edit_text = AsyncMock(return_value=True)
+    coordinator = ApprovalResponseCoordinator(
+        config=Config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        store=store,
+        delivery_gateway=gateway,
+        retry_sources=lambda _room, _sources: None,
+    )
+    with (
+        patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
+        patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
+        patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
+    ):
+        assert await coordinator.settle_failure(continuation, reason)
+
+    request = gateway.edit_text.await_args.args[0]
+    assert request.new_text == visible_text
+    assert request.extra_content == {STREAM_STATUS_KEY: stream_status}
 
 
 @pytest.mark.asyncio

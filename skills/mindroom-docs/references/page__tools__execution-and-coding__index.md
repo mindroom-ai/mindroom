@@ -1,64 +1,52 @@
 # Execution & Coding
 
-Use these tools to inspect and edit local files, run shell commands or Python, work in a code-aware workspace, manage Docker resources, and generate local artifacts such as exports and charts.
+Use these tools to inspect and edit files, run shell commands or Python, manage Docker resources, do exact arithmetic, and generate files and charts.
 
-<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/1bc1dc4d-742f-490b-a177-3679ae412ec2#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ac87d6b3-a82a-491d-ae5c-7d114f55539f#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%" poster="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-light="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-dark="https://github.com/user-attachments/assets/b9ccd95c-1899-4fa2-9beb-a03d22ec6c46">
+  <source src="https://github.com/user-attachments/assets/e1a47a55-05a6-4035-b50c-b631e867b8c8" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a9d21f4f-d9c7-480f-b71b-8a7155903bfc" type="video/mp4">
 </video>
-
-## What This Page Covers
-
-This page documents the built-in tools in the `execution-and-coding` group.
-Use these tools when you need local execution, coding-oriented file access, lightweight computation, or artifact generation inside the agent runtime.
 
 ## Tools On This Page
 
-- [`file`] - Generic local file reads, writes, listings, searches, and chunk edits.
-- [`shell`] - Shell command execution with background handles, runtime env passthrough, and PATH overrides.
-- [`python`] - Python code execution, file helpers, and package installation in the active runtime.
-- [`coding`] - Code-oriented reads, precise edits, grep, file discovery, and directory listing.
-- [`docker`] - Local Docker container, image, volume, and network management.
-- [`calculator`] - Exact arithmetic and small numeric helper functions.
-- [`reasoning`] - Internal `think` and `analyze` scratchpad tools for structured reasoning.
-- [`file_generation`] - JSON, CSV, PDF, DOCX, HTML, and text file export helpers.
-- [`visualization`] - Matplotlib-backed chart generation.
-- [`sleep`] - Intentional delays and pauses.
+- [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
+- [`shell`] - Shell commands with background handles, environment passthrough, and PATH prepends.
+- [`python`] - Python code execution and package installation.
+- [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
+- [`docker`] - Docker container, image, volume, and network management.
+- [`calculator`] - Exact arithmetic without code execution.
+- [`reasoning`] - `think` and `analyze` scratchpad steps.
+- [`file_generation`] - JSON, CSV, PDF, DOCX, HTML, text, and source-code file exports.
+- [`visualization`] - Matplotlib charts.
+- [`sleep`] - Intentional pauses.
 
 ## Common Setup Notes
 
-Most tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
-`docker` is marked `setup_type: special` and `requires_config` because Docker daemon access is privileged host control.
-`src/mindroom/api/integrations.py` currently has no dedicated integration endpoints for them because they are local-runtime tools rather than OAuth-backed services.
+None of these tools needs credentials or dashboard setup; `docker` needs Docker daemon access in the runtime that runs it.
+`docker`, `file_generation`, and `visualization` depend on the `docker`, `reportlab` and `python-docx`, and `matplotlib` packages, which install on first use unless [automatic dependency installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation) is disabled.
 
-Default worker eligibility comes from each toolkit’s catalog metadata, including [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/) and code-execution tools.
-The effective route also depends on runtime worker configuration.
-You can override the effective routed set with `defaults.worker_tools` or `agents.<name>.worker_tools`.
-When `worker_scope` is unset, static-runner calls select no worker-specific storage root; Docker and Kubernetes reuse an unscoped worker per agent and tenant/account.
-Per-call subprocess or forkserver isolation does not imply fresh worker storage.
-`worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
-`worker_scope` controls runtime reuse, not filesystem security.
-Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the deployment model, storage visibility rules, and scope tradeoffs.
+### Where these tools run
 
-When an agent has a canonical workspace root, MindRoom injects that workspace as `base_dir` for tools that expose a `base_dir` constructor field.
-In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-managed instead of something you set inline.
+`file`, `shell`, `python`, `coding`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
+Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
+Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
+`worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
+Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
-Those workspace-backed agents also receive the optional `mindroom_output_path` argument on eligible tools.
-Set it to a workspace-relative file path to save the full supported tool output to that file and return a compact receipt to the model.
-Paths inside a `.git` directory are refused.
-When `mindroom_output_path` is omitted, MindRoom automatically saves supported tool outputs larger than `defaults.tool_output_auto_save_threshold_bytes` to `mindroom_tool_outputs/` inside the workspace and returns a compact receipt with the path, size, format, threshold, and preview.
-The default automatic-save threshold is 50 KiB.
-Agents without a resolved workspace do not receive this argument.
-No extra configuration is required beyond that workspace root.
-`defaults.tool_output_auto_save_threshold_bytes` overrides the automatic-save threshold in `config.yaml`.
-`MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` overrides the default 64 MiB per-output write cap for explicit and automatic saves.
+### Workspace and tool output files
 
-Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
-That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, `python-docx`, and `matplotlib`.
+When an agent has a workspace, it is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
+`python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
+`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, these tools use the process's current directory.
+
+Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
+Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
+The path must name a file inside the workspace; absolute paths, `..`, paths that start with `~` or contain `$` or `%`, symlinks, and paths inside a `.git` directory are refused.
+Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, and a preview.
+`MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` sets the largest output either kind of save writes (default 64 MiB).
 
 ```yaml
 defaults:
-  worker_scope: user_agent
   tool_output_auto_save_threshold_bytes: 51200
 
 agents:
@@ -69,14 +57,10 @@ agents:
     memory_backend: file
     tools:
       - coding
-      - file
-      - python
       - shell:
           extra_env_passthrough:
             - GITHUB_TOKEN
-            - INTERNAL_API_*
           shell_path_prepend:
-            - /run/wrappers/bin
             - /opt/custom/bin
       - file_generation:
           output_directory: exports
@@ -84,41 +68,35 @@ agents:
           output_dir: charts
 ```
 
-In this example, `file_generation` saves into `exports` and `visualization` saves into `charts`, both inside the agent workspace.
+Here `file_generation` saves into `exports` and `visualization` into `charts`, both inside the agent workspace.
 
 ## [`file`]
 
-`file` is the generic local filesystem toolkit for read, write, list, search, delete, and chunk-based edits.
-
-### What It Does
-
-`file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths resolve against `base_dir` and follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` (the default) rejects escapes, and `unrestricted` allows any path the tool's process can reach.
-`save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path inside a `.git` directory, because MindRoom runs Git in knowledge checkouts that may sit inside agent workspaces.
-This is defense in depth: code-execution tools and tools that accept arbitrary output paths can still write there, so the dashboard's knowledge Git listing does not trust a checkout's config.
-`read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
-`search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
-`search_content()` searches text-file contents and skips paths matching `exclude_patterns`.
-MindRoom marks `file` as worker-routed by default, so it usually executes in the sandboxed worker runtime unless you override `worker_tools`.
+`file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
+Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): `workspace` (the default) rejects paths outside the workspace, and `unrestricted` allows any path the tool's process can reach.
+`save_file()`, `replace_file_chunk()`, and `delete_file()` refuse paths inside a `.git` directory.
+`read_file()` refuses files over `max_file_length` characters or `max_file_lines` lines and asks for `read_file_chunk()` instead.
+`search_files()` matches glob patterns; use `search_content()` to search inside text files.
+Prefer [`coding`](#coding) for code-editing agents.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
 | `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
 | `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
-| `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`. |
+| `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`; deletion is opt-in. |
 | `enable_list_files` | `boolean` | `no` | `true` | Enable `list_files()`. |
 | `enable_search_files` | `boolean` | `no` | `true` | Enable `search_files()`. |
+| `enable_search_content` | `boolean` | `no` | `true` | Enable `search_content()`. |
 | `enable_read_file_chunk` | `boolean` | `no` | `true` | Enable `read_file_chunk()`. |
 | `enable_replace_file_chunk` | `boolean` | `no` | `true` | Enable `replace_file_chunk()`. |
 | `expose_base_directory` | `boolean` | `no` | `false` | Include absolute file paths and `base_directory` in `search_files()` output. |
 | `max_file_length` | `number` | `no` | `10000000` | Maximum character count for `read_file()`. |
 | `max_file_lines` | `number` | `no` | `100000` | Maximum line count for `read_file()`. |
-| `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk helpers. |
-| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from content searches; `null` uses Agno defaults and `[]` disables exclusions. |
-| `all` | `boolean` | `no` | `false` | Enable every upstream `file` function at once. |
+| `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk functions. |
+| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from `search_content()`; `null` uses Agno's defaults and `[]` disables exclusions. |
+| `all` | `boolean` | `no` | `false` | Enable every `file` function. |
 
 ### Example
 
@@ -133,57 +111,45 @@ agents:
 
 ```python
 read_file("README.md")
-read_file_chunk("src/mindroom/tools/file.py", 0, 80)
+read_file_chunk("src/app.py", 0, 80)
 replace_file_chunk("docs/notes.md", 10, 12, "Updated text")
 list_files(directory="src")
 search_files("**/*.py")
-search_content("default_execution_target", directory="src/mindroom/tools")
+search_content("TODO", directory="src")
 save_file("temporary notes\n", "scratch/notes.txt")
 ```
 
-### Notes
-
-- `file` is the compatibility-friendly general file toolkit, but `coding` is a better default for code-editing agents.
-- `delete_file()` is disabled by default, so destructive access is opt-in.
-- `search_files()` matches filesystem globs; use `search_content()` to search inside text files.
-
 ## [`shell`]
 
-`shell` runs command strings or argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
+`shell` provides `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
+`run_shell_command()` accepts a shell command string or a list of argv strings.
+Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
+If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
+With `mindroom_output_path`, the complete output is saved to that file instead.
 
-### What It Does
+A command that exceeds `timeout` keeps running in the background, and the tool returns a `shell:...` handle.
+Poll it with `check_shell_command(handle)` and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
+A backgrounded command with `mindroom_output_path` saves its output when it finishes, and `check_shell_command()` then returns the file receipt.
+Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
+Records of finished commands are cleared about 10 minutes after they finish.
+For how stopping a response and worker restarts affect background commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
 
-`shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` accepts either a natural shell command string or a list of argv strings.
-Plain command strings and single-item argv lists that look shell-like run through `bash -c`, using the prepared execution environment without sourcing login profiles on every call.
-Pass `["bash", "-lc", "command"]` explicitly when login-shell initialization is needed.
-Explicit multi-item argv lists run directly without shell parsing.
-The `run_shell_command()` description also gives the model a short working method: sample large inputs instead of printing them, match filters against the extracted field, keep text file boundaries when combining their lines, edit only the requested span, and verify results before finishing.
-If the command exits within `timeout`, the tool returns the last `tail` lines of stdout.
-On non-zero exit, useful stdout is preserved together with stderr.
-Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
-If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
-Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it.
-MindRoom keeps up to 16 backgrounded shell processes per runner and automatically sweeps finished handle records after roughly 10 minutes.
-Unlike upstream Agno's simple shell wrapper, proxied MindRoom shell execution uses a deny-by-default env, supports explicit exported-process-env passthrough patterns, and supports PATH prepends.
-MindRoom marks `shell` as worker-routed by default, so it usually executes in the sandboxed worker runtime.
+Worker-routed `shell` sees only a small default environment; which variables pass by default and which `extra_env_passthrough` never passes are listed in [Shell environment and PATH](https://docs.mindroom.chat/deployment/sandbox-proxy/#shell-environment-and-path).
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `base_dir` | `text` | `no` | `null` | Runtime-managed working directory when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
-| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()` and the companion handle APIs. |
+| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`. |
 | `all` | `boolean` | `no` | `false` | Enable all shell functions. |
-| `extra_env_passthrough` | `text` | `no` | `null` | Extra exported process env var names or glob patterns exposed to sandboxed shell execution beyond the small default system env. This matches exported process env, not config-adjacent `.env` entries. |
-| `shell_path_prepend` | `text` | `no` | `null` | Extra PATH entries prepended for shell subprocesses only. |
+| `extra_env_passthrough` | `text` or `string[]` | `no` | `null` | Additional exported process environment variable names or glob patterns passed to shell commands; comma- or newline-separated in text form. It matches the exported process environment, not entries in the config's `.env` file. |
+| `shell_path_prepend` | `text` or `string[]` | `no` | `null` | Directories prepended to `PATH` for shell commands only, with duplicates removed; comma- or newline-separated in text form. |
 
 ### Example
 
 ```yaml
 agents:
   ops:
-    worker_scope: user_agent
     tools:
       - shell:
           extra_env_passthrough:
@@ -202,17 +168,10 @@ check_shell_command("shell:abcd1234")
 kill_shell_command("shell:abcd1234")
 ```
 
-### Notes
+### Per-workspace environment
 
-- `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries.
-  MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
-- Use explicit argv lists for commands that need exact argument boundaries.
-- In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
-- Background handles live in a worker-local shell supervisor process: they survive multiple requests to the same runner, but not runner or worker restarts.
-- `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
-- For per-workspace env that an agent can edit on the fly (PATH prefixes, `NPM_CONFIG_PREFIX`, `NPM_CONFIG_CACHE`, `PIP_INDEX_URL`, etc.), drop a `.mindroom/worker-env.sh` script in the workspace and `export` the values you want — see "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
-- MindRoom-owned env names are reasserted after the hook and cannot be redirected from `.mindroom/worker-env.sh`: `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, and `VIRTUAL_ENV`.
-- Example:
+An agent can set its own environment variables for worker-routed `shell` and `python`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
+The hook's behavior, limits, and the variables it cannot override are described in [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh).
 
 ```bash
 mkdir -p .mindroom .local/bin .cache/npm
@@ -225,23 +184,17 @@ EOF
 
 ## [`python`]
 
-`python` executes arbitrary Python code, runs Python files, exposes a few file helpers, and can install packages into the active interpreter environment.
-
-### What It Does
-
-`python` exposes `save_to_file_and_run()`, `run_python_code()`, `pip_install_package()`, `uv_pip_install_package()`, `run_python_file_return_variable()`, `read_file()`, and `list_files()`.
-The upstream toolkit can execute arbitrary Python code and warns that it should be used with human supervision.
-MindRoom wraps the installer functions so both `pip_install_package()` and `uv_pip_install_package()` install into the current interpreter environment through MindRoom's shared installer path.
-When `python` is worker-routed, that means package installs land in the active worker environment rather than the primary agent process.
-MindRoom marks `python` as worker-routed by default, so sandbox execution is the normal path when a sandbox backend is configured.
+`python` provides `run_python_code()`, `save_to_file_and_run()`, `run_python_file_return_variable()`, `pip_install_package()`, `uv_pip_install_package()`, `read_file()`, and `list_files()`.
+It runs arbitrary code, so its file functions are never confined to the workspace and it always has unrestricted file access; isolate it with `worker_tools`.
+Both install functions install into the interpreter running the tool, which is the worker's environment when `python` is worker-routed.
+Worker-routed code can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace home are not loaded.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
-| `safe_globals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_globals` dict parameter. |
-| `safe_locals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_locals` dict parameter. |
+| `safe_globals` | `text` | `no` | `null` | Passed to Agno's `safe_globals` constructor argument; meant for programmatic wiring rather than hand-written YAML. |
+| `safe_locals` | `text` | `no` | `null` | Passed to Agno's `safe_locals` constructor argument; meant for programmatic wiring rather than hand-written YAML. |
 
 ### Example
 
@@ -257,40 +210,16 @@ run_python_code("total = sum(i * i for i in range(10))", variable_to_return="tot
 save_to_file_and_run("scripts/demo.py", "result = 6 * 7", variable_to_return="result")
 run_python_file_return_variable("scripts/demo.py", variable_to_return="result")
 pip_install_package("rich")
-read_file("scripts/demo.py")
-list_files()
 ```
-
-### Notes
-
-- `python` runs arbitrary code, so its file helpers are never confined to `base_dir` and its [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is always `unrestricted`; isolate it with `worker_tools`.
-- `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
-- If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
-- Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
-- Worker-routed `python` code and background scripts can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace `HOME` are not loaded.
-- Workspace identity, worker cache, and virtualenv env names remain controlled by MindRoom, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
 
 ## [`coding`]
 
-`coding` is MindRoom's code-oriented local toolkit with line-numbered reads, precise text edits, grep, file discovery, and directory listing.
-
-### What It Does
-
-`coding` exposes `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
-`read_file()` adds line numbers and pagination hints when output is truncated.
-`edit_file()` requires the old text to match exactly one location and returns a unified diff after the edit.
-If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-normalized fuzzy matching.
-`grep()` prefers `rg` when available and falls back to Python regex search otherwise.
-`find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
-Path resolution follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` (the default) stays inside `base_dir`, and `unrestricted` allows outside paths.
-`write_file()` and `edit_file()` refuse any path inside a `.git` directory.
-MindRoom marks `coding` as worker-routed by default.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `base_dir` | `text` | `no` | `null` | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
+`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
+`read_file()` returns line-numbered output with pagination hints when a file is truncated.
+`edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`.
+`grep()` and `find_files()` skip hidden and gitignored paths, though `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
+Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
+`coding` has no configuration fields.
 
 ### Example
 
@@ -302,36 +231,26 @@ agents:
 ```
 
 ```python
-read_file("src/mindroom/tools/shell.py", offset=1, limit=120)
-grep("default_execution_target", path="src/mindroom/tools")
+read_file("src/app.py", offset=1, limit=120)
+grep("TODO", path="src")
 find_files("**/*.md", path="docs")
 edit_file("docs/example.md", "old text", "new text")
 write_file("scratch/todo.txt", "first line\nsecond line\n")
-ls("src/mindroom")
+ls("src")
 ```
-
-### Notes
-
-- Prefer `coding` over `file` for code-editing agents because it gives better read pagination, better search, and safer text replacement behavior.
-- Recursive `grep()` and `find_files()` filter hidden and gitignored paths automatically, but explicit file targets are not filtered.
-- `edit_file()` refuses ambiguous edits, so widen the surrounding context in `old_text` when a match is not unique.
 
 ## [`docker`]
 
-`docker` manages local containers, images, volumes, and networks through the Docker Python client.
-
-### What It Does
-
-`docker` exposes container operations such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
-It also exposes image, volume, and network operations including `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
-On startup, the toolkit checks common Docker socket locations and pings the Docker daemon.
-MindRoom marks `docker` as worker-routed by default because Docker daemon access is privileged host control.
-In hosted, multi-tenant, or default-unsandboxed deployments, Docker is unavailable unless a worker backend is configured or unsafe local execution is explicitly enabled for local development.
+`docker` manages containers with functions such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
+It also manages images, volumes, and networks with functions such as `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
+Docker daemon access is privileged host control, so `docker` runs in a worker by default, and the runtime that runs it needs a reachable Docker daemon or socket.
+`get_container_logs(stream=True)` returns a message asking for non-streaming mode instead of a live stream.
 
 ### Configuration
 
-Set `include_tools` to an optional list of Docker command functions to expose, or leave it empty to expose all Docker commands.
-The deployment must provide Docker daemon access to the selected worker runtime if Docker operations should be allowed.
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `include_tools` | `string[]` | `no` | `null` | Docker functions to expose; unset exposes all of them. |
 
 ### Example
 
@@ -344,67 +263,29 @@ agents:
 
 ```python
 list_containers()
-run_container("postgres:16", detach=True, environment={"POSTGRES_PASSWORD": "example"})
+run_container("postgres:16", name="postgres", detach=True, environment={"POSTGRES_PASSWORD": "example"})
 get_container_logs("postgres", tail=50)
-list_images()
-list_networks()
 ```
-
-### Notes
-
-- The runtime that executes `docker` must have access to a working Docker socket or daemon.
-- If you explicitly route `docker` through workers with `worker_tools`, the worker runtime also needs Docker access.
-- `get_container_logs(stream=True)` does not return a live stream payload to the model and instead returns a status message telling you to use non-streaming mode.
 
 ## [`calculator`]
 
-`calculator` provides exact small-math helper functions without requiring arbitrary code execution.
-
-### What It Does
-
-`calculator` exposes `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()`.
-Each function returns a small JSON payload describing the operation and result.
-`calculator` defaults to primary execution.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
-
-```yaml
-agents:
-  math:
-    tools:
-      - calculator
-```
+`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without the risk of `python`.
+Each function returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
+`factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error.
+`calculator` has no configuration fields.
 
 ```python
-add(2, 3)
 divide(22, 7)
 factorial(6)
 is_prime(97)
-square_root(144)
 ```
-
-### Notes
-
-- Errors such as division by zero, negative factorials, and negative square roots are returned as JSON error payloads instead of raising Python exceptions into the model.
-- `factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error payload before any computation.
-- Use `calculator` for exact arithmetic when you do not need the broader power and risk of `python`.
 
 ## [`reasoning`]
 
-`reasoning` gives an agent an internal scratchpad for structured `think` and `analyze` steps.
-
-### What It Does
-
-`reasoning` exposes `think()` and `analyze()`.
-Both functions write reasoning steps into run-scoped session state keyed by the current Agno `run_id`.
-`think()` records an intermediate thought plus an optional next action.
-`analyze()` records the result of a prior step and maps `next_action` onto `continue`, `validate`, or `final_answer`.
-These steps are intended for the agent's internal reasoning flow rather than user-visible output.
-`reasoning` defaults to primary execution.
+`reasoning` gives an agent a scratchpad for its own step-by-step reasoning rather than user-facing output.
+`think()` records an intermediate thought and an optional next action.
+`analyze()` records the result of a step and a `next_action` of `continue`, `validate`, or `final_answer`.
+Steps are kept for the current run, so later steps see earlier ones.
 
 ### Configuration
 
@@ -412,10 +293,10 @@ These steps are intended for the agent's internal reasoning flow rather than use
 | --- | --- | --- | --- | --- |
 | `enable_think` | `boolean` | `no` | `true` | Enable `think()`. |
 | `enable_analyze` | `boolean` | `no` | `true` | Enable `analyze()`. |
-| `add_instructions` | `boolean` | `no` | `false` | Inject the toolkit's reasoning instructions into the model prompt. |
-| `add_few_shot` | `boolean` | `no` | `false` | Append built-in or custom few-shot examples when instructions are being added. |
-| `instructions` | `text` | `no` | `null` | Replace the default reasoning instructions with your own text. |
-| `few_shot_examples` | `text` | `no` | `null` | Provide custom few-shot examples for the reasoning toolkit. |
+| `add_instructions` | `boolean` | `no` | `false` | Add the toolkit's reasoning instructions to the prompt. |
+| `add_few_shot` | `boolean` | `no` | `false` | Also add few-shot examples when instructions are added. |
+| `instructions` | `text` | `no` | `null` | Replace the default reasoning instructions entirely. |
+| `few_shot_examples` | `text` | `no` | `null` | Replace the built-in few-shot examples; used only when few-shot examples are added. |
 | `all` | `boolean` | `no` | `false` | Enable all reasoning functions. |
 
 ### Example
@@ -429,57 +310,32 @@ agents:
           add_few_shot: true
 ```
 
-```python
-think(
-    title="Plan the investigation",
-    thought="I should inspect the config and then compare it with the runtime behavior.",
-    action="Read the relevant files.",
-)
-analyze(
-    title="Evaluate the findings",
-    result="The config and runtime behavior match.",
-    analysis="I have enough information to answer clearly.",
-    next_action="final_answer",
-)
-```
-
-### Notes
-
-- `instructions` replaces the default reasoning prompt text entirely.
-- `few_shot_examples` only matters when few-shot examples are actually being included.
-- The stored reasoning steps live in session state for the current run, which lets later steps see the full scratchpad history.
-
 ## [`file_generation`]
 
-`file_generation` creates export artifacts as JSON, CSV, PDF, DOCX, HTML, plain text, or source-code files and can optionally save them to disk.
+`file_generation` provides `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
+Each function returns the generated file in its tool result.
+Filenames are generated when omitted, and a missing extension is added for the export type.
+`generate_json_file()` accepts dicts, lists, or strings, and wraps a string that is not valid JSON.
+PDF and DOCX generation are disabled when `reportlab` or `python-docx` is unavailable, even if enabled in config.
 
-### What It Does
-
-`file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
-Each function returns a `ToolResult` with a generated file artifact attached.
-If `output_directory` is set, the generated file is also saved in the agent workspace and the result message includes that file path.
-`output_directory` is relative to the agent workspace and cannot leave it.
-If `output_directory` is unset and `save_files` is `false`, the file exists only in the tool result payload.
-If `save_files` is `true` without `output_directory`, the toolkit saves generated files in the agent workspace root.
-Saving needs an agent workspace; without one, the files exist only in the tool result payload.
-Saved files replace any existing workspace file of the same name, and a link at that name is replaced rather than followed.
-PDF generation is automatically disabled when `reportlab` is unavailable, even if `enable_pdf_generation` is left on.
-DOCX generation is automatically disabled when `python-docx` is unavailable, even if `enable_docx_generation` is left on.
-`file_generation` defaults to primary execution.
+Files are also saved to disk when `output_directory` is set or `save_files` is `true`.
+Saved files go into `output_directory` inside the agent workspace, or the workspace root when only `save_files` is set, and overwrite files of the same name.
+`output_directory` must be a relative path that stays inside the workspace.
+Agents without a workspace cannot save generated files; the files exist only in the tool result.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `output_directory` | `text` | `no` | `null` | Directory inside the agent workspace where generated files are saved. |
+| `save_files` | `boolean` | `no` | `false` | Save generated files; when `output_directory` is unset, they go to the workspace root. |
 | `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
 | `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
-| `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()` when `reportlab` is available. |
-| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `generate_docx_file()` when `python-docx` is available. |
+| `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()`. |
+| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `generate_docx_file()`. |
 | `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
 | `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
-| `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()` for source-file exports. |
-| `save_files` | `boolean` | `no` | `false` | Save generated files in the agent workspace; when `output_directory` is unset, use the workspace root. |
+| `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()`. |
 | `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
 ### Example
@@ -490,37 +346,23 @@ agents:
     tools:
       - file_generation:
           output_directory: exports
-          enable_pdf_generation: true
 ```
 
 ```python
-generate_json_file({"status": "ok", "items": 3}, filename="summary.json")
 generate_csv_file([{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
 generate_pdf_file("Quarterly summary", filename="report.pdf", title="Q1 Report")
 generate_docx_file("Quarterly summary", filename="report.docx", title="Q1 Report")
-generate_html_file("<h1>Quarterly summary</h1>", filename="report.html")
-generate_text_file("Plain text export", filename="notes.txt")
 ```
-
-### Notes
-
-- Filenames are auto-generated when omitted, and missing file extensions are appended automatically for the matching export type.
-- `generate_json_file()` accepts dicts, lists, or strings, and plain strings are wrapped into JSON when they are not already valid JSON.
-- Set `output_directory` to persist artifacts; later shell or file-tool access requires that destination to be visible in the runtime executing those tools.
 
 ## [`visualization`]
 
-`visualization` creates chart images with matplotlib and saves them in an output directory inside the agent workspace.
-
-### What It Does
-
-`visualization` exposes `create_bar_chart()`, `create_line_chart()`, `create_pie_chart()`, `create_scatter_plot()`, and `create_histogram()`.
-The upstream toolkit switches matplotlib to the non-interactive `Agg` backend.
-Each chart function accepts dict-like data, list-based data, or JSON strings, normalizes the data, saves a PNG image, and returns a JSON payload with the file path and status.
-A chart's `filename` must be a plain file name; when it is omitted, the chart is named after its type and numbered from the count of files already in `output_dir`, such as `bar_chart_3.png`.
-Charts replace an existing file of the same name without following links, and `output_dir` is created inside the workspace when it is missing.
+`visualization` provides `create_bar_chart()`, `create_line_chart()`, `create_pie_chart()`, `create_scatter_plot()`, and `create_histogram()`.
+Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scatter plots take x and y lists, and histograms take a list of numbers.
+Each function saves a PNG in `output_dir` inside the agent workspace and returns the file path.
+A chart's `filename` must be a plain file name; when omitted, the chart is named after its type and numbered, such as `bar_chart_3.png`.
+Charts overwrite files of the same name, and `output_dir` is created when missing.
 Agents without a workspace cannot save charts.
-`visualization` defaults to primary execution.
+Because charts are in the workspace, `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
 
 ### Configuration
 
@@ -536,68 +378,24 @@ Agents without a workspace cannot save charts.
 
 ### Example
 
-```yaml
-agents:
-  analyst:
-    tools:
-      - visualization:
-          output_dir: charts
-          enable_create_pie_chart: false
-```
-
 ```python
 create_bar_chart({"Mon": 12, "Tue": 18, "Wed": 9}, title="Requests per day")
-create_line_chart({"Jan": 3, "Feb": 8, "Mar": 13}, title="Growth")
-create_scatter_plot(
-    x=[1, 2, 3],
-    y=[2, 5, 7],
-    title="Experiment results",
-)
+create_scatter_plot(x=[1, 2, 3], y=[2, 5, 7], title="Experiment results")
 create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 ```
 
-### Notes
-
-- Charts land in the agent workspace, so `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
-- `matplotlib` must be importable in the runtime that executes the tool.
-
 ## [`sleep`]
 
-`sleep` is a minimal delay utility for workflows that need an intentional pause between steps.
-
-### What It Does
-
-`sleep` exposes a single `sleep()` function that waits for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
-Other durations return an error message without waiting.
-`sleep` defaults to primary execution.
-
-### Configuration
+`sleep()` waits for 0 to 300 seconds and returns a confirmation; other durations return an error without waiting.
+The response stays open until the delay ends or the response is stopped.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `enable_sleep` | `boolean` | `no` | `true` | Enable `sleep()`. |
 | `all` | `boolean` | `no` | `false` | Enable all sleep functions. |
 
-### Example
-
-```yaml
-agents:
-  scheduler_helper:
-    tools:
-      - sleep
-```
-
-```python
-sleep(5)
-```
-
-### Notes
-
-- `sleep` is useful for deliberate polling loops or staged workflows; the wait holds no thread, but the response stays open until the delay ends or the response is stopped.
-- If you explicitly route `sleep` through workers, the delay occurs in the worker runtime instead of the primary process.
-
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)
 - [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)

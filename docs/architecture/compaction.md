@@ -71,11 +71,9 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - After any redaction change, the scope's metadata seen ids are dropped and the derived ids follow the remaining history, so removed messages return as unseen thread context unless a stale whole-row write restores those metadata ids (see above).
 - Redaction keeps the archived runs it removes as content-free tombstones, so a stale save of such a run is pruned like any other archived run; only conversation deletion removes archive rows.
 - State written by releases before the archive is adopted once, when the conversation database opens and before any response loads it; the archive tables' presence marks it done.
-- Downgrading to a release without the archive is unsupported: older releases neither maintain nor redact the archive, and compaction state they write is never adopted again.
+
 - Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
 
 The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts, and `tests/test_compaction_fuzz.py` checks the archive invariants over generated histories with interrupted chunks, stale session writes, and redactions.
 
-An oversized saved summary requires a model with a larger context window or a smaller current prompt.
-This can happen after switching models or when system instructions and the current message leave too little room for history.
-Preparation does not silently omit or truncate the saved summary.
+See [Context Window](../configuration/history.md#context-window).

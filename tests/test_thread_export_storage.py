@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tracemalloc
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -83,11 +84,12 @@ def test_clear_thread_export_root_removes_only_owned_content(tmp_path: Path) -> 
     note = output_dir / "operator-note.txt"
     note.write_text("keep", encoding="utf-8")
 
-    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+    assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is True
 
     assert not room_dir.exists()
     assert (output_dir / _ROOT_MARKER_FILENAME).exists()
     assert note.read_text(encoding="utf-8") == "keep"
+    assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
 
     prepare_export_root(output_dir, trusted_root=tmp_path)
 
@@ -95,12 +97,14 @@ def test_clear_thread_export_root_removes_only_owned_content(tmp_path: Path) -> 
 def test_clear_thread_export_root_retains_empty_owned_directory(
     tmp_path: Path,
 ) -> None:
-    """Cleanup retains the owned root so later exports can reuse it safely."""
+    """Cleanup retains the owned root so later exports can reuse it safely, and an empty one costs no fsync."""
     output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
     _mark_export_root(output_dir)
 
-    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+    with patch.object(thread_export_storage, "_fsync_directory_fd") as fsync:
+        assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
 
+    fsync.assert_not_called()
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
 
 
@@ -580,8 +584,6 @@ def test_thread_above_the_read_cap_stays_indexed_and_is_not_rewritten(
 ) -> None:
     """A thread file above the read cap is still written, indexed from its header, and left alone while unchanged."""
     monkeypatch.setattr(thread_export_storage, "MAX_READ_BYTES", 4_096)
-    # `_read_text_at` binds the cap as its default, so it is lowered there too.
-    monkeypatch.setitem(thread_export_storage._read_text_at.__kwdefaults__, "max_bytes", 4_096)
     output_dir = tmp_path / "thread_exports"
     room = _room()
 
@@ -611,6 +613,57 @@ def test_thread_above_the_read_cap_stays_indexed_and_is_not_rewritten(
     with patch.object(thread_export_storage, "_atomic_write_at", side_effect=AssertionError("rewrote an export")):
         assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")) is False
         write_room_index(output_dir, room)
+
+
+def test_thread_whose_file_passes_the_cap_fails_and_keeps_its_previous_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each emoji takes ten bytes of YAML, so a thread the message guard admits can still be refused for its file size."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+
+    def payload(body: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "thread": {"id": "$emoji:localhost", "source": "matrix"},
+            "messages": [{"event_id": "$e:localhost", "sender": "@user:localhost", "body": body}],
+        }
+
+    assert write_thread_payload(output_dir, room, "$emoji:localhost", payload("short")) is True
+    path = output_dir / "lobby" / _thread_filename("$emoji:localhost")
+    previous = path.read_bytes()
+    monkeypatch.setattr(thread_export_storage, "_MAX_THREAD_FILE_BYTES", 4_096)
+
+    # Four kilobytes of message JSON become ten kilobytes of YAML.
+    with pytest.raises(RuntimeError, match="too large to export"):
+        write_thread_payload(output_dir, room, "$emoji:localhost", payload("\U0001f600" * 1_000))
+    assert path.read_bytes() == previous
+
+
+def test_unchanged_thread_check_holds_one_copy_of_each_export(tmp_path: Path) -> None:
+    """Deciding that a large thread is unchanged holds its new and existing exports, not stripped copies of both."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+
+    def payload(exported_at: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "thread": {"id": "$large:localhost", "source": "matrix", "exported_at": exported_at, "message_count": 1},
+            "messages": [{"event_id": "$e:localhost", "sender": "@user:localhost", "body": "x" * (4 << 20)}],
+        }
+
+    assert write_thread_payload(output_dir, room, "$large:localhost", payload("2026-10-01T00:00:00.123456+00:00"))
+    size = (output_dir / "lobby" / _thread_filename("$large:localhost")).stat().st_size
+    unchanged = payload("2026-10-02T00:00:00+00:00")
+    tracemalloc.start()
+    try:
+        assert write_thread_payload(output_dir, room, "$large:localhost", unchanged) is False
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # The new export, the existing file, and the read's own buffers stay below four copies.
+    assert peak < 4 * size
 
 
 def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
@@ -712,6 +765,34 @@ def test_room_index_rebuild_reads_its_newest_threads_within_a_budget(
         assert indexed() == (["$thread-1:localhost", "$thread-2:localhost"], [])
 
 
+@pytest.mark.parametrize("planted", ["oversized", "deeply-nested"])
+def test_planted_room_index_too_costly_to_decode_is_rebuilt(tmp_path: Path, planted: str) -> None:
+    """Worker code can replace index.json, so one too large or too deep to decode cheaply is rebuilt instead of trusted."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    payload = {"version": 1, "thread": {"id": "$thread:localhost", "source": "matrix"}, "messages": []}
+    write_thread_payload(output_dir, room, "$thread:localhost", payload)
+    write_room_index(output_dir, room)
+    index = output_dir / "lobby" / "index.json"
+    rebuilt = index.read_bytes()
+    if planted == "oversized":
+        # Its filename set still matches, so only its size keeps an unchanged pass from trusting it.
+        index.write_bytes(rebuilt + b" " * thread_export_storage._MAX_ROOM_INDEX_JSON_BYTES)
+    else:
+        index.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+
+    tracemalloc.start()
+    try:
+        write_room_index(output_dir, room, thread_files_changed=False)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert index.read_bytes() == rebuilt
+    # Neither the drift check nor the rewrite reads the oversized file.
+    assert peak < thread_export_storage._MAX_ROOM_INDEX_JSON_BYTES
+
+
 @pytest.mark.parametrize("filename", ["marker", "index"])
 def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: str) -> None:
     """A FIFO agent code plants where an export file belongs is refused instead of blocking the primary."""
@@ -722,6 +803,6 @@ def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: st
             (tmp_path / "marker").rename(tmp_path / thread_export_storage._ROOT_MARKER_FILENAME)
             assert thread_export_storage._has_valid_export_root_marker(root_fd) is False
         else:
-            assert thread_export_storage._read_text_at(root_fd, "index.yaml") is None
+            assert thread_export_storage._read_bytes_at(root_fd, "index.yaml", max_bytes=1_024) is None
     finally:
         os.close(root_fd)

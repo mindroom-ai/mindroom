@@ -41,7 +41,7 @@ STOP and stale approval failure decisions query exact durable identity; prepared
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
-`TurnStore` owns source-redaction tombstoning, and removes redacted persisted replay before the next response starts in the affected conversation.
+`TurnStore` owns source-redaction tombstoning and answers which events a conversation's history derives from are redacted; each response removes that history from the scope it opens before using it.
 The projection learns about a redaction through journal admission; the Matrix callback records the exact tombstone and joins it to retained physical revision owners.
 A redaction naming an event whose turn or revision owner is recorded in another room changes nothing.
 When no turn records a room for the event, the tombstone is written only if the journal admitted the event in the redaction's room.
@@ -82,13 +82,16 @@ Matrix callback
 Orderly shutdown closes response and journal callback admission before withdrawing runtime capabilities, and tags both sets of owners before cancelling them.
 The source-quiescence request stays latched across supervisor retries and late startup completion, so transport lifecycle notifications cannot reopen admission.
 Interrupted callbacks remain pending for exact replay, including edited messages whose revision has not reached a final response.
-A crash leaves the same pending state as orderly shutdown, and in both the interrupted reply stays visibly streaming until replay adopts it and answers again in place.
-When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and gives the new attempt that account in a transient instruction not to repeat calls that may already have taken effect.
-Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a call started just before the stop may not have reached Matrix, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the instruction.
-The account never enters the conversation history later turns read.
-Instead every streamed edit of the new attempt carries the stopped attempts' tool calls in `io.mindroom.earlier_tool_trace`, so a crash or shutdown during the new attempt passes them on again; their text is not carried, and a stop that leaves a terminal status, such as a user stop, does not carry them.
-A recovered reply that cannot be read back, or that shows no work and has not reached a terminal status, instead gets an instruction warning that side effects may already have happened.
-A replayed turn whose earlier attempt left no reply to adopt, such as a silent scheduled run or a turn whose placeholder was never sent, gets no instruction.
+An entity replacement cancels its work the same way, because the replacement runtime replays it.
+A crash leaves the same pending state as orderly shutdown and entity replacement, and in all three the interrupted reply stays visibly streaming until replay adopts it.
+An approved run cut short by any of them ends its cards and releases its approval continuation without settling its sources, unless a FINAL is already owed, so replay adopts its reply too.
+When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix, and the new attempt streams below them after `**[Response interrupted by service restart]**`, numbering its tool calls after the stopped ones.
+A resumed reply always streams, because a blocking answer would replace what it showed.
+The new attempt's prompt carries an account of what the stopped attempt showed, separating finished tool calls from those still running, and is saved with the turn, so later turns keep it in history.
+The account names no calls as forbidden: with it in the current message, models left side-effecting calls alone while still re-running a read-only call whose shortened result was not enough.
+Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a call started just before the stop may not have reached Matrix, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the account.
+A recovered reply that cannot be read back, or that shows no work and has not reached a terminal status, instead gets an account warning that side effects may already have happened.
+A replayed turn whose earlier attempt left no reply to adopt, such as a silent scheduled run or a turn whose placeholder was never sent, gets no account.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
 Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
 Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
@@ -294,7 +297,7 @@ It no longer sends messages, runs AI, or writes persistence state.
 Command handling now records terminal outcomes through `TurnStore` as well.
 Potentially mutating chat commands use an at-most-once execution-attempt journal: `TurnStore` records that execution is about to begin before the handler runs, then records the exact result before visible delivery.
 Recovery re-delivers a recorded result, while an interrupted execution attempt without a result is not rerun and instead produces an explicit uncertain-outcome response that requires the requester to inspect state before retrying.
-Startup loads turn truth without pruning, repairs ledger records for answers the outbox proves were delivered, replays turn-backed journal events, then applies age and count cleanup while retaining pending redaction work, replayable incomplete turns, and every group referenced by an unsettled journal row.
+Startup loads turn truth without pruning, repairs ledger records for answers the outbox proves were delivered, replays turn-backed journal events, then applies age and count cleanup while retaining conversation redaction tombstones, replayable incomplete turns, and every group referenced by an unsettled journal row.
 Recovery and its post-recovery ledger cleanup run under one background retry owner, independently of bot startup and Matrix sync lifecycle progress.
 Multi-purpose callbacks durably claim one application consumer before that consumer's side effects, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
 Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
@@ -310,14 +313,13 @@ The owning turn's typed physical revision map retains edit ordering independentl
 One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
 A drain asked to rebuild more than eight times in a row drops the edit with an error log instead of holding the room's event lane.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
-A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
-Replacement recovery uses the registered room directly, while next-startup cleanup discovers acknowledged INITIAL deliveries without an owning FINAL in the current membership epoch.
+An interrupted turn stays pending, and replay continues its reply in place.
+An interrupted edit regeneration also stays pending but starts over, because a newer edit may have replaced the prompt its stopped attempt answered.
+Startup cleanup finishes only orphaned streams: acknowledged INITIAL deliveries without an owning FINAL in the current membership epoch whose sources no longer replay.
 Discovery pages the existing delivery outbox, including acknowledgements made before turn attribution, and an empty inventory requires no Matrix history calls.
-Recovery reads each owned response and its complete same-sender replacement history by exact event ID; unreadable content remains untouched for retry.
-Repair and relay publication use the same per-delivery owner as normal Matrix delivery, with ownership checked inside bounded room tasks and again before mutation.
-Before publishing a continuation, recovery reads the complete candidate thread to check for later human work and an already-published continuation.
-An interrupted edit revision remains uncommitted for re-drive.
-Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude synthetic continuation.
+Cleanup reads each owned response and its complete same-sender replacement history by exact event ID; unreadable content remains untouched for retry.
+Repair uses the same per-delivery owner as normal Matrix delivery, with ownership checked inside bounded room tasks and again before mutation.
+Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude cleanup.
 Same-requester supersession preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
 When every current source is deleted and no FINAL owns the response, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
 Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.
@@ -354,24 +356,26 @@ Import publication waits for conflicting provisional writes, rechecks the reques
 An occupied recovered physical source remains authoritative, while any collision confined to a recovered discovery alias declines the historical import.
 `TurnStore` immediately writes an imported record into the ledger, so every later load uses journal authority.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
-Conversation and pending-cleanup lookups use indexes derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.
+Conversation lookups use an index derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.
 Each alias publication, committed replacement, and rollback updates those indexes under the same lock as the primary record map; startup and retention rebuild them from that map.
 The indexes retain references to existing records and add no durable schema or separate recovery state.
-Preparation still scales with the selected conversation's retained records and outstanding cleanup work.
+Preparation still scales with the selected conversation's retained records.
 Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
 One process must own one agent's records; the database merges delivery acknowledgements with ledger writes for that owner, without coordinating independent runtimes against the same storage path.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned in the same transaction that withholds the redacted body, and every projection install path consults that tombstone table.
-A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions of events the journal admitted in that room remain bounded ledger barriers without storage probes.
 Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
-Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, rolls compaction back to just before the first archived run that consumed the event, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Before a response starts, `TurnStore` sanitizes coalesced prompt metadata used by later edit regeneration.
+When the shared turn driver then opens a history scope, it checks every event that history derives from (each top-level run's sources, consumed history, revisions and reply, and the compaction archive) against the room's journal tombstones and this conversation's ledger tombstones, and removes the first run that read, answered, or wrote a redacted one together with its causal suffix, rolling compaction back to just before the first archived run that consumed it.
+Nothing durable records that cleanup is owed: the check derives it at every response, so a crash between tombstone and cleanup, or a redacted event no turn owns, needs no recovery path.
 Physical edits register on the owning turn before prompt retention or generation, including edits consumed only as another turn's context, without becoming source indexes or completion aliases.
 Exact edit tombstones invalidate those revisions while preserving the original source, completed response identity, and any unrelated surviving revision.
 Consumed-history metadata retains physical revision IDs through compaction; only legacy records lacking that provenance use retained source ownership to invalidate an ambiguous compacted summary.
-Registration, tombstone reconciliation, and cleanup share ledger conflict keys, and unsettled physical edits or pending cleanup pin their owners through retention.
-Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts, and cleanup acknowledgement occurs only after all affected scopes are durably clean.
-The revision map remains ledger-owned; model runs carry consumption provenance without mutable cleanup debt.
+Registration and tombstone reconciliation share ledger conflict keys, and unsettled physical edits pin their owners through retention.
+Retention also keeps every turn record that carries a redaction tombstone for a conversation, because history cleanup derives from it once a departure has dropped the journal's tombstone or for history older than the journal.
+Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts.
+The revision map remains ledger-owned; model runs carry consumption provenance.
 Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
 Successful edit generation freezes its selected turn record in the final outbox result before sending; internal prompts and ledger metadata never enter the Matrix payload.
 A winning acknowledgement under active delivery ownership commits that exact historical consumption proof with the canonical response identity, merging current tombstones, STOP, and newer edit facts in the same transaction.
@@ -381,8 +385,8 @@ Coalesced regeneration refills invalidated slots through strict paginated reads 
 An exact principal/room/source projection tombstone proves canonical deletion during refill, allowing the edit owner to reconcile cleanup and rebuild surviving sources before the room FIFO reaches the deletion callback; missing unproven data still blocks generation.
 The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.
 The source-preparation callback receives the actual request history both at early admission and after the final locked history and payload refresh, so context-only revisions are registered before consumption.
-Physical snapshot validation follows awaited cleanup and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
-Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
+Physical snapshot validation follows awaited tombstone reconciliation and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
+Redacted replay may remain in local session storage until the history scope holding it next serves a response; responses do not receive it, while approval continuations, manual compaction, and voice-call turns do not run the check.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts

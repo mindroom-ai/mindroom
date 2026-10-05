@@ -1,17 +1,20 @@
 ---
-icon: lucide/file-clock
+icon: simple/python
 ---
 
 # Background Python Scripts
 
-The `script` tool lets an agent launch and supervise a Python program after the initiating chat turn has ended.
-The program keeps a requester-and-agent-scoped execution identity and can call a bounded subset of the agent's registered tools through MindRoom's normal hooks, approval rules, worker routing, and audit path.
-Use it for watchers, polling loops, and other small automations that should wake an agent only when something changes.
+The `script` tool lets an agent start a Python program that keeps running after the chat turn ends.
+Use it for watchers, polling loops, and other small automations that should wake the agent only when something changes.
+The script can call a chosen subset of the agent's tools through the `MindRoomTools` SDK, with the same hooks, approval rules, worker routing, and audit trail as an ordinary tool call.
+
+Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell`.
+`allowed_tools` limits only calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script.
 
 ## Enable The Tool
 
-Configure the `script` tool on the agent that will own the process.
-The following complete agent example lets a watcher read a URL and send one intentional Matrix self-trigger when the value changes.
+Add `script` to the agent that will own the process, together with the toolkits the script may call.
+This example lets a watcher read a URL and send a Matrix message to its own agent when the value changes.
 
 ```yaml
 models:
@@ -41,23 +44,30 @@ defaults:
   tools: []
 ```
 
-`allowed_tools` contains toolkit names, not function names.
-Unknown or ineligible toolkit names, including `*`, reject the launch with a clear error.
-It limits calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script source.
-Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell` inside its selected execution runtime.
-MindRoom captures the configured `allowed_tools` value when the script launches.
-A non-empty launch-time list restricts the run's grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
-An empty launch-time list captures the agent's full background-eligible callable surface but preapproves none of it for background use.
-A later `allowed_tools` expansion cannot widen a running script's unattended approval authority; operator-authored `tool_approval` rules always apply live.
-The `browser`, `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, and `skill_manage` toolkits are never available to background scripts, even when they are present on the agent.
-Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
-Functions that declare their own confirmation requirement still require Matrix approval.
-The `claude_agent`, `config_manager`, and `scheduler` toolkits are never preapproved for background scripts.
+Scripts also need a worker backend or explicit local execution; see [Worker And Network Requirements](#worker-and-network-requirements).
 
-The limits are captured with each run.
-`max_concurrent_runs` defaults to `3` for one requester and agent.
-`max_tool_calls_per_minute` defaults to `30` and counts newly claimed logical calls rather than receipt polling or an identical retry.
-`max_runtime_hours` defaults to `24`, must be positive and finite, and is enforced by lifecycle reconciliation and an independent worker-supervisor deadline that remains active while the primary is offline.
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `allowed_tools` | `[]` | Toolkit names (not function names) the script may call through `MindRoomTools` |
+| `max_concurrent_runs` | `3` | Maximum unfinished runs for one requester and agent, at least `1` |
+| `max_tool_calls_per_minute` | `30` | Maximum new SDK calls per minute for one run, at least `1`; automatic SDK retries and status polling do not count |
+| `max_runtime_hours` | `24` | Maximum lifetime of one run in hours, positive and finite; the deadline holds even while the primary runtime is offline |
+
+Each run keeps the limits and `allowed_tools` value in effect when it started.
+
+### Which tools a script can call and when it needs approval
+
+- A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval.
+- An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
+- Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
+- The `browser`, `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, and `skill_manage` toolkits are never available to scripts, even when the agent has them.
+- Listing `claude_agent`, `config_manager`, or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
+- Operator [`tool_approval`](../tool-approval.md) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
+- Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
+
+Access is checked again on every call.
+Removing a toolkit or function from the agent, or the requester losing access to the room or agent, takes effect immediately without restarting the script.
+Adding toolkits later, including expanding `allowed_tools`, never gives a running script new unapproved access.
 
 ## Control Functions
 
@@ -76,29 +86,21 @@ cancel_script(run_id: str, force: bool = False)
 list_scripts(include_finished: bool = True)
 ```
 
-`start_script` requires exactly one of `source` or `path`.
-`source` accepts inline Python source.
-`path` must be relative to the agent workspace, and MindRoom snapshots the file before launch so later edits do not change the running program.
-Source is limited to 128 KiB.
-`name` is an optional short label shown in status and list results.
-On Kubernetes, `resource_profile` selects one of three administrator-bounded profiles.
-Omitting it uses the configured default.
-Call `get_script_resource_profiles` first to see the live default and exact CPU and memory requests and limits.
-The selected profile and its exact quantities are also returned by start, status, and list operations.
-An explicit profile fails when the active worker backend cannot enforce resource profiles.
-
-`get_script` returns durable run state plus the supervisor's recent process output when it is available.
-`list_scripts` returns only runs owned by the current requester and agent.
-`cancel_script` revokes the tool capability before it signals the process.
-Normal cancellation requests graceful termination, waits for a short bounded grace period, escalates to a force kill when needed, and publishes `cancelled` only after process exit is confirmed.
-`cancel_script(..., force=True)` skips the graceful signal, but it still confirms the process outcome before claiming cancellation completed.
-If signalling or confirmation is temporarily unavailable, the cancellation intent remains durable and later status or reconciliation passes retry it.
-
-Control responses never expose the capability token or its hash.
+- `start_script` requires exactly one of `source` (inline Python) or `path` (relative to the agent workspace), limited to 128 KiB.
+  A `path` file is copied at launch, so later edits do not change the running program.
+  `name` is an optional label shown in status and list results.
+- `resource_profile` selects a Kubernetes CPU and memory profile; omitting it uses the configured default.
+  `get_script_resource_profiles` shows the default and each profile's exact requests and limits, and start, status, and list results report the selected profile.
+  An explicit profile fails on a backend that cannot enforce resource profiles.
+  Operators define the profiles as described in [Kubernetes deployment](../deployment/kubernetes.md) and the [environment variable reference](../configuration/index.md#workers-and-background-scripts).
+- `get_script` returns the run state plus recent process output when available.
+- `list_scripts` returns only runs owned by the current requester and agent.
+- `cancel_script` immediately revokes the script's tool access, requests graceful termination, force-kills after a short grace period, and reports `cancelled` once the process has exited.
+  `force=True` kills the process without the graceful step.
 
 ## Calling Agent Tools From A Script
 
-The worker environment includes the `mindroom.script_sdk` client, whose implementation uses no third-party imports of its own.
+The worker environment includes the `mindroom.script_sdk` client, which reads its connection settings from the environment the launcher provides.
 Create one `MindRoomTools` instance and call tools by toolkit name, function name, and JSON-compatible keyword arguments.
 
 ```python
@@ -109,27 +111,20 @@ result = tools.call("website", "read_url", url="https://example.org/status.txt")
 print(result, flush=True)
 ```
 
-`MindRoomTools.call(toolkit_name, function_name, **arguments)` is blocking.
-It submits one logical call with a stable generated call ID and argument digest, then polls only that receipt until it is terminal.
-Transport retries never submit the same side effect a second time.
+`MindRoomTools.call(toolkit_name, function_name, **arguments)` blocks until the call finishes and returns a JSON-compatible value.
 Arguments must have an unambiguous strict-JSON representation.
-Successful results are returned as JSON-compatible Python values and are bounded before they cross the gateway.
+A result larger than about 64 KiB fails the call with kind `result_too_large`.
+Calls within one run execute one at a time, in order.
+The SDK retries transient failures automatically without repeating the side effect.
 
-Framework and terminal tool failures raise `MindRoomToolCallError`.
-Operator approval denial raises a non-retryable `MindRoomToolCallError` with kind `approval_denied`.
-The exception exposes `kind`, `retryable`, and `call_id` fields so a script can log or stop predictably.
-An `indeterminate` call means MindRoom accepted the call but cannot prove whether the side effect completed, so the script must not automatically repeat it.
-
-The launcher injects the run ID, gateway URL, and a path to a short-lived capability file.
-Use the SDK instead of reading or forwarding those values directly.
-MindRoom stores only a hash of the capability in durable state and removes the raw file during terminal cleanup.
+Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
+A denied approval raises a non-retryable error with kind `approval_denied`.
+An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
 
 ## Complete Watcher Example
 
-This watcher polls a controlled text endpoint and wakes the same Matrix agent once per observed value change.
-Replace the URL and configured agent name with values for your deployment.
-Start this watcher from a human-requester turn: background calls retain that requester, and Matrix self-messaging requires a human requester.
-For a fresh self-run from another requester context, use `run_subagent` in the agent runtime when self-delegation is allowed; the background-script gateway does not grant delegation tools.
+This watcher polls a text endpoint and wakes the same agent once per observed value change.
+Replace the URL and agent name with values for your deployment.
 
 ```python
 from __future__ import annotations
@@ -168,47 +163,22 @@ if __name__ == "__main__":
     main()
 ```
 
-`matrix_message` starts an agent turn only when `recipient` names an available agent or team.
-Set it to your own agent name for an intentional self-trigger like the example above.
-The message uses the current conversation by default.
-Make the watcher edge-triggered, persist or update its observed value before sending, and avoid reacting to its own unchanged output.
-
-The script inherits the original room, thread, requester, and agent execution identity, so omitting `room_id` sends through that authorized conversation context.
-Normal Matrix authorization is still enforced when a script supplies another room.
-
-## Grants, Approval, And Revocation
-
-MindRoom captures the run's permitted toolkit-and-function pairs and unattended approval authority at launch.
-Every call intersects that launch grant with the agent's current live tool surface, so removing a tool or function revokes it without restarting the script.
-Every call also rechecks the requester's current room access and agent reply authorization, including joined-room membership grants.
-Adding toolkits or functions to the live surface, including through a later `allowed_tools` expansion, does not grant a running script new unattended authority.
-Authorization changes, agent removal, `script` tool removal, and requester-isolation changes durably revoke affected runs before process reconciliation.
-
-Background calls use the same tool hooks, approval scripts, function-authored confirmation, execution identity, worker routing, result normalization, and audit events as an ordinary agent tool call.
-An approval card is tied to the exact run, call ID, function, arguments, requester, room, and thread.
-Only the original requester can decide it.
-Cancellation, expiry, agent removal, and orphan recovery settle pending cards without authorizing the call.
+The script runs in the room, thread, and requester context it was started from, so omitting `room_id` sends to that conversation, and sending to another room still requires normal Matrix authorization.
+Setting `recipient` to the agent's own name starts a new turn for that agent; see [Matrix Message](matrix-message.md#agent-conversations) for recipient rules.
+Self-messaging requires a human requester, so start a self-triggering watcher from a turn a person started.
+Make the watcher edge-triggered: update its observed value before sending, and never react to its own unchanged output.
 
 ## Worker And Network Requirements
 
-The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
-New workers should use the primary's MindRoom revision and must be able to read the staged script snapshot from the agent workspace mounted into them.
-Existing Kubernetes script workers can keep their launch image across primary upgrades when the script protocol version and worker authority remain compatible.
-The worker must also reach the primary script gateway over an authenticated network path.
-Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
-They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
-Set `MINDROOM_SCRIPT_GATEWAY_PORT` to have the primary serve that listener itself on a second port that answers only `/api/script-gateway` routes and returns 404 for every other primary API route.
-The main API port is unchanged, so network policy must still keep workers off it; the environment flag does not create network isolation by itself.
-The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its `<fullname>-script-gateway` ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway).
-When Agent Vault is enabled, run-specific Kubernetes script process pods deliberately omit Agent Vault init, token, proxy, and CA material because their lifecycle is scoped to one run.
-Calls through `MindRoomTools` still use the authenticated script gateway and normal live tool-execution routing, so ordinary dedicated tool workers retain their configured Agent Vault boundary.
-Direct network clients started by the script process do not receive Agent Vault credential injection.
+Run scripts on a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
+The shared `static_runner` sandbox is not supported.
+Workers should run the same MindRoom release as the primary; see [Keeping worker versions matched](../deployment/sandbox-proxy.md#keeping-worker-versions-matched).
+Without a worker backend or explicit local execution, `start_script` fails with `Background scripts require a worker or an explicitly disabled sandbox.`
 
+Workers must reach the primary's script gateway over the network.
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
-For Docker only, `MINDROOM_PUBLIC_URL` can instead name the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
-Kubernetes always requires an explicit `MINDROOM_SCRIPT_GATEWAY_URL` naming its gateway-only listener.
-Worker mode rejects missing, malformed, credential-bearing, unresolved, unspecified, or loopback gateway addresses.
-A query string or fragment is also rejected because the SDK appends receipt endpoint paths to this base.
+With Docker, `MINDROOM_PUBLIC_URL` can name the reachable MindRoom origin instead, and MindRoom appends `/api/script-gateway`.
+Missing, malformed, credential-bearing, unresolvable, unspecified, or loopback gateway addresses are rejected, as are URLs with a query string or fragment.
 
 ```bash
 export MINDROOM_WORKER_BACKEND=docker
@@ -217,7 +187,17 @@ export MINDROOM_SANDBOX_PROXY_TOKEN=replace-with-a-long-random-token
 export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gateway
 ```
 
-For Kubernetes, configure the dedicated backend, the gateway-only listener, and the isolated gateway attestation instead:
+### Kubernetes
+
+Kubernetes scripts stay disabled until the gateway runs on a listener that exposes nothing else, because workers that can reach the general API listener get more authority than the script gateway grants.
+Until then, `start_script` fails with `Kubernetes background scripts require a gateway-only listener; use Docker or explicit unsafe-local mode until that boundary is configured.`
+
+- `MINDROOM_SCRIPT_GATEWAY_PORT` makes the primary serve a second listener that answers only `/api/script-gateway` routes.
+- `MINDROOM_SCRIPT_GATEWAY_URL` must name that listener explicitly; `MINDROOM_PUBLIC_URL` is not used on Kubernetes.
+- `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` attests that workers cannot reach other primary API routes through that listener.
+  The flag does not create network isolation, and the main API port is unchanged, so network policy must still keep workers off it.
+
+The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its `<fullname>-script-gateway` ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three variables, as described in the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway).
 
 ```bash
 export MINDROOM_WORKER_BACKEND=kubernetes
@@ -226,74 +206,63 @@ export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-runtime-script-gateway.mindro
 export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
 ```
 
-Build the worker image from the same source checkout when testing unreleased code.
+With Agent Vault enabled, the script's own direct network requests do not receive Agent Vault credential injection, while its `MindRoomTools` calls run through normal tool routing and keep the configured Agent Vault boundary.
 
-```bash
-docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
-```
+### What a script's worker can access
 
-Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
-The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
-Private agents are supported in worker mode when they use `private.per: user_agent`; broader requester-wide private scopes remain unavailable to background-script workers.
-The worker receives its run snapshot plus the canonical requester-and-agent scoped workspace and state projections used by that worker scope.
-The script can read and modify files visible through that scoped worker filesystem and can read operator-authored worker environment values, including backend `extra_env` and workspace environment overlays.
-MindRoom does not automatically mirror global worker-grantable credentials into a script-specific worker; governed SDK calls obtain their normal authority through the primary gateway.
-This credential rule is not a general secret boundary because operators can deliberately expose values through worker storage or environment configuration.
-Worker mode is process and filesystem isolation, not an independent network sandbox.
-Direct network access follows the Docker, host, and configured egress policy of the worker, and `allowed_tools` does not govern that traffic.
-Sibling run-specific worker roots and snapshots are not mounted into the script worker.
-Brokered tool calls still use the durable requester-and-agent execution identity and each tool's current primary-or-worker execution target rather than the arbitrary script process's run-specific worker.
+- Each run gets its own dedicated worker and filesystem root, even when other runs belong to the same requester and agent.
+- The worker sees the requester-and-agent scoped workspace (see [Filesystem isolation and agent data](../deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data)), and the script can read and modify files there; runs of the same requester and agent share that workspace, so they see each other's files in it.
+- The script can read operator-provided worker environment values, including backend `extra_env` and workspace environment overlays.
+- Global worker credentials are not copied into script workers; `MindRoomTools` calls get their normal authority through the gateway, and each call runs where that tool normally runs, not in the script's worker.
+- Worker mode isolates processes and files, not the network: direct network access follows the worker's Docker, host, and egress policy, and `allowed_tools` does not govern it.
+- [Private agents](../configuration/agents.md#private-instances) must use `private.per: user_agent`; other private scopes fail with `Background-script workers for private agents require private.per=user_agent.`
 
-Setting `MINDROOM_SANDBOX_EXECUTION_MODE` to `off`, `local`, or `disabled` permits local execution instead of a worker.
-Local execution is marked unsafe, runs under the primary host account, inherits the primary process environment, and makes no secret-isolation claim.
-Background scripts require Linux process-group containment and return an error on unsupported platforms.
+### Local execution
+
+Setting `MINDROOM_SANDBOX_EXECUTION_MODE` to `off`, `local`, or `disabled` runs scripts in local execution mode instead of a worker.
+Local execution is marked unsafe, runs under the primary host account, inherits the primary process environment, and provides no secret isolation.
+It requires Linux and fails on other platforms with `Background scripts require Linux process-group containment.`
 Use local execution only for trusted development scripts.
 
 ## Lifecycle And Failure Semantics
 
-Run states are `starting`, `running`, `exited`, `failed`, `cancelled`, and `interrupted`.
-`exited` means the process returned exit code zero.
-`failed` means launch failed or the process returned a nonzero exit code.
-`cancelled` means cancellation was requested and process exit was confirmed.
-`interrupted` means MindRoom lost a required runtime fact, such as the worker supervisor handle, or an isolation-changing reload intentionally stopped the run.
-Authorization loss, owning-agent removal, and removal of the `script` tool are also recorded as interruptions.
+| Run state | Meaning |
+|-----------|---------|
+| `starting`, `running` | The run is launching or active |
+| `exited` | The process returned exit code zero |
+| `failed` | Launch failed or the process returned a nonzero exit code |
+| `cancelled` | Cancellation was requested and the process has exited |
+| `interrupted` | MindRoom stopped or lost the run for one of the reasons below |
 
-Call states are `pending`, `completed`, `failed`, and `indeterminate`.
-Call receipts are durable so a script can poll one accepted call without replaying it.
-Calls are serialized within one run to keep approval and side-effect order predictable.
+Tool calls are `pending`, `completed`, `failed`, or `indeterminate`.
+Cancelling a run cannot roll back a side effect a tool already started; such a call is reported `indeterminate` rather than cancelled or failed.
 
-New Kubernetes script runs survive primary-runtime restarts and compatible image upgrades in their existing dedicated workers.
-Shutdown keeps those processes and capabilities alive while draining accepted tool calls within its deadline.
-Startup fences launches and gateway calls until it verifies the exact worker and supervisor handle, the current requester authorization, and the persisted recovery contract.
-The contract includes the script protocol version, worker ownership and storage, authentication material, execution and private scope, knowledge paths, credential policy, selected resource-profile settings, and gateway URL.
-It permits a changed image or image pull policy while keeping the active worker on its launch image.
-Fresh runs use the newly configured worker image.
-Compatible Kubernetes scripts also survive configuration reloads that change delegation or unrelated agents.
-Removing the owner, authorization, or script tool, changing the owner's process authority, or reloading plugins interrupts affected scripts.
-Resource profiles come from the startup environment rather than reloadable YAML; changing the selected profile's resources prevents adoption after restart, while changing an unused profile does not.
-Backend replacement interrupts scripts whose backend cannot preserve their processes, including Docker workers.
-During replacement, new launches and gateway calls remain unavailable until the new backend is published; existing Kubernetes processes keep running and the SDK retries temporary gateway unavailability.
-Startup migrates an old unversioned recovery signature only when its complete original configuration digest still matches exactly; unverifiable records are interrupted.
+### Restarts, upgrades, and reloads
+
+Kubernetes runs keep running through primary restarts, compatible upgrades, and config reloads that do not affect their owner.
+An upgraded image applies only to new runs; existing runs stay on the image they started with.
+While MindRoom starts up or replaces its worker backend, new launches return an error and must be retried once MindRoom is ready, while SDK calls from running scripts are retried automatically.
 Keep the isolated gateway address stable across upgrades.
-Missing runtime dependencies or a temporary worker-status outage leave recovery pending; gateway calls return retryable HTTP 503 responses until admission reopens.
-The SDK retries transport failures and these responses using the same logical call ID.
-Accepted calls whose outcome cannot be proven become `indeterminate` and are never automatically replayed.
 
-Worker or supervisor loss interrupts the run; MindRoom never automatically relaunches Python source or reconstructs its memory.
-Removing authorization, changing the recovery contract, or removing the isolated gateway attestation also interrupts the run.
-Docker, unsafe-local, and older runs created without a recovery contract retain interruption-on-restart behavior.
-For those runs, startup durably revokes inherited ownership, terminates reachable processes, removes private snapshots, and retires exact dedicated workers before reopening.
-Routine Docker launch changes such as an image or worker-token rotation retain cleanup ownership of existing workers.
-If the Docker daemon, worker storage root, or worker name prefix changed while MindRoom was offline, startup leaves the run revoked and nonterminal and keeps script admission closed instead of reconstructing the historical backend; restore the prior ownership configuration, restart once to retire the run, then apply the new configuration.
-MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
-If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
-Design watchers to checkpoint their observed state so an operator can deliberately relaunch them after worker or node loss.
+Docker and local runs are interrupted by every primary restart.
+Worker-backend replacement also interrupts Docker runs.
 
-Terminal process output is retained durably with a 64 KiB bound and remains available from `get_script(run_id)` after maintenance observes the exit.
-Cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
-When execution crossed that boundary and the result cannot be proven, the call is `indeterminate` rather than falsely reported as cancelled or failed.
+A run is also interrupted when:
 
-Terminal runs are retained for 30 days by default.
-Private source and capability snapshots and exact dedicated workers are removed before terminal state is published.
-After the retention window, lifecycle maintenance removes background approval rows, durable tool-call receipts, and the terminal run row without selecting a worker backend.
-Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to a finite positive number of seconds to change the window; zero, negative, nonnumeric, and non-finite values are rejected at startup.
+- its worker or supervisor is lost, for example through node loss;
+- its owning agent, its `script` tool, or the requester's authorization is removed;
+- a reload changes the owning agent's execution isolation or assigned knowledge base paths, or changes `defaults.worker_grantable_credentials`;
+- any plugin reload happens, even for plugins the script does not use;
+- a restart changes what the run depends on, such as the gateway URL, worker ownership or storage, the selected resource profile's resources, or the `MINDROOM_SCRIPT_GATEWAY_ISOLATED` attestation.
+
+Changing an unused resource profile does not interrupt runs.
+MindRoom never relaunches an interrupted script automatically, so design watchers to checkpoint their observed state for a deliberate relaunch.
+
+If the Docker daemon, worker storage root, or worker name prefix changed while MindRoom was offline, script launches stay blocked until the old runs are retired.
+Restore the previous settings, restart once so MindRoom can retire those runs, then apply the new settings.
+
+### Output and retention
+
+`get_script(run_id)` keeps returning up to 64 KiB of process output after the run ends.
+Finished runs, their tool-call receipts, and approval records are kept for 30 days by default.
+Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to change the window; see the [environment variable reference](../configuration/index.md#workers-and-background-scripts).

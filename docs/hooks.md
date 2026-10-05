@@ -4,9 +4,10 @@ icon: lucide/webhook
 
 # Hooks
 
-Hooks let plugins observe, enrich, and transform messages as they flow through MindRoom.
-A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, per-event fault isolation, and zero risk of crashing the bot.
-Hooks integrate with the existing [plugin system](plugins.md) and are configured through `config.yaml`.
+Hooks are async functions in a [plugin](plugins.md) that run when MindRoom events happen.
+Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
+Each hook has a timeout, and a failing hook is logged without crashing the bot.
+The [Plugins](plugins.md) page covers manifests, `plugins:` entries, installation, and hot reload.
 
 ## Quick start
 
@@ -42,174 +43,32 @@ plugins:
       dawarich_url: http://dawarich.local
 ```
 
-When any agent receives a message, this hook runs concurrently with other enrichment hooks and injects the user's location into non-persisted current-turn context.
-The `persist=False` option keeps it out of session history.
+Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` keeps it out of session history.
 
-## Hook types
+MindRoom finds `@hook` functions in the manifest's `hooks_module`, or in `tools_module` when `hooks_module` is omitted; see [Manifest format](plugins.md#manifest-format).
 
-The hook system has four execution modes, determined by the event, not by individual hooks.
+## Configure hooks per deployment
 
-### Observer (`emit`)
+Plugin `settings` reach every hook in that plugin as `ctx.settings`.
+The `hooks:` map disables a hook or overrides its `priority` or `timeout_ms` by hook name, without changing code:
 
-Hooks run serially.
-Each hook sees the context as read-only (except designated mutable fields like `suppress`).
-Ordinary observer failures are isolated and the next hook still runs; completed external side effects are not rolled back.
-An `agent:started` hook can declare `required=True` when startup must not proceed without its initialization.
-Failure or timeout in a required startup hook aborts that bot's startup before its room reconciliation, using the existing startup failure handling.
-
-```python
-from mindroom.hooks import hook
-
-
-@hook("message:received")
-async def log_inbound(ctx):
-    ctx.logger.info("Message received", body=ctx.envelope.body)
-
-
-@hook("message:after_response")
-async def track_response(ctx):
-    save_metric(ctx.result.response_event_id, ctx.result.delivery_kind)
+```yaml
+plugins:
+  - path: ./plugins/personal-context
+    settings:
+      dawarich_url: http://dawarich.local
+      weather_api_key: ${OPENWEATHER_API_KEY}
+    hooks:
+      enrich_with_weather:
+        enabled: false
+      enrich_with_location:
+        priority: 10
+        timeout_ms: 500
 ```
 
-### Collector (`emit_collect`)
-
-Hooks run concurrently with isolated per-hook state.
-Each hook contributes structured `EnrichmentItem` entries.
-A failing hook loses only its items; other hooks' items are preserved.
-Results merge in hook-order after all hooks complete.
-
-```python
-from mindroom.hooks import hook
-
-
-@hook("message:enrich", priority=10)
-async def enrich_with_weather(ctx):
-    weather = await fetch_weather(ctx.settings["api_key"])
-    if weather:
-        ctx.add_metadata("weather", f"Current weather: {weather}")
-
-
-@hook("message:enrich", priority=20)
-async def enrich_with_calendar(ctx):
-    events = await fetch_calendar(ctx.settings["calendar_url"])
-    if events:
-        ctx.add_metadata("calendar", f"Upcoming: {events}")
-```
-
-### Transformer (`emit_transform`)
-
-Hooks run serially.
-`message:before_response` receives a mutable `ResponseDraft`.
-`message:final_response_transform` receives a mutable `FinalResponseDraft`.
-Both hooks may replace `draft.response_text`.
-Only `message:before_response` may suppress the reply.
-For `message:final_response_transform`, failures skip that hook's changes and keep the previous draft for the next hook.
-
-```python
-from mindroom.hooks import hook
-
-
-@hook("message:before_response", priority=10)
-async def add_disclaimer(ctx):
-    ctx.draft.response_text += "\n\n*Generated automatically.*"
-
-
-@hook("message:before_response", priority=20)
-async def redact_secrets(ctx):
-    ctx.draft.response_text = scrub_api_keys(ctx.draft.response_text)
-
-
-@hook("message:final_response_transform", priority=10)
-async def add_links(ctx):
-    ctx.draft.response_text = linkify_references(ctx.draft.response_text)
-```
-
-### Gate (`emit_gate`)
-
-Hooks run serially.
-Each hook receives a mutable `ToolBeforeCallContext`.
-Failures fail open, so a broken or timed-out gate hook does not block the real tool call.
-The first hook that calls `ctx.decline(reason)` stops the chain and replaces the real tool call with a declined result.
-
-```python
-from mindroom.hooks import hook
-
-
-@hook("tool:before_call", priority=10)
-async def block_secret_reads(ctx):
-    if ctx.tool_name == "read_file" and "secret" in str(ctx.arguments.get("path", "")):
-        ctx.decline("Sensitive files must stay unread.")
-```
-
-## Built-in events
-
-| Event | Mode | Context type | When it fires | Key mutable fields |
-| --- | --- | --- | --- | --- |
-| `message:received` | Observer | `MessageReceivedContext` | After authorization, dedup, and voice normalization; before command parsing, routing, and image/file/video attachment registration | `suppress` |
-| `message:enrich` | Collector | `MessageEnrichContext` | After routing resolves target agent/team; before AI generation | `add_metadata()` |
-| `system:enrich` | Collector | `SystemEnrichContext` | After message enrichment; before AI generation | `add_instruction()` |
-| `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before the first visible Matrix send or edit | `draft.response_text`, `draft.suppress` |
-| `message:final_response_transform` | Transformer | `FinalResponseTransformContext` | On clean streamed success after real visible assistant text has already landed, before one best-effort final edit | `draft.response_text` |
-| `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
-| `message:cancelled` | Observer | `CancelledResponseContext` | After any terminal outcome other than clean success, including explicit cancellation, interruption, suppression, and delivery-failure recovery | None (frozen) |
-| `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
-| `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
-| `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
-| `session:started` | Observer | `SessionHookContext` | Once per persisted session, after the response path confirms a new backing session was created for that history scope, during response finalization and before later cleanup such as persisted response-event IDs or transient-enrichment stripping | None (frozen) |
-| `compaction:before` | Observer | `CompactionHookContext` | After the compacted message set is prepared and before the compacted session is persisted | None (frozen) |
-| `compaction:after` | Observer | `CompactionHookContext` | After compaction is persisted, with before/after token counts and the generated summary | None (frozen) |
-| `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
-| `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
-| `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
-| `room:member_left` | Observer | `RoomMemberLeftContext` | On the router bot after a human's self-authored `m.room.member` transition from `join` to `leave`, excluding configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
-| `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
-| `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
-| `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
-
-`message:before_response` only runs for AI-generated replies before the first real visible assistant text is sent.
-For streaming replies, once real visible assistant text has landed, `message:before_response` does not receive a post-visible finalize pass.
-Use `message:final_response_transform` for one text-only best-effort replacement on clean streamed success.
-`message:final_response_transform` may not suppress, redact, delete, or mutate response metadata.
-
-For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
-MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
-For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
-`room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
-A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
-Historical joins and membership state snapshots silently record existing members in the journal admission transaction before Nio acknowledgement, preventing later profile updates from triggering onboarding.
-A baseline never completes a live join hook still pending in the application journal.
-Baselines and completed-hook markers are indexed journal rows scoped to the bot principal, room, and user; they survive restarts and room departures without rewriting an installation-wide file.
-`room:member_left` reads `display_name` and `avatar_url` from the joined membership state that the leave replaces.
-Actionable room-lifecycle events remain pending until their callback completes, so an interruption can replay a leave before journal settlement and handlers must be idempotent.
-
-### Default timeouts
-
-| Event | Default timeout (ms) |
-| --- | --- |
-| `message:received` | 15000 |
-| `message:enrich` | 2000 |
-| `system:enrich` | 2000 |
-| `message:before_response` | 200 |
-| `message:final_response_transform` | 200 |
-| `message:after_response` | 3000 |
-| `message:cancelled` | 3000 |
-| `reaction:received` | 500 |
-| `room:member_joined` | 3000 |
-| `room:member_left` | 3000 |
-| `schedule:fired` | 1000 |
-| `agent:started` | 5000 |
-| `agent:stopped` | 5000 |
-| `bot:ready` | 5000 |
-| `session:started` | 5000 |
-| `compaction:before` | 15000 |
-| `compaction:after` | 5000 |
-| `config:reloaded` | 5000 |
-| `tool:before_call` | 200 |
-| `tool:after_call` | 300 |
-| Custom events | 1000 |
-
-For `session:started`, `compaction:before`, and `compaction:after`, `ctx.scope.key` identifies the persisted history scope rather than one unique session row.
-Use `ctx.session_id` as the unique persisted session identifier within that scope.
+A per-hook override takes precedence over the value in the `@hook` decorator.
+[Entry formats](plugins.md#entry-formats) lists the plugin entry and override fields.
+If a name under `hooks:` matches no hook in that plugin, MindRoom logs a warning and ignores the override.
 
 ## The `@hook` decorator
 
@@ -232,113 +91,144 @@ async def enrich_weather(ctx):
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `event` | `str` | *required* | Event name to listen for |
-| `name` | `str` | function name | Hook identifier (unique within a plugin) |
+| `name` | `str` | function name | Hook name used by `hooks:` overrides; must be unique within a plugin, and duplicates are skipped with a warning |
 | `priority` | `int` | `100` | Execution order; lower values run first |
 | `timeout_ms` | `int \| None` | per-event default | Override the event's default timeout |
-| `required` | `bool` | `False` | For `agent:started` only: abort bot startup if this hook fails or times out |
-| `agents` | `Iterable[str] \| None` | `None` (all) | Only fire for these agent names |
+| `required` | `bool` | `False` | For `agent:started` only: the bot does not start if this hook fails or times out |
+| `agents` | `Iterable[str] \| None` | `None` (all) | Only fire for these agent or team names |
 | `rooms` | `Iterable[str] \| None` | `None` (all) | Only fire for these room IDs |
 
-The decorator is annotation-only.
-It stores metadata on the function and has no side effects on import.
-Hook callbacks must be `async`.
+Hook functions must be `async`.
+Hooks with equal priority run in `plugins:` list order, then in source order.
+A hook with `agents` set never fires for events that carry no agent: `schedule:fired`, `reaction:received`, `config:reloaded`, and custom events.
+A hook with `rooms` set never fires for `config:reloaded` or for custom events emitted outside a room.
 
-## Plugin manifest
+## Execution modes
 
-Add `hooks_module` to `mindroom.plugin.json` to point to a dedicated hooks file:
+Each event runs its hooks in one of four modes.
 
-```json
-{
-  "name": "my-plugin",
-  "tools_module": "tools.py",
-  "hooks_module": "hooks.py",
-  "skills": ["skills"]
-}
+### Observer
+
+Hooks run one after another and only observe, except for the event's mutable fields such as `suppress`.
+A failing hook is skipped and the next hook still runs; side effects it already made are not undone.
+Custom events and most built-in events are observers.
+
+```python
+from mindroom.hooks import hook
+
+
+@hook("message:received")
+async def log_inbound(ctx):
+    ctx.logger.info("Message received", body=ctx.envelope.body)
+
+
+@hook("message:after_response")
+async def track_response(ctx):
+    save_metric(ctx.result.response_event_id, ctx.result.delivery_kind)
 ```
 
-If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions.
-If both fields point at the same file, MindRoom imports it once and reuses it for tool registration and hook discovery.
+### Collector
 
-## Config
+Used by `message:enrich` and `system:enrich`.
+Hooks run concurrently, at most 10 at a time, so total latency is roughly that of the slowest hook rather than the sum.
+Each hook contributes `EnrichmentItem` entries, and a failing or timed-out hook loses only its own items.
+Items are merged in hook order.
 
-### String form (unchanged)
+### Transformer
 
-```yaml
-plugins:
-  - ./plugins/my-plugin
+Used by `message:before_response` and `message:final_response_transform`.
+Hooks run one after another on a mutable `ctx.draft`, and each may replace `ctx.draft.response_text`.
+Only `message:before_response` may suppress the reply.
+When a `message:before_response` hook fails, changes it made to the draft before failing are kept.
+When a `message:final_response_transform` hook fails, its changes are discarded and the next hook receives the previous draft.
+
+```python
+from mindroom.hooks import hook
+
+
+@hook("message:before_response", priority=10)
+async def add_disclaimer(ctx):
+    ctx.draft.response_text += "\n\n*Generated automatically.*"
+
+
+@hook("message:before_response", priority=20)
+async def redact_secrets(ctx):
+    ctx.draft.response_text = scrub_api_keys(ctx.draft.response_text)
+
+
+@hook("message:final_response_transform", priority=10)
+async def add_links(ctx):
+    ctx.draft.response_text = linkify_references(ctx.draft.response_text)
 ```
 
-### Object form (settings and hook overrides)
+### Gate
 
-```yaml
-plugins:
-  - path: ./plugins/personal-context
-    settings:
-      dawarich_url: http://dawarich.local
-      weather_api_key: ${OPENWEATHER_API_KEY}
-    hooks:
-      enrich_with_weather:
-        enabled: false
-      enrich_with_location:
-        priority: 10
-        timeout_ms: 500
+Used by `tool:before_call`.
+Hooks run one after another, and the first hook that calls `ctx.decline(reason)` stops the chain.
+The tool does not run, and the model receives the reason in the tool result.
+A gate hook that fails or times out does not block the tool call.
+
+```python
+from mindroom.hooks import hook
+
+
+@hook("tool:before_call", priority=10)
+async def block_secret_reads(ctx):
+    if ctx.tool_name == "read_file" and "secret" in str(ctx.arguments.get("path", "")):
+        ctx.decline("Sensitive files must stay unread.")
 ```
 
-Both forms can be mixed in the same `plugins` list.
-Environment variable substitution works through MindRoom's existing config loading.
+## Built-in events
 
-### Hook override fields
+| Event | Mode | Context type | When it fires | Mutable fields | Default timeout (ms) |
+| --- | --- | --- | --- | --- | --- |
+| `message:received` | Observer | `MessageReceivedContext` | After authorization, deduplication, and voice transcription; before command parsing, routing, and attachment registration | `suppress` | 15000 |
+| `message:enrich` | Collector | `MessageEnrichContext` | After routing picks the agent or team; before AI generation | `add_metadata()` | 2000 |
+| `system:enrich` | Collector | `SystemEnrichContext` | After `message:enrich`; before AI generation | `add_instruction()` | 2000 |
+| `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before the reply first becomes visible in Matrix | `draft.response_text`, `draft.suppress` | 200 |
+| `message:final_response_transform` | Transformer | `FinalResponseTransformContext` | After a streamed reply finishes successfully, before its final edit | `draft.response_text` | 200 |
+| `message:after_response` | Observer | `AfterResponseContext` | After the final Matrix send or edit | None | 3000 |
+| `message:cancelled` | Observer | `CancelledResponseContext` | After a response ends any way other than clean success: cancellation, interruption, suppression, or delivery failure | None | 3000 |
+| `agent:started` | Observer | `AgentLifecycleContext` | After the bot logs in, sets presence, and registers callbacks | None | 5000 |
+| `bot:ready` | Observer | `AgentLifecycleContext` | After the bot finishes room joins and initial sync | None | 5000 |
+| `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
+| `session:started` | Observer | `SessionHookContext` | Once when a response creates a new persisted session | None | 5000 |
+| `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary | None | 5000 |
+| `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
+| `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
+| `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router, after a human joins a room | None | 3000 |
+| `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
+| `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
+| `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
+| `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | `bool` | `true` | Disable a hook without removing code |
-| `priority` | `int \| null` | `null` (use decorator value) | Override the decorator priority |
-| `timeout_ms` | `int \| null` | `null` (use decorator value) | Override the decorator timeout |
+Custom events default to 1000 ms.
 
-### Override precedence
+### Event notes
 
-1. Decorator defaults in code
-2. Plugin-level `settings` (available to all hooks as `ctx.settings`)
-3. Per-hook overrides: `enabled`, `priority`, `timeout_ms`
+- **Replies**: `message:before_response` runs only for AI-generated replies, before any reply text is visible.
+  Streamed replies usually show text before they finish, so this hook does not see them; set `defaults.enable_streaming: false` when every reply must pass through it, as with the disclaimer and redaction examples above.
+  Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
+  `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
+- **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
+- **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
+  A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
+- **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
+  In compaction hooks, `ctx.messages` holds the raw `agno.models.message.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, citations, reasoning, and metrics.
+- **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
+  The event fires for visible and silent schedules.
+  Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
+  The hook can run more than once for the same occurrence, so side-effecting hooks should use `ctx.correlation_id`, which is stable per occurrence, as an idempotency key.
+- **Room membership**: both events exclude configured agents, the internal `mindroom_user`, and `bot_accounts`.
+  `room:member_joined` fires only for live joins, not for members already present at startup or for profile changes; `room:member_left` fires when a joined user leaves on their own, not when they are kicked or banned.
+  `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
+  Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
 
-If a hook name appears in `hooks:` but the plugin has no hook with that name, MindRoom logs a startup warning and ignores the override.
+## Message enrichment (`message:enrich`)
 
-## Enrichment pipeline
-
-The `message:enrich` event injects structured context into the current turn and lets each item choose whether it belongs in persisted history.
-
-### How it works
-
-1. **Collect**: After routing decides the target agent, MindRoom runs `emit_collect("message:enrich")` which executes all matching enrichment hooks concurrently.
-2. **Render**: Persisted `EnrichmentItem` entries are rendered into an XML block appended to the user turn:
-
-    ```xml
-    <mindroom_message_context>
-    <item key="user_profile" cache_policy="stable">Prefers concise answers, timezone Europe/Amsterdam</item>
-    </mindroom_message_context>
-    ```
-
-3. **AI sees it**: The model receives persisted items in the current user message and all `persist=False` items in one separate non-persisted current-turn context message.
-For Claude requests, MindRoom places that transient block after the cacheable user content so the growing conversation prefix remains reusable.
-4. **Replay sees persisted items**: MindRoom keeps only persisted enrichment in session history.
-
-### Enrichment policy
-
-Each enrichment item has a `cache_policy`:
-
-- `"volatile"` (default): The item may change on every message (e.g., weather, time).
-- `"stable"`: The item changes rarely (e.g., user profile, timezone).
-
-MindRoom preserves persisted enrichment exactly as rendered for the live request.
-Use stable keys and deterministic hook output when you want later replays and cache keys to line up cleanly.
-
-Message enrichment is persisted by default.
-Set `persist=False` for live context that should be visible only during the current turn, such as location, weather, or other frequently changing external state.
-Transient items stay out of the system prompt and replayable history so provider prompt caches can reuse their stable prefixes.
-
-### Adding enrichment items
-
-Use `ctx.add_metadata()` in any `message:enrich` hook:
+`message:enrich` adds context to the user's message for the current turn.
+Add items with `ctx.add_metadata()`:
 
 ```python
 @hook("message:enrich")
@@ -351,7 +241,7 @@ async def enrich_with_profile(ctx):
     )
 ```
 
-Hooks can also return `EnrichmentItem` objects directly:
+Hooks can also return an `EnrichmentItem` or a list of them:
 
 ```python
 from mindroom.hooks import EnrichmentItem, hook
@@ -362,17 +252,51 @@ async def enrich_with_time(ctx):
     return EnrichmentItem(key="time", text=f"Current time: {now()}", persist=False)
 ```
 
-The `persist` option only affects `message:enrich` items because `system:enrich` items are already current-turn context.
+`EnrichmentItem` fields are `key`, `text`, `cache_policy` (`"volatile"`, the default, for values that change often such as weather or time, or `"stable"` for values that rarely change such as a profile or timezone), `persist` (default `True`), and `minimal_required` (default `False`).
 
-### Enrichment in minimal mode
+Persisted items are appended to the user message and kept in session history, so later turns see them exactly as rendered:
 
-`EnrichmentItem.minimal_required` defaults to `False`.
-In minimal mode, optional system and transient message enrichment remains available through the CLI's enrichment context document instead of being placed directly in the prompt.
-Set `minimal_required=True` when an item must remain visible without a tool call: system enrichment stays in the system prompt, and transient message enrichment stays in the current-turn context message.
-Persisted message enrichment still follows the ordinary history policy.
-Standard mode is unaffected by this flag.
+```xml
+<mindroom_message_context>
+<item key="user_profile" cache_policy="stable">Prefers concise answers, timezone Europe/Amsterdam</item>
+</mindroom_message_context>
+```
 
-Return an `EnrichmentItem` directly to set the flag; `ctx.add_metadata()` and `ctx.add_instruction()` do not accept it:
+Items with `persist=False` go into a separate context message for the current turn only.
+Use `persist=False` for live data such as location or weather, so session history and provider prompt caches stay reusable.
+Use stable keys and deterministic text for persisted items.
+
+## System prompt enrichment (`system:enrich`)
+
+`system:enrich` runs after `message:enrich` and adds instructions to the agent's system prompt for the current turn.
+For teams, the same instructions go to the team and to each member agent.
+Add items with `ctx.add_instruction()`, or return `EnrichmentItem` objects as with `message:enrich`:
+
+```python
+from mindroom.hooks import SystemEnrichContext, hook
+
+
+@hook("system:enrich", priority=40)
+async def inject_room_tags(ctx: SystemEnrichContext) -> None:
+    tags = await get_room_tags(ctx.envelope.room_id)
+    if tags:
+        ctx.add_instruction(
+            "room_tags",
+            f"Existing thread tags in this room: {', '.join(sorted(tags))}",
+            cache_policy="stable",
+        )
+```
+
+Items are rendered in a `<mindroom_system_context>` block, with `"stable"` items first and `"volatile"` items last, each group sorted by key.
+`persist` has no effect here because system enrichment always applies to the current turn only.
+Changing the system prompt invalidates more of the provider's prompt cache, so use `system:enrich` only for room- or turn-scoped instructions that need system-level priority, and `message:enrich` with `persist=False` for live data.
+The key `matrix_message_target` is reserved; MindRoom replaces hook items that use it.
+
+## Enrichment in minimal mode
+
+In [minimal mode](tools/agent-cli.md), system enrichment and non-persisted message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
+Return an `EnrichmentItem` with `minimal_required=True` when the item must stay in the prompt without a tool call; `ctx.add_metadata()` and `ctx.add_instruction()` cannot set this flag.
+Persisted message enrichment and standard mode are unaffected.
 
 ```python
 @hook("system:enrich")
@@ -384,82 +308,9 @@ async def required_instruction(ctx):
     )
 ```
 
-### Performance
-
-Enrichment hooks run concurrently with per-hook timeouts.
-A slow weather API does not block a fast calendar lookup.
-Total enrichment latency equals max(individual hook latencies), not the sum.
-A bounded semaphore (default 10) prevents one plugin from flooding the event loop.
-
-## System enrichment pipeline
-
-The `system:enrich` event powers a parallel enrichment pipeline for the system prompt.
-Use it when room-scoped or turn-scoped instructions should live in `agent.additional_context` instead of the current user message.
-
-### How it works
-
-1. **Collect**: After `message:enrich` finishes, MindRoom runs `emit_collect("system:enrich")` with a `SystemEnrichContext`, which executes all matching system-enrichment hooks concurrently.
-2. **Render**: Collected `EnrichmentItem` entries are rendered into an XML block for the system prompt:
-
-    ```xml
-    <mindroom_system_context>
-    <item key="room_tags" cache_policy="stable">Existing thread tags in this room: backend, urgent</item>
-    <item key="active_focus" cache_policy="volatile">Current focus: triage the incident thread before suggesting new work.</item>
-    </mindroom_system_context>
-    ```
-
-3. **Apply**: For agent runs, MindRoom renders the block into `agent.additional_context` before AI generation.
-4. **Apply to teams**: For team runs, MindRoom assigns the same rendered block to both `team.additional_context` and each member agent's `additional_context`.
-
-### Adding system enrichment items
-
-Use `ctx.add_instruction()` in any `system:enrich` hook:
-
-```python
-from mindroom.hooks import SystemEnrichContext, hook
-
-
-@hook("system:enrich", priority=40)
-async def inject_room_tags(ctx: SystemEnrichContext) -> None:
-    """Inject existing room thread tags into system prompt."""
-    tags = await get_room_tags(ctx.envelope.room_id)
-    if tags:
-        tag_list = ", ".join(sorted(tags))
-        ctx.add_instruction(
-            "room_tags",
-            f"Existing thread tags in this room: {tag_list}",
-            cache_policy="stable",
-        )
-```
-
-Hooks can also return `EnrichmentItem` objects directly, the same way `message:enrich` hooks can.
-
-### System cache policy
-
-Each item still carries a `cache_policy`, but system enrichment uses it to control deterministic ordering for prompt caching:
-
-- `"stable"`: Sorted first by key so long-lived instructions stay grouped at the front of the block.
-- `"volatile"` (default): Sorted last by key so frequently changing instructions stay grouped at the end of the block.
-
-System enrichment changes the system prompt, so use it only when context needs system-level priority.
-Use `message:enrich` with `persist=False` for live data so the stable system and history prefixes remain reusable.
-
-The `matrix_message_target` key is runtime-owned and travels with non-persisted current-turn context for agents that can use `matrix_message`.
-Hook-provided items with that key are replaced by the runtime value.
-
-### Key differences from `message:enrich`
-
-- `system:enrich` injects into the system prompt via `agent.additional_context`, while `message:enrich` injects into the current user turn.
-- `system:enrich` renders `<mindroom_system_context>` blocks, while `message:enrich` renders `<mindroom_message_context>` blocks.
-- `system:enrich` uses `ctx.add_instruction()`, while `message:enrich` uses `ctx.add_metadata()`.
-- `system:enrich` is intended for room- or turn-scoped instructions, while `message:enrich` is intended for user-prompt conversational context.
-
 ## Custom events
 
-Plugins can define and emit namespaced custom events.
-Built-in namespaces (`message:*`, `system:*`, `agent:*`, `bot:*`, `compaction:*`, `schedule:*`, `reaction:*`, `room:*`, `config:*`, `session:*`, `tool:*`) are reserved.
-
-### Defining a custom event hook
+Plugins can define their own namespaced events and emit them from tool code:
 
 ```python
 from mindroom.hooks import hook
@@ -470,10 +321,6 @@ async def audit_completion(ctx):
     append_jsonl(ctx.state_root / "events.jsonl", {"item_id": ctx.payload["item_id"]})
 ```
 
-### Emitting from tool code
-
-Tools emit custom events through the runtime context:
-
 ```python
 from mindroom.tool_system.runtime_context import emit_custom_event
 
@@ -481,47 +328,25 @@ from mindroom.tool_system.runtime_context import emit_custom_event
 await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 ```
 
-Hook contexts do not expose a `hook_registry`, so hook callbacks cannot emit custom events directly through `ctx`.
-If you are writing internal code or tests and already have an explicit `HookRegistry`, you can still call `emit(registry, event_name, context)` manually.
+- Event names must match `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`, so they need at least one colon.
+- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, and `tool` are reserved.
+- Custom events run as observers.
+- Only code running during a tool call in the primary MindRoom process can emit them, which includes `tool:before_call` and `tool:after_call` hooks and custom-event hooks triggered by that call.
+- Hooks running outside a tool call and tools running in workers cannot emit them.
+- Emissions nested more than 3 levels deep are dropped with a warning.
 
-### Event name rules
+## Errors and timeouts
 
-- Pattern: `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`
-- Must contain at least one colon separator
-- Reserved namespaces: `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`
-- Custom events run in observer mode (`emit()`)
-- Recursion guard: nested emissions stop at depth 3
-
-## Error handling
-
-### Fault isolation
-
-Every hook invocation runs inside an `asyncio.timeout()` with structured error logging.
-Ordinary `Exception` and `SystemExit` failures are logged and isolated so later hooks can continue.
-Required startup hooks instead raise a `RuntimeError` with the original failure as its cause, stopping subsequent startup hooks and the bot's room reconciliation.
-Use a short, separate required hook for ownership or other necessary initialization; keep optional backfill, welcomes, and enrichment in ordinary hooks.
-Cancellation follows the caller and event policy, and external side effects completed before a failure cannot be rolled back.
-
-Failure semantics are mode-aware:
-
-- **Observer** failures stop that callback; completed external side effects remain, and the next hook still runs
-- **Collector** failures lose only that hook's contributed items
-- **`message:before_response` transformer** failures preserve mutations already made to the shared draft before the failure
-- **`message:final_response_transform` transformer** failures discard the failed hook's copy and continue with the previous draft
-
-### No quarantine, no cooldown
-
-An ordinary hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
-
-### No automatic retries
-
-The hook runtime does not retry failed hooks.
-If a hook needs retry logic, implement it inside the hook where the author understands idempotency.
+Each hook runs under its timeout.
+A timeout cannot interrupt blocking code such as a CPU-bound loop, so a hook stuck in one stalls MindRoom until it returns.
+An exception or timeout is logged with the plugin and hook name and affects only that hook for that event, as described per mode under [Execution modes](#execution-modes), except for a required `agent:started` hook.
+MindRoom does not retry a failed hook, so implement retries inside the hook if it needs them.
+A failing hook is invoked again on the next matching event, with no quarantine or cooldown, so fixing the code under [hot reload](plugins.md#live-development-hot-reload) takes effect on the next event.
 
 ## Plugin state
 
-Every hook has access to persistent storage via `ctx.state_root`, which maps to `mindroom_data/plugins/<plugin_name>/`.
-The directory is created on first access.
+`ctx.state_root` is a per-plugin directory at `<storage root>/plugins/<plugin name>/` (by default `mindroom_data/plugins/<plugin name>/`), created on first access.
+Organizing it per room or per user is up to the plugin.
 
 ```python
 import json
@@ -539,81 +364,50 @@ async def pin_message(ctx):
     pins_file.write_text(json.dumps(pins))
 ```
 
-Scoped sub-paths (per-room, per-user) are the plugin author's responsibility.
-
 ## Context reference
 
-### Base fields (non-tool hooks)
+### Base fields
 
-Contexts derived from `HookContext` include these fields:
+All contexts except the two tool contexts include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `event_name` | `str` | The event that triggered this hook |
 | `plugin_name` | `str` | Name of the plugin owning this hook |
-| `settings` | `dict[str, Any]` | Plugin settings from `config.yaml` |
+| `settings` | `dict[str, Any]` | Plugin `settings` from `config.yaml` |
 | `config` | `Config` | Current MindRoom config (read-only) |
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
-| `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful when plugin state must ignore anything recorded before it |
-| `state_root` | `Path` | Plugin state directory (property) |
+| `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
+| `state_root` | `Path` | Plugin state directory |
 
-Those non-tool contexts also expose the following helpers:
+`ToolBeforeCallContext` and `ToolAfterCallContext` have the same fields and helpers except `runtime_started_at` and `get_latest_agent_message_snapshot()`, and their `config` and `runtime_paths` can be `None`.
 
-`ToolBeforeCallContext` and `ToolAfterCallContext` use a separate tool-hook surface.
-Their `config` and `runtime_paths` values may be absent, and they do not expose `runtime_started_at` or `get_latest_agent_message_snapshot()`.
+### Event-specific fields
 
-**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
-Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
-For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
-For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
-Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
-Hook-originated sends always carry an internal synthetic-chain depth.
-The first hook-originated hop uses depth `1`, and each later synthetic hop increments it.
-When `trigger_dispatch=True`, MindRoom sends the message as source kind `hook_dispatch`.
-The first synthetic hook hop still re-enters the normal ingress pipeline, including `message:received`.
-For `hook_dispatch`, that first synthetic hop also bypasses the usual "ignore other agent unless mentioned" ingress gate before continuing through normal permissions, routing, and should-respond checks.
-If that first synthetic hop originated from `message:received`, MindRoom skips the origin plugin on the `message:received` re-entry.
-Deeper synthetic hook hops still arrive as messages, but they do not re-enter `message:received` and they stop before further command handling or agent/model dispatch to avoid feedback loops.
+| Context | Fields |
+| --- | --- |
+| `MessageReceivedContext` | `envelope`, `suppress` |
+| `MessageEnrichContext`, `SystemEnrichContext` | `envelope`, `target_entity_name`, `target_member_names` (team members, or `None` for an agent) |
+| `BeforeResponseContext`, `FinalResponseTransformContext` | `draft` |
+| `AfterResponseContext` | `result` |
+| `CancelledResponseContext` | `info` with `envelope`, `visible_response_event_id`, `response_kind`, `failure_reason` |
+| `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
+| `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
+| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `messages`, `token_count_before`, `token_count_after`, `compaction_summary` |
+| `ScheduleFiredContext` | `task_id`, `workflow`, `room_id`, `thread_id`, `created_by`, `message_text`, `suppress` |
+| `ReactionReceivedContext` | `room_id`, `event_id`, `sender_id`, `reaction_key`, `target_event_id`, `thread_id` |
+| `RoomMemberJoinedContext`, `RoomMemberLeftContext` | `agent_name`, `room_id`, `event_id`, `user_id`, `sender_id`, `display_name`, `avatar_url`, `membership`, `prev_membership` |
+| `ConfigReloadedContext` | `changed_entities`, `added_entities`, `removed_entities`, `plugin_changes` |
+| `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
+| `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
+| `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
 
-**`await ctx.query_room_state(room_id, event_type, state_key=None)`**
-Queries Matrix room state events.
-When `state_key` is provided, returns the content `dict` for that single state event, or `None` on Matrix error response/not-found.
-When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on Matrix error response.
-Returns `None` when no room state querier is available (e.g. no Matrix client bound).
-When both the current bot and the router can query room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
-Transport exceptions from the underlying Matrix client propagate to the hook.
+Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
+`blocked` is true when the tool did not run, for example because a gate hook declined it.
 
-**`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`**
-Returns the latest visible `m.room.message` from `sender` in the given room or thread scope, read from the conversation projection.
-`thread_id=None` means the unthreaded room conversation, so a threaded reply never answers a room-scope question.
-The read never blocks on the homeserver and is bounded to the 50 most recent messages in that scope.
-It returns `None` when no reader is bound, when the sender has no visible message inside that window, or when the sender's newest message is awaiting a server refetch because its visible revision was redacted.
-
-**`await ctx.put_room_state(room_id, event_type, state_key, content)`**
-Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
-Returns `False` when no room state putter is available.
-When both the current bot and the router can write room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
-Transport exceptions from the underlying Matrix client propagate to the hook.
-
-**`ctx.matrix_admin`**
-Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
-This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
-It is `None` when no admin-capable client is bound.
-The available methods are `get_joined_rooms()`, `retain_room(room_id)`, `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `get_profile_avatar(user_id)`, `get_room_state_event(room_id, event_type, state_key)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
-Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
-`get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
-`get_joined_rooms()` returns the bound account's joined room IDs, or `None` when the request fails; plugins can use one lookup to verify membership across their recorded rooms.
-`get_profile_avatar` returns the user's Matrix avatar content URI, or `None` when no avatar is available or Matrix returns an error response.
-`get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
-Transport exceptions from read methods propagate to the caller.
-Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
-When reconciling an existing plugin-owned room, call the synchronous `retain_room(room_id)` after verifying the bound bot is still a member.
-It restores the same local retention record used by the bot's membership lifecycle, changes no Matrix membership, and raises `OSError` if persistence fails.
-Retention applies only to managed entities with invite acceptance enabled; it does not override disabled invitation policy.
-
-### Transport objects
+### Message objects
 
 ```python
 MessageEnvelope(
@@ -624,41 +418,24 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     origin: TurnOrigin,
-    hook_source: str | None = None,
-    message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
-    dispatch_policy_source_kind: str | None = None,
+    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages
+    dispatch_policy_source_kind: str | None,
 )
-
-# envelope.room_id is derived from target.room_id.
-# envelope.requester_id, envelope.sender_id, and envelope.source_kind are derived from origin.
-# target.source_thread_id preserves the raw inbound thread ID.
-# target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
-# target.session_id is the canonical persistence key for the conversation.
-# origin is keyword-only in the dataclass constructor and is required.
-# Hook handlers normally inspect ctx.envelope.origin rather than constructing MessageEnvelope themselves.
-# Internal code and tests that construct MessageEnvelope must pass a TurnOrigin built by MindRoom's origin classifier.
-# dispatch_policy_source_kind is usually None.
-# When it is "active_thread_follow_up", source_kind still preserves the original modality such as "message" or "voice".
-# ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND and TRUSTED_INTERNAL_RELAY_SOURCE_KIND are exported from mindroom.hooks for comparisons.
+# Derived properties: room_id (from target), requester_id, sender_id, source_kind (from origin).
+# target.source_thread_id is the raw inbound thread ID, target.resolved_thread_id the delivery thread,
+# and target.session_id the conversation's persistence key.
 
 TurnOrigin(
     transport_sender_id: str,
     requester_id: str,
     sender_entity_name: str | None,
     requester_entity_name: str | None,
-    sender_kind: SenderKind,
+    sender_kind: SenderKind,       # "user" or "managed_entity"
     requester_kind: SenderKind,
-    intent: TurnIntent,
+    intent: TurnIntent,            # see below
     source_kind: str,
-    trust: TurnTrust,
+    trust: TurnTrust,              # "external", "trusted_internal", or "trusted_user_relay"
 )
-
-# TurnOrigin, TurnIntent, SenderKind, and TurnTrust are exported from mindroom.hooks for type comparisons.
-# sender_kind and requester_kind are "user" or "managed_entity".
-# intent is "user_message", "managed_message", "router_handoff", "router_notice", "scheduled_fire", "hook_message", "hook_dispatch", or "trusted_internal_relay".
-# trust is "external", "trusted_internal", or "trusted_user_relay".
-# origin.may_answer_interactive_prompt is true only for human-requested user messages and trusted human relays.
-# origin.may_dispatch_without_mention is true only for the synthetic turns that explicitly bypass the managed-sender mention gate.
 
 ResponseDraft(
     response_text: str,
@@ -682,191 +459,93 @@ ResponseResult(
     response_kind: str,
     envelope: MessageEnvelope,
 )
-
-RoomMemberJoinedContext(
-    agent_name: str,
-    room_id: str,
-    event_id: str,
-    user_id: str,
-    sender_id: str,
-    display_name: str | None,
-    avatar_url: str | None,
-    membership: str,
-    prev_membership: str | None,
-)
-
-RoomMemberLeftContext(
-    agent_name: str,
-    room_id: str,
-    event_id: str,
-    user_id: str,
-    sender_id: str,
-    display_name: str | None,
-    avatar_url: str | None,
-    membership: str,
-    prev_membership: str | None,
-)
-
-ToolBeforeCallContext(
-    tool_name: str,
-    arguments: dict[str, Any],
-    agent_name: str,
-    room_id: str | None,
-    thread_id: str | None,
-    requester_id: str | None,
-    session_id: str | None,
-    declined: bool = False,
-    decline_reason: str = "",
-)
-
-ToolAfterCallContext(
-    tool_name: str,
-    arguments: dict[str, Any],
-    agent_name: str,
-    room_id: str | None,
-    thread_id: str | None,
-    requester_id: str | None,
-    session_id: str | None,
-    result: object | None,
-    error: BaseException | None,
-    blocked: bool,
-    duration_ms: float,
-)
 ```
 
-For `schedule:fired`, `ScheduleFiredContext.thread_id` is the resolved delivery thread.
-This may differ from `workflow.thread_id` when the workflow starts a new thread or resolves to room mode.
-Visible and silent schedules both emit `schedule:fired` before their trigger is sent.
-For recurring schedules, `ctx.correlation_id` identifies the intended occurrence and stays the same across preparation retries.
-A crash or preparation failure before the trigger is durably frozen can invoke the hook again with that ID.
-Side-effecting hooks must use an idempotent destination; use the correlation ID as its idempotency key.
-Once the trigger is frozen, delivery retries reuse its prepared content without invoking hooks again.
-Setting `ctx.suppress = True` cancels the fire, while replacing `ctx.message_text` with an empty or whitespace-only value produces a visible scheduled-task failure notice.
+`TurnIntent` is one of `"user_message"`, `"managed_message"`, `"router_handoff"`, `"router_notice"`, `"scheduled_fire"`, `"external_trigger"`, `"hook_message"`, `"hook_dispatch"`, or `"trusted_internal_relay"`.
+`origin.may_dispatch_without_mention` is true for `hook_dispatch`, `external_trigger`, `router_handoff`, and `scheduled_fire` turns.
+`origin.may_answer_interactive_prompt` is true only for human-requested `user_message`, `router_handoff`, and `trusted_internal_relay` turns.
+`dispatch_policy_source_kind` is usually `None`; when it is `"active_thread_follow_up"`, `source_kind` still holds the original modality such as `"message"` or `"voice"`.
+`TurnOrigin`, `TurnIntent`, `SenderKind`, `TurnTrust`, `ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND`, and `TRUSTED_INTERNAL_RELAY_SOURCE_KIND` are exported from `mindroom.hooks` for comparisons.
+
+### Sending messages
+
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
+
+- For contexts that come from a message, the original human or configured bot-account requester is carried along, so routing, permissions, and memory attribution use that requester rather than the relaying bot.
+- In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
+- A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
+- `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
+- A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.
+  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger commands or agent replies, which prevents feedback loops.
+
+### Room state and recent messages
+
+**`await ctx.query_room_state(room_id, event_type, state_key=None)`** reads Matrix room state.
+With a `state_key`, it returns that event's content `dict`, or `None` when the event is missing or Matrix returns an error.
+Without one, it returns a `{state_key: content}` dict for every event of that type, or `None` on a Matrix error.
+
+**`await ctx.put_room_state(room_id, event_type, state_key, content)`** writes one room state event and returns `True` on success or `False` on a Matrix error.
+
+Both return `None` or `False` when no Matrix client is available.
+When the current bot gets a Matrix error, MindRoom retries the call as the router.
+Network errors raise in the hook.
+
+**`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`** returns the latest visible message from `sender` in the given thread, with `content` and `origin_server_ts`.
+`thread_id=None` reads only the unthreaded room conversation and ignores threaded replies.
+It reads local conversation data without contacting the homeserver and looks only at the 50 most recent messages in that scope.
+It returns `None` when the sender has no visible message in that window or no reader is available.
+
+### Matrix admin
+
+`ctx.matrix_admin` is a limited admin interface backed by the router account, or `None` when unavailable.
+Hooks never get the raw Matrix client.
+
+| Method | Returns |
+| --- | --- |
+| `get_joined_rooms()` | The account's joined room IDs, or `None` on failure |
+| `retain_room(room_id)` | Nothing; synchronous, see below |
+| `resolve_alias(alias)` | Room ID, or `None` if the alias does not exist |
+| `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)` | New room ID, or `None` on failure |
+| `invite_user(room_id, user_id)` | `bool` success |
+| `force_join_user(room_id, user_id)` | `bool` success; joins a local user through the homeserver admin API |
+| `kick_user(room_id, user_id, reason=None)` | `bool` success |
+| `get_room_members(room_id)` | Set of joined user IDs, or `None` when the room cannot be read |
+| `get_profile_avatar(user_id)` | Avatar content URI, or `None` |
+| `get_room_state_event(room_id, event_type, state_key)` | `(True, content)` when found, `(True, None)` when Matrix confirms it is missing, `(False, None)` on other errors |
+| `add_room_to_space(space_room_id, room_id)` | `bool` success |
+| `put_room_state(room_id, event_type, state_key, content)` | `bool` success |
+
+Network errors raise in the hook.
+Rooms created with `create_room` stay with the creating bot across room cleanup and restarts.
+When reconciling a room the plugin created earlier, verify the bot is still a member and call `retain_room(room_id)` to keep it the same way; it changes no Matrix membership and raises `OSError` if it cannot save.
+Retention applies only to bots whose [`accept_invites`](configuration/agents.md) policy is enabled.
 
 ## Testing
 
-Hook tests follow standard pytest patterns.
-Build a registry from stub plugins and invoke the execution helpers directly.
-
-### Testing an observer hook
+Hook functions are plain async functions, so a test can await one with a stub context:
 
 ```python
+from types import SimpleNamespace
+
 import pytest
 
-from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry, MessageReceivedContext, hook
-from mindroom.hooks.execution import emit
+from mindroom.hooks import hook
 
 
-@hook(EVENT_MESSAGE_RECEIVED)
+@hook("message:received")
 async def suppress_spam(ctx):
     if "spam" in ctx.envelope.body:
         ctx.suppress = True
 
 
 @pytest.mark.asyncio
-async def test_suppress_spam(hook_context_factory):
-    registry = HookRegistry.from_plugins([stub_plugin("demo", [suppress_spam])])
-    ctx = hook_context_factory(MessageReceivedContext, body="buy spam now")
-
-    await emit(registry, EVENT_MESSAGE_RECEIVED, ctx)
-
+async def test_suppress_spam():
+    ctx = SimpleNamespace(envelope=SimpleNamespace(body="buy spam now"), suppress=False)
+    await suppress_spam(ctx)
     assert ctx.suppress is True
 ```
 
-### Testing an enrichment hook
+## Limits
 
-```python
-import pytest
-
-from mindroom.hooks import EVENT_MESSAGE_ENRICH, HookRegistry, hook
-from mindroom.hooks.execution import emit_collect
-
-
-@hook(EVENT_MESSAGE_ENRICH)
-async def enrich_with_time(ctx):
-    ctx.add_metadata("time", "2026-03-23T10:00:00Z")
-
-
-@pytest.mark.asyncio
-async def test_enrichment(hook_context_factory):
-    registry = HookRegistry.from_plugins([stub_plugin("demo", [enrich_with_time])])
-    ctx = hook_context_factory("MessageEnrichContext")
-
-    items = await emit_collect(registry, EVENT_MESSAGE_ENRICH, ctx)
-
-    assert len(items) == 1
-    assert items[0].key == "time"
-```
-
-### Testing a transformer hook
-
-```python
-import pytest
-
-from mindroom.hooks import EVENT_MESSAGE_BEFORE_RESPONSE, HookRegistry, hook
-from mindroom.hooks.execution import emit_transform
-
-
-@hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-async def append_footer(ctx):
-    ctx.draft.response_text += "\n-- Footer"
-
-
-@pytest.mark.asyncio
-async def test_append_footer(hook_context_factory):
-    registry = HookRegistry.from_plugins([stub_plugin("demo", [append_footer])])
-    ctx = hook_context_factory("BeforeResponseContext", response_text="Hello")
-
-    result = await emit_transform(registry, EVENT_MESSAGE_BEFORE_RESPONSE, ctx)
-
-    assert result.response_text == "Hello\n-- Footer"
-```
-
-### Creating stub plugins for tests
-
-```python
-from mindroom.config.plugin import PluginEntryConfig
-
-
-def stub_plugin(name, callbacks, *, plugin_order=0, settings=None, hooks=None):
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "entry_config": PluginEntryConfig(
-                path=f"./plugins/{name}",
-                settings=settings or {},
-                hooks=hooks or {},
-            ),
-            "plugin_order": plugin_order,
-        },
-    )()
-```
-
-## Migration
-
-Existing plugins work with zero changes.
-A manifest with only `name`, `tools_module`, and `skills` behaves exactly as before.
-
-To adopt hooks:
-
-1. Add `@hook(...)` decorators to the existing `tools_module`. MindRoom auto-scans and discovers them.
-2. Switch the plugin config entry from string to object form only when you need `settings` or per-hook overrides.
-3. Add `hooks_module` to the manifest later if you want to separate hook code from tool code.
-
-### What stays the same
-
-- `plugins: list[str]` config works unchanged
-- Tool names remain globally unique
-- Per-agent tool filtering (`tools: [file, shell]`) is unchanged
-- Skill allowlists are unchanged
-- Hot reload rebuilds the hook registry from scratch and swaps atomically
-
-### What is out of scope
-
-- Hooks cannot replace core routing, authorization, or deduplication
-- No hook context exposes the Matrix client directly
-- No automatic retries in the hook runtime
-- No cross-worker custom event IPC (primary process only)
+- Hooks cannot replace core routing, authorization, or deduplication.
+- Hooks never receive the Matrix client directly.

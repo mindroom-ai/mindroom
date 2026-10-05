@@ -75,7 +75,7 @@ Native Codex sub-agent only; do not use agent-cli.
 
 Review PR <owner/repo#number> in repo <absolute repo path>.
 Latest local HEAD is <sha> on branch <branch>.
-Base is <base ref>; review the real diff <base ref>..HEAD.
+Base is <base ref>; review the real diff <base ref>...HEAD.
 
 Do not edit files, commit, push, or inspect CI.
 <User constraint if any, for example: CI/tests are already passing.>
