@@ -649,6 +649,10 @@ class CallManager:
         logical_call = self._logical_calls[room.room_id]
         if logical_call.join_blocked or (room.room_id in self._retry_attempts and not retrying):
             return
+        if self._response_admission_gate.closed:
+            # A forced replacement may have planned this agent as idle; join once it publishes its config.
+            self._schedule_reconcile_retry(room)
+            return
         # Count the call as active before tool materialization captures the current config.
         self._joining_requesters[room.room_id] = members[0].user_id
         try:
