@@ -107,7 +107,7 @@ class MemoryEntrypointContext:
 
     @property
     def omitted_lines(self) -> int:
-        """Return how many entrypoint lines the preload cap withheld."""
+        """Return how many entrypoint lines the preload caps withheld."""
         return max(0, self.total_lines - self.included_lines)
 
 

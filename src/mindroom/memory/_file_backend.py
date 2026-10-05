@@ -818,7 +818,7 @@ def _load_scope_entrypoint_context(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> MemoryEntrypointContext:
-    """Load the scoped `MEMORY.md` entrypoint text and what the cap withheld."""
+    """Load the scoped `MEMORY.md` entrypoint text and what the caps withheld."""
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
     payload = _read_scope_entrypoint_payload(scope_path)
     if payload is None:
