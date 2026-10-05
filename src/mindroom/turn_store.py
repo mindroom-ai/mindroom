@@ -13,6 +13,7 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.handled_turns import (
     HandledTurnLedger,
     TurnRecord,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+    from agno.db.base import BaseDb
 
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
@@ -363,12 +365,25 @@ class TurnStore:
                 timestamp=0.0,
             )
 
+        split_redacted_event_ids = self._split_redacted_aliases(turn_record)
+        await self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
+        # A redacted source this turn splits from its coalesced pending turn still names that turn;
+        # rewriting it lets the ledger detach it onto its own tombstone record. Looking again after
+        # the write also catches a redaction that landed while the write waited.
+        for event_id in sorted(split_redacted_event_ids | self._split_redacted_aliases(turn_record)):
+            await self._ledger.update_handled_turn(
+                (event_id,),
+                lambda existing, event_id=event_id: existing.get(event_id),
+            )
+
+    def _split_redacted_aliases(self, turn_record: TurnRecord) -> set[str]:
+        """Return redacted sources of unfinished turns that share a source with this one but are not its own."""
         conversation_records = (
             self._ledger.turn_records_for_conversation(session_id=turn_record.conversation_target.session_id)
             if turn_record.conversation_target is not None
             else ()
         )
-        split_redacted_event_ids = {
+        return {
             event_id
             for existing in (
                 *conversation_records,
@@ -378,14 +393,6 @@ class TurnStore:
             for event_id in existing.redacted_source_event_ids
             if event_id not in turn_record.indexed_event_ids
         }
-        await self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
-        # A redacted source this turn splits from its coalesced pending turn still names that turn;
-        # rewriting it lets the ledger detach it onto its own tombstone record.
-        for event_id in sorted(split_redacted_event_ids):
-            await self._ledger.update_handled_turn(
-                (event_id,),
-                lambda existing, event_id=event_id: existing.get(event_id),
-            )
 
     def terminal_turn_record(self, turn_id: str, response_event_id: str) -> TurnRecord | None:
         """Return the record a FINAL acknowledgement should commit alongside it.
@@ -1107,34 +1114,8 @@ class TurnStore:
         turn_record: TurnRecord,
         requester_user_id: str,
     ) -> None:
-        """Remove stale persisted runs before regenerating one edited turn.
-
-        History derived from redacted events goes first, so a compaction rollback
-        cannot restore the edited turn's old runs after they were pruned.
-        """
-        target = turn_record.conversation_target
-        scope = turn_record.history_scope
-        if target is not None and scope is not None:
-            storage = self.deps.state_writer.create_storage(
-                self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
-                scope=scope,
-            )
-            try:
-                session = (
-                    get_team_session(storage, target.session_id)
-                    if self.deps.state_writer.session_type_for_scope(scope) is SessionType.TEAM
-                    else get_agent_session(storage, target.session_id)
-                )
-                if session is not None:
-                    await remove_history_of_redacted_events(
-                        storage,
-                        session,
-                        scope,
-                        partial(self.redacted_history_events, target),
-                    )
-            finally:
-                storage.close()
-        self._remove_stale_runs_for_turn_record(
+        """Remove stale persisted runs before regenerating one edited turn."""
+        await self._remove_stale_runs_for_turn_record(
             turn_record=turn_record,
             requester_user_id=requester_user_id,
             reason="edited",
@@ -1222,37 +1203,47 @@ class TurnStore:
                 storage.close()
         return newest_match
 
-    def _remove_stale_runs_for_turn_record(
+    async def _remove_stale_runs_for_turn_record(
         self,
         *,
         turn_record: TurnRecord,
         requester_user_id: str,
         reason: str,
     ) -> bool:
-        """Remove persisted runs using the exact recorded target and history scope."""
-        if turn_record.conversation_target is None or turn_record.history_scope is None:
+        """Remove persisted runs using the exact recorded target and history scope.
+
+        History derived from redacted events goes first, so a compaction rollback
+        cannot restore the turn's old runs after they were pruned.
+        """
+        target = turn_record.conversation_target
+        scope = turn_record.history_scope
+        if target is None or scope is None:
             return False
-        session_id = turn_record.conversation_target.session_id
-        execution_identity = self.deps.tool_runtime.build_execution_identity(
-            target=turn_record.conversation_target,
-            user_id=requester_user_id,
-        )
         storage = self.deps.state_writer.create_storage(
-            execution_identity,
-            scope=turn_record.history_scope,
+            self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
+            scope=scope,
         )
-        removed_any = False
+        session_type = self.deps.state_writer.session_type_for_scope(scope)
         try:
-            session_type = self.deps.state_writer.session_type_for_scope(turn_record.history_scope)
-            for source_event_id in turn_record.indexed_event_ids:
-                removed_source = remove_run_by_event_id(
+            session = await run_blocking_until_complete(
+                get_team_session if session_type is SessionType.TEAM else get_agent_session,
+                storage,
+                target.session_id,
+            )
+            if session is not None:
+                await remove_history_of_redacted_events(
                     storage,
-                    session_id,
-                    source_event_id,
-                    session_type=session_type,
-                    remove_following_runs=True,
+                    session,
+                    scope,
+                    partial(self.redacted_history_events, target),
                 )
-                removed_any = removed_source or removed_any
+            removed_any = await run_blocking_until_complete(
+                _remove_runs_for_sources,
+                storage,
+                target.session_id,
+                session_type,
+                turn_record.indexed_event_ids,
+            )
         finally:
             storage.close()
         if removed_any:
@@ -1260,10 +1251,32 @@ class TurnStore:
                 "Removed stale persisted history for handled turn",
                 reason=reason,
                 source_event_ids=list(turn_record.source_event_ids),
-                session_id=session_id,
-                history_scope=turn_record.history_scope.key,
+                session_id=target.session_id,
+                history_scope=scope.key,
             )
         return removed_any
+
+
+def _remove_runs_for_sources(
+    storage: BaseDb,
+    session_id: str,
+    session_type: SessionType,
+    source_event_ids: tuple[str, ...],
+) -> bool:
+    """Remove each source's runs and every run after them; return whether any went."""
+    removed_any = False
+    for source_event_id in source_event_ids:
+        removed_any = (
+            remove_run_by_event_id(
+                storage,
+                session_id,
+                source_event_id,
+                session_type=session_type,
+                remove_following_runs=True,
+            )
+            or removed_any
+        )
+    return removed_any
 
 
 def _merged_redaction_tombstones(

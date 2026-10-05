@@ -197,7 +197,7 @@ class TurnRecordCodec:
         # LEGACY_COMPAT: Ledger records carrying redaction cleanup obligations.
         # Legacy format: A stored record with pending_redaction_cleanup_event_ids, and revision replay
         # entries with cleanup_pending, naming session cleanup still owed for its tombstoned sources.
-        # Last legacy release: v2026.10.142; replacement: the next release derives session cleanup at
+        # Last legacy release: v2026.10.143; replacement: the next release derives session cleanup at
         # each response from the history's own event ids against the journal and ledger tombstones.
         # Handling: Both keys are ignored on read and dropped on the next write; every owed event is
         # also a ledger tombstone, so the next response of each affected history finds and removes it.
