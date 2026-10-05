@@ -1,7 +1,7 @@
 # Code Map
 
 Where things live in `src/mindroom/`, for locating code.
-When you add, rename, or remove a module, update its row in the same PR.
+When you add, rename, or remove a key module, update its row in the same PR.
 
 ## Inbound Turn Pipeline
 
@@ -270,11 +270,15 @@ Matrix sync callback
 | `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
+| `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
+| `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
+| `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
+| `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 
 ## Persistent State
 
 Persistent state lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
-- `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
+- `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, such as an agent's traces in `agents/<agent>/sessions/<agent>.db`, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
 - `agents/*/learning/` – Per-agent Agno Learning data when learning is enabled
 - `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG

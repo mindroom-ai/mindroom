@@ -50,7 +50,7 @@ If you switched homeservers or see `M_FORBIDDEN`, stop the backend and clear the
 uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
 ```
 
-This uses the same config and storage selection as `mindroom run`, including `MINDROOM_CONFIG_PATH` and `MINDROOM_STORAGE_PATH`; a hardcoded `mindroom_data/matrix_state.yaml` only covers default storage beside the repository's config.
+This uses the same environment and `.env` selection as `mindroom run`, including `MINDROOM_CONFIG_PATH` and `MINDROOM_STORAGE_PATH`; if the backend uses `--config` or `--storage-path`, export the matching variable first, because a hardcoded `mindroom_data/matrix_state.yaml` only covers default storage beside the repository's config.
 For a full destructive reset of the local homeserver, read the `just local-matrix-reset` warning in `docs/dev/ops/README.md` first.
 
 ## Fast Path: Use Existing Repo Config
@@ -119,6 +119,8 @@ mindroom_user:
 room_defaults:
   join_policy: public
 ```
+
+To exercise Mem0 memory instead of `backend: file`, set `memory.backend: mem0` and an `embedder` with `provider: openai` and a `config.model` the local server serves, such as `embeddinggemma:300m` (see `docs/memory.md`).
 
 Then export an isolated runtime.
 
@@ -222,6 +224,8 @@ Use the actual alias created by the active config.
 ## Read and Send Messages with Matty
 
 Matty accepts per-command credentials with `-u` and `-p`.
+Matty refers to messages by handles `m1`, `m2`, … and to threads by `t1`, `t2`, …; thread handles persist across sessions.
+`matty messages` takes `--limit` (default 20), `matty thread-start "$room_id" m2 "text"` starts a thread from a message, and every command has a short alias (`r`, `m`, `t`, `th`, `ts`, `tr`, …; see `matty --help`).
 Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b`).
 Correlate replies with the submitted event ID through either `m.thread` relations or room-mode `m.in_reply_to` relations, then apply edits targeting the matched response event; follow the [tester observation protocol](../../../agents/mindroom-tester.md) for sender checks, terminal status, and timeouts.
 
@@ -282,8 +286,8 @@ uv run --python 3.13 matty thread-reply "$room_id" t1 "$agent_id continue" -u "$
 ```
 
 Agents usually reply in threads and may stream by editing the same event, which can take 10 seconds or more.
-Inspect the latest `io.mindroom.stream_status` in a client or event view that exposes it: `pending` and `streaming` mean the reply is still in progress, and `completed` confirms success.
-Record `cancelled` or `error` as terminal outcomes; body ellipses are not a completion signal.
+Inspect the latest `io.mindroom.stream_status` in a client or event view that exposes it: `pending` and `streaming` mean the reply is still in progress, `approval_pending` means it waits for someone to approve or deny a tool call, and `completed` confirms success.
+Record `cancelled` or `error` as terminal outcomes, as well as a reply that ends with a `**[Response interrupted…]**` note; body ellipses are not a completion signal.
 When reading threads through the raw `/messages` API, the streamed edits are `m.replace` events whose `m.relates_to.event_id` is the placeholder reply, not the thread root, so collect the thread events first and then apply every `m.replace` whose target is one of them; filtering on the root alone leaves the reply stuck at `Thinking...`.
 A deterministic stub on 9292 can also emit an OpenAI `tool_calls` delta when the user text contains a marker, which exercises MindRoom's tool hook chain end to end without a provider key.
 If `matty threads` looks empty or flaky, use `matty messages --format json` to discover the thread handle and then read it directly with `matty thread`.

@@ -70,8 +70,8 @@ Do not require refactors of untouched code unless they have clear immediate ROI.
 - **PR**: Is the PR description and title clear and informative?
 - **Docs**: Do docs changes follow the Documentation Policy in @AGENTS.md?
   A change to configuration, user-visible behavior, or an operator procedure without an update to its owning page is a blocker.
-  Docs text that fails the policy's question test is also a blocker: a narrated bug fix, implementation mechanics outside `docs/architecture/`, a hardening limit normal use never reaches, or a rare failure or recovery path.
-  A fix that restores documented behavior, a refactor, or hardening needs no docs change, so never ask for one.
+  Docs text that fails the policy's question test is also a blocker: a narrated bug fix, implementation mechanics outside `docs/architecture/`, or a hardening limit or rare failure or recovery path that no user would plausibly ask about.
+  A fix that restores documented behavior, a refactor, or hardening whose limits normal use never reaches needs no user-docs change, so never ask for one; contributor pages under `docs/architecture/` follow their own update rules.
 - **Tests**: Are there tests, and do they cover the changes adequately?
   Are they testing something meaningful or are they just trivial?
   On NixOS, run them inside `nix-shell shell.nix` (or use `nix-shell shell.nix --run 'uv run pytest -x -n 0 --no-cov -v'`).

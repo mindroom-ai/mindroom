@@ -34,8 +34,8 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 
 - The primary reader of `docs/` is an AI agent running inside MindRoom, which loads whole pages through the bundled `mindroom-docs` skill to explain, configure, operate, and troubleshoot MindRoom for its user.
   Every sentence on a page costs context on every question that page answers, so a sentence belongs only when that agent needs it.
-- **Default to no docs change.**
-  Bug fixes that restore documented behavior, refactors, hardening, internal limits, and changes to failure or recovery paths need none.
+- **Default to no change in user docs**, meaning every page outside `docs/architecture/`.
+  Bug fixes that restore documented behavior, refactors, and hardening or internal limits that normal use never reaches need none; contributor pages such as the code map, `migrations.md`, and `agno-compatibility.md` follow their own update rules.
   Change docs only when configuration, user-visible behavior, or an operator procedure changes, and then add only the sentences that change an answer to a user question.
 - **Name the question before writing a sentence**: keep it only when the agent would answer a realistic user question worse without it, such as how to set something up, what a setting does, or why something did or did not happen.
   If you cannot name that question, the sentence does not belong outside `docs/architecture/`.
@@ -49,8 +49,8 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
   `docs/architecture/` pages are for contributors and may explain mechanisms; other pages name implementation details only when a documented procedure needs them.
 - Sentences like these fail the question test:
   - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." describes a cache, not anything a user does or sees.
-  - "A reply that continues after a tool approval, and a voice-call reply, do not remove it first." lists rare paths no user asks about.
-  By contrast, "Edits to an agent's `instructions`, `model`, or `tools` apply from its next reply without restarting it." answers "do I need to restart?".
+  - "Restart recovery now checks the handled-turn ledger before replaying journal events." narrates a mechanism and its history; the outcome is "restarts do not produce duplicate replies".
+  These pass: "Edits to an agent's `instructions`, `model`, or `tools` apply from its next reply without restarting it." answers "do I need to restart?", and the history page's note that a voice-call reply or a reply resuming after a tool approval can still use a redacted message is a rare path that answers "can the agent still see what I deleted?".
 - Each topic has one owning page that states each of its facts once; other pages link to it instead of splitting its rules across pages.
 
 ### Refactor Policy
@@ -163,6 +163,7 @@ The full model, the `file_access` setting, and the list of intentional behaviors
 - `docs/dev/ops/README.md` lists the `just` recipes, including the destructive `just local-matrix-reset`; read its warning before resetting.
 - For hosted Matrix with pairing (`uvx mindroom config init --matrix-server mindroom.chat`, then `uvx mindroom run`), see `docs/getting-started.md` and `docs/deployment/hosted-matrix.md`.
 - SaaS platform deployment, staging values, release deploys, and Supabase migrations are documented in `docs/deployment/saas-platform.md`.
+- `docs/cli.md` documents every `mindroom` command, including `mindroom doctor`, `mindroom run --log-level DEBUG`, and `mindroom local-stack-setup`.
 
 ### Step 3: Development & Git
 
@@ -267,8 +268,8 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 - **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
 - **Teams**: Collaborative bundles of agents that coordinate or parallelize work
 
-**Code map**: `docs/architecture/code-map.md` holds the inbound turn pipeline, a one-line purpose for every module under `src/mindroom/`, and where persistent state lives.
-Read it to locate code, and update its module rows when you add, rename, or remove a module.
+**Code map**: `docs/architecture/code-map.md` holds the inbound turn pipeline, a one-line purpose for each key module under `src/mindroom/`, and where persistent state lives.
+Read it to locate code, and update its rows when you add, rename, or remove a key module.
 Turn handling is described in `docs/architecture/bot-runtime.md`, and minimal-mode ownership and recovery in `docs/architecture/agent-cli.md`.
 
 ### SaaS Platform (`saas-platform/`)
@@ -293,14 +294,14 @@ Turn handling is described in `docs/architecture/bot-runtime.md`, and minimal-mo
 ### Ecosystem Repositories
 
 MindRoom also maintains related repositories under `github.com/mindroom-ai`, many of them cloned in the parent directory (`../`) of this dev environment:
-- `synapse` - Synapse fork with optional compact-edit collapsing for superseded `m.replace` events, advertised in `/versions` as `org.mindroom.compact_edits`. See `README.md` and `FORK_CHANGES.md`.
-- `mindroom-librechat` - LibreChat fork that renders MindRoom inline `<tool>` / `<tool-group>` tags as native `ToolCall` cards. See `README.md` and `.mindroom/` (`fork-context.md`, `tool-tag-rendering.md`).
-- `mindroom-chat` - MindRoom Chat, the Cinny-based Matrix client for MindRoom on the web, iOS, and Android. See `README.md` and `FORK_CHANGES.md`.
+- `synapse` - Synapse fork with optional compact-edit collapsing for superseded `m.replace` events, advertised in `/versions` as `org.mindroom.compact_edits` (see `README.md` and `FORK_CHANGES.md`).
+- `mindroom-librechat` - LibreChat fork that renders MindRoom inline `<tool>` / `<tool-group>` tags as native `ToolCall` cards (see `README.md` and `.mindroom/fork-context.md` and `.mindroom/tool-tag-rendering.md`).
+- `mindroom-chat` - MindRoom Chat, the Cinny-based Matrix client for MindRoom on the web, iOS, and Android (see `README.md` and `FORK_CHANGES.md`).
 - `mindroom-stack` - Docker Compose reference stack with the published MindRoom backend and frontend, a Tuwunel homeserver, and MindRoom Chat.
 
 ### Configuration Model
 
-The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mindroom/config/` (root model in `src/mindroom/config/main.py`); `docs/configuration/` documents every section, starting from the minimal example in `docs/configuration/index.md`.
+The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mindroom/config/` (root model in `src/mindroom/config/main.py`); `docs/configuration/index.md` shows a minimal example and lists every top-level section with its owning page.
 `config.yaml` changes are watched at runtime: the orchestrator diffs configs, applies what it can in place, and restarts only the affected entities without bringing down the stack.
 
 ## 6. Releases
