@@ -3631,8 +3631,8 @@ async def test_call_events_cannot_bypass_pending_join_backoff(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["cascaded", "live"])
-async def test_delegated_call_retries_reuse_logical_call_session_id(
+@pytest.mark.parametrize("backend", ["realtime", "cascaded", "live"])
+async def test_call_retries_reuse_per_call_session_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     backend: str,
@@ -3652,7 +3652,7 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    config = _live_config() if backend == "live" else _cascaded_config()
+    config = {"realtime": _config, "cascaded": _cascaded_config, "live": _live_config}[backend]()
     manager = _manager(client, FakeBridge(), tmp_path, config)
     results = iter(("retry", "joined", "joined"))
 
@@ -3670,6 +3670,7 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
 
     assert len(session_ids) == 2
     assert session_ids[0] == session_ids[1]
+    assert session_ids[0].startswith(f"{ROOM_ID}:call:")
 
     client.room_get_state.return_value = _state_response()
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))

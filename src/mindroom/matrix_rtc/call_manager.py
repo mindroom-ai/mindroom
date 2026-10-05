@@ -175,7 +175,7 @@ class _LogicalCallState:
     """State that survives media-session reconnects for one logical call."""
 
     requester_id: str
-    agent_session_id: str | None
+    agent_session_id: str
     join_blocked: bool = False
 
 
@@ -1182,9 +1182,7 @@ class CallManager:
 
     def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
         """Create the state shared by every media attempt for one caller presence."""
-        session_id = None
-        if self._call_config.backend in {"cascaded", "live"}:
-            session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
+        session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
         logical_call = _LogicalCallState(requester_id=requester_id, agent_session_id=session_id)
         self._logical_calls[room_id] = logical_call
         return logical_call
