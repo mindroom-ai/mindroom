@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from agno.tools import Toolkit
 
+from mindroom.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
 from mindroom.scheduling import (
     cancel_scheduled_task,
     edit_scheduled_task,
@@ -15,6 +18,10 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,
 )
+
+if TYPE_CHECKING:
+    from agno.agent import Agent
+    from agno.run import RunContext
 
 _TOOL_ERROR_PREFIX = "❌"
 _LIST_SCHEDULES_ERROR = "Unable to retrieve scheduled tasks."
@@ -34,6 +41,7 @@ class SchedulerTools(Toolkit):
             tools=[
                 self.schedule,
                 self.schedule_tool_call,
+                self.run_scheduled_call,
                 self.edit_schedule,
                 self.list_schedules,
                 self.cancel_schedule,
@@ -101,31 +109,37 @@ class SchedulerTools(Toolkit):
         arguments_json: str,
         execute_at: str,
         description: str,
+        agent: Agent | None = None,
     ) -> str:
-        """Schedule one exact approval-gated tool call that the requester approves now.
+        """Schedule one of your approval-gated tool calls that the requester approves now.
 
         Use this when a gated action, such as sending an external message, must run at
-        a set time while the requester may be away. MindRoom posts an approval card in
-        this thread showing the exact call and send time. Once approved, the call runs
-        at that time without another approval, but only if it is made exactly once with
-        exactly these arguments within 15 minutes of the scheduled time. A cancelled or
-        edited schedule, a late run, or any other call asks for approval again. Tell the
-        requester to approve the card; do not claim the call ran until it reports success.
+        a set time while the requester may be away. MindRoom stores the call and posts an
+        approval card in this thread showing it and the send time. When the task fires,
+        you are asked to call `run_scheduled_call` with its task ID, which runs the stored
+        call once without another approval. Tell the requester to approve the card; do
+        not claim the call ran until `run_scheduled_call` reports its result.
 
         Args:
-            tool_name: The tool function to call, e.g. "post_slack_message".
-            arguments_json: The call's exact arguments as a JSON object string.
+            tool_name: One of your tool functions, e.g. "post_slack_message".
+            arguments_json: The call's arguments as a JSON object string.
             execute_at: When to run, as ISO 8601 with a UTC offset,
                 e.g. "2026-10-04T09:00:00-04:00".
-            description: Short human-readable description of the scheduled action.
+            description: Short description of the scheduled action; if the requester
+                approves any arguments, it tells you what the call should do when it runs.
+            agent: Supplied by MindRoom; never pass it.
 
         Returns:
             The scheduling result message.
 
         """
         context = get_tool_runtime_context()
-        if context is None or context.room is None:
+        if context is None or context.room is None or agent is None:
             return "❌ Scheduler tool is unavailable in this context."
+        prepared = prepare_scheduled_call(agent, tool_name, arguments_json)
+        if isinstance(prepared, str):
+            raise RuntimeError(prepared)  # noqa: TRY004 - a scheduler failure, reported like the others
+        live, arguments = prepared
 
         task_id, response_text = await schedule_approved_tool_call(
             runtime=build_scheduling_runtime_from_tool_runtime_context(context),
@@ -133,14 +147,45 @@ class SchedulerTools(Toolkit):
             thread_id=context.resolved_thread_id,
             scheduled_by=context.requester_id,
             agent_name=context.agent_name,
+            call=live,
             tool_name=tool_name,
-            arguments_json=arguments_json,
+            arguments=arguments,
             execute_at=execute_at,
             description=description,
         )
         if task_id is None:
             raise RuntimeError(response_text)
         return response_text
+
+    async def run_scheduled_call(
+        self,
+        task_id: str,
+        arguments_json: str | None = None,
+        agent: Agent | None = None,
+        run_context: RunContext | None = None,
+    ) -> object:
+        """Run the call a scheduled task stored, once, with the requester's approval.
+
+        Call this when a scheduled task asks you to. It runs the stored call without
+        another approval card and returns the tool's result. If the requester approved
+        any arguments, you may pass arguments_json to replace the stored arguments for
+        the same tool; otherwise omit it.
+
+        Args:
+            task_id: The scheduled task's ID from its message.
+            arguments_json: Optional replacement arguments as a JSON object string,
+                only when the requester approved any arguments.
+            agent: Supplied by MindRoom; never pass it.
+            run_context: Supplied by MindRoom; never pass it.
+
+        Returns:
+            The tool's result, or why the call did not run.
+
+        """
+        context = get_tool_runtime_context()
+        if context is None:
+            return "❌ Scheduler tool is unavailable in this context."
+        return await run_scheduled_call(context, agent, run_context, task_id, arguments_json)
 
     async def edit_schedule(
         self,

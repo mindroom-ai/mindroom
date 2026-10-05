@@ -67,7 +67,11 @@ from .projection import ProjectedEvent, replacement_target, thread_root, visible
 from .scheduled_approvals import (
     SCHEDULED_APPROVAL_WINDOW_NS,
     ScheduledApprovalArmState,
+    ScheduledCall,
     ScheduledCallBinding,
+    ScheduledCallClaim,
+    ScheduledCallOutcome,
+    ScheduledCallRefusal,
     scheduled_call_run_id,
 )
 from .store import EventJournalStore, PrincipalStore, TurnRecordStore
@@ -139,7 +143,11 @@ __all__ = [
     "RoomHistoryRecovery",
     "RoomMembershipPosition",
     "ScheduledApprovalArmState",
+    "ScheduledCall",
     "ScheduledCallBinding",
+    "ScheduledCallClaim",
+    "ScheduledCallOutcome",
+    "ScheduledCallRefusal",
     "SemanticConsumer",
     "StoredApprovalCard",
     "TerminalTurnWrite",

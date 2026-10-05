@@ -68,7 +68,14 @@ from .projection import (
     project,
     tombstoned_event_ids,
 )
-from .scheduled_approvals import ScheduledApprovalArmState, ScheduledCallBinding  # noqa: TC001
+from .scheduled_approvals import (  # noqa: TC001
+    ScheduledApprovalArmState,
+    ScheduledCall,
+    ScheduledCallBinding,
+    ScheduledCallClaim,
+    ScheduledCallOutcome,
+    ScheduledCallRefusal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -1241,6 +1248,42 @@ class PrincipalStore:
                 self._principal_id,
                 task_id=task_id,
                 reason=reason,
+            ),
+        )
+
+    async def scheduled_call(self, *, task_id: str) -> ScheduledCall | None:
+        """Read the call one scheduled task stored."""
+        return await self._backend.read(
+            lambda transaction: scheduled_approvals.stored_call(transaction, self._principal_id, task_id=task_id),
+        )
+
+    async def claim_scheduled_call(
+        self,
+        *,
+        call: ScheduledCall,
+        arguments_json: str,
+        receipt: ApprovalCardReservation,
+    ) -> ScheduledCallClaim | ScheduledCallRefusal:
+        """Spend one armed scheduled approval and reserve its receipt in one commit."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.claim(
+                transaction,
+                self._principal_id,
+                call=call,
+                arguments_json=arguments_json,
+                receipt=receipt,
+                now_ns=time.time_ns(),
+            ),
+        )
+
+    async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None:
+        """Record how one claimed scheduled call ended."""
+        await self._backend.write(
+            lambda transaction: scheduled_approvals.record_outcome(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                outcome=outcome,
             ),
         )
 

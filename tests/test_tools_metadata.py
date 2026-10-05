@@ -1629,6 +1629,7 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
     assert set(tool.async_functions) == {
         "schedule",
         "schedule_tool_call",
+        "run_scheduled_call",
         "edit_schedule",
         "list_schedules",
     }

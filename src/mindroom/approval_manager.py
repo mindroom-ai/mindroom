@@ -21,10 +21,13 @@ from mindroom.event_journal import (
     BackgroundApprovalDecision,
     DeliveryStage,
     MatrixDelivery,
+    ScheduledCall,
     ScheduledCallBinding,
+    ScheduledCallClaim,
+    ScheduledCallOutcome,
+    ScheduledCallRefusal,
     StoredApprovalCard,
     UnreadableApprovalCard,
-    approval_arguments_digest,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
@@ -98,6 +101,15 @@ class ToolApprovalTransportError(RuntimeError):
 
 class UnverifiableApprovalCardError(ToolApprovalTransportError):
     """A legacy approval action target cannot be authenticated by Matrix."""
+
+
+def _scheduled_call_target(task_id: str, execute_at_ns: int) -> dict[str, object]:
+    """Name the scheduled task a scheduling card or its receipt belongs to."""
+    return {
+        "approval_target": "scheduled_call",
+        "scheduled_task_id": task_id,
+        "scheduled_for": approval_timestamp(execute_at_ns),
+    }
 
 
 def _utcnow() -> datetime:
@@ -378,63 +390,85 @@ class ApprovalManager:
 
     async def request_scheduled_call_approval(
         self,
+        binding: ScheduledCallBinding,
         *,
-        task_id: str,
-        room_id: str,
-        thread_id: str,
-        requester_id: str,
         approver_user_id: str,
-        agent_name: str,
-        tool_name: str,
-        arguments: dict[str, object],
-        execute_at: datetime,
-        workflow_digest: str,
         scheduled_for_text: str,
         any_arguments_offered: bool,
     ) -> bool:
-        """Publish one card approving the call a scheduled task will make later."""
+        """Publish one card approving the call a scheduled task stores for later."""
         cards = self.cards
         if self.prepare_event is None or cards is None or self.send_delivery is None:
             return False
-        execute_at_ns = int(execute_at.timestamp() * 1_000_000_000)
-        delivery_id = f"scheduled-approval:{task_id}"
+        delivery_id = f"scheduled-approval:{binding.task_id}"
         reservation = await self._prepare_approval_card(
             approval_id=delivery_id,
-            tool_call_id=task_id,
-            tool_name=tool_name,
-            raw_arguments=arguments,
-            agent_name=agent_name,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=requester_id,
+            tool_call_id=binding.task_id,
+            tool_name=binding.tool_name,
+            raw_arguments=json.loads(binding.arguments_json),
+            agent_name=binding.agent_name,
+            room_id=binding.room_id,
+            thread_id=binding.thread_id,
+            requester_id=binding.requester_id,
             approver_user_id=approver_user_id,
-            expires_at_ns=execute_at_ns,
+            expires_at_ns=binding.execute_at_ns,
             target_fields={
-                "approval_target": "scheduled_call",
-                "scheduled_task_id": task_id,
-                "scheduled_for": approval_timestamp(execute_at_ns),
+                **_scheduled_call_target(binding.task_id, binding.execute_at_ns),
                 "scheduled_window_seconds": SCHEDULED_APPROVAL_WINDOW_NS // 1_000_000_000,
                 **({"scheduled_scope_options": list(SCHEDULED_SCOPE_OPTIONS)} if any_arguments_offered else {}),
-                "body": f"🔒 Approval required: {tool_name} (scheduled for {scheduled_for_text})",
+                "body": f"🔒 Approval required: {binding.tool_name} (scheduled for {scheduled_for_text})",
             },
         )
         if reservation is None or reservation.payload.get("approvable", True) is not True:
             return False
-        binding = ScheduledCallBinding(
-            task_id=task_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=requester_id,
-            entity_name=agent_name,
-            tool_name=tool_name,
-            arguments_digest=approval_arguments_digest(arguments),
-            workflow_digest=workflow_digest,
-            execute_at_ns=execute_at_ns,
-        )
         if not await cards.reserve_scheduled_call_approval(binding=binding, card=reservation):
             return False
         await self._publish_reserved_cards([delivery_id])
         return True
+
+    async def scheduled_call(self, task_id: str) -> ScheduledCall | None:
+        """Read the call one scheduled task stored."""
+        return None if self.cards is None else await self.cards.scheduled_call(task_id=task_id)
+
+    async def claim_scheduled_call(
+        self,
+        call: ScheduledCall,
+        *,
+        arguments_json: str,
+        approver_user_id: str,
+    ) -> ScheduledCallClaim | ScheduledCallRefusal | None:
+        """Spend a scheduled approval for the arguments about to run and publish its receipt.
+
+        Returns None when the approval runtime cannot prepare the receipt, which claims nothing.
+        """
+        cards = self.cards
+        if self.prepare_event is None or cards is None or self.send_delivery is None:
+            return None
+        delivery_id = f"scheduled-receipt:{call.task_id}"
+        receipt = await self._prepare_approval_card(
+            approval_id=delivery_id,
+            tool_call_id=call.task_id,
+            tool_name=call.tool_name,
+            raw_arguments=json.loads(arguments_json),
+            agent_name=call.agent_name,
+            room_id=call.room_id,
+            thread_id=call.thread_id,
+            requester_id=call.requester_id,
+            approver_user_id=approver_user_id,
+            expires_at_ns=call.execute_at_ns + SCHEDULED_APPROVAL_WINDOW_NS,
+            target_fields=_scheduled_call_target(call.task_id, call.execute_at_ns),
+        )
+        if receipt is None:
+            return None
+        claimed = await cards.claim_scheduled_call(call=call, arguments_json=arguments_json, receipt=receipt)
+        if isinstance(claimed, ScheduledCallClaim):
+            await self._publish_reserved_cards([delivery_id])
+        return claimed
+
+    async def record_scheduled_call_outcome(self, task_id: str, outcome: ScheduledCallOutcome) -> None:
+        """Record how one claimed scheduled call ended."""
+        if self.cards is not None:
+            await self.cards.record_scheduled_call_outcome(task_id=task_id, outcome=outcome)
 
     async def arm_scheduled_call_approval(
         self,

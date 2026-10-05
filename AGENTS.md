@@ -134,8 +134,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
 | `event_journal/response_attempts.py` | Normalized durable response ownership registration, binding, and exact lookup queries |
 | `event_journal/legacy_response_attempts.py` | One-time transactional adoption of released response ownership snapshots |
-| `event_journal/automatic_approvals.py` | Approve a pending call without a card and publish its receipt, shared by timed grants and scheduled approvals |
-| `event_journal/scheduled_approvals.py` | One-shot approvals for tool calls approved while scheduling them: binding, fire-time arming, withdrawal, and consumption |
+| `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
@@ -205,6 +204,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling.py` | Cron and natural-language task scheduling |
+| `scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
 | `tools/` | 100+ tool integrations |

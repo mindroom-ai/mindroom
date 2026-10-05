@@ -25,13 +25,19 @@ from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exemp
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from datetime import datetime
     from pathlib import Path
     from types import ModuleType
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.event_journal import ScheduledApprovalArmState
+    from mindroom.event_journal import (
+        ScheduledApprovalArmState,
+        ScheduledCall,
+        ScheduledCallBinding,
+        ScheduledCallClaim,
+        ScheduledCallOutcome,
+        ScheduledCallRefusal,
+    )
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -43,11 +49,14 @@ __all__ = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "arm_scheduled_call_approval",
+    "claim_scheduled_call",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "is_process_active_approval_card",
+    "record_scheduled_call_outcome",
     "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
+    "scheduled_call",
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
@@ -296,55 +305,64 @@ def scheduled_call_offers_any_arguments(
     tool_name: str,
     arguments: dict[str, object],
     *,
-    entity_name: str,
     requester_id: str,
     approver_id: str,
+    authored_confirmation: bool,
 ) -> bool:
     """Return whether a scheduled call's card may offer approving any arguments.
 
-    Like a timed approval, the broader scope needs requesters who approve their
-    own calls, and it covers only the scheduling agent's own call, which a team
-    never makes itself. Generic MCP dispatch names its remote tool in the
-    arguments, so approving any arguments there would approve every tool on the
-    server; it stays exact-only.
+    Like a timed approval, the broader scope needs requesters who approve their own
+    calls. A tool that asks for its own confirmation is approved only for the exact
+    call shown. Generic MCP dispatch names its remote tool in the arguments, so
+    approving any arguments there would approve every tool on the server.
     """
-    if not config.tool_approval.scheduled_any_arguments or entity_name in config.teams or approver_id != requester_id:
+    if not config.tool_approval.scheduled_any_arguments or approver_id != requester_id or authored_confirmation:
         return False
     operation = grant_operation(config, tool_name, arguments)
     return operation is not None and operation.mcp_server_id is None
 
 
 async def request_scheduled_call_approval(
+    binding: ScheduledCallBinding,
     *,
-    task_id: str,
-    room_id: str,
-    thread_id: str,
-    requester_id: str,
     approver_user_id: str,
-    agent_name: str,
-    tool_name: str,
-    arguments: dict[str, object],
-    execute_at: datetime,
-    workflow_digest: str,
     scheduled_for_text: str,
     any_arguments_offered: bool,
 ) -> bool:
-    """Publish the card that pre-approves a call a scheduled task will make."""
+    """Publish the card that pre-approves the call a scheduled task stores."""
     manager = approval_manager.get_approval_store()
     return manager is not None and await manager.request_scheduled_call_approval(
-        task_id=task_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        requester_id=requester_id,
+        binding,
         approver_user_id=approver_user_id,
-        agent_name=agent_name,
-        tool_name=tool_name,
-        arguments=arguments,
-        execute_at=execute_at,
-        workflow_digest=workflow_digest,
         scheduled_for_text=scheduled_for_text,
         any_arguments_offered=any_arguments_offered,
     )
+
+
+async def scheduled_call(task_id: str) -> ScheduledCall | None:
+    """Read the call one scheduled task stored; none without a store."""
+    manager = approval_manager.get_approval_store()
+    return None if manager is None else await manager.scheduled_call(task_id)
+
+
+async def claim_scheduled_call(
+    call: ScheduledCall,
+    *,
+    arguments_json: str,
+    approver_user_id: str,
+) -> ScheduledCallClaim | ScheduledCallRefusal | None:
+    """Spend a scheduled approval for the arguments about to run; none without a store."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return None
+    return await manager.claim_scheduled_call(call, arguments_json=arguments_json, approver_user_id=approver_user_id)
+
+
+async def record_scheduled_call_outcome(task_id: str, outcome: ScheduledCallOutcome) -> None:
+    """Record how one claimed scheduled call ended."""
+    manager = approval_manager.get_approval_store()
+    if manager is not None:
+        await manager.record_scheduled_call_outcome(task_id, outcome)
 
 
 async def arm_scheduled_call_approval(

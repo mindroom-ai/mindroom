@@ -1,44 +1,52 @@
 """One-shot approvals for tool calls a requester approved while scheduling them.
 
 A scheduled call's card is a detached exact-call card on the shared
-background-approval lifecycle, as the single call of the run its task names. This module owns the binding a later call must
-match: the scheduled task fires, arms the binding only if the task is unchanged
-and on time, and the first matching call consumes it. The requester approves
-either the exact arguments shown on the card or any arguments for that tool.
-It is the only module that reads or writes the binding table.
+background-approval lifecycle, as the single call of the run its task names.
+This module owns the binding that stores the approved call: the scheduled task
+fires, arms the binding only if the task is unchanged and on time, and the
+scheduling agent claims it once by task ID, which spends the approval and
+publishes its receipt. The requester approves either the stored arguments or any
+arguments for that tool. It is the only module that reads or writes the binding table.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_approval_grants import ANY_ARGUMENTS, EXACT_ARGUMENTS, approval_timestamp
+from mindroom.tool_approval_grants import ANY_ARGUMENTS, EXACT_ARGUMENTS, ScheduledCallBinding, approval_timestamp
 
-from . import approval_card_state, approval_grants, automatic_approvals, background_approvals
+from . import approval_card_state, approval_grants, background_approvals, membership_state, outbox
+from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
-    from .approval_continuations import ApprovalContinuation
-    from .backend import Transaction
+    from .backend import Row, Transaction
 
 __all__ = [
     "RECEIPT",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "ScheduledApprovalArmState",
+    "ScheduledCall",
     "ScheduledCallBinding",
-    "apply_armed",
+    "ScheduledCallClaim",
+    "ScheduledCallOutcome",
+    "ScheduledCallRefusal",
     "arm",
     "card_identity",
+    "claim",
     "prune",
     "record_decision",
+    "record_outcome",
     "remember_receipt_alias",
     "reserve",
     "scheduled_call_run_id",
+    "stored_call",
     "withdraw",
 ]
 
@@ -46,6 +54,19 @@ SCHEDULED_APPROVAL_WINDOW_NS = 15 * 60 * 1_000_000_000
 _RUN_PREFIX = "scheduled-task:"
 _RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 ScheduledApprovalArmState = Literal["none", "armed", "denied", "unarmed"]
+ScheduledCallRefusal = Literal[
+    "missing",
+    "elsewhere",
+    "withdrawn",
+    "not_approved",
+    "not_armed",
+    "used",
+    "late",
+    "arguments",
+    "left_room",
+]
+# Completed means the call returned; a claimed binding with no outcome ended in an unknown state.
+ScheduledCallOutcome = Literal["completed", "failed"]
 # A consumed binding marks the receipt it published as an automatic terminal approval.
 RECEIPT = """EXISTS (
     SELECT 1 FROM scheduled_call_approvals AS scheduled
@@ -56,19 +77,30 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class ScheduledCallBinding:
-    """The call, scope, task, and time one scheduled approval covers."""
+class ScheduledCall:
+    """A stored scheduled call as its scheduling agent reads it before claiming it."""
 
     task_id: str
     room_id: str
     thread_id: str
     requester_id: str
-    # The responding agent or team; a team's call is made by one of its members.
-    entity_name: str
+    agent_name: str
+    toolkit_name: str
     tool_name: str
-    arguments_digest: str
-    workflow_digest: str
+    arguments_json: str
     execute_at_ns: int
+    # The scope the requester approved, narrowed to exact arguments when operators stop allowing any.
+    approved_scope: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledCallClaim:
+    """One spent approval: the exact call to run and the provenance its receipt published."""
+
+    toolkit_name: str
+    tool_name: str
+    arguments_json: str
+    provenance: dict[str, object]
 
 
 def scheduled_call_run_id(task_id: str) -> str:
@@ -157,9 +189,9 @@ def reserve(
     transaction.execute(
         """
         INSERT INTO scheduled_call_approvals (
-            principal_id, task_id, delivery_id, room_id, thread_id, requester_id, entity_name,
-            tool_name, arguments_digest, workflow_digest, execute_at_ns, membership_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            principal_id, task_id, delivery_id, room_id, thread_id, requester_id, agent_name,
+            toolkit_name, tool_name, arguments_json, workflow_digest, execute_at_ns, membership_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, task_id) DO NOTHING
         """,
         (
@@ -169,9 +201,10 @@ def reserve(
             binding.room_id,
             binding.thread_id,
             binding.requester_id,
-            binding.entity_name,
+            binding.agent_name,
+            binding.toolkit_name,
             binding.tool_name,
-            binding.arguments_digest,
+            binding.arguments_json,
             binding.workflow_digest,
             binding.execute_at_ns,
             0 if epoch is None else int(epoch["membership_epoch"]),
@@ -276,8 +309,8 @@ def arm(
 
 def withdraw(transaction: Transaction, principal_id: str, *, task_id: str, reason: str) -> RecordedApprovalDecision:
     """Withdraw a cancelled or edited task's approval for good and deny its card if still pending."""
-    # Serialize with consumption, which runs under this lock during card reservation,
-    # then lock the card's row before the binding, in the same order as a card decision.
+    # Serialize with a claim, which runs under this lock, then lock the card's row
+    # before the binding, in the same order as a card decision.
     approval_grants.lock(transaction, principal_id)
     recorded = background_approvals.resolve_call(
         transaction,
@@ -297,100 +330,156 @@ def withdraw(transaction: Transaction, principal_id: str, *, task_id: str, reaso
     return recorded
 
 
-def apply_armed(
+def stored_call(transaction: Transaction, principal_id: str, *, task_id: str) -> ScheduledCall | None:
+    """Read the call a scheduled task stored, so its agent can prepare it before claiming."""
+    row = transaction.fetchone(
+        "SELECT * FROM scheduled_call_approvals WHERE principal_id = ? AND task_id = ?",
+        (principal_id, task_id),
+    )
+    if row is None:
+        return None
+    return ScheduledCall(
+        task_id=task_id,
+        room_id=str(row["room_id"]),
+        thread_id=str(row["thread_id"]),
+        requester_id=str(row["requester_id"]),
+        agent_name=str(row["agent_name"]),
+        toolkit_name=str(row["toolkit_name"]),
+        tool_name=str(row["tool_name"]),
+        arguments_json=str(row["arguments_json"]),
+        execute_at_ns=int(row["execute_at_ns"]),
+        approved_scope=None if row["approved_scope"] is None else str(row["approved_scope"]),
+    )
+
+
+def claim(
     transaction: Transaction,
     principal_id: str,
     *,
-    continuation_principal_id: str,
-    continuation: ApprovalContinuation,
-    card: ApprovalCardReservation,
-    membership_epoch: int,
-    any_arguments_eligible: bool,
-) -> bool:
-    """Approve one call matching an armed binding and publish its receipt instead of a card.
+    call: ScheduledCall,
+    arguments_json: str,
+    receipt: ApprovalCardReservation,
+    now_ns: int,
+) -> ScheduledCallClaim | ScheduledCallRefusal:
+    """Spend an armed approval once and reserve its receipt in the same commit.
 
-    An any-arguments approval covers only the scheduling agent's own call whose
-    card a timed approval could cover, so a team member's or delegated agent's
-    call, or one with arguments too large to show, still asks.
+    ``call`` names who claims it: the binding's room, thread, requester, agent,
+    and stored call must still match. ``arguments_json`` is the canonical
+    arguments that will run, the stored ones unless any arguments were approved.
     """
-    call = next(call for call in continuation.calls if call.tool_call_id == card.tool_call_id)
-    if call.arguments_digest is None or continuation.thread_id is None:
-        return False
-    any_arguments = any_arguments_eligible and call.invoking_agent == continuation.entity_name
-    now = time.time_ns()
+    # Serialize with withdrawal, then lock the card's row before the binding, as a card decision does.
+    approval_grants.lock(transaction, principal_id)
     row = transaction.fetchone(
         """
-        SELECT scheduled.task_id, scheduled.execute_at_ns, scheduled.decided_at_ns, scheduled.decided_by,
-               scheduled.card_event_id, scheduled.approved_scope
+        SELECT scheduled.*, background.decision
         FROM scheduled_call_approvals AS scheduled
         JOIN background_approval_calls AS background
           ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
-        WHERE scheduled.principal_id = ? AND scheduled.room_id = ? AND scheduled.thread_id = ?
-          AND scheduled.requester_id = ? AND scheduled.entity_name = ? AND scheduled.tool_name = ?
-          AND (scheduled.arguments_digest = ? OR scheduled.approved_scope = ?)
-          AND scheduled.membership_epoch = ?
-          AND scheduled.armed_at_ns IS NOT NULL AND scheduled.revoked_at_ns IS NULL
-          AND scheduled.consumed_at_ns IS NULL
-          AND scheduled.execute_at_ns BETWEEN ? AND ?
-          AND background.decision = 'approved'
-        ORDER BY CASE WHEN scheduled.arguments_digest = ? THEN 0 ELSE 1 END, scheduled.execute_at_ns, scheduled.task_id
-        LIMIT 1
+        WHERE scheduled.principal_id = ? AND scheduled.task_id = ?
         """,
-        (
-            principal_id,
-            continuation.room_id,
-            continuation.thread_id,
-            continuation.requester_id,
-            continuation.entity_name,
-            call.tool_name,
-            call.arguments_digest,
-            # NULL matches no scope, leaving only an exact-arguments match.
-            ANY_ARGUMENTS if any_arguments else None,
-            membership_epoch,
-            now - SCHEDULED_APPROVAL_WINDOW_NS,
-            now + SCHEDULED_APPROVAL_WINDOW_NS,
-            call.arguments_digest,
-        ),
+        (principal_id, call.task_id),
     )
     if row is None:
-        return False
-    task_id = str(row["task_id"])
+        return "missing"
+    refusal = _refusal(row, call, arguments_json, now_ns)
+    if refusal is not None:
+        return refusal
+    if receipt.tool_call_id != call.task_id or receipt.payload.get("tool_name") != call.tool_name:
+        msg = f"Scheduled call receipt {receipt.delivery_id!r} names another call"
+        raise ValueError(msg)
+    if not membership_state.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=call.room_id,
+        expected_membership_epoch=int(row["membership_epoch"]),
+    ):
+        return "left_room"
     approved_at = None if row["decided_at_ns"] is None else approval_timestamp(int(row["decided_at_ns"]))
     # An approved card always records its approver, which may be the canonical account behind an aliased requester.
     approved_by = str(row["decided_by"])
-    provenance = {
+    provenance: dict[str, object] = {
         "kind": "scheduled_approval",
-        "task_id": task_id,
+        "task_id": call.task_id,
         "approval_card_event_id": row["card_event_id"],
         "approved_by": approved_by,
         "approved_at": approved_at,
         "scheduled_for": approval_timestamp(int(row["execute_at_ns"])),
         "scope": str(row["approved_scope"]),
-        "arguments_digest": call.arguments_digest,
+        # Canonical JSON, so this equals the approval digest of the same arguments.
+        "arguments_digest": hashlib.sha256(arguments_json.encode()).hexdigest(),
     }
-    if not automatic_approvals.apply(
-        transaction,
-        principal_id,
-        continuation_principal_id=continuation_principal_id,
-        call_identity=(continuation.approval_id, continuation.generation, call.tool_call_id),
-        card=card,
-        room_id=continuation.room_id,
-        thread_id=continuation.thread_id,
-        membership_epoch=membership_epoch,
-        metadata=approval_card_state.ApprovalDecisionMetadata(
-            resolved_by=approved_by,
-            resolved_at=approved_at,
-            provenance=provenance,
-        ),
-        now_ns=now,
-    ):
-        return False
     transaction.execute(
         """
         UPDATE scheduled_call_approvals SET consumed_at_ns = ?, consumed_delivery_id = ?
         WHERE principal_id = ? AND task_id = ?
         """,
-        (now, card.delivery_id, principal_id, task_id),
+        (now_ns, receipt.delivery_id, principal_id, call.task_id),
+    )
+    outbox.enqueue(
+        transaction,
+        principal_id,
+        delivery_id=receipt.delivery_id,
+        stage=DeliveryStage.INITIAL,
+        event_type=receipt.event_type,
+        room_id=call.room_id,
+        thread_id=call.thread_id,
+        membership_epoch=int(row["membership_epoch"]),
+        payload=approval_card_state.terminal_content(
+            receipt.payload,
+            status="approved",
+            reason=None,
+            metadata=approval_card_state.ApprovalDecisionMetadata(
+                resolved_by=approved_by,
+                resolved_at=approved_at,
+                provenance=provenance,
+            ),
+            publication="receipt",
+        ),
+        edits_event_id=None,
     )
     logger.info("scheduled_tool_call_approval_consumed", tool_name=call.tool_name, **provenance)
-    return True
+    return ScheduledCallClaim(
+        toolkit_name=call.toolkit_name,
+        tool_name=call.tool_name,
+        arguments_json=arguments_json,
+        provenance=provenance,
+    )
+
+
+def record_outcome(transaction: Transaction, principal_id: str, *, task_id: str, outcome: ScheduledCallOutcome) -> None:
+    """Record how a claimed call ended; a claim never returns to unspent."""
+    transaction.execute(
+        """
+        UPDATE scheduled_call_approvals SET outcome = ?
+        WHERE principal_id = ? AND task_id = ? AND consumed_at_ns IS NOT NULL AND outcome IS NULL
+        """,
+        (outcome, principal_id, task_id),
+    )
+
+
+def _refusal(  # noqa: PLR0911 - one refusal per broken condition
+    row: Row,
+    call: ScheduledCall,
+    arguments_json: str,
+    now_ns: int,
+) -> ScheduledCallRefusal | None:
+    claimant = (call.room_id, call.thread_id, call.requester_id, call.agent_name, call.toolkit_name, call.tool_name)
+    stored = tuple(
+        str(row[column])
+        for column in ("room_id", "thread_id", "requester_id", "agent_name", "toolkit_name", "tool_name")
+    )
+    if stored != claimant:
+        return "elsewhere"
+    if row["revoked_at_ns"] is not None:
+        return "withdrawn"
+    if row["decision"] != "approved":
+        return "not_approved"
+    if row["consumed_at_ns"] is not None:
+        return "used"
+    if row["armed_at_ns"] is None:
+        return "not_armed"
+    if abs(now_ns - int(row["execute_at_ns"])) > SCHEDULED_APPROVAL_WINDOW_NS:
+        return "late"
+    if arguments_json != str(row["arguments_json"]) and row["approved_scope"] != ANY_ARGUMENTS:
+        return "arguments"
+    return None

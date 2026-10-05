@@ -100,8 +100,8 @@ Compact grant identity remains so duplicate actions cannot recreate a window or 
 `approval_grant_cards` retains scope and exact-call identity while eligible cards are pending and keeps the grant reference for automatically decided calls as audit facts.
 Grant maintenance deletes retired scope rows that were never associated with a grant.
 `approval_grant_locks` contains only the principal identity used to serialize grant changes, maintenance, and card reservation.
-`scheduled_call_approvals` retains each scheduled call's binding: task, room, thread, requester, entity, tool, arguments digest, task fingerprint, send time, approver, approved scope, and the receipt it published; the arguments themselves stay only in the card payload and the scheduled task.
-Its card and decision live in the detached exact-call ledger shared with background scripts, and timed grants and scheduled approvals publish their receipts through one shared transition.
+`scheduled_call_approvals` retains each scheduled call: task, room, thread, requester, agent, toolkit, tool, the unredacted arguments as canonical JSON, task fingerprint, send time, approver, approved scope, its one claim and outcome, and the receipt it published; Matrix task state and the trigger carry only the task ID.
+Its card and decision live in the detached exact-call ledger shared with background scripts, and a claim spends the approval and reserves its receipt in one commit before the call runs, so an interrupted call has an unknown outcome and is never retried.
 Grant maintenance prunes a binding 30 days after its send time or withdrawal once its card has retired and any receipt is settled.
 
 The [automatic Nio 1.0 migration](../deployment/upgrades.md#upgrading-to-nio-10) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.

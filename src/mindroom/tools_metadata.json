@@ -9225,6 +9225,7 @@
         "cancel_schedule",
         "edit_schedule",
         "list_schedules",
+        "run_scheduled_call",
         "schedule",
         "schedule_tool_call"
       ],

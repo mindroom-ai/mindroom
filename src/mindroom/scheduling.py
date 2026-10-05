@@ -19,8 +19,6 @@ from zoneinfo import ZoneInfo
 import humanize
 import nio
 from agno.agent import Agent
-from agno.tools.function import Function
-from agno.utils.functions import get_function_call
 from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
@@ -40,6 +38,7 @@ from mindroom.recurring_schedule import (
     plan_recurring_occurrence,
 )
 from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.scheduled_tool_calls import canonical_arguments
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval import (
     ToolApprovalScriptError,
@@ -50,6 +49,7 @@ from mindroom.tool_approval import (
     scheduled_call_offers_any_arguments,
     withdraw_scheduled_call_approval,
 )
+from mindroom.tool_approval_grants import ScheduledCallBinding
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ScheduledApprovalArmState
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.scheduled_tool_calls import LiveFunction
 
 logger = get_logger(__name__)
 
@@ -1484,6 +1485,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     task_room_id = workflow.room_id
     current_target = MessageTarget.for_scheduled_task(workflow)
     latest_pending_task: ScheduledTaskRecord | None = None
+    approval_state: ScheduledApprovalArmState = "none"
     try:
         while True:
             latest_task = await _reconcile_runnable_task_retrying(
@@ -1587,6 +1589,8 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             current_target = MessageTarget.for_scheduled_task(workflow)
         with bound_log_context(**current_target.log_context):
             logger.exception("one_time_task_failed", task_id=task_id)
+            if approval_state == "armed":
+                await _withdraw_unsent_scheduled_call(task_id)
             if workflow.room_id:
                 error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
                 await scheduling_executor.send_scheduled_failure_notice(
@@ -1970,34 +1974,29 @@ async def _arm_scheduled_call(
         return "unarmed"
 
 
-def _scheduled_call_trigger_message(agent_name: str, tool_name: str, arguments: dict[str, object]) -> str:
-    """Ask the scheduling agent to make the one call the requester approved."""
-    rendered_arguments = json.dumps(arguments, ensure_ascii=False, indent=2, sort_keys=True)
-    return (
-        f"@{agent_name} Make this pre-approved tool call now: call `{tool_name}` exactly once with exactly "
-        "these arguments, adding, removing, or changing nothing, then report whether it succeeded.\n\n"
-        f"```json\n{rendered_arguments}\n```"
-    )
-
-
-def _parse_scheduled_call(
+def _scheduled_call_trigger_message(
+    agent_name: str,
+    task_id: str,
     tool_name: str,
-    arguments_json: str,
-    execute_at: str,
-) -> tuple[dict[str, object], datetime] | str:
-    """Return the exact arguments and future UTC send time, or why they cannot be bound."""
-    try:
-        decoded = json.loads(arguments_json)
-    except json.JSONDecodeError:
-        decoded = None
-    if not isinstance(decoded, dict):
-        return "❌ arguments_json must be a JSON object of the call's exact arguments."
-    # Bind what the fire-time call will run with: Agno decodes a model's tool-call
-    # arguments through this helper, which turns top-level "true", "false",
-    # "none", and "null" strings into literals before approval sees them.
-    call = get_function_call(tool_name, arguments=arguments_json, functions={tool_name: Function(name=tool_name)})
-    assert call is not None
-    arguments = call.arguments or {}
+    description: str,
+    *,
+    any_arguments_offered: bool,
+) -> str:
+    """Ask the scheduling agent to run the stored call by its task ID; the arguments stay out of Matrix."""
+    message = (
+        f"@{agent_name} Run scheduled call `{task_id}` now: call `run_scheduled_call` with task_id "
+        f'"{task_id}" once, then report its result. It runs the `{tool_name}` call the requester approved.'
+    )
+    if any_arguments_offered:
+        message += (
+            "\n\nIf the requester approved any arguments, you may pass `arguments_json` with the "
+            f"arguments for `{tool_name}` that this task needs: {description}"
+        )
+    return message
+
+
+def _parse_send_time(execute_at: str) -> datetime | str:
+    """Return the future UTC send time, or why it cannot be used."""
     try:
         send_at = datetime.fromisoformat(execute_at)
     except ValueError:
@@ -2006,38 +2005,33 @@ def _parse_scheduled_call(
         return "❌ execute_at must include a UTC offset, e.g. 2026-10-04T09:00:00-04:00."
     if send_at <= datetime.now(UTC):
         return "❌ execute_at must be in the future."
-    return arguments, send_at.astimezone(UTC)
+    return send_at.astimezone(UTC)
 
 
-async def schedule_approved_tool_call(  # noqa: PLR0911
-    *,
+async def _scheduled_call_refusal(  # noqa: PLR0911 - one refusal per broken condition
     runtime: SchedulingRuntime,
-    room_id: str,
+    *,
     thread_id: str | None,
     scheduled_by: str,
     agent_name: str,
+    call: LiveFunction,
     tool_name: str,
-    arguments_json: str,
+    arguments: dict[str, object],
     execute_at: str,
-    description: str,
-) -> tuple[str | None, str]:
-    """Schedule one exact gated tool call and ask the requester to approve it now.
-
-    Returns:
-        Tuple of (task_id, response_message)
-
-    """
+) -> tuple[datetime, str] | str:
+    """Return the send time and approver for a call that may be pre-approved, or why it may not."""
     config = runtime.config
     runtime_paths = runtime.runtime_paths
     if thread_id is None:
-        return (None, "❌ Pre-approved tool calls must be scheduled from a thread.")
-    parsed = _parse_scheduled_call(tool_name, arguments_json, execute_at)
-    if isinstance(parsed, str):
-        return (None, parsed)
-    arguments, send_at = parsed
+        return "❌ Pre-approved tool calls must be scheduled from a thread."
+    if agent_name not in config.agents:
+        return "❌ Only an agent, not a team, can schedule a pre-approved tool call."
+    send_at = _parse_send_time(execute_at)
+    if isinstance(send_at, str):
+        return send_at
     approver_id = resolve_tool_approval_approver(config, runtime_paths, scheduled_by)
     if approver_id is None:
-        return (None, "❌ Only a human requester can pre-approve a scheduled tool call.")
+        return "❌ Only a human requester can pre-approve a scheduled tool call."
     try:
         requires_approval, _timeout_seconds = await evaluate_tool_approval(
             config,
@@ -2047,18 +2041,69 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
             agent_name,
         )
     except ToolApprovalScriptError as exc:
-        return (None, f"❌ Could not evaluate the approval policy for `{tool_name}`: {exc}")
-    if not requires_approval:
-        return (None, f"❌ `{tool_name}` does not require approval; use `schedule` instead.")
+        return f"❌ Could not evaluate the approval policy for `{tool_name}`: {exc}"
+    if not requires_approval and not call.authored_confirmation:
+        return f"❌ `{tool_name}` does not require approval; use `schedule` instead."
     responders = await runtime.responder_candidates_for_room(runtime.room, scheduled_by)
     if entity_identity_registry(config, runtime_paths).current_id(agent_name) not in responders:
-        return (None, f"❌ `{agent_name}` cannot receive a scheduled call from you in this room.")
+        return f"❌ `{agent_name}` cannot receive a scheduled call from you in this room."
+    return send_at, approver_id
+
+
+async def schedule_approved_tool_call(
+    *,
+    runtime: SchedulingRuntime,
+    room_id: str,
+    thread_id: str | None,
+    scheduled_by: str,
+    agent_name: str,
+    call: LiveFunction,
+    tool_name: str,
+    arguments: dict[str, object],
+    execute_at: str,
+    description: str,
+) -> tuple[str | None, str]:
+    """Store one gated call of the agent's own and ask the requester to approve it now.
+
+    Returns:
+        Tuple of (task_id, response_message)
+
+    """
+    config = runtime.config
+    checked = await _scheduled_call_refusal(
+        runtime,
+        thread_id=thread_id,
+        scheduled_by=scheduled_by,
+        agent_name=agent_name,
+        call=call,
+        tool_name=tool_name,
+        arguments=arguments,
+        execute_at=execute_at,
+    )
+    if isinstance(checked, str):
+        return (None, checked)
+    send_at, approver_id = checked
+    assert thread_id is not None
 
     task_id = str(uuid.uuid4())[:8]
+    any_arguments_offered = scheduled_call_offers_any_arguments(
+        config,
+        tool_name,
+        arguments,
+        requester_id=scheduled_by,
+        approver_id=approver_id,
+        authored_confirmation=call.authored_confirmation,
+    )
     workflow = ScheduledWorkflow(
         schedule_type="once",
         execute_at=send_at,
-        message=_scheduled_call_trigger_message(agent_name, tool_name, arguments),
+        message=_scheduled_call_trigger_message(
+            agent_name,
+            task_id,
+            tool_name,
+            description,
+            any_arguments_offered=any_arguments_offered,
+        ),
         description=description,
         history_limit=0,
         created_by=scheduled_by,
@@ -2066,30 +2111,27 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         room_id=room_id,
         pre_approved_call=True,
     )
+    binding = ScheduledCallBinding(
+        task_id=task_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=scheduled_by,
+        agent_name=agent_name,
+        toolkit_name=call.toolkit_name,
+        tool_name=tool_name,
+        arguments_json=canonical_arguments(arguments),
+        workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
+        execute_at_ns=int(send_at.timestamp() * 1_000_000_000),
+    )
     # Publish the task only once its card exists, so no cancel or edit can reach a task whose
     # card is still being prepared; a card whose task never published is withdrawn.
     task_published = False
     try:
         if not await request_scheduled_call_approval(
-            task_id=task_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=scheduled_by,
+            binding,
             approver_user_id=approver_id,
-            agent_name=agent_name,
-            tool_name=tool_name,
-            arguments=arguments,
-            execute_at=send_at,
-            workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
             scheduled_for_text=_format_local_time(send_at, config.timezone),
-            any_arguments_offered=scheduled_call_offers_any_arguments(
-                config,
-                tool_name,
-                arguments,
-                entity_name=agent_name,
-                requester_id=scheduled_by,
-                approver_id=approver_id,
-            ),
+            any_arguments_offered=any_arguments_offered,
         ):
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
         await _persist_scheduled_task_state(
@@ -2113,7 +2155,7 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         task_id,
         workflow,
         config,
-        runtime_paths,
+        runtime.runtime_paths,
         runtime.conversation_reader,
         runtime.matrix_admin,
         config_provider=runtime.config_provider,

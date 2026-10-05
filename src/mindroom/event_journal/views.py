@@ -56,7 +56,14 @@ if TYPE_CHECKING:
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
-    from .scheduled_approvals import ScheduledApprovalArmState, ScheduledCallBinding
+    from .scheduled_approvals import (
+        ScheduledApprovalArmState,
+        ScheduledCall,
+        ScheduledCallBinding,
+        ScheduledCallClaim,
+        ScheduledCallOutcome,
+        ScheduledCallRefusal,
+    )
 
 
 class AdmissionView(Protocol):
@@ -494,6 +501,18 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
     ) -> ScheduledApprovalArmState: ...
 
     async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision: ...  # noqa: D102
+
+    async def scheduled_call(self, *, task_id: str) -> ScheduledCall | None: ...  # noqa: D102
+
+    async def claim_scheduled_call(  # noqa: D102
+        self,
+        *,
+        call: ScheduledCall,
+        arguments_json: str,
+        receipt: ApprovalCardReservation,
+    ) -> ScheduledCallClaim | ScheduledCallRefusal: ...
+
+    async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None: ...  # noqa: D102
 
     async def resolve_continuation_approval_card(  # noqa: D102
         self,

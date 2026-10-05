@@ -1,8 +1,9 @@
-"""Approvals granted while scheduling one exact tool call and consumed once when it fires."""
+"""Approvals granted while scheduling one tool call, spent once when its agent runs the stored call."""
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -11,7 +12,12 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
+from agno.run import RunContext
+from agno.tools import Toolkit
 
+from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval_inbound import parse_approval_response_event
 from mindroom.approval_manager import ApprovalManager
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -29,12 +35,14 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     MatrixDelivery,
+    ScheduledCallClaim,
     approval_arguments_digest,
     scheduled_call_run_id,
 )
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.scheduled_tool_calls import canonical_arguments
 from mindroom.scheduling import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
@@ -46,7 +54,7 @@ from mindroom.scheduling import (
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from mindroom.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
-from mindroom.tool_approval_grants import ApprovalOperation
+from mindroom.tool_approval_grants import ScheduledCallBinding
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -62,14 +70,18 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from mindroom.approval_manager import ApprovalActionResult
+    from mindroom.event_journal import ScheduledCallRefusal
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
 _REQUESTER = "@human:test"
 _AGENT = "code"
+_TOOLKIT = "slack"
 _TASK = "task-1"
 _SCHEDULED_CARD = "$scheduled-approval:" + _TASK
+_RECEIPT = "scheduled-receipt:" + _TASK
 _ARGUMENTS: dict[str, object] = {"channel": "U123", "text": "Good morning!"}
+_OTHER_ARGUMENTS: dict[str, object] = {"channel": "U999", "text": "Other"}
 
 
 def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelivery]) -> ApprovalManager:
@@ -89,24 +101,32 @@ def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelive
     )
 
 
+def _binding(*, execute_at: datetime | None = None, workflow_digest: str = "workflow") -> ScheduledCallBinding:
+    return ScheduledCallBinding(
+        task_id=_TASK,
+        room_id=_ROOM,
+        thread_id=_THREAD,
+        requester_id=_REQUESTER,
+        agent_name=_AGENT,
+        toolkit_name=_TOOLKIT,
+        tool_name="post_slack_message",
+        arguments_json=canonical_arguments(_ARGUMENTS),
+        workflow_digest=workflow_digest,
+        execute_at_ns=int((execute_at or datetime.now(UTC) + timedelta(minutes=1)).timestamp() * 1_000_000_000),
+    )
+
+
 async def _schedule(
     manager: ApprovalManager,
     *,
     execute_at: datetime | None = None,
     workflow_digest: str = "workflow",
     any_arguments_offered: bool = False,
+    approver: str = _REQUESTER,
 ) -> bool:
     return await manager.request_scheduled_call_approval(
-        task_id=_TASK,
-        room_id=_ROOM,
-        thread_id=_THREAD,
-        requester_id=_REQUESTER,
-        approver_user_id=_REQUESTER,
-        agent_name=_AGENT,
-        tool_name="post_slack_message",
-        arguments=_ARGUMENTS,
-        execute_at=execute_at or datetime.now(UTC) + timedelta(minutes=1),
-        workflow_digest=workflow_digest,
+        _binding(execute_at=execute_at, workflow_digest=workflow_digest),
+        approver_user_id=approver,
         scheduled_for_text="9:00 AM EDT",
         any_arguments_offered=any_arguments_offered,
     )
@@ -130,10 +150,11 @@ async def _decide(
     status: str,
     *,
     scheduled_scope: str | None = None,
+    sender: str = _REQUESTER,
 ) -> ApprovalActionResult:
     return await manager.handle_card_response(
         room_id=_ROOM,
-        sender_id=_REQUESTER,
+        sender_id=sender,
         card_event_id=_SCHEDULED_CARD,
         status=status,
         reason=None,
@@ -142,24 +163,37 @@ async def _decide(
     )
 
 
-async def _fire_time_call(
-    journal: EventJournalStore,
+async def _claim(
     manager: ApprovalManager,
-    name: str,
     *,
-    arguments: dict[str, object] = _ARGUMENTS,
-    thread: str = _THREAD,
-    agent: str = _AGENT,
-    member: str | None = None,
-    grantable: bool = True,
-) -> ApprovalContinuation:
-    """Pause one agent or team run on a gated call, the way the fire-time turn does."""
-    responder = journal.principal("agent@" + agent)
+    arguments: dict[str, object] | None = None,
+    **claimant: str,
+) -> ScheduledCallClaim | ScheduledCallRefusal | None:
+    """Claim the stored call as its agent would, optionally from elsewhere or with other arguments."""
+    call = await manager.scheduled_call(_TASK)
+    assert call is not None
+    arguments_json = call.arguments_json if arguments is None else canonical_arguments(arguments)
+    return await manager.claim_scheduled_call(
+        replace(call, **claimant),
+        arguments_json=arguments_json,
+        approver_user_id=_REQUESTER,
+    )
+
+
+async def _armed(manager: ApprovalManager, *, scope: str | None = None) -> None:
+    assert await _schedule(manager, any_arguments_offered=scope is not None)
+    assert (await _decide(manager, "approved", scheduled_scope=scope)).consumed is True
+    assert await _arm(manager) == "armed"
+
+
+async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, name: str) -> ApprovalContinuation:
+    """Pause one agent run on a gated call made directly, which asks for approval the ordinary way."""
+    responder = journal.principal("agent@" + _AGENT)
     await responder.admit(
         InboundEvent(
             event_id="$source-" + name,
             room_id=_ROOM,
-            thread_id=thread,
+            thread_id=_THREAD,
             kind=EventKind.MESSAGE,
             event_class=EventClass.ACTIONABLE,
             sender=_REQUESTER,
@@ -172,9 +206,9 @@ async def _fire_time_call(
         run_id="run-" + name,
         session_id="session-" + name,
         entity_kind="agent",
-        entity_name=agent,
+        entity_name=_AGENT,
         room_id=_ROOM,
-        thread_id=thread,
+        thread_id=_THREAD,
         requester_id=_REQUESTER,
         response_event_id="$waiting-" + name,
         sources=ResponseSources(("$source-" + name,), ("$source-" + name,)),
@@ -182,9 +216,9 @@ async def _fire_time_call(
             ApprovalCall(
                 tool_call_id="call-" + name,
                 tool_name="post_slack_message",
-                invoking_agent=member or agent,
+                invoking_agent=_AGENT,
                 expires_at_ns=9_000_000_000_000_000_000,
-                arguments_digest=approval_arguments_digest(arguments),
+                arguments_digest=approval_arguments_digest(_ARGUMENTS),
             ),
         ),
         state="waiting",
@@ -195,18 +229,17 @@ async def _fire_time_call(
         approval_id="card-" + name,
         continuation_id=name,
         continuation_generation=0,
-        entity_name=agent,
+        entity_name=_AGENT,
         response_event_id=continuation.response_event_id,
         tool_call_id="call-" + name,
         tool_name="post_slack_message",
-        arguments=dict(arguments),
+        arguments=dict(_ARGUMENTS),
         room_id=_ROOM,
         requester_id=_REQUESTER,
         approver_user_id=_REQUESTER,
         expires_at_ns=9_000_000_000_000_000_000,
-        agent_name=member or agent,
-        thread_id=thread,
-        grant_operation=ApprovalOperation("binding", "post_slack_message") if grantable else None,
+        agent_name=_AGENT,
+        thread_id=_THREAD,
     )
     assert card is not None
     assert await manager.reserve_and_publish(
@@ -220,12 +253,22 @@ async def _fire_time_call(
     return stored
 
 
+async def _binding_column(journal: EventJournalStore, column: str) -> object:
+    row = await journal.backend.read(
+        lambda transaction: transaction.fetchone(
+            f"SELECT {column} AS value FROM scheduled_call_approvals WHERE task_id = ?",  # noqa: S608 - test column
+            (_TASK,),
+        ),
+    )
+    return None if row is None else row["value"]
+
+
 @pytest.mark.asyncio
-async def test_scheduling_card_shows_the_exact_call_and_send_time(
+async def test_scheduling_card_shows_the_stored_call_and_send_time(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The requester reviews the real tool, its exact arguments, and when it will run."""
+    """The requester reviews the real tool, its arguments, and when it will run."""
     journal = journal_database()
     sent: list[MatrixDelivery] = []
     manager = _manager(journal, tmp_path, sent)
@@ -249,53 +292,97 @@ async def test_scheduling_card_shows_the_exact_call_and_send_time(
         )
         assert stored is not None
         assert stored.target_kind == "scheduled_call"
+        call = await manager.scheduled_call(_TASK)
+        assert call is not None
+        assert call.toolkit_name == _TOOLKIT
+        assert call.arguments_json == canonical_arguments(_ARGUMENTS)
     finally:
         await manager.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_armed_approval_runs_the_exact_call_once(
+async def test_armed_approval_is_spent_once_with_its_receipt(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The fire-time call publishes an approved receipt instead of waiting; a repeat waits again."""
+    """Claiming the stored call publishes an approved receipt; a second claim is refused."""
     journal = journal_database()
     sent: list[MatrixDelivery] = []
     manager = _manager(journal, tmp_path, sent)
     try:
-        assert await _schedule(manager)
-        assert (await _decide(manager, "approved")).consumed is True
-        assert await _arm(manager) == "armed"
+        await _armed(manager)
         sent.clear()
 
-        first = await _fire_time_call(journal, manager, "first")
+        claimed = await _claim(manager)
 
-        assert first.state == "ready"
-        assert first.calls[0].decision is not None
-        assert first.calls[0].decision.value == "approved"
+        assert isinstance(claimed, ScheduledCallClaim)
+        assert claimed.tool_name == "post_slack_message"
+        assert claimed.toolkit_name == _TOOLKIT
+        assert claimed.arguments_json == canonical_arguments(_ARGUMENTS)
         [receipt] = sent
+        assert receipt.delivery_id == _RECEIPT
         assert receipt.stage is DeliveryStage.INITIAL
+        assert receipt.thread_id == _THREAD
         assert receipt.payload["status"] == "approved"
         assert receipt.payload["approvable"] is False
         assert receipt.payload["resolved_by"] == _REQUESTER
         assert receipt.payload["arguments"] == _ARGUMENTS
-        assert "approval_scope" not in receipt.payload
-        assert "auto_approve_options" not in receipt.payload
+        assert receipt.payload["scheduled_task_id"] == _TASK
         provenance = receipt.payload["approval_provenance"]
+        assert provenance == claimed.provenance
         assert provenance["kind"] == "scheduled_approval"
         assert provenance["task_id"] == _TASK
         assert provenance["approved_by"] == _REQUESTER
         assert provenance["approved_at"] is not None
         assert provenance["approval_card_event_id"] == _SCHEDULED_CARD
+        assert provenance["scope"] == "exact_arguments"
         assert provenance["arguments_digest"] == approval_arguments_digest(_ARGUMENTS)
         cards = journal.principal("router@shared")
-        assert await cards.pending_approval_card(room_id=_ROOM, card_event_id="$card-first") is None
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$card-first")
+        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
 
-        repeat = await _fire_time_call(journal, manager, "repeat")
+        assert await _claim(manager) == "used"
+    finally:
+        await manager.shutdown()
 
-        assert repeat.calls[0].decision is None
-        assert await cards.pending_approval_card(room_id=_ROOM, card_event_id="$card-repeat") is not None
+
+@pytest.mark.asyncio
+async def test_concurrent_claims_spend_the_approval_once(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Two claims racing for the same task run the call at most once."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        await _armed(manager)
+
+        results = await asyncio.gather(_claim(manager), _claim(manager))
+
+        assert sorted(isinstance(result, ScheduledCallClaim) for result in results) == [False, True]
+        assert "used" in results
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_outcome_is_recorded_once_and_unknown_until_then(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A claimed call has no outcome until it returns, and its first recorded outcome stands."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        await _armed(manager)
+        await manager.record_scheduled_call_outcome(_TASK, "completed")
+        assert await _binding_column(journal, "outcome") is None
+
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
+        assert await _binding_column(journal, "outcome") is None
+        await manager.record_scheduled_call_outcome(_TASK, "failed")
+        await manager.record_scheduled_call_outcome(_TASK, "completed")
+
+        assert await _binding_column(journal, "outcome") == "failed"
     finally:
         await manager.shutdown()
 
@@ -309,10 +396,8 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        await _arm(manager)
-        await _fire_time_call(journal, manager, "first")
+        await _armed(manager)
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
         cards = journal.principal("router@shared")
 
         await cards.maintain_automatic_approvals()
@@ -320,34 +405,49 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
         remaining = await journal.backend.read(
             lambda transaction: transaction.fetchone(
                 "SELECT 1 AS present FROM matrix_delivery_outbox WHERE delivery_id = ?",
-                ("card-first",),
+                (_RECEIPT,),
             ),
         )
         assert remaining is None
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$card-first")
+        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("armed", "call"),
+    ("armed", "claim", "refusal"),
     [
-        (False, {}),
-        (True, {"arguments": {"channel": "U123", "text": "Good morning!!"}}),
-        (True, {"arguments": {"channel": "U999", "text": "Good morning!"}}),
-        (True, {"thread": "$other-thread"}),
-        (True, {"agent": "other"}),
+        (False, {}, "not_armed"),
+        (True, {"arguments": {"channel": "U123", "text": "Good morning!!"}}, "arguments"),
+        (True, {"arguments": _OTHER_ARGUMENTS}, "arguments"),
+        (True, {"thread_id": "$other-thread"}, "elsewhere"),
+        (True, {"room_id": "!other:test"}, "elsewhere"),
+        (True, {"requester_id": "@other:test"}, "elsewhere"),
+        (True, {"agent_name": "other"}, "elsewhere"),
+        (True, {"toolkit_name": "other_slack"}, "elsewhere"),
+        (True, {"tool_name": "delete_slack_message"}, "elsewhere"),
     ],
-    ids=["unarmed", "changed-text", "changed-destination", "other-thread", "other-agent"],
+    ids=[
+        "unarmed",
+        "changed-text",
+        "changed-destination",
+        "other-thread",
+        "other-room",
+        "other-requester",
+        "other-agent",
+        "other-toolkit",
+        "other-tool",
+    ],
 )
-async def test_anything_but_the_armed_exact_call_still_waits_for_approval(
+async def test_anything_but_the_armed_stored_call_is_refused(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     armed: bool,
-    call: dict,
+    claim: dict,
+    refusal: str,
 ) -> None:
-    """A call that differs from the approved one in any way gets today's pending card."""
+    """An exact approval spends only for its own agent, conversation, and stored arguments."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
@@ -356,16 +456,62 @@ async def test_anything_but_the_armed_exact_call_still_waits_for_approval(
         if armed:
             assert await _arm(manager) == "armed"
 
-        continuation = await _fire_time_call(journal, manager, "mismatch", **call)
+        assert await _claim(manager, **claim) == refusal
+        assert isinstance(await _claim(manager), ScheduledCallClaim) is armed
+    finally:
+        await manager.shutdown()
 
-        assert continuation.calls[0].decision is None
-        assert (
-            await journal.principal("router@shared").pending_approval_card(
-                room_id=_ROOM,
-                card_event_id="$card-mismatch",
-            )
-            is not None
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "refusal"),
+    [(None, "not_approved"), ("denied", "not_approved")],
+    ids=["pending", "denied"],
+)
+async def test_unapproved_card_is_refused(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    decision: str | None,
+    refusal: str,
+) -> None:
+    """Without the requester's approval nothing is spent."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager)
+        if decision is not None:
+            await _decide(manager, decision)
+
+        assert await _claim(manager) == refusal
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_claim_long_after_the_send_time_is_refused(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """An approval armed in time but claimed outside its window is not spent."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        await _armed(manager)
+        await journal.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE scheduled_call_approvals SET execute_at_ns = 0 WHERE task_id = ?",
+                (_TASK,),
+            ),
         )
+
+        call = await manager.scheduled_call(_TASK)
+        assert call is not None
+        result = await manager.claim_scheduled_call(
+            replace(call, execute_at_ns=0),
+            arguments_json=call.arguments_json,
+            approver_user_id=_REQUESTER,
+        )
+        assert result == "late"
     finally:
         await manager.shutdown()
 
@@ -394,7 +540,7 @@ async def test_approval_far_from_the_send_time_does_not_arm(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A task firing outside the window around its approved time falls back to a card."""
+    """A task firing outside the window around its approved time does not arm."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
@@ -458,106 +604,35 @@ async def test_new_room_tenure_does_not_inherit_the_approval(
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        assert await _arm(manager) == "armed"
+        await _armed(manager)
         cards = journal.principal("router@shared")
         await admit_room_membership(cards, _ROOM, "leave")
         await admit_room_membership(cards, _ROOM, "join")
 
-        continuation = await _fire_time_call(journal, manager, "rejoined")
-
-        assert continuation.calls[0].decision is None
+        assert await _claim(manager) == "left_room"
     finally:
         await manager.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_approval_is_not_used_when_another_gated_call_would_hold_the_run(
+async def test_direct_call_to_the_tool_still_asks_for_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The scheduled call runs unattended only when nothing else in its step waits for a person."""
+    """An armed scheduled approval approves nothing but its own claim; calling the tool directly asks as usual."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        assert await _arm(manager) == "armed"
-        responder = journal.principal("agent@" + _AGENT)
-        await responder.admit(
-            InboundEvent(
-                event_id="$source-pair",
-                room_id=_ROOM,
-                thread_id=_THREAD,
-                kind=EventKind.MESSAGE,
-                event_class=EventClass.ACTIONABLE,
-                sender=_REQUESTER,
-                origin_server_ts=1000,
-                source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "send it"}},
-            ),
-        )
-        other_arguments: dict[str, object] = {"channel": "U999", "text": "Also this"}
-        calls = (("call-scheduled", _ARGUMENTS), ("call-other", other_arguments))
-        continuation = ApprovalContinuation(
-            approval_id="pair",
-            run_id="run-pair",
-            session_id="session-pair",
-            entity_kind="agent",
-            entity_name=_AGENT,
-            room_id=_ROOM,
-            thread_id=_THREAD,
-            requester_id=_REQUESTER,
-            response_event_id="$waiting-pair",
-            sources=ResponseSources(("$source-pair",), ("$source-pair",)),
-            calls=tuple(
-                ApprovalCall(
-                    tool_call_id=call_id,
-                    tool_name="post_slack_message",
-                    invoking_agent=_AGENT,
-                    expires_at_ns=9_000_000_000_000_000_000,
-                    arguments_digest=approval_arguments_digest(arguments),
-                )
-                for call_id, arguments in calls
-            ),
-            state="waiting",
-            runtime_generation="runtime",
-        )
-        assert await responder.create_approval_continuation(continuation) is not None
-        cards = []
-        for index, (call_id, arguments) in enumerate(calls):
-            card = await manager.prepare_detached_approval(
-                approval_id=f"card-pair-{index}",
-                continuation_id="pair",
-                continuation_generation=0,
-                entity_name=_AGENT,
-                response_event_id=continuation.response_event_id,
-                tool_call_id=call_id,
-                tool_name="post_slack_message",
-                arguments=dict(arguments),
-                room_id=_ROOM,
-                requester_id=_REQUESTER,
-                approver_user_id=_REQUESTER,
-                expires_at_ns=9_000_000_000_000_000_000,
-                agent_name=_AGENT,
-                thread_id=_THREAD,
-            )
-            assert card is not None
-            cards.append(card)
+        await _armed(manager)
 
-        assert await manager.reserve_and_publish(
-            continuation_principal_id=responder.principal_id,
-            continuation_id="pair",
-            continuation_generation=0,
-            cards=tuple(cards),
-        )
+        direct = await _ordinary_card(journal, manager, "direct")
 
-        stored = await responder.approval_continuation("pair")
-        assert stored is not None
-        assert [call.decision for call in stored.calls] == [None, None]
-        follow_up = await _fire_time_call(journal, manager, "alone")
-        assert follow_up.calls[0].decision is not None
-        assert follow_up.calls[0].decision.value == "approved"
+        assert direct.calls[0].decision is None
+        assert (
+            await journal.principal("router@shared").pending_approval_card(room_id=_ROOM, card_event_id="$card-direct")
+            is not None
+        )
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
     finally:
         await manager.shutdown()
 
@@ -589,58 +664,27 @@ async def test_any_arguments_approval_runs_one_call_with_different_arguments(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The broader scope accepts other arguments for the same tool, still only once."""
+    """The broader scope accepts other arguments for the same stored tool, still only once."""
     journal = journal_database()
     sent: list[MatrixDelivery] = []
     manager = _manager(journal, tmp_path, sent)
     try:
-        assert await _schedule(manager, any_arguments_offered=True)
-        assert (await _decide(manager, "approved", scheduled_scope="any_arguments")).consumed is True
+        await _armed(manager, scope="any_arguments")
         decision = next(delivery for delivery in sent if delivery.stage is DeliveryStage.FINAL)
         assert decision.payload["scheduled_scope"] == "any_arguments"
-        assert await _arm(manager) == "armed"
         sent.clear()
 
-        changed = await _fire_time_call(journal, manager, "changed", arguments={"channel": "U999", "text": "Other"})
+        claimed = await _claim(manager, arguments=_OTHER_ARGUMENTS)
 
-        assert changed.calls[0].decision is not None
-        assert changed.calls[0].decision.value == "approved"
+        assert isinstance(claimed, ScheduledCallClaim)
+        assert claimed.arguments_json == canonical_arguments(_OTHER_ARGUMENTS)
         [receipt] = sent
+        assert receipt.payload["arguments"] == _OTHER_ARGUMENTS
         assert receipt.payload["approval_provenance"]["scope"] == "any_arguments"
         assert receipt.payload["approval_provenance"]["arguments_digest"] == approval_arguments_digest(
-            {"channel": "U999", "text": "Other"},
+            _OTHER_ARGUMENTS,
         )
-        again = await _fire_time_call(journal, manager, "again")
-        assert again.calls[0].decision is None
-    finally:
-        await manager.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_any_arguments_covers_only_calls_a_timed_approval_could_cover(
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-) -> None:
-    """A call no card could approve for any arguments, such as one too large to show, still asks."""
-    journal = journal_database()
-    manager = _manager(journal, tmp_path, [])
-    try:
-        assert await _schedule(manager, any_arguments_offered=True)
-        await _decide(manager, "approved", scheduled_scope="any_arguments")
-        assert await _arm(manager) == "armed"
-
-        changed = await _fire_time_call(
-            journal,
-            manager,
-            "changed",
-            arguments={"channel": "U999", "text": "Other"},
-            grantable=False,
-        )
-        exact = await _fire_time_call(journal, manager, "exact", grantable=False)
-
-        assert changed.calls[0].decision is None
-        assert exact.calls[0].decision is not None
-        assert exact.calls[0].decision.value == "approved"
+        assert await _claim(manager) == "used"
     finally:
         await manager.shutdown()
 
@@ -650,7 +694,7 @@ async def test_exact_approval_is_recorded_as_exact_scope(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """An approval without a scope, such as a reaction, covers only the exact arguments."""
+    """An approval without a scope, such as a reaction, covers only the stored arguments."""
     journal = journal_database()
     sent: list[MatrixDelivery] = []
     manager = _manager(journal, tmp_path, sent)
@@ -661,9 +705,7 @@ async def test_exact_approval_is_recorded_as_exact_scope(
         assert decision.payload["scheduled_scope"] == "exact_arguments"
         await _arm(manager)
 
-        changed = await _fire_time_call(journal, manager, "changed", arguments={"channel": "U999", "text": "Other"})
-
-        assert changed.calls[0].decision is None
+        assert await _claim(manager, arguments=_OTHER_ARGUMENTS) == "arguments"
     finally:
         await manager.shutdown()
 
@@ -673,7 +715,7 @@ async def test_disabling_any_arguments_narrows_an_existing_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """Turning the broader scope off applies to approvals already given, which then need the exact call."""
+    """Turning the broader scope off applies to approvals already given, which then run the stored call."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
@@ -681,12 +723,8 @@ async def test_disabling_any_arguments_narrows_an_existing_approval(
         await _decide(manager, "approved", scheduled_scope="any_arguments")
         assert await _arm(manager, any_arguments_allowed=False) == "armed"
 
-        changed = await _fire_time_call(journal, manager, "changed", arguments={"channel": "U999", "text": "Other"})
-        exact = await _fire_time_call(journal, manager, "exact")
-
-        assert changed.calls[0].decision is None
-        assert exact.calls[0].decision is not None
-        assert exact.calls[0].decision.value == "approved"
+        assert await _claim(manager, arguments=_OTHER_ARGUMENTS) == "arguments"
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
     finally:
         await manager.shutdown()
 
@@ -731,7 +769,7 @@ async def test_scope_is_ignored_on_an_ordinary_approval_card(
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
-        await _fire_time_call(journal, manager, "plain")
+        await _ordinary_card(journal, manager, "plain")
 
         result = await manager.handle_card_response(
             room_id=_ROOM,
@@ -749,73 +787,19 @@ async def test_scope_is_ignored_on_an_ordinary_approval_card(
 
 
 @pytest.mark.asyncio
-async def test_team_member_call_consumes_the_team_approval(
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-) -> None:
-    """A team schedules as itself, while the member that makes the call is recorded on the paused run."""
-    journal = journal_database()
-    manager = _manager(journal, tmp_path, [])
-    try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        assert await _arm(manager) == "armed"
-
-        continuation = await _fire_time_call(journal, manager, "team-call", member="writer")
-
-        assert continuation.calls[0].invoking_agent == "writer"
-        assert continuation.calls[0].decision is not None
-        assert continuation.calls[0].decision.value == "approved"
-    finally:
-        await manager.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_any_arguments_covers_only_the_scheduling_agents_own_calls(
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-) -> None:
-    """A team member or delegated agent cannot borrow an any-arguments approval; an exact call still runs."""
-    journal = journal_database()
-    manager = _manager(journal, tmp_path, [])
-    try:
-        assert await _schedule(manager, any_arguments_offered=True)
-        await _decide(manager, "approved", scheduled_scope="any_arguments")
-        assert await _arm(manager) == "armed"
-
-        borrowed = await _fire_time_call(
-            journal,
-            manager,
-            "borrowed",
-            arguments={"channel": "U999", "text": "Other"},
-            member="writer",
-        )
-        exact = await _fire_time_call(journal, manager, "exact", member="writer")
-
-        assert borrowed.calls[0].decision is None
-        assert exact.calls[0].decision is not None
-        assert exact.calls[0].decision.value == "approved"
-    finally:
-        await manager.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_cancelling_an_armed_task_revokes_its_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A task cancelled after it armed cannot lend its approval to a later identical call."""
+    """A task cancelled after it armed cannot spend its approval."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        assert await _arm(manager) == "armed"
+        await _armed(manager)
 
         await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
-        continuation = await _fire_time_call(journal, manager, "after-cancel")
 
-        assert continuation.calls[0].decision is None
+        assert await _claim(manager) == "withdrawn"
         assert await _arm(manager) == "unarmed"
     finally:
         await manager.shutdown()
@@ -826,7 +810,7 @@ async def test_only_the_requesters_denial_skips_the_send(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A card MindRoom denies on its own, such as on room departure, falls back to approval at send time."""
+    """A card MindRoom denies on its own, such as on room departure, does not skip the send."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
@@ -873,20 +857,9 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
     monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
     cards = journal.principal("router@shared")
 
-    async def binding_present() -> bool:
-        row = await journal.backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT 1 AS present FROM scheduled_call_approvals WHERE task_id = ?",
-                (_TASK,),
-            ),
-        )
-        return row is not None
-
     try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        await _arm(manager)
-        await _fire_time_call(journal, manager, "first")
+        await _armed(manager)
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
         await journal.backend.write(
             lambda transaction: transaction.execute(
                 "UPDATE scheduled_call_approvals SET execute_at_ns = 0 WHERE task_id = ?",
@@ -896,23 +869,23 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
         await journal.backend.write(
             lambda transaction: transaction.execute(
                 "UPDATE matrix_delivery_outbox SET acknowledged_event_id = NULL WHERE delivery_id = ?",
-                ("card-first",),
+                (_RECEIPT,),
             ),
         )
 
         await cards.maintain_automatic_approvals()
-        assert await binding_present()
+        assert await _binding_column(journal, "task_id") == _TASK
 
         await journal.backend.write(
             lambda transaction: transaction.execute(
                 "UPDATE matrix_delivery_outbox SET acknowledged_event_id = ? WHERE delivery_id = ?",
-                ("$card-first", "card-first"),
+                ("$" + _RECEIPT, _RECEIPT),
             ),
         )
         await manager.recover_cards_on_startup()
 
-        assert not await binding_present()
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$card-first")
+        assert await _binding_column(journal, "task_id") is None
+        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
@@ -927,33 +900,12 @@ async def test_receipt_names_the_account_that_approved_the_card(
     sent: list[MatrixDelivery] = []
     manager = _manager(journal, tmp_path, sent)
     try:
-        assert await manager.request_scheduled_call_approval(
-            task_id=_TASK,
-            room_id=_ROOM,
-            thread_id=_THREAD,
-            requester_id=_REQUESTER,
-            approver_user_id="@canonical:test",
-            agent_name=_AGENT,
-            tool_name="post_slack_message",
-            arguments=_ARGUMENTS,
-            execute_at=datetime.now(UTC) + timedelta(minutes=1),
-            workflow_digest="workflow",
-            scheduled_for_text="9:00 AM EDT",
-            any_arguments_offered=False,
-        )
-        result = await manager.handle_card_response(
-            room_id=_ROOM,
-            sender_id="@canonical:test",
-            card_event_id=_SCHEDULED_CARD,
-            status="approved",
-            reason=None,
-            authorize_responder=lambda _agent: True,
-        )
-        assert result.consumed is True
+        assert await _schedule(manager, approver="@canonical:test")
+        assert (await _decide(manager, "approved", sender="@canonical:test")).consumed is True
         assert await _arm(manager) == "armed"
         sent.clear()
 
-        await _fire_time_call(journal, manager, "first")
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
 
         [receipt] = sent
         assert receipt.payload["resolved_by"] == "@canonical:test"
@@ -983,11 +935,9 @@ async def test_receipt_that_will_never_be_sent_does_not_block_pruning(
     manager = _manager(journal, tmp_path, [])
     monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
     try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        await _arm(manager)
-        await _fire_time_call(journal, manager, "first")
-        await journal.backend.write(lambda transaction: transaction.execute(abandon, ("card-first",)))
+        await _armed(manager)
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
+        await journal.backend.write(lambda transaction: transaction.execute(abandon, (_RECEIPT,)))
         await journal.backend.write(
             lambda transaction: transaction.execute(
                 "UPDATE scheduled_call_approvals SET execute_at_ns = 0 WHERE task_id = ?",
@@ -997,17 +947,11 @@ async def test_receipt_that_will_never_be_sent_does_not_block_pruning(
 
         await manager.recover_cards_on_startup()
 
-        remaining = await journal.backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT 1 AS present FROM scheduled_call_approvals WHERE task_id = ?",
-                (_TASK,),
-            ),
-        )
-        assert remaining is None
+        assert await _binding_column(journal, "task_id") is None
         receipt = await journal.backend.read(
             lambda transaction: transaction.fetchone(
                 "SELECT 1 AS present FROM matrix_delivery_outbox WHERE delivery_id = ?",
-                ("card-first",),
+                (_RECEIPT,),
             ),
         )
         assert receipt is None
@@ -1037,13 +981,7 @@ async def test_withdrawn_bindings_are_pruned_without_waiting_for_their_send_time
 
         await manager.recover_cards_on_startup()
 
-        remaining = await journal.backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT 1 AS present FROM scheduled_call_approvals WHERE task_id = ?",
-                (_TASK,),
-            ),
-        )
-        assert remaining is None
+        assert await _binding_column(journal, "task_id") is None
     finally:
         await manager.shutdown()
 
@@ -1057,16 +995,14 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
-        assert await _schedule(manager)
-        await _decide(manager, "approved")
-        await _arm(manager)
-        await _fire_time_call(journal, manager, "first")
+        await _armed(manager)
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
         cards = journal.principal("router@shared")
 
         await cards.remember_terminal_approval_alias(
             room_id=_ROOM,
             card_event_id="$receipt-copy",
-            delivery_id="card-first",
+            delivery_id=_RECEIPT,
         )
 
         assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$receipt-copy")
@@ -1121,9 +1057,63 @@ def _persisted_workflows(context: ToolRuntimeContext) -> list[tuple[str, Schedul
     return records
 
 
+class _SlackTools(Toolkit):
+    """A configured toolkit whose one gated function records each real run."""
+
+    def __init__(self, runs: list[dict[str, object]], *, outcome: object = "sent") -> None:
+        self.runs = runs
+        self.outcome = outcome
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    def post_slack_message(self, channel: str, text: str = "") -> object:
+        """Post a Slack message.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+
+        """
+        self.runs.append({"channel": channel, "text": text, "thread": threading.get_ident()})
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def _live_agent(
+    runs: list[dict[str, object]] | None = None,
+    *,
+    outcome: object = "sent",
+    toolkit_name: str = _TOOLKIT,
+    authored_confirmation: bool = False,
+    extra_toolkits: tuple[Toolkit, ...] = (),
+) -> Agent:
+    """Build a live agent whose toolkit carries its configured identity, as agent assembly sets it."""
+    toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = toolkit_name
+        if authored_confirmation:
+            function.requires_confirmation = True
+    return Agent(id="general", model=OpenAIChat(), tools=[toolkit, *extra_toolkits])
+
+
+async def _schedule_from_tool(
+    *,
+    arguments_json: str = '{"text": "Good morning!", "channel": "U123"}',
+    execute_at: str = "2030-01-02T09:00:00-05:00",
+    agent: Agent | None = None,
+) -> str:
+    return await SchedulerTools().schedule_tool_call(
+        tool_name="post_slack_message",
+        arguments_json=arguments_json,
+        execute_at=execute_at,
+        description="Morning DM",
+        agent=agent or _live_agent(),
+    )
+
+
 @pytest.mark.asyncio
-async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -> None:
-    """The saved task carries the exact call, and the card binds that task as it will fire."""
+async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of_matrix() -> None:
+    """The card binds the stored call, while the saved task and trigger name only the task to run."""
     config = _gated_config()
     context = _tool_context(config)
     request = AsyncMock(return_value=True)
@@ -1134,12 +1124,7 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
-        result = await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json='{"text": "Good morning!", "channel": "U123"}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Morning DM",
-        )
+        result = await _schedule_from_tool()
 
     [(status, record)] = _persisted_workflows(context)
     workflow = record.workflow
@@ -1152,58 +1137,67 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
     assert workflow.history_limit == 0
     assert workflow.created_by == "@user:localhost"
     assert workflow.description == "Morning DM"
+    assert workflow.pre_approved_call is True
     assert workflow.message.startswith("@general ")
+    assert f'run_scheduled_call` with task_id "{record.task_id}"' in workflow.message
     assert "`post_slack_message`" in workflow.message
-    assert '"channel": "U123"' in workflow.message
-    assert '"text": "Good morning!"' in workflow.message
+    assert "U123" not in workflow.message
+    assert "Good morning" not in workflow.message
+    assert "Morning DM" in workflow.message
+    [binding] = request.await_args.args
+    assert binding == ScheduledCallBinding(
+        task_id=record.task_id,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        agent_name="general",
+        toolkit_name=_TOOLKIT,
+        tool_name="post_slack_message",
+        arguments_json=canonical_arguments({"channel": "U123", "text": "Good morning!"}),
+        workflow_digest=_scheduled_call_workflow_digest(record.task_id, workflow),
+        execute_at_ns=int(workflow.execute_at.timestamp() * 1_000_000_000),
+    )
     kwargs = request.await_args.kwargs
-    assert kwargs["task_id"] == record.task_id
-    assert kwargs["room_id"] == "!room:localhost"
-    assert kwargs["thread_id"] == "$thread"
-    assert kwargs["requester_id"] == "@user:localhost"
     assert kwargs["approver_user_id"] == "@user:localhost"
-    assert kwargs["agent_name"] == "general"
-    assert kwargs["tool_name"] == "post_slack_message"
-    assert kwargs["arguments"] == {"channel": "U123", "text": "Good morning!"}
-    assert kwargs["execute_at"] == workflow.execute_at
     assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
     assert kwargs["any_arguments_offered"] is True
-    assert workflow.pre_approved_call is True
-    assert kwargs["workflow_digest"] == _scheduled_call_workflow_digest(record.task_id, workflow)
     start.assert_called_once()
     assert record.task_id in result
     assert "approve" in result.lower()
 
 
 @pytest.mark.asyncio
-async def test_schedule_tool_call_offers_any_arguments_only_to_a_requester_approving_their_own_calls() -> None:
-    """A requester whose approvals go to another account gets an exact-only card, as with timed approvals."""
+@pytest.mark.parametrize(
+    ("approver", "authored_confirmation"),
+    [("@owner:localhost", False), ("@user:localhost", True)],
+    ids=["approver-elsewhere", "tool-asks-itself"],
+)
+async def test_schedule_tool_call_offers_only_exact_approval_where_any_arguments_cannot_apply(
+    approver: str,
+    authored_confirmation: bool,
+) -> None:
+    """Approvals sent to another account, or a tool that confirms its own calls, get an exact-only card."""
     config = _gated_config()
     context = _tool_context(config)
     request = AsyncMock(return_value=True)
 
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.resolve_tool_approval_approver", return_value="@owner:localhost"),
+        patch("mindroom.scheduling.resolve_tool_approval_approver", return_value=approver),
         patch("mindroom.scheduling._start_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
-        await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json='{"text": "Good morning!", "channel": "U123"}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Morning DM",
-        )
+        await _schedule_from_tool(agent=_live_agent(authored_confirmation=authored_confirmation))
 
-    kwargs = request.await_args.kwargs
-    assert kwargs["approver_user_id"] == "@owner:localhost"
-    assert kwargs["any_arguments_offered"] is False
+    [(_status, record)] = _persisted_workflows(context)
+    assert request.await_args.kwargs["any_arguments_offered"] is False
+    assert "arguments_json" not in record.workflow.message
 
 
 @pytest.mark.asyncio
-async def test_schedule_tool_call_offers_only_exact_approval_for_a_team() -> None:
-    """Any member may make a team's call, so a team's card never offers approving any arguments."""
+async def test_schedule_tool_call_refuses_a_team() -> None:
+    """A team never makes calls itself, so only an agent can store one."""
     config = _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -1218,20 +1212,13 @@ async def test_schedule_tool_call_offers_only_exact_approval_for_a_team() -> Non
 
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling._start_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "crew"),
+        pytest.raises(RuntimeError, match="Only an agent"),
     ):
-        await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json='{"text": "Good morning!", "channel": "U123"}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Morning DM",
-        )
+        await _schedule_from_tool()
 
-    kwargs = request.await_args.kwargs
-    assert kwargs["agent_name"] == "crew"
-    assert kwargs["any_arguments_offered"] is False
+    request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1246,20 +1233,15 @@ async def test_schedule_tool_call_requires_the_agent_to_be_able_to_reply_in_the_
         _responders(context.config),
         pytest.raises(RuntimeError, match="cannot receive"),
     ):
-        await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json='{"channel": "U123"}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Morning DM",
-        )
+        await _schedule_from_tool()
 
     request.assert_not_awaited()
     context.client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_schedule_tool_call_binds_the_arguments_the_call_will_run_with() -> None:
-    """The card and digest show arguments as the model runtime decodes them, so the fire-time call can match."""
+async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
+    """String values such as "true" or "None" stay strings; nothing reinterprets them before they run."""
     context = _tool_context(_gated_config())
     request = AsyncMock(return_value=True)
 
@@ -1269,38 +1251,55 @@ async def test_schedule_tool_call_binds_the_arguments_the_call_will_run_with() -
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
-        await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json='{"text": "None", "unfurl": " TRUE ", "blocks": {"hidden": "false"}}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Morning DM",
-        )
+        await _schedule_from_tool(arguments_json='{"channel": " TRUE ", "text": "None"}')
 
-    assert request.await_args.kwargs["arguments"] == {"text": None, "unfurl": True, "blocks": {"hidden": "false"}}
+    [binding] = request.await_args.args
+    assert binding.arguments_json == '{"channel":" TRUE ","text":"None"}'
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("arguments_json", "execute_at", "thread_id", "gated", "error"),
+    ("arguments_json", "execute_at", "thread_id", "gated", "agent", "error"),
     [
-        ("{", "2030-01-02T09:00:00-05:00", "$thread", True, "arguments_json must be a JSON object"),
-        ("[1]", "2030-01-02T09:00:00-05:00", "$thread", True, "arguments_json must be a JSON object"),
-        ("{}", "tomorrow at nine", "$thread", True, "ISO 8601"),
-        ("{}", "2030-01-02T09:00:00", "$thread", True, "UTC offset"),
-        ("{}", "2020-01-02T09:00:00+00:00", "$thread", True, "future"),
-        ("{}", "2030-01-02T09:00:00-05:00", None, True, "thread"),
-        ("{}", "2030-01-02T09:00:00-05:00", "$thread", False, "does not require approval"),
+        ("{", "2030-01-02T09:00:00-05:00", "$thread", True, None, "not valid JSON"),
+        ("[1]", "2030-01-02T09:00:00-05:00", "$thread", True, None, "must be a JSON object"),
+        ('{"channel": "a", "channel": "b"}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "duplicate key"),
+        ('{"channel": NaN}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "not valid JSON"),
+        ('{"channel": "U1", "text": 1e999}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "non-finite"),
+        ('{"text": "no channel"}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "current parameters"),
+        ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", "$thread", True, "elsewhere", "not one of this agent"),
+        ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", "$thread", True, "twice", "more than one"),
+        ('{"channel": "U1"}', "tomorrow at nine", "$thread", True, None, "ISO 8601"),
+        ('{"channel": "U1"}', "2030-01-02T09:00:00", "$thread", True, None, "UTC offset"),
+        ('{"channel": "U1"}', "2020-01-02T09:00:00+00:00", "$thread", True, None, "future"),
+        ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", None, True, None, "thread"),
+        ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", "$thread", False, None, "does not require approval"),
     ],
-    ids=["invalid-json", "not-object", "not-iso", "naive", "past", "no-thread", "ungated"],
+    ids=[
+        "invalid-json",
+        "not-object",
+        "duplicate-key",
+        "nan",
+        "overflow",
+        "schema",
+        "unknown-tool",
+        "ambiguous-tool",
+        "not-iso",
+        "naive",
+        "past",
+        "no-thread",
+        "ungated",
+    ],
 )
-async def test_schedule_tool_call_rejects_what_it_cannot_bind(
+async def test_schedule_tool_call_rejects_what_it_cannot_store(
     arguments_json: str,
     execute_at: str,
     thread_id: str | None,
     gated: bool,
+    agent: str | None,
     error: str,
 ) -> None:
-    """Nothing is saved and no card is posted for a call that cannot be pre-approved exactly."""
+    """Nothing is saved and no card is posted for a call that cannot be stored and run as approved."""
     config = (
         _gated_config()
         if gated
@@ -1308,6 +1307,11 @@ async def test_schedule_tool_call_rejects_what_it_cannot_bind(
     )
     context = _tool_context(config, thread_id=thread_id)
     request = AsyncMock(return_value=True)
+    live_agent = {
+        None: _live_agent(),
+        "elsewhere": Agent(id="general", model=OpenAIChat(), tools=[]),
+        "twice": _live_agent(extra_toolkits=(_named_slack_tools("other_slack"),)),
+    }[agent]
 
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
@@ -1315,15 +1319,17 @@ async def test_schedule_tool_call_rejects_what_it_cannot_bind(
         _responders(context.config, "general"),
         pytest.raises(RuntimeError, match=error),
     ):
-        await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json=arguments_json,
-            execute_at=execute_at,
-            description="Morning DM",
-        )
+        await _schedule_from_tool(arguments_json=arguments_json, execute_at=execute_at, agent=live_agent)
 
     context.client.room_put_state.assert_not_awaited()
     request.assert_not_awaited()
+
+
+def _named_slack_tools(owner: str) -> Toolkit:
+    toolkit = _SlackTools([])
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = owner
+    return toolkit
 
 
 @pytest.mark.asyncio
@@ -1357,15 +1363,10 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         _responders(context.config, "general"),
         pytest.raises(raised),
     ):
-        await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json='{"channel": "U123"}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Morning DM",
-        )
+        await _schedule_from_tool()
 
     context.client.room_put_state.assert_not_awaited()
-    withdraw.assert_awaited_once_with(request.await_args.kwargs["task_id"], reason="Schedule cancelled.")
+    withdraw.assert_awaited_once_with(request.await_args.args[0].task_id, reason="Schedule cancelled.")
     start.assert_not_called()
 
 
@@ -1385,14 +1386,9 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
         _responders(context.config, "general"),
         pytest.raises(RuntimeError, match="Failed to schedule"),
     ):
-        await SchedulerTools().schedule_tool_call(
-            tool_name="post_slack_message",
-            arguments_json='{"channel": "U123"}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Morning DM",
-        )
+        await _schedule_from_tool()
 
-    withdraw.assert_awaited_once_with(request.await_args.kwargs["task_id"], reason="Schedule cancelled.")
+    withdraw.assert_awaited_once_with(request.await_args.args[0].task_id, reason="Schedule cancelled.")
     start.assert_not_called()
 
 
@@ -1793,22 +1789,16 @@ def test_malformed_scheduled_scope_never_becomes_a_decision(content: dict[str, o
     assert payload.scheduled_scope is None
 
 
-_CREW = Config(
-    agents={"general": AgentConfig(display_name="General Agent")},
-    teams={"crew": TeamConfig(display_name="Crew", role="Ship things", agents=["general"])},
-)
-
-
 @pytest.mark.parametrize(
-    ("config", "tool_name", "arguments", "entity_name", "approver_id", "offered"),
+    ("config", "tool_name", "arguments", "approver_id", "authored_confirmation", "offered"),
     [
-        (Config(), "post_slack_message", {"channel": "U1"}, "general", "@user:server", True),
+        (Config(), "post_slack_message", {"channel": "U1"}, "@user:server", False, True),
         (
             Config(tool_approval=ToolApprovalConfig(scheduled_any_arguments=False)),
             "post_slack_message",
             {},
-            "general",
             "@user:server",
+            False,
             False,
         ),
         (
@@ -1817,32 +1807,32 @@ _CREW = Config(
             ),
             "files_call_tool",
             {"tool_name": "delete", "arguments": {"path": "/one"}},
-            "general",
             "@user:server",
             False,
+            False,
         ),
-        (_CREW, "post_slack_message", {}, "crew", "@user:server", False),
-        (Config(), "post_slack_message", {}, "general", "@owner:server", False),
+        (Config(), "post_slack_message", {}, "@owner:server", False, False),
+        (Config(), "post_slack_message", {}, "@user:server", True, False),
     ],
-    ids=["plain-tool", "operator-disabled", "generic-mcp-dispatch", "team", "approver-elsewhere"],
+    ids=["plain-tool", "operator-disabled", "generic-mcp-dispatch", "approver-elsewhere", "tool-asks-itself"],
 )
-def test_any_arguments_is_offered_only_where_a_timed_approval_could_apply(
+def test_any_arguments_is_offered_only_where_it_can_apply(
     config: Config,
     tool_name: str,
     arguments: dict[str, object],
-    entity_name: str,
     approver_id: str,
+    authored_confirmation: bool,
     offered: bool,
 ) -> None:
-    """Generic MCP dispatch, an operator opt-out, a team, or approvals sent elsewhere keep scheduled approvals exact."""
+    """Generic MCP dispatch, an operator opt-out, approvals sent elsewhere, or self-confirming tools stay exact."""
     assert (
         scheduled_call_offers_any_arguments(
             config,
             tool_name,
             arguments,
-            entity_name=entity_name,
             requester_id="@user:server",
             approver_id=approver_id,
+            authored_confirmation=authored_confirmation,
         )
         is offered
     )
@@ -1896,3 +1886,239 @@ async def test_cancelling_a_plain_reminder_leaves_call_approvals_alone() -> None
 
     assert result == "✅ Cancelled task `task1234`"
     withdraw.assert_not_awaited()
+
+
+def _code_config() -> Config:
+    return _bind_runtime_paths(
+        Config(
+            agents={_AGENT: AgentConfig(display_name="Code Agent")},
+            tool_approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
+            ),
+        ),
+    )
+
+
+def _turn_context(config: Config, *, thread_id: str = _THREAD) -> ToolRuntimeContext:
+    """The tool context of the scheduling agent's own turn in the scheduling thread."""
+    return replace(
+        _make_context(config),
+        agent_name=_AGENT,
+        requester_id=_REQUESTER,
+        target=MessageTarget.resolve(room_id=_ROOM, thread_id=thread_id, reply_to_event_id=None),
+    )
+
+
+async def _run(
+    manager: ApprovalManager,
+    agent: Agent | None,
+    *,
+    arguments_json: str | None = None,
+    context: ToolRuntimeContext | None = None,
+) -> object:
+    with (
+        patch("mindroom.approval_manager.get_approval_store", return_value=manager),
+        tool_runtime_context(context or _turn_context(_code_config())),
+    ):
+        return await SchedulerTools().run_scheduled_call(
+            task_id=_TASK,
+            arguments_json=arguments_json,
+            agent=agent,
+            run_context=RunContext(run_id="run", session_id="session", session_state={}),
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_function_runs_with_its_hooks_and_keeps_tool_instructions(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The stored call runs once through the live function and its hooks, off the event loop, in this turn."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    hooked: list[str] = []
+    agent = _live_agent(runs)
+
+    def hook(function_name: str, function_call: Callable[..., object], arguments: dict[str, object]) -> object:
+        hooked.append(function_name)
+        return function_call(**arguments)
+
+    for toolkit in agent.tools or ():
+        assert isinstance(toolkit, Toolkit)
+        for function in toolkit.get_async_functions().values():
+            function.tool_hooks = [hook]
+    instructions = ["keep me"]
+    agent._tool_instructions = instructions
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, agent)
+
+        assert result == "sent"
+        assert [{key: run[key] for key in ("channel", "text")} for run in runs] == [_ARGUMENTS]
+        assert runs[0]["thread"] != threading.get_ident()
+        assert hooked == ["post_slack_message"]
+        assert agent._tool_instructions is instructions
+        assert await _binding_column(journal, "outcome") == "completed"
+
+        repeat = await _run(manager, agent)
+
+        assert isinstance(repeat, str)
+        assert "already used" in repeat
+        assert len(runs) == 1
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope", "authored_confirmation", "runs_replacement"),
+    [(None, False, False), ("any_arguments", False, True), ("any_arguments", True, False)],
+    ids=["exact", "any-arguments", "self-confirming-tool"],
+)
+async def test_replacement_arguments_run_only_under_an_any_arguments_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    scope: str | None,
+    authored_confirmation: bool,
+    runs_replacement: bool,
+) -> None:
+    """The agent's own arguments replace the stored ones only when any arguments were approved for that tool."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    agent = _live_agent(runs, authored_confirmation=authored_confirmation)
+    try:
+        await _armed(manager, scope=scope)
+
+        result = await _run(manager, agent, arguments_json='{"channel": "U999", "text": "Other"}')
+
+        if runs_replacement:
+            assert result == "sent"
+            assert [{key: run[key] for key in ("channel", "text")} for run in runs] == [_OTHER_ARGUMENTS]
+        else:
+            assert isinstance(result, str)
+            assert "only the stored arguments" in result
+            assert runs == []
+            assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unapproved_call_offers_the_ordinary_way_with_its_stored_arguments(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Without an approval the call does not run, and the agent learns how to ask for approval now."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    try:
+        assert await _schedule(manager)
+
+        result = await _run(manager, _live_agent(runs))
+
+        assert isinstance(result, str)
+        assert "has not approved it" in result
+        assert "call `post_slack_message` with these arguments" in result
+        assert canonical_arguments(_ARGUMENTS) in result
+        assert runs == []
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_kind", "thread_id", "reason"),
+    [
+        ("none", _THREAD, "own conversation turn"),
+        ("live", "$other-thread", "another agent, conversation, or requester"),
+        ("without-tool", _THREAD, "not one of this agent's tools"),
+        ("other-toolkit", _THREAD, "not one of this agent's tools"),
+    ],
+    ids=["no-live-agent", "other-thread", "tool-gone", "same-name-other-toolkit"],
+)
+async def test_call_that_cannot_run_here_spends_nothing(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    agent_kind: str,
+    thread_id: str,
+    reason: str,
+) -> None:
+    """A run outside the agent's own turn, elsewhere, or without the stored toolkit is refused before claiming."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    agent = {
+        "none": None,
+        "live": _live_agent(),
+        "without-tool": Agent(id="general", model=OpenAIChat(), tools=[]),
+        "other-toolkit": _live_agent(toolkit_name="other_slack"),
+    }[agent_kind]
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, agent, context=_turn_context(_code_config(), thread_id=thread_id))
+
+        assert isinstance(result, str)
+        assert reason in result
+        assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "message"),
+    [(RuntimeError("slack is down"), "slack is down"), (iter(["streamed"]), "streams its result")],
+    ids=["tool-error", "streaming-result"],
+)
+async def test_failed_call_spends_its_approval_and_records_the_failure(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    outcome: object,
+    message: str,
+) -> None:
+    """A claimed call that fails is never retried; its outcome and reason are reported."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, _live_agent(outcome=outcome))
+
+        assert isinstance(result, str)
+        assert message in result
+        assert await _binding_column(journal, "outcome") == "failed"
+        assert await _claim(manager) == "used"
+    finally:
+        await manager.shutdown()
+
+
+def test_only_the_built_in_scheduled_call_runner_skips_approval_gating() -> None:
+    """A rule gating everything leaves run_scheduled_call ungated, but not a same-named plugin function."""
+    config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
+
+    def run_scheduled_call() -> str:
+        """Plugin function that shares the runner's name."""
+        return "plugin"
+
+    scheduler = apply_tool_approval_capability(
+        SchedulerTools(),
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name="scheduler",
+    )
+    plugin = apply_tool_approval_capability(
+        Toolkit(name="plugin", tools=[run_scheduled_call]),
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name="plugin",
+    )
+
+    assert scheduler is not None
+    assert plugin is not None
+    assert scheduler.async_functions["run_scheduled_call"].requires_confirmation is not True
+    assert scheduler.async_functions["schedule_tool_call"].requires_confirmation is True
+    assert plugin.functions["run_scheduled_call"].requires_confirmation is True

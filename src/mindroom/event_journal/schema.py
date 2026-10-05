@@ -131,17 +131,18 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS scheduled_call_approvals (
         -- One tool call a requester approved while scheduling it. The
         -- decision lives on the shared detached-card row; this row holds the
-        -- binding a later call must match and its one-shot consumption, whose
-        -- receipt maintenance looks up by its delivery.
+        -- stored call, its one-shot claim and outcome, and the receipt
+        -- maintenance looks up by its delivery.
         principal_id TEXT NOT NULL,
         task_id TEXT NOT NULL,
         delivery_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         requester_id TEXT NOT NULL,
-        entity_name TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        toolkit_name TEXT NOT NULL,
         tool_name TEXT NOT NULL,
-        arguments_digest TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
         workflow_digest TEXT NOT NULL,
         execute_at_ns BIGINT NOT NULL,
         membership_epoch BIGINT NOT NULL,
@@ -153,6 +154,7 @@ _TABLES = (
         revoked_at_ns BIGINT,
         consumed_at_ns BIGINT,
         consumed_delivery_id TEXT,
+        outcome TEXT,
         PRIMARY KEY (principal_id, task_id),
         UNIQUE (principal_id, delivery_id),
         UNIQUE (principal_id, consumed_delivery_id)
@@ -489,11 +491,6 @@ _INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS approval_grant_cards_scope ON approval_grant_cards (principal_id, scope_key)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS scheduled_call_approvals_scope ON scheduled_call_approvals (
-        principal_id, room_id, thread_id, requester_id, entity_name, tool_name, arguments_digest
-    )
     """,
     """
     CREATE INDEX IF NOT EXISTS interactive_selections_revision

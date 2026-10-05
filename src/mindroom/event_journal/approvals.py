@@ -159,17 +159,6 @@ def reserve_deliveries(
     ):
         return False
     for card in cards:
-        # A scheduled call runs unattended only when no other card in its step would hold the run.
-        if len(cards) == 1 and scheduled_approvals.apply_armed(
-            transaction,
-            card_principal_id,
-            continuation_principal_id=continuation_principal_id,
-            continuation=continuation,
-            card=approval_grants.unscoped(card),
-            membership_epoch=membership_epoch,
-            any_arguments_eligible=card.grant_operation is not None,
-        ):
-            continue
         scoped_card = approval_grants.reserve_identity(
             transaction,
             card_principal_id,

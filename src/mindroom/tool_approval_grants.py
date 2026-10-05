@@ -78,6 +78,24 @@ def approval_timestamp(timestamp_ns: int) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduledCallBinding:
+    """The call, task, and time one scheduled approval covers."""
+
+    task_id: str
+    room_id: str
+    thread_id: str
+    requester_id: str
+    agent_name: str
+    # The configured toolkit that owns the function, so a same-named function elsewhere never runs.
+    toolkit_name: str
+    tool_name: str
+    # Canonical JSON of the approved arguments, executed as stored.
+    arguments_json: str
+    workflow_digest: str
+    execute_at_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalGrant:
     """Durable grant identity retained independently of retired approval cards."""
 
