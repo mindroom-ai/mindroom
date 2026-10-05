@@ -726,6 +726,84 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     assert not any(workspace.rglob("*"))
 
 
+_WORKER_RUNTIME_ENV = {
+    "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+    "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
+    "MINDROOM_WORKER_BACKEND": "kubernetes",
+    "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+}
+
+
+def _worker_attachment_tool(
+    tmp_path: Path,
+    *,
+    runtime_env: dict[str, str],
+    worker_tools_override: list[str],
+) -> AttachmentTools:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=runtime_env,
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return AttachmentTools(
+        runtime_paths=runtime_paths,
+        worker_target=_shared_worker_target(),
+        worker_tools_override=worker_tools_override,
+        tool_output_workspace_root=workspace,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("inline_limit_env", "expected_error"),
+    [
+        ({}, None),
+        (
+            {"MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES": str(16 * 1024 * 1024)},
+            "Attachment att_archive exceeds inline worker-transfer size limit (16777217 bytes > 16777216 bytes).",
+        ),
+    ],
+)
+async def test_get_attachment_worker_save_accepts_attachments_over_16_mib_unless_lowered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inline_limit_env: dict[str, str],
+    expected_error: str | None,
+) -> None:
+    """A received file above 16 MiB reaches the worker unless an operator lowers the inline cap."""
+    monkeypatch.delenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", raising=False)
+    runtime_env = {**_WORKER_RUNTIME_ENV, **inline_limit_env}
+    tool = _worker_attachment_tool(tmp_path, runtime_env=runtime_env, worker_tools_override=["file"])
+    size_bytes = 16 * 1024 * 1024 + 1
+    sample_file = tmp_path / "archive.zip"
+    sample_file.write_bytes(b"PK")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_archive")
+    assert attachment is not None
+    os.truncate(attachment.local_path, size_bytes)
+
+    with (
+        tool_runtime_context(
+            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
+        ),
+        patch(
+            "mindroom.custom_tools.attachments.save_attachment_to_worker",
+            return_value=SimpleNamespace(worker_path="scratch/archive.zip", size_bytes=size_bytes, sha256="sha256"),
+        ) as mocked_save,
+    ):
+        payload = json.loads(await tool.get_attachment("att_archive", mindroom_output_path="scratch/archive.zip"))
+
+    if expected_error is None:
+        assert payload["status"] == "ok"
+        assert payload["mindroom_tool_output"]["bytes"] == size_bytes
+        assert len(mocked_save.call_args.kwargs["payload_bytes"]) == size_bytes
+    else:
+        assert payload["status"] == "error"
+        assert payload["message"] == expected_error
+        mocked_save.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_matrix_message_attachments_sends_attachment_ids(tmp_path: Path) -> None:
     """Helper should resolve attachment IDs and upload them to Matrix."""

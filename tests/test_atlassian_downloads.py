@@ -854,7 +854,7 @@ async def test_download_above_the_retained_media_limit_is_too_large(
 ) -> None:
     """An inline transfer limit above MindRoom's retained media limit still reports a size error."""
     tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 4)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 4)
     gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), _file(b"12345"))
 
     result = await _download(tool, context)

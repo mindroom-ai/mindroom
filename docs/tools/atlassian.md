@@ -249,8 +249,8 @@ To give an agent read access only, hide the write functions with [`exclude_tools
 The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 
-Downloads are limited to the inline attachment size, 16 MiB by default, which an operator raises with [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](../deployment/sandbox-proxy.md#environment-variable-reference).
-The 64 MiB limit for [registered files](../attachments.md) still applies and cannot be raised.
+Downloads are limited to 64 MiB, the limit for [registered files](../attachments.md), which cannot be raised.
+An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](../deployment/sandbox-proxy.md#environment-variable-reference).
 
 ## Limits
 
