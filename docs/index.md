@@ -1,5 +1,6 @@
 ---
 icon: lucide/bot
+title: AI agents that know you and your work
 ---
 
 # MindRoom
@@ -16,7 +17,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
   <source src="https://github.com/user-attachments/assets/af51cf1e-840a-415e-ae97-df453d2afdda" type="video/mp4">
 </video>
 
-**[Get started](getting-started.md)** · **[See it in action](showcase.md)** · **[Coming from OpenClaw?](openclaw.md)**
+**[Get started](getting-started.md)** · **[See it in action](showcase.md)** · **[Try hosted MindRoom](https://mindroom.chat/#hosted)** · **[Coming from OpenClaw?](openclaw.md)**
 
 ## What People Use It For
 
@@ -28,7 +29,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     - Keep notes, a journal, and memories you can still find months later.
     - Track your budget, workouts, or anything else in files the agent keeps up to date.
     - Follow the topics you care about, with a digest that only arrives when there is something new.
-    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval rules for anything risky.
+    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval for the actions you choose.
     - Build quick tools and scripts in the agent's own workspace.
 
 === "Work"
@@ -70,7 +71,7 @@ Send a voice message from your phone ([Voice Messages](voice.md)), or call an ag
 ### Safe to give real access
 
 - Sending or changing something can wait for your one-tap approval, which shows exactly what will be sent and to whom ([Tool Approval](tool-approval.md)).
-- Code runs in isolated workers ([Workers & Sandboxing](deployment/sandbox-proxy.md)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](deployment/approved-egress.md)).
+- Code can run in isolated workers ([Workers & Sandboxing](deployment/sandbox-proxy.md)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](deployment/approved-egress.md)).
 - Each agent answers only the people and rooms you allow ([Access Control](authorization.md)).
 - It all runs on [Matrix](matrix.md), an open, end-to-end encrypted messaging standard that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
 
@@ -116,7 +117,7 @@ MindRoom takes the opposite approach.
 | Who they serve | Usually one person's assistant | Personal agents for everyone and shared agents for teams, in rooms where people and agents work together, with access control |
 | What agents can show | Whatever each app allows, mostly text and simple buttons | Its own client: approval cards, live tool traces, voice calls, a browser you can take over, and interactive pages |
 | How they connect | One adapter per messaging app | One open, encrypted protocol, plus bridges for reach |
-| Where messages go | Through each messaging platform | End-to-end encrypted, on servers you can run yourself |
+| Where messages go | Through each messaging platform | On servers you can run yourself, where rooms can be end-to-end encrypted |
 
 Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [Import from OpenClaw](openclaw.md).
 
