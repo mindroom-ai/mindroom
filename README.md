@@ -77,13 +77,13 @@ See [Quick Start](#quick-start) for every way to run it.
 <p><b>Canvases you can click</b><br />An agent lays out free slots or a trip budget beside the chat and acts on what you pick.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6ccc9db8-6155-4d50-ae60-f4e011d39617" /><img src="https://github.com/user-attachments/assets/c8492e0c-4864-4753-ad1b-4a7d66e70c91" alt="A thread next to a data canvas with a fitted curve and its parameters" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6ccc9db8-6155-4d50-ae60-f4e011d39617" /><img src="https://github.com/user-attachments/assets/c8492e0c-4864-4753-ad1b-4a7d66e70c91" alt="A data canvas with a fitted curve, its parameters, and one point left out" /></picture></a>
 <p><b>Data you can explore</b><br />Leave a point out of a fit, then send the new result back to the agent.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ddf9402f-a451-4f50-b070-1b50aab739c8" /><img src="https://github.com/user-attachments/assets/6b7a2673-d9b9-446a-b9a7-4e4240241489" alt="An agent's browser waits on an order page while the user can take control" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ddf9402f-a451-4f50-b070-1b50aab739c8" /><img src="https://github.com/user-attachments/assets/6b7a2673-d9b9-446a-b9a7-4e4240241489" alt="The agent hands over the passkey step next to its browser on the order page" /></picture></a>
 <p><b>It drives, you take the wheel</b><br />Watch an agent work in its own browser and take over when it needs your passkey.</p>
 </td>
 <td width="50%" valign="top">
