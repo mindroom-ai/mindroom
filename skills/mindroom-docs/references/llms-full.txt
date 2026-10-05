@@ -4685,8 +4685,6 @@ For a rejected credential, update the credential MindRoom uses, restart MindRoom
 
 ## Calling an agent about a thread
 
-A call used to start with the agent knowing nothing about what you wanted to talk about, so you had to explain the thread out loud first.
-
 In MindRoom Chat, start the call from a thread's header, or from the agent's profile while a thread is open.
 When the agent picks up, it receives a snapshot of that conversation and the thread title.
 The snapshot is the newest part of the thread that fits the call budget (about 6,000 tokens), with a note when older messages were left out.
