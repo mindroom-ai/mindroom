@@ -4702,7 +4702,7 @@ It works with all three call profiles:
 
 The snapshot is used only when the call can safely see it.
 The caller must pass the normal reply permissions for the origin room and still be a member of it, the agent must have joined it, and a thread origin must point at the thread's first message.
-The origin must also be written by the call's only caller, for this agent.
+The origin must also be written by the call's only caller, for this agent, and name a room other than the call room.
 If any check fails, or reading the conversation takes longer than 5 seconds, the call proceeds without it.
 
 When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.

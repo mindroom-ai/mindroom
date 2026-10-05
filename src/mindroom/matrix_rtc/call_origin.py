@@ -122,7 +122,7 @@ async def _read_origin_history(origin: CallOrigin, context: ToolRuntimeContext) 
     return projected_thread_history(page, complete=False)
 
 
-async def resolve_call_origin_context(
+async def resolve_call_origin_context(  # noqa: PLR0911
     origin: CallOrigin,
     *,
     context: ToolRuntimeContext,
@@ -133,8 +133,12 @@ async def resolve_call_origin_context(
     cross-room check that gates the Matrix tools: the caller must be allowed to
     use this agent and be currently joined to the origin room. The agent must
     also be in that room, and a stamped thread must be rooted at the stamped
-    event. Every failure, including a failed read, rejects instead of raising.
+    event. The call room itself is never an origin: that check only covers
+    other rooms. Every failure, including a failed read, rejects instead of raising.
     """
+    if origin.room_id == context.room_id:
+        _reject(origin, "origin_is_call_room")
+        return None
     try:
         access_allowed = await room_access_allowed(context, origin.room_id)
     except Exception as error:
