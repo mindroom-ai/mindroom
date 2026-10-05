@@ -129,12 +129,11 @@ async def resolve_call_origin_context(  # noqa: PLR0911
 ) -> CallOriginContext | None:
     """Snapshot the origin conversation for the caller, or ``None`` when any check fails.
 
-    The origin is stamped by the caller, so it is only trusted after the same
-    cross-room check that gates the Matrix tools: the caller must be allowed to
-    use this agent and be currently joined to the origin room. The agent must
-    also be in that room, and a stamped thread must be rooted at the stamped
-    event. The call room itself is never an origin: that check only covers
-    other rooms. Every failure, including a failed read, rejects instead of raising.
+    The origin is stamped by the caller, so it is only trusted after the same cross-room check
+    that gates the Matrix tools: the caller must be allowed to use this agent and be currently
+    joined to the origin room. That check passes the call room unconditionally, so the call room
+    is never an origin. The agent must also be in the origin room, and a stamped thread must be
+    rooted at the stamped event. Every failure, including a failed read, rejects instead of raising.
     """
     if origin.room_id == context.room_id:
         _reject(origin, "origin_is_call_room")
