@@ -921,21 +921,24 @@ def clear_thread_export_root(
     output_dir: Path,
     *,
     trusted_root: Path | None = None,
-) -> None:
-    """Remove exporter-owned content from one target and preserve unrelated entries."""
+) -> bool:
+    """Remove exporter-owned content from one target, keep unrelated entries, and report whether any was removed."""
     root_fd = _open_owned_export_root(
         output_dir,
         create=False,
         trusted_root=trusted_root,
     )
     if root_fd is None:
-        return
+        return False
     try:
+        removed = False
         for name in os.listdir(root_fd):  # noqa: PTH208 - root_fd pins the directory
             if name == _ROOT_MARKER_FILENAME:
                 continue
-            _remove_reconciliation_room(root_fd, output_dir, name)
-        _fsync_directory_fd(root_fd)
+            removed = _remove_reconciliation_room(root_fd, output_dir, name) or removed
+        if removed:
+            _fsync_directory_fd(root_fd)
+        return removed
     finally:
         os.close(root_fd)
 
