@@ -101,3 +101,26 @@ def test_build_call_brief_caps_long_message_bodies() -> None:
 def test_build_call_brief_returns_empty_string_when_header_does_not_fit() -> None:
     """A budget smaller than the header yields no brief."""
     assert build_call_brief(_context([("Alice", "hi")]), token_budget=10) == ""
+
+
+def test_build_call_brief_stays_within_budget_for_many_tiny_messages() -> None:
+    """Newline joiners count toward the budget, and the newest message survives."""
+    messages = [("Alice", f"hi {index}") for index in range(2_000)]
+    for budget in (300, 1_000, 6_000):
+        brief = build_call_brief(_context(messages), token_budget=budget)
+        assert approximate_o200k_tokens(brief) <= budget, budget
+        assert brief.endswith("- Alice: hi 1999"), budget
+        assert "earlier messages omitted]" in brief, budget
+
+
+def test_build_call_brief_never_exceeds_budget_just_above_header_size() -> None:
+    """The omission marker and oversized messages are dropped rather than overflowing."""
+    header_only = build_call_brief(_context([]), token_budget=6_000)
+    header_tokens = approximate_o200k_tokens(header_only)
+    assert header_tokens > 0
+    for slack in range(6):
+        budget = header_tokens + slack
+        brief = build_call_brief(_context([("Alice", "word " * 400)]), token_budget=budget)
+        assert approximate_o200k_tokens(brief) <= budget, slack
+        assert brief.startswith(header_only), slack
+        assert "word word" not in brief, slack

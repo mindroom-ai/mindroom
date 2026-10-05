@@ -92,8 +92,22 @@ def _capped(body: str) -> str:
     return f"{body[: _BRIEF_MESSAGE_MAX_CHARS - 1]}…"
 
 
+def _newest_lines_that_could_fit(lines: Sequence[str], token_budget: int) -> int:
+    """Upper bound on how many newest lines fit, from per-line token counts alone."""
+    total = 0
+    for count, line in enumerate(reversed(lines)):
+        total += approximate_o200k_tokens(line)
+        if total > token_budget:
+            return count
+    return len(lines)
+
+
 def build_call_brief(origin_context: CallOriginContext, *, token_budget: int) -> str:
-    """Render the newest origin messages that fit ``token_budget``, oldest first."""
+    """Render the newest origin messages that fit ``token_budget``, oldest first.
+
+    The returned text never exceeds ``token_budget`` tokens, measured on the
+    final joined string. When older messages are dropped, a marker line says so.
+    """
     place = "thread" if origin_context.origin.thread_id is not None else "room conversation"
     title = f' titled "{origin_context.thread_title}"' if origin_context.thread_title else ""
     header = (
@@ -101,24 +115,28 @@ def build_call_brief(origin_context: CallOriginContext, *, token_budget: int) ->
         f'The caller started this call from a {place}{title} in the room "{origin_context.room_name}". '
         "Its recent messages follow, oldest first. Treat them as shared context the caller may refer to."
     )
-    used = approximate_o200k_tokens(header)
-    if used > token_budget:
+    if approximate_o200k_tokens(header) > token_budget:
         return ""
-    kept: list[str] = []
-    for message in reversed(origin_context.messages):
-        line = f"- {message.label}: {_capped(message.body)}"
-        cost = approximate_o200k_tokens(line)
-        if used + cost > token_budget:
-            break
-        kept.append(line)
-        used += cost
-    kept.reverse()
-    omitted = len(origin_context.messages) - len(kept)
-    if omitted:
-        marker = f"[{omitted} earlier messages omitted]"
-        while kept and used + approximate_o200k_tokens(marker) > token_budget:
-            used -= approximate_o200k_tokens(kept.pop(0))
-            omitted += 1
-            marker = f"[{omitted} earlier messages omitted]"
-        kept.insert(0, marker)
-    return "\n".join([header, *kept])
+    lines = [f"- {message.label}: {_capped(message.body)}" for message in origin_context.messages]
+
+    def render(kept_count: int) -> str:
+        omitted = len(lines) - kept_count
+        marker = [f"[{omitted} earlier messages omitted]"] if omitted else []
+        return "\n".join([header, *marker, *lines[len(lines) - kept_count :]])
+
+    def fits(kept_count: int) -> bool:
+        return approximate_o200k_tokens(render(kept_count)) <= token_budget
+
+    if not fits(0):
+        return header
+    # Binary search the longest newest-suffix whose joined text fits. Every accepted
+    # length was measured, so the result is within budget even if BPE merges make
+    # the token count slightly non-monotonic.
+    low, high = 0, _newest_lines_that_could_fit(lines, token_budget)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if fits(mid):
+            low = mid
+        else:
+            high = mid - 1
+    return render(low)
