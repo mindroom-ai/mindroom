@@ -56,7 +56,7 @@ See [Quick start](#quick-start) for every way to run it.
 <tr>
 <td width="50%" valign="top">
 <a href="https://docs.mindroom.chat/showcase/#ask-approve-done"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/5e389c59-c81a-4f70-9c5d-de7406ff95f4" /><img src="https://github.com/user-attachments/assets/bc6194b1-9398-47f5-b649-2ea17dbb6b9f" alt="A review dialog where the user approves an agent's calendar booking" /></picture></a>
-<p><b>Approve before it acts</b><br />Risky actions wait for your OK, with the exact arguments in view.</p>
+<p><b>Approve before it acts</b><br />Actions you choose wait for your OK, with the exact arguments in view.</p>
 </td>
 <td width="50%" valign="top">
 <a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/39a572a8-74d7-4349-ad68-2ee1b0c16a21" /><img src="https://github.com/user-attachments/assets/1efa0323-6502-4d7c-82c9-6c39f906ce89" alt="Three colleagues see the same agent thread side by side" /></picture></a>

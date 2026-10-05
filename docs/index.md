@@ -29,7 +29,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     - Keep notes, a journal, and memories you can still find months later.
     - Track your budget, workouts, or anything else in files the agent keeps up to date.
     - Follow the topics you care about, with a digest that only arrives when there is something new.
-    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval rules for anything risky.
+    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval for the actions you choose.
     - Build quick tools and scripts in the agent's own workspace.
 
 === "Work"
