@@ -79,29 +79,25 @@ def _tokens(payload: bytes) -> int:
     return estimate_text_tokens(payload.decode("utf-8"))
 
 
-def _memory_dir_texts(root: Path, exclude: Iterable[str]) -> dict[str, str]:
-    """Return the rewritable memory/ topic files by path, except ``exclude``; others cannot be restored.
+def _memory_dir_files(root: Path, exclude: Iterable[str]) -> dict[str, tuple[str, bool]]:
+    """Return memory/ topic files by path as their text and whether it is the whole file, except ``exclude``.
 
     Curated and protected files are excluded even under memory/, so their content is counted and restored once.
     """
     excluded = set(exclude)
     return {
-        memory_file.relative_path: memory_file.text
+        memory_file.relative_path: (memory_file.text, memory_file.rewritable)
         for memory_file in read_scope_memory_files(root)
-        if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX)
-        and memory_file.rewritable
-        and memory_file.relative_path not in excluded
+        if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX) and memory_file.relative_path not in excluded
     }
 
 
 def _restored_archive(archived: str, current: str) -> str:
-    """Return a topic file's archived text followed by the lines the run added to it."""
-    archived_lines = set(archived.splitlines())
-    added = [line for line in current.splitlines() if line not in archived_lines]
-    if not added:
+    """Return a topic file's archived text followed by everything the run left in it, so nothing is lost."""
+    if not current:
         return archived
     separator = "" if not archived or archived.endswith("\n") else "\n"
-    return archived + separator + "\n".join(added) + "\n"
+    return archived + separator + current
 
 
 def _curated_paths(config: Config, agent_name: str, settings: PromptCurationAutomation) -> list[str]:
@@ -142,7 +138,10 @@ def plan_curation(
         root=root,
         settings=settings,
         snapshot=snapshot,
-        memory_snapshot=_memory_dir_texts(root, exclude=snapshot),
+        # Only whole files can be restored, so only those are snapshotted.
+        memory_snapshot={
+            path: text for path, (text, whole) in _memory_dir_files(root, exclude=snapshot).items() if whole
+        },
         curated=curated,
         upper_tokens=upper,
         floor_tokens=upper - round(measured * (settings.max_reduction - settings.min_reduction)),
@@ -165,7 +164,11 @@ def curation_prompt(config: Config, plan: CurationPlan) -> str:
     )
 
 
-def _violations(plan: CurationPlan, current: Mapping[str, bytes | None], memory_now: Mapping[str, str]) -> list[str]:
+def _violations(
+    plan: CurationPlan,
+    current: Mapping[str, bytes | None],
+    memory_now: Mapping[str, tuple[str, bool]],
+) -> list[str]:
     settings = plan.settings
     violations = [
         f"{path} changed but is protected"
@@ -193,10 +196,10 @@ def _violations(plan: CurationPlan, current: Mapping[str, bytes | None], memory_
     return violations
 
 
-def _content_loss(plan: CurationPlan, curated_tokens: int, memory_now: Mapping[str, str]) -> str | None:
+def _content_loss(plan: CurationPlan, curated_tokens: int, memory_now: Mapping[str, tuple[str, bool]]) -> str | None:
     """Describe memory content deleted instead of moved beyond the allowance, or return None."""
     before = plan.measured_tokens + sum(estimate_text_tokens(text) for text in plan.memory_snapshot.values())
-    lost = before - (curated_tokens + sum(estimate_text_tokens(text) for text in memory_now.values()))
+    lost = before - (curated_tokens + sum(estimate_text_tokens(text) for text, _whole in memory_now.values()))
     if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
         return None
     return f"{lost} tokens of memory were deleted instead of moved to memory/ (at most {max_loss})"
@@ -221,9 +224,9 @@ def _read_after_run(root: Path, path: str) -> bytes | None | OSError | ValueErro
         return error
 
 
-def _restore_archives(plan: CurationPlan, damaged: Iterable[str], memory_now: Mapping[str, str]) -> None:
+def _restore_archives(plan: CurationPlan, damaged: Iterable[str], memory_now: Mapping[str, tuple[str, bool]]) -> None:
     for path in damaged:
-        restored = _restored_archive(plan.memory_snapshot[path], memory_now.get(path, ""))
+        restored = _restored_archive(plan.memory_snapshot[path], memory_now.get(path, ("", True))[0])
         _restore(plan.root, path, restored.encode("utf-8"))
 
 
@@ -231,9 +234,14 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
     """Check the files against the plan, writing the snapshot back over every changed file when a guard fails."""
     after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
     changed = [path for path, payload in plan.snapshot.items() if after_run[path] != payload]
-    memory_now = _memory_dir_texts(plan.root, exclude=plan.snapshot)
+    memory_now = _memory_dir_files(plan.root, exclude=plan.snapshot)
     # Appending keeps a topic file's archived text; deleting, truncating, or rewriting it does not.
-    damaged = [path for path, text in plan.memory_snapshot.items() if not memory_now.get(path, "").startswith(text)]
+    damaged = [
+        path
+        for path, text in plan.memory_snapshot.items()
+        # A file now past the read cap or no longer valid UTF-8 cannot be compared or restored safely, so it stays.
+        if path not in memory_now or (memory_now[path][1] and not memory_now[path][0].startswith(text))
+    ]
     if not changed:
         # Untouched prompt files leave only the loss guard: other memory/ edits, such as a memory tool update from
         # another conversation, stay unless detail was deleted.
@@ -258,7 +266,7 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
 def curation_notice(plan: CurationPlan, result: _CurationResult) -> str:
     """Return the one-line notice posted in the prompt's thread once verify ran."""
     if result.restored:
-        return f"↩️ Restored the prompt files: {'; '.join(result.violations)}."
+        return f"↩️ Restored the snapshot: {'; '.join(result.violations)}."
     if not result.changed:
         return f"Prompt maintenance changed nothing; the files stay at {plan.measured_tokens} tokens."
     return f"✅ Prompt files condensed from {plan.measured_tokens} to {result.tokens_after} tokens."

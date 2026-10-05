@@ -190,7 +190,7 @@ def test_a_run_that_misses_the_bounds_is_restored_byte_identical(
     assert result.restored
     assert violation in result.violations
     assert _snapshot(root) == before
-    assert curation_notice(plan, result).startswith("↩️ Restored the prompt files: ")
+    assert curation_notice(plan, result).startswith("↩️ Restored the snapshot: ")
 
 
 def test_changing_a_protected_file_restores_it_and_the_rest(tmp_path: Path) -> None:
@@ -266,7 +266,40 @@ def test_a_restored_archive_keeps_facts_added_during_the_run(tmp_path: Path) -> 
     result = verify_curation(plan)
 
     assert result.restored
-    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "- Dentist on Friday.\n"
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "# Projects\n- Dentist on Friday.\n"
+
+
+def test_a_restored_archive_keeps_a_fact_repeated_under_another_heading(tmp_path: Path) -> None:
+    """The run's text is kept whole, so the same line under a different heading is not dropped as a duplicate."""
+    config, automation, root = _setup(tmp_path)
+    archive = "# Project A\nDeadline: Friday\n" + "Archived project detail. " * 80 + "\n"
+    (root / "memory" / "projects.md").write_text(archive, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    (root / "memory" / "projects.md").write_text("# Project B\nDeadline: Friday\n", encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == archive + "# Project B\nDeadline: Friday\n"
+
+
+def test_an_archive_appended_past_the_read_cap_is_left_alone(tmp_path: Path) -> None:
+    """A topic file that grows past 1 MiB cannot be compared safely, so verify neither counts it lost nor restores it."""
+    config, automation, root = _setup(tmp_path)
+    big = "x" * ((1 << 20) - 100) + "\n"
+    (root / "memory" / "projects.md").write_text(big, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    with (root / "memory" / "projects.md").open("a", encoding="utf-8") as archive:
+        archive.write("- Dentist on Friday at 10, bring the insurance card.\n" * 4)
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (False, False)
+    assert (root / "memory" / "projects.md").read_text().endswith("bring the insurance card.\n")
 
 
 def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
