@@ -101,7 +101,8 @@ def plan_curation(
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read or rewritten safely.
     """
-    root = resolve_agent_runtime(agent_name, config, runtime_paths, None).file_memory_root
+    # Automations only run for shared agents, which have no requester-private state.
+    root = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=None).file_memory_root
     if root is None:
         return None
     curated_payloads = {
