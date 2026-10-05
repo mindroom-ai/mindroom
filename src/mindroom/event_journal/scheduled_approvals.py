@@ -313,7 +313,7 @@ def arm(
 
 
 def withdraw(transaction: Transaction, principal_id: str, *, task_id: str, reason: str) -> RecordedApprovalDecision:
-    """Withdraw a cancelled or edited task's approval for good and deny its card if still pending."""
+    """Withdraw a cancelled task's approval for good and deny its card if still pending."""
     # Serialize with a claim, which runs under this lock, then lock the card's row
     # before the binding, in the same order as a card decision.
     approval_grants.lock(transaction, principal_id)

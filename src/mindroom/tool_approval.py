@@ -383,7 +383,7 @@ async def arm_scheduled_call_approval(
 
 
 async def withdraw_scheduled_call_approval(task_id: str, *, reason: str) -> None:
-    """Withdraw a cancelled or edited task's approval and deny its card if it is still pending."""
+    """Withdraw a cancelled task's approval and deny its card if it is still pending."""
     manager = approval_manager.get_approval_store()
     if manager is not None:
         await manager.withdraw_scheduled_call_approval(task_id, reason=reason)

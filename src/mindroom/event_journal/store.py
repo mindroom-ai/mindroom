@@ -1241,7 +1241,7 @@ class PrincipalStore:
         )
 
     async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision:
-        """Withdraw one cancelled or edited task's approval and deny its card if still pending."""
+        """Withdraw one cancelled task's approval and deny its card if still pending."""
         return await self._backend.write(
             lambda transaction: scheduled_approvals.withdraw(
                 transaction,

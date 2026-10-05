@@ -43,6 +43,7 @@ from mindroom.event_journal import (
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.scheduled_tool_calls import prepare_scheduled_call
 from mindroom.scheduling import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
@@ -55,6 +56,7 @@ from mindroom.scheduling import (
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from mindroom.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -2260,3 +2262,36 @@ async def test_streaming_tool_is_refused_before_its_approval_is_spent(
         assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_behind_its_output_wrapper_is_refused_before_spending(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The output-file wrapper every workspace toolkit gets does not hide a streaming body."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    toolkit = wrap_toolkit_for_output_files(_StreamingTools(), ToolOutputFilePolicy(workspace_root=tmp_path))
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = _TOOLKIT
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, Agent(id="general", model=OpenAIChat(), tools=[toolkit]))
+
+        assert isinstance(result, str)
+        assert "streams its result" in result
+        assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+def test_scheduler_functions_are_never_scheduled_calls() -> None:
+    """The runner and the scheduler cannot be stored as the call a schedule runs later."""
+    agent = Agent(id="general", model=OpenAIChat(), tools=[SchedulerTools(), _SlackTools([])])
+
+    for tool_name in ("run_scheduled_call", "schedule_tool_call"):
+        result = prepare_scheduled_call(agent, tool_name, '{"task_id": "abc"}')
+        assert isinstance(result, str)
+        assert "not one of this agent's tools" in result

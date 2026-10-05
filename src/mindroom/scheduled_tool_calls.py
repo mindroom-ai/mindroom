@@ -31,6 +31,7 @@ from mindroom.tool_approval import (
     scheduled_call,
 )
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
+from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
@@ -105,7 +106,10 @@ def _resolve_live_function(agent: Agent, tool_name: str, toolkit_name: str | Non
     candidates: dict[str, Function] = {}
     # MindRoom builds each turn's tools as a list of configured toolkits.
     for tool in agent.tools if isinstance(agent.tools, list) else ():
-        function = tool.get_async_functions().get(tool_name) if isinstance(tool, Toolkit) else None
+        # The scheduler's own functions are never a scheduled call; its runner spends approvals itself.
+        if not isinstance(tool, Toolkit) or tool.name == "scheduler":
+            continue
+        function = tool.get_async_functions().get(tool_name)
         if function is None or function.owning_toolkit is None:
             continue
         if toolkit_name is None or function.owning_toolkit == toolkit_name:
@@ -115,7 +119,8 @@ def _resolve_live_function(agent: Agent, tool_name: str, toolkit_name: str | Non
     if len(candidates) > 1:
         return f"more than one of this agent's tools is named `{tool_name}`"
     [(owner, function)] = candidates.items()
-    entrypoint = None if function.entrypoint is None else inspect.unwrap(function.entrypoint)
+    # The output-file wrapper declares the function it wraps; look through it to the real body.
+    entrypoint = None if function.entrypoint is None else inspect.unwrap(tool_schema_source(function.entrypoint))
     if (
         function.requires_user_input
         or function.external_execution
