@@ -118,6 +118,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
 8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
 9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place without restarting receive loops.
    Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
+   A replaced bot whose reply outlives the bounded shutdown drain is still replaced with the rest of its batch, because its stop releases every resource and leaves the cancelled reply pending for the replacement to replay; any other stop failure still keeps the old bot registered and fails the reload.
 10. Removed entities prepare their response runtime for shutdown, reconcile approval work, and call `leave_rooms()` while ingestion remains active; the orchestrator then cancels the receive loop and stops the bot.
 11. New and restarted bots go through room setup.
 12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.

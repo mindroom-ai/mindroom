@@ -40,6 +40,7 @@ from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
+    ResponseShutdownTimeoutError,
     RestartReasonCategory,
     RuntimeLifecycleAction,
     RuntimeShutdownIntent,
@@ -669,6 +670,29 @@ async def cancel_sync_task(
     await cancel_task(task, shutdown_intent=shutdown_intent)
 
 
+def _split_restart_response_timeouts(
+    bot_entity_names: list[str],
+    phase_results: tuple[list[object], ...],
+    *,
+    restart_entities: set[str],
+) -> tuple[list[BaseException], set[str]]:
+    """Separate failed bot stops from restarting bots whose reply outlived the drain.
+
+    A restarting bot releases every resource even when a reply outlives the
+    bounded drain, and the cancelled reply stays pending for its replacement
+    to replay, so any other failure still keeps it from being replaced.
+    """
+    failures: list[BaseException] = []
+    response_timeout_entities: set[str] = set()
+    for results in phase_results:
+        for entity_name, result in zip(bot_entity_names, results, strict=True):
+            if isinstance(result, ResponseShutdownTimeoutError) and entity_name in restart_entities:
+                response_timeout_entities.add(entity_name)
+            elif isinstance(result, BaseException):
+                failures.append(result)
+    return failures, response_timeout_entities
+
+
 async def stop_entities(
     entities_to_stop: set[str],
     agent_bots: dict[str, AgentBot | TeamBot],
@@ -683,7 +707,8 @@ async def stop_entities(
         for entity_name in entities_to_stop
     }
     entity_names = sorted(entities_to_stop)
-    bots_to_stop = [agent_bots[entity_name] for entity_name in entity_names if entity_name in agent_bots]
+    bot_entity_names = [entity_name for entity_name in entity_names if entity_name in agent_bots]
+    bots_to_stop = [agent_bots[entity_name] for entity_name in bot_entity_names]
     phase_cancellations: list[asyncio.CancelledError] = []
     quiesce_results, cancellation = await gather_shutdown_phase(
         *(bot._quiesce_matrix_ingestion() for bot in bots_to_stop),
@@ -710,8 +735,7 @@ async def stop_entities(
             agent_bots[entity_name].prepare_for_sync_shutdown(
                 shutdown_intent=shutdown_intents[entity_name],
             )
-            for entity_name in entity_names
-            if entity_name in agent_bots
+            for entity_name in bot_entity_names
         ),
     )
     if cancellation is not None:
@@ -719,21 +743,25 @@ async def stop_entities(
     stop_results, cancellation = await gather_shutdown_phase(
         *(
             agent_bots[entity_name].stop(shutdown_intent=shutdown_intents[entity_name])
-            for entity_name in entity_names
-            if entity_name in agent_bots
+            for entity_name in bot_entity_names
         ),
     )
     if cancellation is not None:
         phase_cancellations.append(cancellation)
-    cleanup_failures = [
-        result
-        for results in (cancel_results, prepare_results, stop_results)
-        for result in results
-        if isinstance(result, BaseException)
-    ]
-    failures = [*quiesce_failures, *phase_cancellations, *cleanup_failures]
+    bot_failures, response_timeout_entities = _split_restart_response_timeouts(
+        bot_entity_names,
+        (prepare_results, stop_results),
+        restart_entities=restart_entities,
+    )
+    cleanup_failures = [result for result in cancel_results if isinstance(result, BaseException)]
+    failures = [*quiesce_failures, *phase_cancellations, *cleanup_failures, *bot_failures]
     if failures:
         raise failures[0]
+    if response_timeout_entities:
+        logger.warning(
+            "restart_replacing_entities_after_response_drain_timeout",
+            entities=sorted(response_timeout_entities),
+        )
 
     for entity_name in entity_names:
         agent_bots.pop(entity_name, None)

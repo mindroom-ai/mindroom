@@ -2177,7 +2177,12 @@ class AgentBot:
             # returns, so raising keeps this bot registered and stops the reload
             # before it creates a replacement on a store that never closed.
             # Swallowing is what would certify a partial stop as a clean one.
-            raise failures[0]
+            # A restart still replaces a bot whose only failure is a reply that
+            # outlived the drain, so a failed release must win over that timeout.
+            raise next(
+                (failure for failure in failures if not isinstance(failure, ResponseShutdownTimeoutError)),
+                failures[0],
+            )
         self._deferred_stop_required = False
         self.logger.info("Stopped agent bot")
 
