@@ -2684,7 +2684,7 @@ def _patch_call_writeback(
         "mindroom.matrix_rtc.call_manager.room_access_allowed",
         AsyncMock(return_value=access_allowed),
     )
-    post = post or AsyncMock(return_value=True)
+    post = post or AsyncMock()
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.post_call_writeback", post)
     monkeypatch.setattr(CallTranscript, "finalize", AsyncMock())
     return post

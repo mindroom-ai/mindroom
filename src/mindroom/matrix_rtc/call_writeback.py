@@ -37,18 +37,16 @@ def format_call_writeback(
     return f"📞 Voice call · {minutes} min\n\n<details>\n<summary>Transcript</summary>\n\n{transcript}\n\n</details>"
 
 
-async def post_call_writeback(*, context: ToolRuntimeContext, origin: CallOrigin, body: str) -> bool:
+async def post_call_writeback(*, context: ToolRuntimeContext, origin: CallOrigin, body: str) -> None:
     """Send one transcript message into the origin thread or room."""
-    latest_thread_event_id = None
-    if origin.thread_id is not None:
-        latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
-            room_id=origin.room_id,
-            thread_id=origin.thread_id,
-        )
+    latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+        room_id=origin.room_id,
+        thread_id=origin.thread_id,
+    )
     content = build_message_content(
         body,
         thread_event_id=origin.thread_id,
-        latest_thread_event_id=latest_thread_event_id or origin.thread_id,
+        latest_thread_event_id=latest_thread_event_id,
         extra_content={SKIP_MENTIONS_KEY: True},
     )
     delivered = await send_message_result(
@@ -59,6 +57,5 @@ async def post_call_writeback(*, context: ToolRuntimeContext, origin: CallOrigin
     )
     if delivered is None:
         logger.warning("call_writeback_send_failed", room_id=origin.room_id, thread_id=origin.thread_id)
-        return False
+        return
     logger.info("call_writeback_sent", room_id=origin.room_id, thread_id=origin.thread_id)
-    return True
