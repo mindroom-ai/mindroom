@@ -72,7 +72,7 @@ Send a voice message from your phone ([Voice Messages](https://docs.mindroom.cha
 ### Safe to give real access
 
 - Sending or changing something can wait for your one-tap approval, which shows exactly what will be sent and to whom ([Tool Approval](https://docs.mindroom.chat/tool-approval/)).
-- Code runs in isolated workers ([Workers & Sandboxing](https://docs.mindroom.chat/deployment/sandbox-proxy/)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)).
+- Code can run in isolated workers ([Workers & Sandboxing](https://docs.mindroom.chat/deployment/sandbox-proxy/)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)).
 - Each agent answers only the people and rooms you allow ([Access Control](https://docs.mindroom.chat/authorization/)).
 - It all runs on [Matrix](https://docs.mindroom.chat/matrix/), an open, end-to-end encrypted messaging standard that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
 
