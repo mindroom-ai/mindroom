@@ -1347,7 +1347,7 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
     request_outcome: bool | BaseException,
     raised: type[BaseException],
 ) -> None:
-    """The task becomes visible only after its card exists, and any card left by a failed request is withdrawn."""
+    """The task becomes visible only after its card exists, and a card a failed request may have left is withdrawn."""
     context = _tool_context(_gated_config())
     request = (
         AsyncMock(side_effect=request_outcome)
@@ -1367,7 +1367,11 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         await _schedule_from_tool()
 
     context.client.room_put_state.assert_not_awaited()
-    withdraw.assert_awaited_once_with(request.await_args.args[0].task_id, reason="Schedule cancelled.")
+    if request_outcome is False:
+        # No card was reserved, so an existing approval under the same task ID is left alone.
+        withdraw.assert_not_awaited()
+    else:
+        withdraw.assert_awaited_once_with(request.await_args.args[0].task_id, reason="Schedule cancelled.")
     start.assert_not_called()
 
 
@@ -2160,5 +2164,48 @@ async def test_edited_task_offers_the_ordinary_way_after_its_approval_was_withdr
         assert "withdrawn" in result
         assert "call `post_slack_message` with these arguments" in result
         assert runs == []
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_misspelled_argument_is_refused_when_scheduling() -> None:
+    """An argument the tool does not take is refused up front instead of failing after the approval is spent."""
+    context = _tool_context(_gated_config())
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(RuntimeError, match="current parameters"),
+    ):
+        await _schedule_from_tool(arguments_json='{"channel": "U1", "txet": "typo"}')
+
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reused_task_id_never_borrows_or_withdraws_another_tasks_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A second card for a task ID that already has a stored call is refused, leaving the first one intact."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        await _armed(manager)
+
+        assert not await manager.request_scheduled_call_approval(
+            replace(_binding(), arguments_json=canonical_arguments(_OTHER_ARGUMENTS)),
+            approver_user_id=_REQUESTER,
+            scheduled_for_text="9:00 AM EDT",
+            any_arguments_offered=False,
+        )
+
+        call = await manager.scheduled_call(_TASK)
+        assert call is not None
+        assert call.arguments_json == canonical_arguments(_ARGUMENTS)
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
     finally:
         await manager.shutdown()

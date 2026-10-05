@@ -61,7 +61,9 @@ _REFUSALS: dict[ScheduledCallRefusal, str] = {
 
 
 # Refusals after which the requester can still approve the same call the ordinary way, such as after an edit.
-_ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset({"withdrawn", "not_approved", "not_armed", "late"})
+_ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset(
+    {"withdrawn", "not_approved", "not_armed", "late", "left_room"},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,9 +237,14 @@ def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition
 
 def _invalid_arguments(function: Function, arguments: dict[str, object]) -> str | None:
     """Return why arguments do not fit the function's current schema, or None."""
+    schema = function_schema(function)
+    unknown = set(arguments) - set(schema.get("properties", {}))
     try:
-        validate_tool_arguments(function_schema(function), arguments)
+        validate_tool_arguments(schema, arguments)
     except ValueError:
+        return "the arguments do not match the tool's current parameters"
+    # Tool entrypoints reject arguments they do not take, which would fail only after the approval is spent.
+    if unknown and schema.get("additionalProperties") is not True:
         return "the arguments do not match the tool's current parameters"
     return None
 

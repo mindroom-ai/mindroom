@@ -2126,13 +2126,16 @@ async def schedule_approved_tool_call(
     # Publish the task only once its card exists, so no cancel or edit can reach a task whose
     # card is still being prepared; a card whose task never published is withdrawn.
     task_published = False
+    # None until the request answers: a request that raised may have reserved its card.
+    card_reserved: bool | None = None
     try:
-        if not await request_scheduled_call_approval(
+        card_reserved = await request_scheduled_call_approval(
             binding,
             approver_user_id=approver_id,
             scheduled_for_text=_format_local_time(send_at, config.timezone),
             any_arguments_offered=any_arguments_offered,
-        ):
+        )
+        if not card_reserved:
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
         await _persist_scheduled_task_state(
             client=runtime.client,
@@ -2147,7 +2150,7 @@ async def schedule_approved_tool_call(
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
     finally:
-        if not task_published:
+        if not task_published and card_reserved is not False:
             await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     scheduled_for = _format_scheduled_time(send_at, config.timezone)
     _start_scheduled_task(

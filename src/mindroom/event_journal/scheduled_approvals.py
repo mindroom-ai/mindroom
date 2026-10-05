@@ -166,7 +166,12 @@ def reserve(
     binding: ScheduledCallBinding,
     card: ApprovalCardReservation,
 ) -> bool:
-    """Reserve the scheduling-time card and its binding in one commit."""
+    """Reserve the scheduling-time card and its binding in one commit; a task ID already in use reserves nothing."""
+    if transaction.fetchone(
+        "SELECT 1 AS present FROM scheduled_call_approvals WHERE principal_id = ? AND task_id = ?",
+        (principal_id, binding.task_id),
+    ):
+        return False
     run_id = scheduled_call_run_id(binding.task_id)
     if card_identity({"content": card.payload}) != (run_id, binding.task_id):
         msg = f"Scheduled approval delivery {card.delivery_id!r} changed exact-call identity"
