@@ -51,6 +51,7 @@ def _tool_context(
     *,
     attachment_ids: tuple[str, ...] = (),
     process_env: dict[str, str] | None = None,
+    agent_tools: list[str] | None = None,
 ) -> ToolRuntimeContext:
     client = MagicMock()
     client.rooms = {"!room:localhost": MagicMock()}
@@ -62,7 +63,7 @@ def _tool_context(
     config = bind_runtime_paths(
         with_current_room_member_access(
             Config(
-                agents={"openclaw": AgentConfig(display_name="OpenClaw")},
+                agents={"openclaw": AgentConfig(display_name="OpenClaw", tools=agent_tools or [])},
                 authorization={},
             ),
         ),
@@ -739,6 +740,7 @@ def _worker_attachment_tool(
     *,
     runtime_env: dict[str, str],
     worker_tools_override: list[str],
+    file_access: FileAccess = "workspace",
 ) -> AttachmentTools:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -752,6 +754,7 @@ def _worker_attachment_tool(
         worker_target=_shared_worker_target(),
         worker_tools_override=worker_tools_override,
         tool_output_workspace_root=workspace,
+        file_access=file_access,
     )
 
 
@@ -804,27 +807,65 @@ async def test_get_attachment_worker_save_accepts_attachments_over_16_mib_unless
         mocked_save.assert_not_called()
 
 
+_COPY_TO_WORKSPACE_USAGE = (
+    "Not in your workspace. Copy it there with get_attachment(attachment_id, mindroom_output_path=...) "
+    "before file, coding, python, or shell tools use it."
+)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("uses_worker", [True, False])
+@pytest.mark.parametrize(
+    ("worker_tools_override", "file_access", "keeps_local_path", "usage"),
+    [
+        ([], "workspace", True, None),
+        (["file", "shell"], "workspace", False, _COPY_TO_WORKSPACE_USAGE),
+        # The local file tool is confined to the workspace, so it cannot open runtime storage either.
+        (["shell"], "workspace", False, _COPY_TO_WORKSPACE_USAGE),
+        (
+            ["shell"],
+            "unrestricted",
+            True,
+            "local_path opens only in tools that run in the MindRoom runtime (file). "
+            "Before tools that run in a worker (shell) use the file, copy it into the workspace with "
+            "get_attachment(attachment_id, mindroom_output_path=...).",
+        ),
+        (
+            ["file"],
+            "workspace",
+            True,
+            "local_path opens only in tools that run in the MindRoom runtime (shell). "
+            "Before tools that run in a worker (file) use the file, copy it into the workspace with "
+            "get_attachment(attachment_id, mindroom_output_path=...).",
+        ),
+    ],
+)
 async def test_attachment_metadata_shows_local_path_only_where_agent_tools_can_open_it(
     tmp_path: Path,
-    uses_worker: bool,
+    worker_tools_override: list[str],
+    file_access: FileAccess,
+    keeps_local_path: bool,
+    usage: str | None,
 ) -> None:
-    """Worker-routed agents are told to copy the file instead of getting a runtime path their tools cannot open."""
+    """Agents get the runtime path only when one of their tools can open it, and a copy note for worker tools."""
     tool = _worker_attachment_tool(
         tmp_path,
         runtime_env=_WORKER_RUNTIME_ENV,
-        worker_tools_override=["file"] if uses_worker else [],
+        worker_tools_override=worker_tools_override,
+        file_access=file_access,
     )
     (tmp_path / "workspace" / "notes.txt").write_text("notes", encoding="utf-8")
     sample_file = tmp_path / "archive.zip"
     sample_file.write_bytes(b"PK")
     attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_archive")
     assert attachment is not None
+    context = _tool_context(
+        tmp_path,
+        attachment_ids=(attachment.attachment_id,),
+        process_env=_WORKER_RUNTIME_ENV,
+        agent_tools=["attachments", "file", "shell"],
+    )
 
-    with tool_runtime_context(
-        _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
-    ):
+    with tool_runtime_context(context):
         metadata = json.loads(await tool.get_attachment("att_archive"))
         listing = json.loads(await tool.list_attachments())
         registered = json.loads(await tool.register_attachment("notes.txt"))
@@ -832,12 +873,10 @@ async def test_attachment_metadata_shows_local_path_only_where_agent_tools_can_o
     assert metadata["status"] == listing["status"] == registered["status"] == "ok"
     for payload in (metadata["attachment"], listing["attachments"][0], registered["attachment"]):
         assert payload["available"] is True
-        if uses_worker:
-            assert "local_path" not in payload
-            assert "mindroom_output_path" in payload["usage"]
-        else:
+        assert ("local_path" in payload) is keeps_local_path
+        assert payload.get("usage") == usage
+        if keeps_local_path:
             assert Path(payload["local_path"]).is_file()
-            assert "usage" not in payload
 
 
 @pytest.mark.asyncio
