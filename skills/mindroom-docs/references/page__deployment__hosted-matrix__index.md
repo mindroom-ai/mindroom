@@ -2,7 +2,7 @@
 
 In this setup the Matrix homeserver and chat UI are hosted at `mindroom.chat`, and only the MindRoom backend runs on your machine.
 This page covers pairing that backend with your MindRoom Chat account (`mindroom connect`), the credentials pairing saves, what the hosted server can see, and how to point the same flow at your own deployment.
-For first-run install steps, see [Getting Started](https://docs.mindroom.chat/getting-started/#recommended-hosted-matrix-local-mindroom-uvx-only).
+For first-run install steps, see [Getting Started](https://docs.mindroom.chat/getting-started/#recommended-your-computer-mindroom-chat).
 
 ## What Runs Where
 

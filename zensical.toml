@@ -3,12 +3,12 @@
 
 [project]
 site_name = "MindRoom"
-site_description = "AI agents that live in Matrix and work everywhere via bridges"
+site_description = "AI agents that know you and your work, in a chat app anyone can use. Open source, any model, self-host or hosted."
 site_author = "MindRoom Team"
 site_url = "https://docs.mindroom.chat/"
 extra_css = ["assets/themed-video.css"]
 extra_javascript = ["assets/themed-video.js"]
-copyright = "Copyright &copy; 2025 MindRoom Team"
+copyright = "Copyright &copy; 2025–2026 MindRoom Team"
 
 repo_url = "https://github.com/mindroom-ai/mindroom"
 repo_name = "GitHub"

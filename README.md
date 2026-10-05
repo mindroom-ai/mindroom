@@ -11,7 +11,7 @@
 
 Open source under Apache 2.0 · Any model, local or cloud · Self-host the whole stack
 
-[Website](https://mindroom.chat) · [Docs](https://docs.mindroom.chat) · [Showcase](https://docs.mindroom.chat/showcase/) · [MindRoom Chat](https://chat.mindroom.chat) · [Quick start](#quick-start)
+[Website](https://mindroom.chat) · [Docs](https://docs.mindroom.chat) · [Showcase](https://docs.mindroom.chat/showcase/) · [MindRoom Chat](https://chat.mindroom.chat) · [Hosted](https://mindroom.chat/#hosted) · [Quick start](#quick-start)
 
 [![PyPI](https://img.shields.io/pypi/v/mindroom)](https://pypi.org/project/mindroom/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/mindroom-ai/mindroom/pytest.yml?label=tests)](https://github.com/mindroom-ai/mindroom/actions/workflows/pytest.yml)
@@ -26,37 +26,29 @@ https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244
 MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
 Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
 Pick a [local model](docs/configuration/models.md) for your private life or a frontier model for hard problems, and self-host the whole stack or run only the agents on your own computer.
+Everything you self-host is Apache 2.0; only the code that runs the hosted service, in `saas-platform/`, uses the [Business Source License](#license).
 
-<table>
-<tr>
-<th width="50%">Any computer</th>
-<th width="50%">macOS app</th>
-</tr>
-<tr>
-<td valign="top">
+**Run it on any computer**
 
 ```bash
 uvx mindroom run
 ```
 
-Installs and starts MindRoom with a starter agent, then pairs it with your [MindRoom Chat](https://chat.mindroom.chat) account.
+Needs [uv](https://docs.astral.sh/uv/getting-started/installation/) and a model: an API key, a subscription login such as Codex, or a local model.
+It installs and starts MindRoom with a starter agent, then pairs it with your [MindRoom Chat](https://chat.mindroom.chat) account.
 
-</td>
-<td valign="top">
+**Or use the macOS app**
 
 ```bash
 brew install --cask mindroom-ai/tap/mindroom
 ```
 
-A native app that runs your agents on your Mac in the background.
+A native app that runs your agents on your Mac in the background, with one-click local models.
 Needs an Apple silicon Mac with macOS 14 or later.
 
-</td>
-</tr>
-</table>
-
 Chat with your agents on the [web](https://chat.mindroom.chat), on the [Mac](docs/installation/macos-app.md), on [iPhone and iPad](https://apps.apple.com/us/app/mindroom-ai/id6760272172), and on Android (in beta).
-See [Quick Start](#quick-start) for every way to run it.
+Rather not run it yourself? [Try hosted MindRoom](https://mindroom.chat/#hosted).
+See [Quick start](#quick-start) for every way to run it.
 
 ## See it in action
 
@@ -107,13 +99,7 @@ These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recor
 
 ## What people use it for
 
-<table>
-<tr>
-<th width="50%">Personal</th>
-<th width="50%">Work</th>
-</tr>
-<tr>
-<td valign="top">
+### Personal
 
 - Plan a family trip, from flights to a packing list.
 - Keep your calendar, reminders, and to-do lists in order, by voice.
@@ -122,8 +108,7 @@ These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recor
 - Look after your homelab and smart home, with approval for anything risky.
 - Build quick tools and scripts in the agent's own workspace.
 
-</td>
-<td valign="top">
+### Work
 
 - Find anything across email, chat, documents, tickets, and code, with sources.
 - Get a morning briefing, or a summary of your week before a one-on-one.
@@ -132,10 +117,6 @@ These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recor
 - Triage the inbox and draft emails, approving each one before it is sent.
 - Join a new team and ask its agent how the work fits together.
 
-</td>
-</tr>
-</table>
-
 ## Why MindRoom
 
 <table>
@@ -143,7 +124,8 @@ These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recor
 <td width="50%" valign="top">
 
 **🔌 [Connected to your tools and documents](https://docs.mindroom.chat/#agents-that-know-you-and-your-work)**<br />
-Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, search your own documents, and can use any computer you pair, even from a server across the world.
+Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents.
+They can even use a computer you pair, from a server across the world.
 
 </td>
 <td width="50%" valign="top">
@@ -157,13 +139,13 @@ Pick a model per agent: a local one for your most personal data, a frontier one 
 <td valign="top">
 
 **🧠 [Memory that keeps improving](https://docs.mindroom.chat/#they-remember-and-keep-improving)**<br />
-Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills.
+Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills, while what you tell a private agent stays out of shared ones.
 
 </td>
 <td valign="top">
 
 **🛡️ [Safe to give real access](https://docs.mindroom.chat/#safe-to-give-real-access)**<br />
-One-tap approval for anything risky, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.
+One-tap approval for the actions you choose, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.
 
 </td>
 </tr>
@@ -262,39 +244,76 @@ Two AI agents from different companies collaborating — impossible with app-bou
 
 </details>
 
-## How It Compares to OpenClaw and Hermes
+## How it compares to OpenClaw and Hermes
 
 [OpenClaw](https://github.com/openclaw/openclaw) and [Hermes Agent](https://github.com/nousresearch/hermes-agent) are self-hosted assistants that pipe an agent into chat apps you already use.
 MindRoom plays in the same space but makes different architectural bets:
 
 - **Multi-agent and multi-user by default.** Both are personal-first: one owner talking to their assistant. In MindRoom every agent is a real Matrix user, so you run a fleet of specialists and teams, share them with family, a project, or a whole company, and scope access per user and per room.
 - **An AI-native interface on an open protocol.** With WhatsApp, Signal, or Telegram as the front end, you rent UX from platforms that were never designed for agents and can cut bots off at any time. MindRoom's home is Matrix, with [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) tuned for AI: collapsible tool-call traces, model metadata on every response, streaming with in-place edits, response cancellation, and first-class threads. Bridges to those apps are additive, not the foundation.
-- **Sandboxing with real secrets isolation.** Execution tools (shell, Python, coding) can run in isolated container workers with no access to the primary process's secrets — your agent uses credentialed tools (Gmail, GitHub, ...) while the code it executes can never read those credentials. Per-tool [approval rules](docs/tool-approval.md) and [egress approval](docs/deployment/approved-egress.md) add human-in-the-loop control.
+- **Sandboxing with real secrets isolation.** Execution tools (shell, Python, coding) can run in isolated container workers with no access to the primary process's secrets — your agent uses credentialed tools (Gmail, GitHub, ...) while code running in a worker cannot read those credentials. Per-tool [approval rules](docs/tool-approval.md) and [egress approval](docs/deployment/approved-egress.md) add human-in-the-loop control.
 - **Batteries included.** 100+ built-in tool integrations with typed configuration, OAuth flows, and automatic dependency installation — plus OpenClaw-compatible skills on top.
 
 Coming from OpenClaw? MindRoom [imports OpenClaw workspaces](docs/openclaw.md) (`SOUL.md`, `MEMORY.md`, skills) and ships an `openclaw_compat` tool preset.
 
-## Quick Start
+## Quick start
 
-### Hosted Matrix + local MindRoom (fastest)
+### Your computer + MindRoom Chat (fastest)
 
-MindRoom runs on your machine; Matrix is hosted at `mindroom.chat` and the chat UI at [chat.mindroom.chat](https://chat.mindroom.chat).
-The only prerequisite is [uv](https://github.com/astral-sh/uv), which installs Python automatically if needed.
+MindRoom runs on your computer; Matrix is hosted at `mindroom.chat` and the chat app at [chat.mindroom.chat](https://chat.mindroom.chat).
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs Python when needed, a model (an API key, a subscription login such as Codex, or a local model), and a MindRoom Chat account, which your first sign-in at [chat.mindroom.chat](https://chat.mindroom.chat) creates.
 
 ```bash
 uvx mindroom run
-# First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
-# MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
-# then prints a link and QR code: approve it with your MindRoom Chat account,
-# or enter the code in MindRoom Chat -> Settings -> Local MindRoom.
-# Finally, Enter keeps MindRoom running in the background as a login service (systemd or launchd); n runs it here
+# First run: choose a model provider; anthropic, openai, and openrouter
+# also ask for an API key (Enter skips).
+# MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted
+# defaults, then prints a link and QR code: approve it with your MindRoom Chat
+# account, or enter the code in MindRoom Chat -> Settings -> Local MindRoom.
+# Finally, Enter keeps MindRoom running in the background as a login service
+# (systemd or launchd); n runs it here instead.
 ```
 
 Coding agents and scripts can answer every question with flags instead: `OPENAI_API_KEY=sk-... uvx mindroom run --provider openai --service`.
 To create or review the files without starting, run `uvx mindroom config init` (optionally with `--provider codex` or another preset), edit `~/.mindroom/.env`, and then run `uvx mindroom run`.
 See the [hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for full details.
 
-### Self-hosted, from source
+### macOS app
+
+The macOS app provides a native window and menu bar companion for local agents and computer access.
+It bundles `uv`, uses `~/.mindroom` for config and state, and manages the `mindroom service` launchd service.
+The signed app requires an Apple silicon Mac.
+
+```bash
+brew install --cask mindroom-ai/tap/mindroom
+```
+
+Open **MindRoom** from `/Applications` to set up local agents, manage computer access, or open chat and the configuration dashboard.
+**Run AI on this Mac** offers one-click local model setup; see the [hardware recommendations](docs/installation/macos-app.md#local-ai-models) for Qwen3.8 27B and smaller models matched to your Mac's memory.
+See the [macOS app guide](docs/installation/macos-app.md) for setup, updates, and uninstall instructions.
+
+### Full stack with Docker Compose
+
+To self-host everything, including the Matrix homeserver and the chat app, use [mindroom-stack](https://github.com/mindroom-ai/mindroom-stack) with Docker and Docker Compose:
+
+```bash
+git clone https://github.com/mindroom-ai/mindroom-stack
+cd mindroom-stack
+cp .env.example .env
+$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
+./scripts/quickstart.py
+```
+
+It serves the dashboard at http://localhost:8765, MindRoom Chat at http://localhost:8080, and Matrix at http://localhost:8008.
+See [Full stack Docker Compose](docs/getting-started.md#full-stack-docker-compose) for other providers and access from other devices, and [Deployment](#deployment) for Kubernetes.
+
+### From source, for contributors
+
+To work on MindRoom itself, run it from a checkout.
+
+<details>
+<summary><b>Run from source</b></summary>
+
 
 Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
 For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
@@ -329,33 +348,19 @@ With dashboard assets available, open http://localhost:8765.
 Without assets and Bun, the API is available at http://localhost:8765/api but the dashboard is unavailable.
 Matrix E2EE support is installed by default.
 
-### macOS app
-
-The macOS app provides a native window and menu bar companion for local agents and computer access.
-It bundles `uv`, uses `~/.mindroom` for config and state, and manages the `mindroom service` launchd service.
-The signed app requires an Apple silicon Mac.
-
-```bash
-brew install --cask mindroom-ai/tap/mindroom
-```
-
-Open **MindRoom** from `/Applications` to set up local agents, manage computer access, or open chat and the configuration dashboard.
-**Run AI on this Mac** offers one-click local model setup; see the [hardware recommendations](docs/installation/macos-app.md#local-ai-models) for Qwen3.8 27B and smaller models matched to your Mac's memory.
-See the [macOS app guide](docs/installation/macos-app.md) for setup, updates, and uninstall instructions.
+</details>
 
 ### First steps
 
-In the MindRoom chat client (hosted at [chat.mindroom.chat](https://chat.mindroom.chat), or bundled with the local stack):
+Open the **Personal** room in MindRoom Chat ([chat.mindroom.chat](https://chat.mindroom.chat), or the chat app of your own stack) and greet the starter agent:
 
 ```text
-You: @assistant What can you do?
-Assistant: I can coordinate our team of specialized agents...
-
-You: @research @analyst What are the latest AI breakthroughs?
-[Agents collaborate to research and analyze]
+@mind hello
 ```
 
-## How Agents Respond
+Then add more agents and teams in the dashboard or `config.yaml` (see [Configuration](#configuration)), and mention several in one message to have them work together.
+
+## How agents respond
 
 Agents and teams respond using Matrix thread relations to keep conversations organized.
 If your client or bridge only sends plain replies, MindRoom keeps them in an existing thread when the reply chain eventually reaches a threaded ancestor or proven thread root.
@@ -405,7 +410,7 @@ Plain replies that never reach threaded context still stay plain replies.
 
 Everything lives in `config.yaml`: agents, teams, models, rooms, knowledge bases, voice, memory, and authorization.
 The web dashboard edits the same file, so you can point-and-click instead of writing YAML.
-Either way, changes are hot-reloaded and take effect without a restart.
+Either way, changes are hot-reloaded, and most take effect without a restart.
 
 ```yaml
 agents:
@@ -452,7 +457,8 @@ Environment variables go in `.env` next to the selected config file (`~/.mindroo
 MATRIX_HOMESERVER=https://your-matrix.server
 ANTHROPIC_API_KEY=your-key-here
 # Dashboard API key; generate one with `openssl rand -hex 32`.
-# Set it empty (MINDROOM_API_KEY=) only with `--api-host 127.0.0.1`; `mindroom run` listens on every interface by default.
+# `mindroom run` listens on every network interface by default, so keep this key set;
+# leave it empty (MINDROOM_API_KEY=) only together with `--api-host 127.0.0.1`.
 MINDROOM_API_KEY=replace-with-a-long-random-secret
 ```
 
@@ -503,7 +509,7 @@ By building on it, MindRoom inherits instead of reimplements:
 
 See [docs/architecture](docs/architecture) for internals.
 
-## Note for Self-Hosters
+## Note for self-hosters
 
 This repository contains everything you need to self-host MindRoom.
 The `saas-platform/` directory contains infrastructure specific to running MindRoom as a hosted service and can be safely ignored by self-hosters.

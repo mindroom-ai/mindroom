@@ -9,18 +9,25 @@ Pick one setup:
 
 | Setup | Use when |
 | --- | --- |
-| [Hosted Matrix + local MindRoom](#recommended-hosted-matrix-local-mindroom-uvx-only) (recommended) | You want the simplest start: you run only MindRoom, and Matrix and the chat UI are hosted at `mindroom.chat` |
-| [NixOS LXC container](#preferred-alternative-nixos-lxc-container-agent-controlled-machine) | You want an agent to fully manage its own persistent machine while the host controls what it can see |
-| [Full stack Docker Compose](#alternative-full-stack-docker-compose) | You want everything local: dashboard, Matrix homeserver, and chat client |
+| [Your computer + MindRoom Chat](#recommended-your-computer-mindroom-chat) (recommended) | You want the simplest start: MindRoom runs on your computer, and Matrix and the chat app are hosted at `mindroom.chat` |
+| [macOS app](installation/macos-app.md) | You want a native app that runs your agents on an Apple silicon Mac, including one-click local models |
+| [Full stack Docker Compose](#full-stack-docker-compose) | You want everything on your own machine: dashboard, Matrix homeserver, and chat app |
+| [Agent-managed NixOS container](#advanced-agent-managed-nixos-container) | You want an agent to manage its own persistent machine while the host controls what it can see |
 | [Manual install](#manual-install-with-your-own-matrix-homeserver) | You already run a Matrix homeserver |
+| [Hosted MindRoom](https://mindroom.chat/#hosted) | You want nothing to install, and MindRoom runs your agents for you |
 
 <a id="hosted-matrix-local-mindroom-recommended"></a>
+<a id="recommended-hosted-matrix-local-mindroom-uvx-only"></a>
 
-## Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
+## Recommended: your computer + MindRoom Chat
 
-The Matrix homeserver is hosted at `mindroom.chat` and the chat UI at `chat.mindroom.chat`; only MindRoom runs on your machine.
+MindRoom runs on your computer, while the Matrix homeserver is hosted at `mindroom.chat` and the chat app at `chat.mindroom.chat`.
 
-**Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+Before you start:
+
+- Install [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs Python when needed.
+- Have a model ready: an API key for a provider such as Anthropic, OpenAI, or OpenRouter, a subscription login such as Codex, or a local model through Ollama or llama.cpp.
+- Sign in at [chat.mindroom.chat](https://chat.mindroom.chat); the first sign-in creates the MindRoom Chat account that approves the pairing.
 
 ### 1. Run MindRoom
 
@@ -54,7 +61,19 @@ Check it with `mindroom service status`, and run `mindroom service restart` afte
 Answering `n` runs MindRoom and the dashboard in the terminal instead, which also happens when the service cannot be installed.
 See [`mindroom service`](cli.md#service) for when the question is skipped.
 
-### Set up without a terminal
+### Verify
+
+- **Chat:** open `https://chat.mindroom.chat` and send `@mind hello` in the `Personal` room.
+- **Dashboard:** open `http://localhost:8765` to configure agents, models, and tools.
+  It asks for the `MINDROOM_API_KEY` that setup generated in `~/.mindroom/.env`, because `mindroom run` serves the dashboard on every network interface by default.
+- **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](cli.md#doctor).
+
+See [Hosted Matrix + Local Backend](deployment/hosted-matrix.md) for what runs where and the credential and trust model.
+To run worker-routed execution tools such as `coding`, `docker`, `file`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](deployment/sandbox-proxy.md).
+
+<a id="set-up-without-a-terminal"></a>
+
+### Set up from a script or service
 
 Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`, unless you pass `--provider`.
 Flags answer the setup questions up front, which lets a script or coding agent set up MindRoom:
@@ -80,35 +99,9 @@ uvx mindroom run
 The generated `.env` lists the credentials the chosen preset needs; set them before running.
 See [`config init`](cli.md#config-init) for every option and the extra steps for the `codex`, `kimi`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](configuration/models.md#environment-variables) for each provider's credentials.
 
-### Verify
+<a id="alternative-full-stack-docker-compose"></a>
 
-- **Chat:** open `https://chat.mindroom.chat` and send `@mind hello` in the `Personal` room.
-- **Dashboard:** open `http://localhost:8765` to configure agents, models, and tools.
-  It asks for the `MINDROOM_API_KEY` that setup generated in `~/.mindroom/.env`, because `mindroom run` serves the dashboard on every network interface by default.
-- **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](cli.md#doctor).
-
-See [Hosted Matrix + Local Backend](deployment/hosted-matrix.md) for what runs where and the credential and trust model.
-To run worker-routed execution tools such as `coding`, `docker`, `file`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](deployment/sandbox-proxy.md).
-
-## Preferred alternative: NixOS LXC container (agent-controlled machine)
-
-Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions an Incus LXC system container running NixOS with MindRoom, the Tuwunel Matrix homeserver, MindRoom Chat, and Caddy, plus Docker and `ragenix`-based secrets.
-Because the whole machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on without touching the host, unlike the mostly stateless Docker Compose stack.
-It is harder to set up by hand, but a coding agent such as Codex or Claude Code can follow the repo's `AGENTS.md` runbook directly.
-
-It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/):
-
-```bash
-git clone https://github.com/mindroom-ai/lxc-nixos.git
-cd lxc-nixos
-incus launch images:nixos/unstable mindroom -c security.nesting=true
-incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
-```
-
-Then follow the repo's `AGENTS.md` runbook for operator SSH keys, secrets bootstrap, and the `nixos-rebuild switch` deployment.
-
-## Alternative: Full Stack Docker Compose
+## Full stack Docker Compose
 
 Use this when you want everything local: the MindRoom dashboard, a Matrix homeserver, and the MindRoom Chat client in one stack.
 It requires Docker and Docker Compose.
@@ -128,6 +121,26 @@ To use another provider, edit `config/config.yaml` and supply its credentials be
 The stack serves the MindRoom dashboard at `http://localhost:8765`, the MindRoom Chat client at `http://localhost:8080`, and Matrix at `http://localhost:8008`, using the published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images.
 To reach it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting.
 See the [stack README](https://github.com/mindroom-ai/mindroom-stack) for running `docker compose` directly, changing host ports, and pinning images.
+
+<a id="preferred-alternative-nixos-lxc-container-agent-controlled-machine"></a>
+
+## Advanced: agent-managed NixOS container
+
+Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions an Incus LXC system container running NixOS with MindRoom, the Tuwunel Matrix homeserver, MindRoom Chat, and Caddy, plus Docker and `ragenix`-based secrets.
+Because the whole machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on without touching the host, unlike the mostly stateless Docker Compose stack.
+It is harder to set up by hand, but a coding agent such as Codex or Claude Code can follow the repo's `AGENTS.md` runbook directly.
+
+It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/):
+
+```bash
+git clone https://github.com/mindroom-ai/lxc-nixos.git
+cd lxc-nixos
+incus launch images:nixos/unstable mindroom -c security.nesting=true
+incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
+```
+
+Then follow the repo's `AGENTS.md` runbook for operator SSH keys, secrets bootstrap, and the `nixos-rebuild switch` deployment.
 
 ## Manual install with your own Matrix homeserver
 
@@ -219,7 +232,8 @@ OPENAI_API_KEY=your_openai_key
 # OPENROUTER_API_KEY=your_openrouter_key
 
 # Dashboard API key; generate one with `openssl rand -hex 32`.
-# Set it empty (MINDROOM_API_KEY=) only with `--api-host 127.0.0.1`; `mindroom run` listens on every interface by default.
+# `mindroom run` listens on every network interface by default, so keep this key set;
+# leave it empty (MINDROOM_API_KEY=) only together with `--api-host 127.0.0.1`.
 MINDROOM_API_KEY=replace-with-a-long-random-secret
 ```
 

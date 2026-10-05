@@ -12,7 +12,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
   <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b#t=0.1" type="video/mp4">
 </video>
 
-**[Get started](https://docs.mindroom.chat/getting-started/)** · **[See it in action](https://docs.mindroom.chat/showcase/)** · **[Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/)**
+**[Get started](https://docs.mindroom.chat/getting-started/)** · **[See it in action](https://docs.mindroom.chat/showcase/)** · **[Try hosted MindRoom](https://mindroom.chat/#hosted)** · **[Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/)**
 
 ## What People Use It For
 
@@ -112,7 +112,7 @@ MindRoom takes the opposite approach.
 | Who they serve | Usually one person's assistant | Personal agents for everyone and shared agents for teams, in rooms where people and agents work together, with access control |
 | What agents can show | Whatever each app allows, mostly text and simple buttons | Its own client: approval cards, live tool traces, voice calls, a browser you can take over, and interactive pages |
 | How they connect | One adapter per messaging app | One open, encrypted protocol, plus bridges for reach |
-| Where messages go | Through each messaging platform | End-to-end encrypted, on servers you can run yourself |
+| Where messages go | Through each messaging platform | On servers you can run yourself, with end-to-end encrypted rooms |
 
 Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [Import from OpenClaw](https://docs.mindroom.chat/openclaw/).
 
