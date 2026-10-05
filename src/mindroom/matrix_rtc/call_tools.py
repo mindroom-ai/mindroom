@@ -889,6 +889,14 @@ def _function_requires_text_chat(function: Function, config: Config) -> bool:
     )
 
 
+def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
+    """Return whether the call agent can send Matrix messages; calls hide tools that may need approval."""
+    return "matrix_message" in config.resolve_entity(agent_name).available_tools and not tool_may_require_approval(
+        config,
+        "matrix_message",
+    )
+
+
 def _function_available_during_call(
     function: Function,
     *,

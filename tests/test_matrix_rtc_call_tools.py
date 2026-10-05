@@ -38,6 +38,7 @@ from mindroom.matrix_rtc.call_tools import (
     _close_cascaded_call_resources,
     _wrap_agno_function,
     build_call_tools,
+    matrix_message_available_during_call,
 )
 from mindroom.memory import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -2065,3 +2066,15 @@ async def test_build_call_tools_requires_runtime_context(tmp_path: Path) -> None
             requester_id=REQUESTER,
             authorize_operation=_authorized_call_operation,
         )
+
+
+def test_matrix_message_available_during_call_needs_the_tool_without_approval() -> None:
+    """Calls hide tools that may need approval, so only an unapproved matrix_message counts."""
+    config = _config()
+    assert not matrix_message_available_during_call(config, AGENT)
+    config.agents[AGENT].tools = ["matrix_message"]
+    assert matrix_message_available_during_call(config, AGENT)
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="matrix_message", action="require_approval")],
+    )
+    assert not matrix_message_available_during_call(config, AGENT)
