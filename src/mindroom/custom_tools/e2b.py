@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable  # noqa: TC003  # resolved by Agno function schema introspection
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, override
@@ -13,7 +14,10 @@ from agno.agent import Agent  # noqa: TC002  # resolved by Agno function schema 
 from agno.team.team import Team  # noqa: TC002  # resolved by Agno function schema introspection
 from agno.tools.e2b import E2BTools
 from agno.tools.function import ToolResult
+from agno.utils.code_execution import prepare_python_code
 from e2b.envd.api import ENVD_API_FILES_ROUTE, handle_envd_api_exception
+from e2b_code_interpreter.constants import DEFAULT_TIMEOUT, JUPYTER_PORT
+from e2b_code_interpreter.models import Execution, extract_exception, parse_output
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.file_access import resolve_agent_file
@@ -62,14 +66,42 @@ def _sandbox_file_chunks(sandbox: Sandbox, path: str) -> Iterator[Iterator[bytes
         yield _within_read_limit(response.iter_bytes())
 
 
-def _within_read_limit(chunks: Iterable[bytes]) -> Iterator[bytes]:
+def _check_read_limit(total: int, subject: str) -> None:
+    if total > MAX_READ_BYTES:
+        message = f"{subject} exceeds the {MAX_READ_BYTES >> 20} MiB transfer limit"
+        raise ValueError(message)
+
+
+def _within_read_limit(chunks: Iterable[bytes], subject: str = "Sandbox file") -> Iterator[bytes]:
     total = 0
     for chunk in chunks:
         total += len(chunk)
-        if total > MAX_READ_BYTES:
-            message = f"Sandbox file exceeds the {MAX_READ_BYTES >> 20} MiB transfer limit"
-            raise ValueError(message)
+        _check_read_limit(total, subject)
         yield chunk
+
+
+def _run_code_within_read_limit(sandbox: Sandbox, code: str) -> Execution:
+    """Run one cell like ``Sandbox.run_code``, refusing its output once it passes the shared read limit.
+
+    The SDK reads each output line whole, so one large print or image would be buffered
+    before any output callback could stop it; this sends the same request and stops reading at the limit.
+    """
+    config = sandbox.connection_config
+    with httpx.stream(
+        "POST",
+        f"{'http' if config.debug else 'https'}://{sandbox.get_host(JUPYTER_PORT)}/execute",
+        json={"code": code, "context_id": None, "language": None, "env_vars": None},
+        headers=config.sandbox_headers,
+        proxy=config.proxy,
+        timeout=httpx.Timeout(config.request_timeout, read=DEFAULT_TIMEOUT),
+    ) as response:
+        if error := extract_exception(response):
+            raise error
+        output = b"".join(_within_read_limit(response.iter_bytes(), "Sandbox code output"))
+    execution = Execution()
+    for line in output.splitlines():
+        parse_output(execution, line.decode())
+    return execution
 
 
 class MindRoomE2BTools(E2BTools):
@@ -82,6 +114,7 @@ class MindRoomE2BTools(E2BTools):
     descriptors pinned below their root, so a link swapped in after resolution
     cannot redirect them. Uploads, downloads, and file reads refuse files above
     the shared read limit, and downloads stream so no partial file is published.
+    Command and code output above that limit is refused while it streams.
     """
 
     def __init__(
@@ -112,6 +145,74 @@ class MindRoomE2BTools(E2BTools):
                     return self._workspace_root, resolved.relative_to(canonical_root)
         msg = f"Local path must name a file inside the agent workspace, relative to it and without '..': {path}"
         raise ValueError(msg)
+
+    @override
+    def run_python_code(self, code: str) -> str:
+        """Run Python code in an isolated E2B sandbox environment.
+
+        Args:
+            code (str): Python code to execute
+
+        Returns:
+            str: Execution results or error message
+
+        """
+        try:
+            execution = _run_code_within_read_limit(self.sandbox, prepare_python_code(code))
+        except Exception as e:
+            return json.dumps({"status": "error", "message": f"Error executing code: {e}"})
+        self.last_execution = execution
+        if (error := execution.error) is not None:
+            return f"Error: {error.name}\n{error.value}\n{error.traceback}"
+        results = [f"Logs:\n{execution.logs}"]
+        for number, result in enumerate(execution.results, start=1):
+            if result.text:
+                results.append(f"Result {number}: {result.text}")
+            elif result.png:
+                results.append(f"Result {number}: Generated PNG image (use download_png_result to save)")
+            elif result.chart:
+                chart_type = result.chart.to_dict().get("type", "unknown")
+                results.append(
+                    f"Result {number}: Generated interactive {chart_type} chart (use download_chart_data to save)",
+                )
+            else:
+                results.append(f"Result {number}: Output available")
+        return json.dumps(results)
+
+    @override
+    def run_command(
+        self,
+        command: str,
+        on_stdout: Callable | None = None,
+        on_stderr: Callable | None = None,
+        background: bool = False,
+    ) -> str:
+        """Run a shell command in the sandbox environment.
+
+        Args:
+            command (str): Shell command to execute
+            on_stdout (callable, optional): Callback function for streaming stdout
+            on_stderr (callable, optional): Callback function for streaming stderr
+            background (bool): Whether to run the command in background
+
+        Returns:
+            str: Command results or error message, or the command object for background execution
+
+        """
+        # The SDK keeps all of a command's output until it ends, so its output callbacks stop it at the limit.
+        received = 0
+
+        def within_read_limit(callback: Callable | None) -> Callable[[str], None]:
+            def receive(output: str) -> None:
+                nonlocal received
+                received += len(output.encode())
+                _check_read_limit(received, "Sandbox command output")
+                if callback:
+                    callback(output)
+
+            return receive
+
+        return super().run_command(command, within_read_limit(on_stdout), within_read_limit(on_stderr), background)
 
     @override
     def upload_file(self, file_path: str, sandbox_path: str | None = None) -> str:
