@@ -194,17 +194,17 @@ With TypeSafe, the task continues only when the probability that no interruption
 The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
 Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
-Attachment contents, tool calls and results, system prompts, and memory are never sent, but message text can still contain private information.
+Attachment contents, tool arguments and results, system prompts, and memory are never sent, but message text can still contain private information.
 
 The agent gets the wrap-up notice without a judgment when:
 
 - the thread's history could not be read completely;
-- the active request or a queued message has an attachment, or the turn was not started by a typed message, such as a scheduled task or a voice message;
+- the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;
 - the active request and queued messages alone exceed 16 KB, or more than eight messages are queued;
 - anything the judge would see looks like a credential;
 - the agent replies in `thread_mode: room`.
 
-Each skip logs `Mid-turn judgment skipped` with a `reason`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
+Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
 Queued messages are handled after the active response finishes either way.
