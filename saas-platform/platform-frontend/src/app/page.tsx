@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
@@ -19,6 +19,7 @@ import {
   Globe,
   Laptop,
   Lock,
+  Menu,
   MessageSquare,
   Network,
   Server,
@@ -26,6 +27,7 @@ import {
   Smartphone,
   SquareTerminal,
   TabletSmartphone,
+  X,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -48,12 +50,14 @@ type PricePlan = {
 const docsUrl = 'https://docs.mindroom.chat/'
 const githubUrl = 'https://github.com/mindroom-ai/mindroom'
 const installGuideUrl = `${docsUrl}getting-started/`
+const showcaseUrl = `${docsUrl}showcase/`
 const macAppUrl = `${docsUrl}installation/macos-app/`
 
 type InstallOption = {
   label: string
   icon: LucideIcon
   command: string
+  note: ReactNode
   steps: [title: string, body: string][]
   guide: { href: string; label: string }
 }
@@ -63,9 +67,18 @@ const installOptions: InstallOption[] = [
     label: 'Terminal',
     icon: SquareTerminal,
     command: 'uvx mindroom run',
+    note: (
+      <>
+        Needs{' '}
+        <a href="https://docs.astral.sh/uv/getting-started/installation/" className="underline decoration-gray-400 underline-offset-2 hover:text-gray-950 dark:hover:text-white">
+          uv
+        </a>{' '}
+        and a model: an API key, a subscription login, or a local model.
+      </>
+    ),
     steps: [
       ['Run MindRoom on your computer', 'One command installs and starts it, with a starter agent.'],
-      ['Approve the pairing link', 'Connect it to your MindRoom Chat account in the browser.'],
+      ['Approve the pairing link', 'Sign in to MindRoom Chat in your browser and approve it.'],
     ],
     guide: { href: installGuideUrl, label: 'Read the install guide' },
   },
@@ -73,8 +86,9 @@ const installOptions: InstallOption[] = [
     label: 'macOS app',
     icon: Laptop,
     command: 'brew install --cask mindroom-ai/tap/mindroom',
+    note: 'Needs an Apple silicon Mac with macOS 14 or later.',
     steps: [
-      ['Open the MindRoom app', 'It installs MindRoom and runs your agents on your Mac in the background. Needs an Apple silicon Mac with macOS 14 or later.'],
+      ['Open the MindRoom app', 'It installs MindRoom and runs your agents on your Mac in the background, with one-click local models.'],
       ['Connect your chat account', 'Approve the pairing link without leaving the app.'],
     ],
     guide: { href: macAppUrl, label: 'Read the macOS app guide' },
@@ -117,7 +131,7 @@ const workUses = [
 const reasons: IconItem[] = [
   {
     title: 'Connected to your tools and documents',
-    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, search your own documents, and can use any computer you pair, even from a server across the world.',
+    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents. They can even use a computer you pair, from a server across the world.',
     icon: Bot,
     href: `${docsUrl}#agents-that-know-you-and-your-work`,
   },
@@ -129,13 +143,13 @@ const reasons: IconItem[] = [
   },
   {
     title: 'Memory that keeps improving',
-    body: 'Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills.',
+    body: 'Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills, while what you tell a private agent stays out of shared ones.',
     icon: Brain,
     href: `${docsUrl}#they-remember-and-keep-improving`,
   },
   {
     title: 'Safe to give real access',
-    body: 'One-tap approval for anything risky, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
+    body: 'One-tap approval for the actions you choose, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
     icon: Shield,
     href: `${docsUrl}#safe-to-give-real-access`,
   },
@@ -155,7 +169,7 @@ const reasons: IconItem[] = [
 
 const setups: (IconItem & { cta: string })[] = [
   {
-    title: 'Your computer, hosted chat',
+    title: 'Your computer + MindRoom Chat',
     body: 'Run the backend on your machine with one command and pair it with MindRoom Chat. Your agents, memory, and keys live on your machine, and there is no server to run.',
     icon: Laptop,
     href: installGuideUrl,
@@ -215,7 +229,8 @@ const plans: PricePlan[] = [
 const footerLinks = [
   { href: docsUrl, label: 'Docs' },
   { href: installGuideUrl, label: 'Install guide' },
-  { href: `${docsUrl}showcase/`, label: 'Showcase' },
+  { href: showcaseUrl, label: 'Showcase' },
+  { href: `${docsUrl}architecture/security-posture/`, label: 'Security' },
   { href: githubUrl, label: 'GitHub' },
   { href: 'https://pypi.org/project/mindroom/', label: 'PyPI' },
 ]
@@ -371,6 +386,7 @@ function RunItYourself() {
           })}
         </div>
         <CopyCommand key={option.label} command={option.command} />
+        <p className="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">{option.note}</p>
         <ol className="mt-6 space-y-5">
           {steps.map(([title, body], index) => (
             <li key={title} className="flex gap-4">
@@ -439,6 +455,47 @@ function ReasonRows({ items }: { items: IconItem[] }) {
   )
 }
 
+const menuLinks = [
+  ...navLinks,
+  { href: showcaseUrl, label: 'Showcase' },
+  { href: docsUrl, label: 'Docs' },
+  { href: githubUrl, label: 'GitHub' },
+  { href: '/auth/login', label: 'Sign in' },
+]
+
+function MobileMenu() {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="lg:hidden">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls="mobile-menu"
+        aria-label={open ? 'Close menu' : 'Open menu'}
+        onClick={() => setOpen(!open)}
+        className="flex h-9 w-9 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white"
+      >
+        {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+      </button>
+      {open && (
+        <div id="mobile-menu" className="absolute inset-x-0 top-full border-b border-gray-200 bg-white px-4 py-3 shadow-lg dark:border-gray-800 dark:bg-gray-950">
+          {menuLinks.map((link) => (
+            <a
+              key={link.label}
+              href={link.href}
+              onClick={() => setOpen(false)}
+              className="block rounded-md px-3 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-200 dark:hover:bg-white/8 dark:hover:text-white"
+            >
+              {link.label}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function LandingPage() {
   return (
     <main className="min-h-screen bg-white text-gray-950 dark:bg-gray-950 dark:text-white">
@@ -456,6 +513,9 @@ export default function LandingPage() {
             ))}
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
+            <a href={showcaseUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white lg:inline-flex">
+              Showcase
+            </a>
             <a href={docsUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
               Docs
             </a>
@@ -470,6 +530,7 @@ export default function LandingPage() {
               Get started
               <ArrowRight className="h-4 w-4" />
             </a>
+            <MobileMenu />
           </div>
         </div>
       </nav>
@@ -618,7 +679,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="border-y border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800">
+      <section className="border-y border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800 dark:bg-gray-900">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
             <h2 className="text-3xl font-semibold text-white">Run MindRoom today.</h2>

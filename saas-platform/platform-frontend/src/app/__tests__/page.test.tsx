@@ -91,6 +91,18 @@ describe('LandingPage', () => {
     expect(screen.getByRole('button', { name: 'Copy command' })).toHaveTextContent('Copy')
   })
 
+  it('opens a menu with every page link on small screens', () => {
+    render(<LandingPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+
+    const menu = within(document.getElementById('mobile-menu') as HTMLElement)
+    expect(menu.getByRole('link', { name: 'Showcase' })).toHaveAttribute('href', 'https://docs.mindroom.chat/showcase/')
+    expect(menu.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/auth/login')
+    fireEvent.click(menu.getByRole('link', { name: 'Hosted' }))
+    expect(screen.queryByRole('button', { name: 'Close menu' })).not.toBeInTheDocument()
+  })
+
   it('lists the MindRoom Chat apps', () => {
     render(<LandingPage />)
 
