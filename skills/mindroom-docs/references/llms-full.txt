@@ -4719,12 +4719,13 @@ Clients ask for this with the `origin` field of the call room's `io.mindroom.age
   "version": 1,
   "agent_user_id": "@mindroom_assistant:example.org",
   "creator_user_id": "@alice:example.org",
-  "ephemeral": true,
+  "ephemeral": false,
   "origin": { "room_id": "!abc:example.org", "thread_id": "$root" }
 }
 ```
 
 `thread_id` is `null` when the call starts from the room's main timeline, and `origin` may be left out entirely.
+MindRoom Chat keeps one call room per caller and agent and re-writes `origin` before every call, so an origin always describes the current call.
 
 ## Transcripts and memory
 
