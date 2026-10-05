@@ -122,7 +122,8 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    Per-entity access already restarts its entity, and keeping the drain for these inputs stops a policy change from committing between an admitted reply's authorization decision and the response it permits.
    Partial-publication repairs always drain, and MCP catalogs refreshed during a skipped-drain apply restart their dependents through the drained MCP catalog path instead of inline.
 9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place without restarting receive loops.
-   Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
+   A call-enabled agent is replaced when its own call setup changes: its `calls.agents` entry, the profile it uses, a model that profile references, `calls.enabled`, or `calls.livekit_service_url`.
+   Otherwise `CallManager.update_config()` hands the new config to later calls, but an agent with a call in progress is replaced after any authored config change, ending that call, because the call's tools, prompt, and approval policy were built from the config it joined with.
    A replaced bot whose reply outlives the bounded shutdown drain is still replaced with the rest of its batch, because its stop releases every resource and leaves the cancelled reply pending for the replacement to replay; any other stop failure still keeps the old bot registered and fails the reload.
 10. Removed entities prepare their response runtime for shutdown, reconcile approval work, and call `leave_rooms()` while ingestion remains active; the orchestrator then cancels the receive loop and stops the bot.
 11. New and restarted bots go through room setup.

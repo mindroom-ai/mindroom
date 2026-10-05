@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_rooms import get_rooms_for_entity
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from mindroom.bot import AgentBot, TeamBot
+    from mindroom.config.calls import LiveCallProfile
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -131,15 +132,19 @@ def _identify_entities_to_restart(
     teams_to_restart = _get_changed_teams(config, new_config, agent_bots)
 
     entities_to_restart = agents_to_restart | teams_to_restart
-    entities_to_restart |= _call_agents_to_restart(config, new_config)
+    entities_to_restart |= _call_agents_to_restart(config, new_config, agent_bots)
     if changed_mcp_servers:
         entities_to_restart |= _entities_referencing_mcp_servers(config, new_config, changed_mcp_servers)
 
     return entities_to_restart
 
 
-def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[str]:
-    """Return call agents whose effective call-manager configuration changed."""
+def _call_agents_to_restart(
+    config: Config | None,
+    new_config: Config,
+    agent_bots: Mapping[str, AgentBot | TeamBot],
+) -> set[str]:
+    """Return call agents whose call setup changed or whose call in progress would keep stale config."""
     if config is None:
         return set()
     old_agents = set(config.calls.agents) if config.calls.enabled else set()
@@ -150,19 +155,41 @@ def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[st
         if _call_manager_signature(config, agent_name) != _call_manager_signature(new_config, agent_name)
     }
     if changed_agents:
+        logger.info("call_manager_configuration_changed_restart_required", agents=sorted(changed_agents))
+    # Idle call managers receive later config through CallManager.update_config(), but a call
+    # in progress keeps the tools, prompt, and approval policy built from the config it joined with.
+    agents_in_call = {
+        agent_name
+        for agent_name in old_agents - changed_agents
+        if (bot := agent_bots.get(agent_name)) is not None and bot.active_call_requesters
+    }
+    if agents_in_call and config.authored_model_dump() != new_config.authored_model_dump():
         logger.info(
-            "call_manager_configuration_changed_restart_required",
-            agents=sorted(changed_agents),
+            "call_agent_configuration_changed_during_call_restart_required",
+            agents=sorted(agents_in_call),
             reason="active call tooling captures the authored configuration snapshot",
         )
+        changed_agents |= agents_in_call
     return changed_agents
 
 
 def _call_manager_signature(config: Config, agent_name: str) -> object | None:
-    """Return the authored config captured by one active call agent."""
+    """Return the call settings one agent's call manager is built from."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
         return None
-    return config.authored_model_dump()
+    profile = config.calls.resolve_agent_config(agent_name)
+    model_name = None
+    if profile.backend == "cascaded":
+        model_name = profile.model
+    elif profile.backend == "live":
+        model_name = cast("LiveCallProfile", profile).agent_model
+    model = config.models.get(model_name) if model_name is not None else None
+    return (
+        config.calls.livekit_service_url,
+        config.calls.agents[agent_name],
+        profile.model_dump(exclude_none=True),
+        model.model_dump(exclude_none=True) if model is not None else None,
+    )
 
 
 def _get_changed_agents(
