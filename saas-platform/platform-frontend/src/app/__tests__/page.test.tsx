@@ -91,16 +91,40 @@ describe('LandingPage', () => {
     expect(screen.getByRole('button', { name: 'Copy command' })).toHaveTextContent('Copy')
   })
 
-  it('opens a menu with every page link on small screens', () => {
+  it('opens a menu with every page link on small screens and closes it on Escape', () => {
     render(<LandingPage />)
+    const button = screen.getByRole('button', { name: 'Menu' })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+    fireEvent.click(button)
 
-    const menu = within(document.getElementById('mobile-menu') as HTMLElement)
-    expect(menu.getByRole('link', { name: 'Showcase' })).toHaveAttribute('href', 'https://docs.mindroom.chat/showcase/')
-    expect(menu.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/auth/login')
-    fireEvent.click(menu.getByRole('link', { name: 'Hosted' }))
-    expect(screen.queryByRole('button', { name: 'Close menu' })).not.toBeInTheDocument()
+    expect(button).toHaveAttribute('aria-expanded', 'true')
+    const menuElement = document.getElementById(button.getAttribute('aria-controls') ?? '')
+    expect(menuElement).not.toBeNull()
+    const menu = within(menuElement as HTMLElement)
+    expect(menu.getAllByRole('link').map((link) => [link.textContent, link.getAttribute('href')])).toEqual([
+      ['Why MindRoom', '#why'],
+      ['Self-host', '#self-host'],
+      ['Hosted', '#hosted'],
+      ['Showcase', 'https://docs.mindroom.chat/showcase/'],
+      ['Docs', 'https://docs.mindroom.chat/'],
+      ['GitHub', 'https://github.com/mindroom-ai/mindroom'],
+      ['Sign in', '/auth/login'],
+    ])
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(button).toHaveAttribute('aria-expanded', 'false')
+    expect(button).toHaveFocus()
+    expect(document.getElementById('mobile-menu')).toBeNull()
+  })
+
+  it('closes the menu after following a link', () => {
+    render(<LandingPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Menu' }))
+
+    fireEvent.click(within(document.getElementById('mobile-menu') as HTMLElement).getByRole('link', { name: 'Hosted' }))
+
+    expect(document.getElementById('mobile-menu')).toBeNull()
   })
 
   it('lists the MindRoom Chat apps', () => {

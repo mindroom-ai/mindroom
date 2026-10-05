@@ -108,6 +108,14 @@ const navLinks = [
   { href: '#hosted', label: 'Hosted' },
 ]
 
+const menuLinks: { href: string; label: string; external?: boolean }[] = [
+  ...navLinks,
+  { href: showcaseUrl, label: 'Showcase', external: true },
+  { href: docsUrl, label: 'Docs', external: true },
+  { href: githubUrl, label: 'GitHub', external: true },
+  { href: '/auth/login', label: 'Sign in' },
+]
+
 const heroFacts = ['Open source, Apache 2.0', 'Any model, local or cloud', 'Self-host the whole stack']
 
 const personalUses = [
@@ -131,7 +139,7 @@ const workUses = [
 const reasons: IconItem[] = [
   {
     title: 'Connected to your tools and documents',
-    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents. They can even use a computer you pair, from a server across the world.',
+    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents. Even from a server across the world, they can use a computer you pair.',
     icon: Bot,
     href: `${docsUrl}#agents-that-know-you-and-your-work`,
   },
@@ -455,41 +463,63 @@ function ReasonRows({ items }: { items: IconItem[] }) {
   )
 }
 
-const menuLinks = [
-  ...navLinks,
-  { href: showcaseUrl, label: 'Showcase' },
-  { href: docsUrl, label: 'Docs' },
-  { href: githubUrl, label: 'GitHub' },
-  { href: '/auth/login', label: 'Sign in' },
-]
-
 function MobileMenu() {
   const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setOpen(false)
+      buttonRef.current?.focus()
+    }
+    const closeOnOutsideTap = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    document.addEventListener('pointerdown', closeOnOutsideTap)
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape)
+      document.removeEventListener('pointerdown', closeOnOutsideTap)
+    }
+  }, [open])
+
+  const linkClass = 'block rounded-md px-3 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-200 dark:hover:bg-white/8 dark:hover:text-white'
 
   return (
-    <div className="lg:hidden">
+    <div ref={containerRef} className="lg:hidden">
       <button
+        ref={buttonRef}
         type="button"
+        aria-label="Menu"
         aria-expanded={open}
-        aria-controls="mobile-menu"
-        aria-label={open ? 'Close menu' : 'Open menu'}
+        aria-controls={open ? 'mobile-menu' : undefined}
         onClick={() => setOpen(!open)}
         className="flex h-9 w-9 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white"
       >
         {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
       </button>
       {open && (
-        <div id="mobile-menu" className="absolute inset-x-0 top-full border-b border-gray-200 bg-white px-4 py-3 shadow-lg dark:border-gray-800 dark:bg-gray-950">
-          {menuLinks.map((link) => (
-            <a
-              key={link.label}
-              href={link.href}
-              onClick={() => setOpen(false)}
-              className="block rounded-md px-3 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-200 dark:hover:bg-white/8 dark:hover:text-white"
-            >
-              {link.label}
-            </a>
-          ))}
+        <div id="mobile-menu" className="absolute inset-x-0 top-full max-h-[calc(100dvh-4rem)] overflow-y-auto overscroll-contain border-b border-gray-200 bg-white px-4 py-3 shadow-lg dark:border-gray-800 dark:bg-gray-950">
+          {menuLinks.map((link) =>
+            link.external ? (
+              <a
+                key={link.label}
+                href={link.href}
+                onClick={() => setOpen(false)}
+                className={linkClass}
+                {...(link.href === githubUrl ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+              >
+                {link.label}
+              </a>
+            ) : (
+              <Link key={link.label} href={link.href} onClick={() => setOpen(false)} className={linkClass}>
+                {link.label}
+              </Link>
+            ),
+          )}
         </div>
       )}
     </div>
@@ -503,7 +533,7 @@ export default function LandingPage() {
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
           <Link href="/" className="group flex items-center gap-3" aria-label="MindRoom home">
             <MindRoomLogo className="transition-transform duration-200 group-hover:scale-105" size={32} />
-            <span className="text-lg font-semibold">MindRoom</span>
+            <span className="text-lg font-semibold max-[359px]:sr-only">MindRoom</span>
           </Link>
           <div className="hidden items-center gap-7 lg:flex">
             {navLinks.map((link) => (
@@ -512,7 +542,7 @@ export default function LandingPage() {
               </Link>
             ))}
           </div>
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1 sm:gap-3">
             <a href={showcaseUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white lg:inline-flex">
               Showcase
             </a>
@@ -528,7 +558,7 @@ export default function LandingPage() {
             </Link>
             <a href={installGuideUrl} className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200 sm:px-4">
               Get started
-              <ArrowRight className="h-4 w-4" />
+              <ArrowRight className="hidden h-4 w-4 sm:block" />
             </a>
             <MobileMenu />
           </div>
