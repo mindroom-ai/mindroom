@@ -2596,6 +2596,36 @@ async def test_stop_entities_cleans_up_before_reporting_source_quiesce_failure()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "restart_entities", "replaced"),
+    [
+        (ResponseShutdownTimeoutError("reply outlived the drain"), {"agent1"}, True),
+        (RuntimeError("journal store close failed"), {"agent1"}, False),
+        (ResponseShutdownTimeoutError("reply outlived the drain"), set(), False),
+    ],
+)
+async def test_stop_entities_tolerates_only_restart_drain_timeouts(
+    failure: Exception,
+    restart_entities: set[str],
+    replaced: bool,
+) -> None:
+    """Only a restarting bot's reply drain timeout lets the batch be replaced."""
+    bot = _shutdown_bot_mock()
+    bot.stop = AsyncMock(side_effect=failure)
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": asyncio.create_task(asyncio.sleep(60))}
+
+    if replaced:
+        await stop_entities({"agent1"}, agent_bots, sync_tasks, restart_entities=restart_entities)
+        assert agent_bots == {}
+    else:
+        with pytest.raises(type(failure)) as raised:
+            await stop_entities({"agent1"}, agent_bots, sync_tasks, restart_entities=restart_entities)
+        assert raised.value is failure
+        assert agent_bots == {"agent1": bot}
+
+
+@pytest.mark.asyncio
 async def test_stop_entities_prioritizes_quiesce_failure_after_cleanup_failures() -> None:
     """Every cleanup stage runs while the source-barrier error stays primary."""
     quiesce_failure = RuntimeError("source quiesce failed")

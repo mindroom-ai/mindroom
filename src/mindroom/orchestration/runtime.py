@@ -680,7 +680,7 @@ def _split_restart_response_timeouts(
 
     A restarting bot releases every resource even when a reply outlives the
     bounded drain, and the cancelled reply stays pending for its replacement
-    to replay, so only a failed release keeps it from being replaced.
+    to replay, so any other failure still keeps it from being replaced.
     """
     failures: list[BaseException] = []
     response_timeout_entities: set[str] = set()
