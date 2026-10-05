@@ -154,17 +154,18 @@ async def _curate(
     return None if task is None else await task
 
 
-MOVE = [
-    ("append_file", {"path": "memory/topics.md", "content": SECTIONS[3]}),
-    ("edit_file", {"path": "MEMORY.md", "old_text": SECTIONS[3], "new_text": POINTER}),
-]
+# Two steps, as the prompt asks: Agno runs one step's tool calls concurrently, in no fixed order.
+MOVE = (
+    [("append_file", {"path": "memory/topics.md", "content": SECTIONS[3]})],
+    [("edit_file", {"path": "MEMORY.md", "old_text": SECTIONS[3], "new_text": POINTER})],
+)
 
 
 @pytest.mark.asyncio
 async def test_moving_detail_into_memory_within_bounds_is_published(tmp_path: Path) -> None:
     """A pass that moves one section verbatim into memory/ and leaves a pointer lands in its band and is published."""
     config, paths, root = _setup(tmp_path)
-    model = _model(MOVE)
+    model = _model(*MOVE)
 
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
         outcome = await _curate(PromptCurationRunner(paths), config)
@@ -188,7 +189,7 @@ async def test_moving_detail_into_memory_within_bounds_is_published(tmp_path: Pa
     assert SECTIONS[7] in prompt
     assert (
         "Edited MEMORY.md. Curated files now 1133 tokens (target at most 1157, not below 1093); "
-        "net memory content removed 0 tokens (at most 64)." in model.requests[1]
+        "net memory content removed 0 tokens (at most 64)." in model.requests[2]
     )
 
 
@@ -228,7 +229,7 @@ async def test_a_rewrite_during_the_pass_discards_it_without_counting_a_failure(
     """A live turn's rewrite wins over the pass, which publishes nothing and is not held against the agent."""
     config, paths, root = _setup(tmp_path)
     rewritten = "# Memory\nRewritten by a live turn.\n"
-    model = _model(MOVE)
+    model = _model(*MOVE)
     model.before_answer = lambda: (root / "MEMORY.md").write_text(rewritten, encoding="utf-8")
 
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
@@ -245,7 +246,7 @@ async def test_a_timed_out_pass_reports_its_usage_and_changes_nothing(tmp_path: 
     """A pass that runs out of time publishes nothing, counts as a failure, and still reports what it spent."""
     config, paths, root = _setup(tmp_path, timeout_seconds=1)
     before = _snapshot(root)
-    model = _model(MOVE)
+    model = _model(*MOVE)
     model.released_requests = 1
 
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
@@ -262,7 +263,7 @@ async def test_a_failing_model_run_counts_as_a_failure(tmp_path: Path) -> None:
     """A provider error ends the pass without publishing and backs off like a rejection."""
     config, paths, root = _setup(tmp_path)
     before = _snapshot(root)
-    model = _model(MOVE)
+    model = _model(*MOVE)
     model.failure = RuntimeError("provider down")
 
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
@@ -283,7 +284,7 @@ async def test_one_pass_runs_per_workspace_and_stop_cancels_it_unpublished(tmp_p
     """A second reply does not start a second pass, and shutdown cancels the running one before it publishes."""
     config, paths, root = _setup(tmp_path)
     before = _snapshot(root)
-    model = _model(MOVE)
+    model = _model(*MOVE)
     model.released_requests = 1
     runner = PromptCurationRunner(paths)
 
@@ -325,11 +326,11 @@ async def test_the_cooldown_survives_a_restart(tmp_path: Path) -> None:
     """The persisted attempt time keeps a new runner from curating again within the cooldown."""
     config, paths, _root = _setup(tmp_path)
     runner = PromptCurationRunner(paths)
-    with patch("mindroom.model_loading.get_model_instance", return_value=_model(MOVE)):
+    with patch("mindroom.model_loading.get_model_instance", return_value=_model(*MOVE)):
         assert await _curate(runner, config) == "accepted"
     assert runner.maybe_start(config, agent_name="mind", session_id="session", identity=None) is None
 
-    model = _model(MOVE)
+    model = _model(*MOVE)
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
         assert await _curate(PromptCurationRunner(paths), config) is None
 
@@ -356,7 +357,7 @@ async def test_a_failed_pass_is_retried_only_after_its_backoff(tmp_path: Path) -
     for elapsed, expected in ((day + 1, None), (2 * day + 1, "accepted")):
         with (
             patch.object(runner_module, "_now", return_value=state["last_attempt_at"] + elapsed),
-            patch("mindroom.model_loading.get_model_instance", return_value=_model(MOVE)),
+            patch("mindroom.model_loading.get_model_instance", return_value=_model(*MOVE)),
         ):
             assert await _curate(PromptCurationRunner(paths), config) == expected
 
@@ -365,7 +366,7 @@ async def test_a_failed_pass_is_retried_only_after_its_backoff(tmp_path: Path) -
 async def test_files_under_the_trigger_start_no_pass(tmp_path: Path) -> None:
     """Small prompt files cost no model call and leave no state behind."""
     config, paths, _root = _setup(tmp_path, memory="# Memory\n- Prefers terse replies.\n")
-    model = _model(MOVE)
+    model = _model(*MOVE)
 
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
         assert await _curate(PromptCurationRunner(paths), config) is None
@@ -380,10 +381,8 @@ async def test_hysteresis_keeps_curating_under_the_trigger_until_the_target(tmp_
     # 942 tokens: under the 1,000 trigger but over the 900 stop target.
     config, paths, root = _setup(tmp_path, memory=HEADER + "".join(SECTIONS[:5]) + FILLER + EXTRA)
     model = _model(
-        [
-            ("append_file", {"path": "memory/trips.md", "content": EXTRA}),
-            ("edit_file", {"path": "MEMORY.md", "old_text": EXTRA, "new_text": ""}),
-        ],
+        [("append_file", {"path": "memory/trips.md", "content": EXTRA})],
+        [("edit_file", {"path": "MEMORY.md", "old_text": EXTRA, "new_text": ""})],
     )
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
         assert await _curate(PromptCurationRunner(paths), config) is None
@@ -413,7 +412,7 @@ async def test_private_workspaces_are_curated_and_tracked_per_worker_scope(tmp_p
     """A private agent's requester workspace is curated with that requester's identity and its own state."""
     config, paths, root = _setup(tmp_path, private=True)
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=_model(MOVE)):
+    with patch("mindroom.model_loading.get_model_instance", return_value=_model(*MOVE)):
         assert await _curate(PromptCurationRunner(paths), config, ALICE) == "accepted"
 
     assert (root / "memory" / "topics.md").read_text() == SECTIONS[3]
@@ -426,7 +425,7 @@ async def test_private_workspaces_are_curated_and_tracked_per_worker_scope(tmp_p
 async def test_pass_logs_carry_its_caller_label_not_the_responses_context(tmp_path: Path) -> None:
     """The pass's model calls are labelled prompt_curation and carry none of the triggering response's log fields."""
     config, paths, _root = _setup(tmp_path)
-    model = _model(MOVE)
+    model = _model(*MOVE)
 
     with (
         structlog.contextvars.bound_contextvars(correlation_id="$response"),

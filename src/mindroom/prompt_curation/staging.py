@@ -12,6 +12,7 @@ Every read and write goes through the file-memory descriptor helpers, because wo
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal
@@ -72,6 +73,8 @@ class StagedWorkspace:
     curated: tuple[str, ...]
     _edited: dict[str, str] = field(default_factory=dict)
     _appended: dict[str, str] = field(default_factory=dict)
+    # Agno may run one model step's tool calls concurrently; each edit reads and replaces whole text.
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     @classmethod
     def load(cls, root: Path, settings: PromptCurationConfig) -> StagedWorkspace:
@@ -122,21 +125,22 @@ class StagedWorkspace:
         if path not in self.settings.files:
             msg = f"{path} is not curatable; only edit the curatable files: {', '.join(self.curated)}"
             raise ValueError(msg)
-        text = self.read(path)
         if not old_text:
             msg = "old_text must not be empty"
             raise ValueError(msg)
-        if (count := text.count(old_text)) != 1:
-            msg = (
-                f"old_text not found in {path}"
-                if count == 0
-                else f"old_text matches {count} places in {path}; include more surrounding text"
-            )
-            raise ValueError(msg)
-        edited = text.replace(old_text, new_text, 1)
-        if refuse is not None and (reason := refuse(path, edited)) is not None:
-            raise ValueError(reason)
-        self._edited[path] = edited
+        with self._lock:
+            text = self.read(path)
+            if (count := text.count(old_text)) != 1:
+                msg = (
+                    f"old_text not found in {path}"
+                    if count == 0
+                    else f"old_text matches {count} places in {path}; include more surrounding text"
+                )
+                raise ValueError(msg)
+            edited = text.replace(old_text, new_text, 1)
+            if refuse is not None and (reason := refuse(path, edited)) is not None:
+                raise ValueError(reason)
+            self._edited[path] = edited
 
     def append(self, path: str, content: str) -> None:
         """Append ``content`` as whole lines to a ``memory/`` Markdown file, creating it when needed."""
@@ -151,7 +155,8 @@ class StagedWorkspace:
             msg = "content must not be empty"
             raise ValueError(msg)
         block = content if content.endswith("\n") else f"{content}\n"
-        self._appended[path] = self._appended.get(path, "") + block
+        with self._lock:
+            self._appended[path] = self._appended.get(path, "") + block
 
     def changed_paths(self) -> frozenset[str]:
         """Return every path whose staged text differs from what the pass read."""
