@@ -17,7 +17,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -35,6 +35,14 @@ from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.room_membership import cached_joined_member_ids
+from mindroom.matrix_rtc.call_origin import (
+    AGENT_CALL_STATE_EVENT_TYPE,
+    CALL_BRIEF_TOKEN_BUDGET,
+    CallOriginContext,
+    build_call_brief,
+    parse_call_origin,
+    resolve_call_origin_context,
+)
 from mindroom.matrix_rtc.call_session import (
     CallJoinError,
     CallSession,
@@ -64,6 +72,7 @@ from mindroom.matrix_rtc.voice_agent import (
     VoiceAgentOptions,
     matrix_calls_dependencies_available,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.response_admission import (
     ResponseAdmissionGate,
@@ -82,6 +91,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix_rtc.call_origin import CallOrigin
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
     from mindroom.matrix_rtc.focus import SfuGrant
     from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
@@ -107,6 +117,8 @@ _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
 _RECONCILE_MIN_INTERVAL_S = 1.0
+# Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
+_ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
 _OPENAI_SPEECH_BASE_URL = "https://api.openai.com/v1"
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
@@ -127,6 +139,7 @@ _LIVE_VOICE_INSTRUCTIONS = (
     "checked information or completed work until the agent returns the result."
 )
 _LIVE_INSTRUCTION_TOKEN_LIMIT = 16_000
+_LIVE_MIN_BRIEF_TOKENS = 300
 _LIVE_OVERSIZED_INSTRUCTIONS = (
     "The agent's full caller-bound instructions and context are intentionally held by the delegated agent, "
     "not this voice model. Delegate every substantive user request to the agent, including questions, requests "
@@ -136,11 +149,23 @@ _LIVE_OVERSIZED_INSTRUCTIONS = (
 )
 
 
-def _build_live_instructions(agent_system_prompt: str, *, agent_display_name: str) -> str:
+def _build_live_instructions(
+    agent_system_prompt: str,
+    *,
+    agent_display_name: str,
+    origin_context: CallOriginContext | None = None,
+) -> str:
     """Use full context when it fits, otherwise require full-context delegation."""
     suffix = f"\n\n{_LIVE_VOICE_INSTRUCTIONS}"
     complete = f"{agent_system_prompt}{suffix}"
-    if approximate_o200k_tokens(complete) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+    complete_tokens = approximate_o200k_tokens(complete)
+    if complete_tokens <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+        # The 8 tokens cover the newlines joining the brief to the prompt.
+        remaining = min(CALL_BRIEF_TOKEN_BUDGET, _LIVE_INSTRUCTION_TOKEN_LIMIT - complete_tokens - 8)
+        if origin_context is not None and remaining >= _LIVE_MIN_BRIEF_TOKENS:
+            brief = build_call_brief(origin_context, token_budget=remaining)
+            if brief:
+                return f"{agent_system_prompt}\n\n{brief}{suffix}"
         return complete
 
     bounded = (
@@ -180,6 +205,14 @@ class _LogicalCallState:
 
 
 @dataclass(frozen=True)
+class _RoomCallState:
+    """One room-state read: current remote call members and the agent-call state events."""
+
+    members: list[CallMember]
+    agent_call_events: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class _StartingCall:
     """One session start that revocation may cancel before publication."""
 
@@ -187,9 +220,10 @@ class _StartingCall:
     task: asyncio.Task[None]
 
 
-def _build_call_instructions(chat_system_prompt: str) -> str:
-    """Append voice-specific delivery guidance to the chat system prompt."""
-    return f"{chat_system_prompt}\n\n{_VOICE_STYLE_ADDENDUM}"
+def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") -> str:
+    """Append the origin brief and voice delivery guidance to the chat system prompt."""
+    parts = [chat_system_prompt, origin_brief, _VOICE_STYLE_ADDENDUM]
+    return "\n\n".join(part for part in parts if part)
 
 
 def preload_matrix_call_dependencies(config: Config) -> None:
@@ -581,14 +615,20 @@ class CallManager:
                         or not self._is_configured_call_room(room)
                     ):
                         return
-                    members = await self._fetch_remote_members(room_id)
-                    if members is None:
+                    state = await self._fetch_room_call_state(room_id)
+                    if state is None:
                         # Transient state-fetch failure: keep any active session alive
                         # and retry even if no further call event arrives.
                         self._schedule_reconcile_retry(room)
                         return
+                    members = state.members
                     self._schedule_expiry_reconcile(room, members)
-                    await self._apply_reconciled_members(room, members, retrying=retrying)
+                    await self._apply_reconciled_members(
+                        room,
+                        members,
+                        retrying=retrying,
+                        agent_call_events=state.agent_call_events,
+                    )
         except ResponseAdmissionRefusedError:
             logger.info(
                 "call_reconcile_refused_after_runtime_replacement",
@@ -602,6 +642,7 @@ class CallManager:
         members: list[CallMember],
         *,
         retrying: bool = False,
+        agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Apply one authoritative room/call roster to the active session."""
         room_id = room.room_id
@@ -626,12 +667,12 @@ class CallManager:
             self._clear_logical_call(room_id)
             logical_call = self._start_logical_call(room_id, requester_id)
         if session is None:
-            await self._join_if_populated(room, members, retrying=retrying)
+            await self._join_if_populated(room, members, retrying=retrying, agent_call_events=agent_call_events)
             return
         if session.requester_id != requester_id:
             self._sessions.pop(room_id, None)
             await self._stop_session(session)
-            await self._join_if_populated(room, members, retrying=retrying)
+            await self._join_if_populated(room, members, retrying=retrying, agent_call_events=agent_call_events)
             return
         await self._update_session_members(room, session, members)
 
@@ -641,6 +682,7 @@ class CallManager:
         members: list[CallMember],
         *,
         retrying: bool = False,
+        agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Join a populated call or finish a successful empty reconciliation."""
         if not members:
@@ -656,7 +698,7 @@ class CallManager:
         # Count the call as active before tool materialization captures the current config.
         self._joining_requesters[room.room_id] = members[0].user_id
         try:
-            result = await self._join(room, members)
+            result = await self._join(room, members, agent_call_events=agent_call_events)
         finally:
             self._joining_requesters.pop(room.room_id, None)
         if result == "joined":
@@ -803,8 +845,8 @@ class CallManager:
             return False
         return True
 
-    async def _fetch_remote_members(self, room_id: str) -> list[CallMember] | None:
-        """Current, unexpired call members in the room, excluding ourselves.
+    async def _fetch_room_call_state(self, room_id: str) -> _RoomCallState | None:
+        """Current, unexpired call members in the room, excluding ourselves, and its agent-call state.
 
         Returns ``None`` when the room state could not be read, so callers can
         distinguish "the call is empty" from a transient homeserver error.
@@ -836,9 +878,18 @@ class CallManager:
             if member.user_id == self._client.user_id:
                 continue
             members.append(member)
-        return members
+        agent_call_events = tuple(
+            event for event in response.events if event.get("type") == AGENT_CALL_STATE_EVENT_TYPE
+        )
+        return _RoomCallState(members=members, agent_call_events=agent_call_events)
 
-    async def _join(self, room: nio.MatrixRoom, members: list[CallMember]) -> _JoinResult:  # noqa: C901, PLR0911
+    async def _join(  # noqa: C901, PLR0911
+        self,
+        room: nio.MatrixRoom,
+        members: list[CallMember],
+        *,
+        agent_call_events: tuple[dict[str, Any], ...],
+    ) -> _JoinResult:
         room_id = room.room_id
         logical_call = self._logical_calls[room_id]
         requester_id = members[0].user_id
@@ -856,10 +907,25 @@ class CallManager:
         if service is None:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
             return "skip"
+        # The origin only enriches the call; a slow or broken one must never block it.
+        origin_context = None
+        try:
+            async with asyncio.timeout(_ORIGIN_RESOLUTION_TIMEOUT_S):
+                origin_context = await self._resolve_origin_context(room_id, requester_id, agent_call_events)
+        except TimeoutError:
+            logger.warning(
+                "call_origin_resolution_timed_out",
+                room_id=room_id,
+                agent=self._agent_name,
+                timeout_s=_ORIGIN_RESOLUTION_TIMEOUT_S,
+            )
+        except Exception:
+            logger.warning("call_origin_resolution_failed", room_id=room_id, agent=self._agent_name, exc_info=True)
         try:
             tooling = await self._build_tooling(
                 room_id,
                 requester_id=requester_id,
+                origin_context=origin_context,
             )
             transcript = CallTranscript.start(
                 agent_name=self._agent_name,
@@ -898,6 +964,7 @@ class CallManager:
             bridge=bridge,
             backend=backend,
             requester_id=members[0].user_id,
+            origin_context=origin_context,
         )
         try:
             session = CallSession(
@@ -1138,11 +1205,41 @@ class CallManager:
         except Exception as error:
             logger.warning(event, room_id=session.room_id, error=str(error))
 
+    async def _resolve_origin_context(
+        self,
+        room_id: str,
+        requester_id: str,
+        agent_call_events: tuple[dict[str, Any], ...],
+    ) -> CallOriginContext | None:
+        """Return the validated conversation this call was started from, if any."""
+        origin: CallOrigin | None = parse_call_origin(
+            agent_call_events,
+            requester_id=requester_id,
+            agent_user_id=self._client.user_id,
+        )
+        if origin is None:
+            return None
+        context = self._tool_support.build_context(
+            MessageTarget(
+                room_id=room_id,
+                source_thread_id=None,
+                resolved_thread_id=None,
+                reply_to_event_id=None,
+                session_id=create_session_id(room_id, None),
+            ),
+            user_id=requester_id,
+            agent_name=self._agent_name,
+        )
+        if context is None:
+            return None
+        return await resolve_call_origin_context(origin, context=context)
+
     async def _build_tooling(
         self,
         room_id: str,
         *,
         requester_id: str,
+        origin_context: CallOriginContext | None = None,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
         logical_call = self._logical_calls[room_id]
@@ -1168,6 +1265,11 @@ class CallManager:
             voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
             active_model_name=active_model_name,
             reconcile_spoken_response=self._call_config.backend != "live",
+            origin_brief=(
+                build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET)
+                if origin_context and enable_responder
+                else None
+            ),
         )
 
     @asynccontextmanager
@@ -1258,6 +1360,7 @@ class CallManager:
         bridge: VoiceBridgeLike,
         backend: _ResolvedVoiceBackend,
         requester_id: str,
+        origin_context: CallOriginContext | None = None,
     ) -> CallVoiceAgentOptions:
         """Build selected-backend options with shared transcript hooks."""
 
@@ -1273,7 +1376,10 @@ class CallManager:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
             return VoiceAgentOptions(
-                instructions=_build_call_instructions(tooling.instructions),
+                instructions=_build_call_instructions(
+                    tooling.instructions,
+                    build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET) if origin_context else "",
+                ),
                 model=realtime_config.model,
                 api_key=backend.realtime_api_key,
                 voice=realtime_config.voice,
@@ -1295,6 +1401,7 @@ class CallManager:
                 return _build_live_instructions(
                     await get_system_prompt(),
                     agent_display_name=self._config.agents[self._agent_name].display_name,
+                    origin_context=origin_context,
                 )
 
             return LiveVoiceAgentOptions(

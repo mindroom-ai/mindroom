@@ -642,6 +642,7 @@ visibility = [
     "mindroom.commands.handler",
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.matrix_rtc.call_origin",
     "mindroom.post_response_effects",
     "mindroom.scheduling",
     "mindroom.thread_export.projected_history",
@@ -4000,6 +4001,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix_rtc.call_origin",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.matrix_rtc.events",
@@ -4034,6 +4036,15 @@ depends_on = [
     "mindroom.tool_approval",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_origin"
+depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.conversation_reads",
 ]
 
 [[modules]]
