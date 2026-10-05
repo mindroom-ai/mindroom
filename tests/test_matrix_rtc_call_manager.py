@@ -2725,6 +2725,9 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     post = _patch_call_writeback(monkeypatch)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    origin_room = _room(room_id=_ORIGIN_CONTEXT.origin.room_id)
+    origin_room.add_member("@alice:example.org", "Alice", None)
+    client.rooms = {origin_room.room_id: origin_room}
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
@@ -2736,9 +2739,30 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
     body = post.await_args.kwargs["body"]
     assert body.startswith("📞 Voice call · 2 min")
-    assert "**@alice:example.org**: Book the train" in body
+    assert "**Alice**: Book the train" in body
     assert "**Helper**: Booked" in body
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_ended_by_shutdown_posts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A call that ends because MindRoom shuts down posts no transcript."""
+    post = _patch_call_writeback(monkeypatch)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    _record_two_minute_exchange(bridge)
+
+    await manager.shutdown()
+    await _drain_background_tasks(manager)
+
+    assert bridge.closed is True
+    post.assert_not_awaited()
 
 
 @pytest.mark.asyncio
