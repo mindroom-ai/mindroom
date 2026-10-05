@@ -268,7 +268,7 @@ async def test_resolve_ignores_thread_summaries_from_untrusted_senders(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_allow_access")
 async def test_resolve_skips_empty_bodies_and_falls_back_to_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Blank messages are dropped, unknown senders keep their id, and an unnamed room keeps its id."""
+    """Blank messages are dropped, unknown senders keep their id, and an unnamed room uses nio's computed name."""
     stranger = "@stranger:example.org"
     history = _history(
         _message("$root", CALLER, "Plan the trip"),

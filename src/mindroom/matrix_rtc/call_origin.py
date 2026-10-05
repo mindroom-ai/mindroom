@@ -170,7 +170,7 @@ async def resolve_call_origin_context(
         messages.append(_CallBriefMessage(label=label, body=body))
     return CallOriginContext(
         origin=origin,
-        room_name=room.display_name or origin.room_id,
+        room_name=room.display_name,
         thread_title=thread_title,
         messages=tuple(messages),
     )
