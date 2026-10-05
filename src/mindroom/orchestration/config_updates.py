@@ -57,8 +57,18 @@ class ConfigUpdatePlan:
     matrix_space_changed: bool
     authorization_changed: bool
     room_metadata_changed: bool = False
+    reply_authorization_changed: bool = False
     added_entities: set[str] = field(default_factory=set)
     entities_to_reconcile_rooms: set[str] = field(default_factory=set)
+
+    @property
+    def requires_response_drain(self) -> bool:
+        """Return whether publication must wait for in-flight responses.
+
+        A plan that touches no entity and no reply-authorization input only
+        replaces config that responses read live, so it can publish while they run.
+        """
+        return self.reply_authorization_changed or self._has_entity_changes
 
     @property
     def _has_entity_changes(self) -> bool:
@@ -223,6 +233,26 @@ def _entities_with_room_changes(
     }
 
 
+def _reply_authorization_inputs_changed(config: Config, new_config: Config) -> bool:
+    """Return whether config read by reply, invite, or trigger authorization changed.
+
+    Per-entity access and rooms are not listed because changing them already
+    restarts or re-rooms that entity.
+    """
+    return (
+        config.administrators != new_config.administrators
+        or config.authorization != new_config.authorization
+        or config.bot_accounts != new_config.bot_accounts
+        or config.mindroom_user != new_config.mindroom_user
+        or config.room_defaults != new_config.room_defaults
+        or config.rooms != new_config.rooms
+        or config.router.access != new_config.router.access
+        or config.router.accept_invites != new_config.router.accept_invites
+        or config.personal_rooms != new_config.personal_rooms
+        or config.external_trigger_policy != new_config.external_trigger_policy
+    )
+
+
 def _room_metadata_changed(config: Config, new_config: Config) -> bool:
     """Return whether managed room metadata changed without implying bot reconstruction."""
     return config.rooms != new_config.rooms
@@ -350,6 +380,7 @@ def build_config_update_plan(
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
         authorization_changed=current_config.authorization != new_config.authorization,
         room_metadata_changed=_room_metadata_changed(current_config, new_config),
+        reply_authorization_changed=_reply_authorization_inputs_changed(current_config, new_config),
         added_entities=added_entities,
         entities_to_reconcile_rooms=entities_to_reconcile_rooms,
     )
