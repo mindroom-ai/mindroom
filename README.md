@@ -67,7 +67,7 @@ See [Quick Start](#quick-start) for every way to run it.
 <p><b>Approve before it acts</b><br />Risky actions wait for your OK, with the exact arguments in view.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/39a572a8-74d7-4349-ad68-2ee1b0c16a21" /><img src="https://github.com/user-attachments/assets/1efa0323-6502-4d7c-82c9-6c39f906ce89" alt="Three colleagues see the same agent thread side by side" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/635ce3ef-217d-494a-a8e5-01e3dd78454d" /><img src="https://github.com/user-attachments/assets/fbd1295d-025d-41d1-9ee8-0cc674706b98" alt="Three colleagues see the same agent thread side by side" /></picture></a>
 <p><b>The whole team, one thread</b><br />Colleagues share an agent in a thread and see every answer stream in live.</p>
 </td>
 </tr>
