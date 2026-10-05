@@ -456,10 +456,12 @@ class ChatUITools(Toolkit):
         answered an earlier version of the page.
 
         To keep what the user does in the page across reloads and your updates, call
-        ``window.mindroom.saveState(value)`` with JSON up to 256 KB; every later load
-        of this canvas starts with it in ``window.mindroom.state`` (``undefined``
-        before the first save). Saved state stays on the user's device and never
-        reaches you.
+        ``window.mindroom.saveState(value)`` on every change with up to 256K characters
+        of JSON (larger values throw); later loads of this canvas start with it in
+        ``window.mindroom.state``, which is ``undefined`` when nothing is saved. Read it
+        defensively: an earlier version of the page may have saved it. Saved state
+        stays on the user's device, only the 100 most recently saved canvases keep it,
+        and it never reaches you.
 
         If the page throws an error or loads something Chat blocks, the user can send
         you the errors as ``Canvas error (<canvas_event_id>, revision <event_id>):``
