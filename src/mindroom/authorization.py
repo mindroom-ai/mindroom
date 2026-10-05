@@ -451,7 +451,7 @@ def classify_responder_candidates_from_cached_room(
 
     A proven grant remains usable when an ad-hoc member snapshot is partial.
     """
-    responders = _configured_responder_entities_for_room(room, config, runtime_paths)
+    responders = configured_responder_entities_for_room(room, config, runtime_paths)
     discovery_complete = responders is not None or room_membership_is_complete(room)
     if responders is None:
         responders = get_available_responders_in_room(room, config, runtime_paths)
@@ -496,7 +496,7 @@ def responder_candidate_entities_from_cached_room(
     ).allowed
 
 
-def _configured_responder_entities_for_room(
+def configured_responder_entities_for_room(
     room: nio.MatrixRoom,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -524,7 +524,7 @@ async def responder_candidate_entities_with_membership_refresh(
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return candidates, refreshing unsynced ad-hoc room membership when possible."""
-    configured_entities = _configured_responder_entities_for_room(room, config, runtime_paths)
+    configured_entities = configured_responder_entities_for_room(room, config, runtime_paths)
     if configured_entities is not None:
         return filter_responders_by_sender_permissions(
             configured_entities,

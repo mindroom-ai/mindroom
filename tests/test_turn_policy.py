@@ -200,6 +200,37 @@ async def test_mention_of_other_agent_is_ignored(config: Config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mentioned_agent_not_configured_for_room_rejects(config: Config) -> None:
+    """A joined agent that a configured room does not list explains why it cannot answer."""
+    config.agents["research"].rooms = [_ROOM_ID]
+    policy = _policy_for(config, "general")
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    context = _context(mentioned=[_entity_id(config, "general")], am_i_mentioned=True)
+
+    plan = await _plan(policy, room, _dispatch(context, agent_name="general"))
+
+    assert plan.kind == "respond"
+    assert plan.response_action is not None
+    assert plan.response_action.kind == "reject"
+    assert plan.response_action.rejection_message is not None
+    assert "not configured for this room" in plan.response_action.rejection_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mention_research", [False, True])
+async def test_unmentioned_agent_not_configured_for_room_stays_silent(config: Config, mention_research: bool) -> None:
+    """An agent that a configured room does not list never volunteers the rejection."""
+    config.agents["research"].rooms = [_ROOM_ID]
+    policy = _policy_for(config, "general")
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    context = _context(mentioned=[_entity_id(config, "research")] if mention_research else None)
+
+    plan = await _plan(policy, room, _dispatch(context, agent_name="general"))
+
+    assert plan.kind == "ignore"
+
+
+@pytest.mark.asyncio
 async def test_unmentioned_room_message_with_multiple_responders_is_ignored(config: Config) -> None:
     """With several visible responders, no agent self-selects for an untagged room message."""
     policy = _policy_for(config, "general")
