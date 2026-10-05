@@ -35,6 +35,7 @@ tool_approval:
 | `rules[].action` | `auto_approve` or `require_approval` | — | Fixed decision; set exactly one of `action` or `script` |
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
+| `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](scheduling.md#pre-approved-tool-calls) |
 
 ## Approving and Denying
 
@@ -44,6 +45,7 @@ tool_approval:
   When an agent acts on a request relayed by another agent's reply, the original human is asked.
 - Tool calls requested by agents, the system, or configured bridge bots are denied instead of waiting for approval.
 - An unanswered card expires after its `timeout_days` and the call is denied.
+- A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](scheduling.md#pre-approved-tool-calls).
 
 While approval is pending, the agent stops typing and the conversation can continue.
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
@@ -53,7 +55,7 @@ The approved call runs only with the exact arguments shown on the card.
 
 Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
 It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments.
-It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves or for background-script approvals.
+It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
 ## Approval Card Contents

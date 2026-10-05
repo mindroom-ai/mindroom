@@ -56,6 +56,14 @@ if TYPE_CHECKING:
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
+    from .scheduled_approvals import (
+        ScheduledApprovalArmState,
+        ScheduledCall,
+        ScheduledCallBinding,
+        ScheduledCallClaim,
+        ScheduledCallOutcome,
+        ScheduledCallRefusal,
+    )
 
 
 class AdmissionView(Protocol):
@@ -477,6 +485,35 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
 
     async def prune_background_approvals(self, *, run_id: str) -> bool: ...  # noqa: D102
 
+    async def reserve_scheduled_call_approval(  # noqa: D102
+        self,
+        *,
+        binding: ScheduledCallBinding,
+        card: ApprovalCardReservation,
+    ) -> bool: ...
+
+    async def arm_scheduled_call_approval(  # noqa: D102
+        self,
+        *,
+        task_id: str,
+        workflow_digest: str,
+        any_arguments_allowed: bool,
+    ) -> ScheduledApprovalArmState: ...
+
+    async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision: ...  # noqa: D102
+
+    async def scheduled_call(self, *, task_id: str) -> ScheduledCall | None: ...  # noqa: D102
+
+    async def claim_scheduled_call(  # noqa: D102
+        self,
+        *,
+        call: ScheduledCall,
+        arguments_json: str,
+        receipt: ApprovalCardReservation,
+    ) -> ScheduledCallClaim | ScheduledCallRefusal: ...
+
+    async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None: ...  # noqa: D102
+
     async def resolve_continuation_approval_card(  # noqa: D102
         self,
         *,
@@ -505,7 +542,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
     ) -> ApprovalGrant | None: ...
 
-    async def maintain_approval_grants(self, *, grant_id: str | None = None) -> tuple[str, ...]: ...  # noqa: D102
+    async def maintain_automatic_approvals(self, *, grant_id: str | None = None) -> tuple[str, ...]: ...  # noqa: D102
 
     async def revoke_approval_grant(  # noqa: D102
         self,

@@ -1287,6 +1287,7 @@ visibility = [
     "mindroom.minimal_mode_preflight",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestrator",
+    "mindroom.scheduling",
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
 ]
@@ -4540,6 +4541,7 @@ depends_on = [
     "mindroom.scheduling_executor",
     "mindroom.recurring_schedule",
     "mindroom.requester_identity",
+    "mindroom.tool_approval",
 ]
 
 [[modules]]
@@ -6530,12 +6532,19 @@ expose = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "arm_scheduled_call_approval",
+    "claim_scheduled_call",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "is_process_active_approval_card",
+    "record_scheduled_call_outcome",
+    "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
+    "scheduled_call",
+    "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "withdraw_scheduled_call_approval",
 ]
 from = ["mindroom.tool_approval"]
 

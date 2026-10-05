@@ -20,6 +20,7 @@ from mindroom.approval_manager import (
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
 if TYPE_CHECKING:
@@ -29,6 +30,14 @@ if TYPE_CHECKING:
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
+    from mindroom.event_journal import (
+        ScheduledApprovalArmState,
+        ScheduledCall,
+        ScheduledCallBinding,
+        ScheduledCallClaim,
+        ScheduledCallOutcome,
+        ScheduledCallRefusal,
+    )
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -39,12 +48,19 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "arm_scheduled_call_approval",
+    "claim_scheduled_call",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "is_process_active_approval_card",
+    "record_scheduled_call_outcome",
+    "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
+    "scheduled_call",
+    "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "withdraw_scheduled_call_approval",
 ]
 
 # Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
@@ -93,6 +109,7 @@ class MatrixApprovalAction:
     action: Literal["revoke_auto_approval"] | None = None
     grant_id: str | None = None
     current_binding: str | None = None
+    scheduled_scope: str | None = None
 
 
 def _check_callable_from_module(
@@ -252,6 +269,7 @@ async def handle_matrix_approval_action(
         and action.grant_id is not None
         and action.status is None
         and action.auto_approve_seconds is None
+        and action.scheduled_scope is None
     ):
         return await manager.handle_grant_revocation(
             room_id=action.room_id,
@@ -261,7 +279,12 @@ async def handle_matrix_approval_action(
             authorize_responder=authorize_responder,
             before_consume=before_consume,
         )
-    if action.status is None or action.action is not None or action.grant_id is not None:
+    if (
+        action.status is None
+        or action.action is not None
+        or action.grant_id is not None
+        or (action.scheduled_scope is not None and action.auto_approve_seconds is not None)
+    ):
         return ApprovalActionResult(consumed=False)
     return await manager.handle_card_response(
         room_id=action.room_id,
@@ -273,7 +296,97 @@ async def handle_matrix_approval_action(
         authorize_responder=authorize_responder,
         auto_approve_seconds=action.auto_approve_seconds,
         current_binding=action.current_binding,
+        scheduled_scope=action.scheduled_scope,
     )
+
+
+def scheduled_call_offers_any_arguments(
+    config: Config,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    requester_id: str,
+    approver_id: str,
+    authored_confirmation: bool,
+) -> bool:
+    """Return whether a scheduled call's card may offer approving any arguments.
+
+    Like a timed approval, the broader scope needs requesters who approve their own
+    calls. A tool that asks for its own confirmation is approved only for the exact
+    call shown. Generic MCP dispatch names its remote tool in the arguments, so
+    approving any arguments there would approve every tool on the server.
+    """
+    if not config.tool_approval.scheduled_any_arguments or approver_id != requester_id or authored_confirmation:
+        return False
+    operation = grant_operation(config, tool_name, arguments)
+    return operation is not None and operation.mcp_server_id is None
+
+
+async def request_scheduled_call_approval(
+    binding: ScheduledCallBinding,
+    *,
+    approver_user_id: str,
+    scheduled_for_text: str,
+    any_arguments_offered: bool,
+) -> bool:
+    """Publish the card that pre-approves the call a scheduled task stores."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.request_scheduled_call_approval(
+        binding,
+        approver_user_id=approver_user_id,
+        scheduled_for_text=scheduled_for_text,
+        any_arguments_offered=any_arguments_offered,
+    )
+
+
+async def scheduled_call(task_id: str) -> ScheduledCall | None:
+    """Read the call one scheduled task stored; none without a store."""
+    manager = approval_manager.get_approval_store()
+    return None if manager is None else await manager.scheduled_call(task_id)
+
+
+async def claim_scheduled_call(
+    call: ScheduledCall,
+    *,
+    arguments_json: str,
+    approver_user_id: str,
+) -> ScheduledCallClaim | ScheduledCallRefusal | None:
+    """Spend a scheduled approval for the arguments about to run; none without a store."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return None
+    return await manager.claim_scheduled_call(call, arguments_json=arguments_json, approver_user_id=approver_user_id)
+
+
+async def record_scheduled_call_outcome(task_id: str, outcome: ScheduledCallOutcome) -> None:
+    """Record how one claimed scheduled call ended."""
+    manager = approval_manager.get_approval_store()
+    if manager is not None:
+        await manager.record_scheduled_call_outcome(task_id, outcome)
+
+
+async def arm_scheduled_call_approval(
+    task_id: str,
+    workflow_digest: str,
+    *,
+    any_arguments_allowed: bool,
+) -> ScheduledApprovalArmState:
+    """Arm a scheduled call's approval as its unchanged task fires; unknown without a store."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return "none"
+    return await manager.arm_scheduled_call_approval(
+        task_id,
+        workflow_digest,
+        any_arguments_allowed=any_arguments_allowed,
+    )
+
+
+async def withdraw_scheduled_call_approval(task_id: str, *, reason: str) -> None:
+    """Withdraw a cancelled task's approval and deny its card if it is still pending."""
+    manager = approval_manager.get_approval_store()
+    if manager is not None:
+        await manager.withdraw_scheduled_call_approval(task_id, reason=reason)
 
 
 def is_process_active_approval_card(card_event_id: str) -> bool:
