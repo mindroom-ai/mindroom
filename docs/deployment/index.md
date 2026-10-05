@@ -11,9 +11,9 @@ Each option links to the page with its setup steps.
 
 | Method | Best For |
 |--------|----------|
-| [Your computer + MindRoom Chat](hosted-matrix.md) | Recommended and simplest: run only `uvx mindroom run` locally |
-| [NixOS LXC (Incus)](../getting-started.md#advanced-agent-managed-nixos-container) | Give a MindRoom agent full freedom over its own persistent NixOS machine while the host controls what it sees |
+| [Your computer + MindRoom Chat (hosted Matrix)](hosted-matrix.md) | Recommended and simplest: run only `uvx mindroom run` locally |
 | [Full Stack (Docker Compose)](../getting-started.md#full-stack-docker-compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
+| [Agent-managed NixOS container (advanced)](../getting-started.md#advanced-agent-managed-nixos-container) | Give a MindRoom agent full freedom over its own persistent NixOS machine while the host controls what it sees |
 | [Docker (single container)](docker.md) | Single MindRoom runtime when you already have Matrix |
 | [Direct install](../getting-started.md#manual-install-with-your-own-matrix-homeserver) | Development and simple setups with your own Matrix homeserver |
 | [Kubernetes](kubernetes.md) | Production clusters: a runtime with optional Tuwunel, client, and MatrixRTC charts, or the multi-tenant SaaS platform |
