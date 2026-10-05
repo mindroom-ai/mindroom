@@ -117,7 +117,8 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
 8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
 9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place without restarting receive loops.
-   Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
+   A call-enabled agent is replaced when its own call setup changes: its `calls.agents` entry, the profile it uses, a model that profile references, `calls.enabled`, or `calls.livekit_service_url`.
+   Otherwise `CallManager.update_config()` hands the new config to later calls, but an agent with a call in progress is replaced after any authored config change, ending that call, because the call's tools, prompt, and approval policy were built from the config it joined with.
 10. Removed entities prepare their response runtime for shutdown, reconcile approval work, and call `leave_rooms()` while ingestion remains active; the orchestrator then cancels the receive loop and stops the bot.
 11. New and restarted bots go through room setup.
 12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.
