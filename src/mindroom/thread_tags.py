@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
+from mindroom.matrix.room_power import user_power_level
+from mindroom.matrix.room_reconciliation import read_room_creators
 
 logger = get_logger(__name__)
 
@@ -25,7 +27,6 @@ RESOLVED_THREAD_TAG = "resolved"
 AUTOMATIC_THREAD_TAG_EXCLUSIONS = frozenset({RESOLVED_THREAD_TAG})
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
-_DEFAULT_USER_POWER_LEVEL = 0
 _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
@@ -541,31 +542,12 @@ def _required_state_event_power_level(
     return _DEFAULT_STATE_EVENT_POWER_LEVEL
 
 
-def _user_power_level(
-    power_levels_content: Mapping[str, object],
-    *,
-    user_id: str,
-) -> int:
-    """Return the current user's effective Matrix power level for one room."""
-    users = power_levels_content.get("users")
-    if isinstance(users, Mapping):
-        typed_users = cast("Mapping[str, object]", users)
-        user_level = _parse_power_level(typed_users.get(user_id))
-        if user_level is not None:
-            return user_level
-
-    users_default = _parse_power_level(power_levels_content.get("users_default"))
-    if users_default is not None:
-        return users_default
-    return _DEFAULT_USER_POWER_LEVEL
-
-
 def _raise_insufficient_power_level(
     room_id: str,
     *,
     subject_label: str,
     user_id: str,
-    user_power_level: int,
+    user_power_level: float,
     required_power_level: int,
 ) -> None:
     """Raise one consistent insufficient-power error."""
@@ -602,23 +584,21 @@ def _assert_user_can_write_thread_tags(
     *,
     subject_label: str,
     user_id: str,
+    creators: frozenset[str],
 ) -> None:
     """Assert one Matrix user can send the thread-tags state event."""
     required_power_level = _required_state_event_power_level(
         power_levels_content,
         event_type=THREAD_TAGS_EVENT_TYPE,
     )
-    user_power_level = _user_power_level(
-        power_levels_content,
-        user_id=user_id,
-    )
-    if user_power_level >= required_power_level:
+    level = user_power_level(power_levels_content, user_id, creators)
+    if level >= required_power_level:
         return
     _raise_insufficient_power_level(
         room_id,
         subject_label=subject_label,
         user_id=user_id,
-        user_power_level=user_power_level,
+        user_power_level=level,
         required_power_level=required_power_level,
     )
 
@@ -702,12 +682,25 @@ async def _assert_thread_tags_write_allowed(
         msg = f"Failed to parse Matrix power levels for {room_id}: {response.content!r}"
         raise ThreadTagsError(msg)
     power_levels_content = response.content
+    required_power_level = _required_state_event_power_level(power_levels_content, event_type=THREAD_TAGS_EVENT_TYPE)
+    creators: frozenset[str] | None = None
+
+    async def creators_for(user_id: str) -> frozenset[str]:
+        """Read the room's creators only when the listed power falls short, the one case they can change."""
+        nonlocal creators
+        if creators is None and user_power_level(power_levels_content, user_id) < required_power_level:
+            creators = await read_room_creators(client, room_id)
+            if creators is None:
+                msg = f"Failed to read the creators of {room_id}"
+                raise ThreadTagsError(msg)
+        return creators or frozenset()
 
     _assert_user_can_write_thread_tags(
         power_levels_content,
         room_id,
         subject_label="the Matrix client",
         user_id=actor_user_id,
+        creators=await creators_for(actor_user_id),
     )
     if requester_user_id is None:
         return
@@ -729,6 +722,7 @@ async def _assert_thread_tags_write_allowed(
         room_id,
         subject_label="the requester",
         user_id=normalized_requester_user_id,
+        creators=await creators_for(normalized_requester_user_id),
     )
 
 

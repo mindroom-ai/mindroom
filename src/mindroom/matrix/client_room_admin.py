@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, MutableMapping
 from enum import StrEnum
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -12,7 +13,8 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE
-from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_state_event
+from mindroom.matrix.room_power import has_privileged_creators, user_power_level
+from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -89,8 +91,12 @@ def _create_room_initial_state(
     admin_users: list[str] | None,
     *,
     encrypted: bool,
+    creators: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Build the initial state events for one managed room creation."""
+    """Build the initial state events for one managed room creation.
+
+    ``creators`` are the users the new room's version gives unlimited power, which it forbids listing.
+    """
     power_level_content: dict[str, Any] = {
         "users_default": _DEFAULT_USER_POWER_LEVEL,
         "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
@@ -103,6 +109,7 @@ def _create_room_initial_state(
         users.update(dict.fromkeys(admin_users, _ROOM_ADMIN_POWER_LEVEL))
     if client.user_id:
         users[client.user_id] = _ROOM_ADMIN_POWER_LEVEL
+    users = {user_id: level for user_id, level in users.items() if user_id not in creators}
     if users:
         power_level_content["users"] = users
     initial_state: list[dict[str, Any]] = [{"type": _POWER_LEVELS_EVENT_TYPE, "content": power_level_content}]
@@ -111,6 +118,27 @@ def _create_room_initial_state(
             {"type": _ROOM_ENCRYPTION_EVENT_TYPE, "state_key": "", "content": dict(_ROOM_ENCRYPTION_CONTENT)},
         )
     return initial_state
+
+
+async def _new_room_version(client: nio.AsyncClient) -> str | None:
+    """Return the room version the homeserver creates rooms with, or None when it does not say."""
+    if not client.access_token:
+        return None
+    response = await client.send(
+        "GET",
+        "/_matrix/client/v3/capabilities",
+        headers={"Authorization": f"Bearer {client.access_token}"},
+    )
+    try:
+        if response.status != HTTPStatus.OK:
+            return None
+        payload = await response.json()
+    finally:
+        response.release()
+    capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
+    room_versions = capabilities.get("m.room_versions") if isinstance(capabilities, dict) else None
+    default = room_versions.get("default") if isinstance(room_versions, dict) else None
+    return default if isinstance(default, str) else None
 
 
 async def create_room(
@@ -130,7 +158,20 @@ async def create_room(
         room_config["alias"] = alias
     if topic:
         room_config["topic"] = topic
-    room_config["initial_state"] = _create_room_initial_state(client, power_users, admin_users, encrypted=encrypted)
+    # Pin the version the initial power levels are built for, so the server cannot pick another.
+    room_version = await _new_room_version(client)
+    creators = frozenset()
+    if room_version is not None:
+        room_config["room_version"] = room_version
+        if has_privileged_creators(room_version) and client.user_id:
+            creators = frozenset({client.user_id})
+    room_config["initial_state"] = _create_room_initial_state(
+        client,
+        power_users,
+        admin_users,
+        encrypted=encrypted,
+        creators=creators,
+    )
     if initial_state:
         room_config["initial_state"].extend(initial_state)
 
@@ -207,12 +248,13 @@ def _with_event_power_level(
     return next_content
 
 
-async def ensure_managed_room_power_levels(
+async def ensure_managed_room_power_levels(  # noqa: PLR0911 - each unsafe Matrix state is a separate fail-closed exit
     client: nio.AsyncClient,
     room_id: str,
     admin_user_ids: Iterable[str] = (),
     *,
     snapshot: RoomStateSnapshot | None = None,
+    creators: frozenset[str] | None = None,
 ) -> bool:
     """Reconcile managed-room power levels with one read-modify-write.
 
@@ -235,12 +277,16 @@ async def ensure_managed_room_power_levels(
         )
         return False
     current_content = current_response.content
+    if creators is None:
+        creators = await read_room_creators(client, room_id, snapshot=snapshot)
+    if creators is None:
+        return False
 
     desired_content = current_content
     for event_type, power_level in _MANAGED_ROOM_EVENT_POWER_LEVELS.items():
         desired_content = _with_event_power_level(desired_content, event_type, power_level)
     concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
-    desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids)
+    desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids, creators)
     if desired_content == current_content:
         logger.debug(
             "Managed room power levels already configured",
@@ -252,7 +298,8 @@ async def ensure_managed_room_power_levels(
     if snapshot is not None:
         # Topics and other policy operations may have awaited since this snapshot.
         # A required read-modify-write must preserve current grants, not restore old ones.
-        return await ensure_managed_room_power_levels(client, room_id, concrete_admin_ids)
+        # The create event is immutable, so the snapshot's creators stay current.
+        return await ensure_managed_room_power_levels(client, room_id, concrete_admin_ids, creators=creators)
 
     response = await client.room_put_state(
         room_id=room_id,
@@ -280,28 +327,21 @@ async def ensure_managed_room_power_levels(
 def _with_room_admin_power_levels(
     power_levels_content: dict[str, Any],
     user_ids: Iterable[str],
+    creators: frozenset[str],
 ) -> dict[str, Any]:
-    """Return power-level content with users promoted while preserving existing admins."""
+    """Return power-level content with users promoted while preserving existing admins.
+
+    Privileged creators already have unlimited power, and listing them would be rejected.
+    """
     next_content = dict(power_levels_content)
     existing_users = power_levels_content.get("users")
     next_users = dict(existing_users) if isinstance(existing_users, dict) else {}
-    for user_id in sorted(set(user_ids)):
+    for user_id in sorted(set(user_ids) - creators):
         current_level = next_users.get(user_id)
         if not isinstance(current_level, int) or current_level < _ROOM_ADMIN_POWER_LEVEL:
             next_users[user_id] = _ROOM_ADMIN_POWER_LEVEL
     next_content["users"] = next_users
     return next_content
-
-
-def _room_power_level_for_user(power_levels_content: dict[str, Any], user_id: str) -> int:
-    """Return one user's current room power level from power-level state content."""
-    users = power_levels_content.get("users")
-    if isinstance(users, dict):
-        user_level = users.get(user_id)
-        if isinstance(user_level, int):
-            return user_level
-    users_default = power_levels_content.get("users_default")
-    return users_default if isinstance(users_default, int) else _DEFAULT_USER_POWER_LEVEL
 
 
 async def room_admin_power_user(
@@ -338,9 +378,11 @@ async def room_admin_power_user(
         return None
 
     for user_id in concrete_user_ids:
-        if _room_power_level_for_user(current_response.content, user_id) >= _ROOM_ADMIN_POWER_LEVEL:
+        if user_power_level(current_response.content, user_id) >= _ROOM_ADMIN_POWER_LEVEL:
             return user_id
-    return None
+    # Room version 12 never lists its creators, whose power is unlimited, so they are checked only now.
+    creators = await read_room_creators(client, room_id)
+    return next((user_id for user_id in concrete_user_ids if user_id in (creators or frozenset())), None)
 
 
 async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix state is a separate fail-closed exit
@@ -350,6 +392,7 @@ async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix 
     *,
     snapshot: RoomStateSnapshot | None = None,
     write_allowed: Callable[[], bool] | None = None,
+    creators: frozenset[str] | None = None,
 ) -> bool:
     """Grant Matrix room admin power while respecting a caller's live write authority."""
     concrete_user_ids = {user_id for user_id in user_ids if user_id}
@@ -369,7 +412,11 @@ async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix 
         )
         return False
     current_content = current_response.content
-    desired_content = _with_room_admin_power_levels(current_content, concrete_user_ids)
+    if creators is None:
+        creators = await read_room_creators(client, room_id, snapshot=snapshot)
+    if creators is None:
+        return False
+    desired_content = _with_room_admin_power_levels(current_content, concrete_user_ids, creators)
     if desired_content == current_content:
         logger.debug(
             "Room admins already have sufficient power",
@@ -380,7 +427,13 @@ async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix 
         return True
 
     if snapshot is not None:
-        return await ensure_room_admin_power_levels(client, room_id, concrete_user_ids, write_allowed=write_allowed)
+        return await ensure_room_admin_power_levels(
+            client,
+            room_id,
+            concrete_user_ids,
+            write_allowed=write_allowed,
+            creators=creators,
+        )
 
     if write_allowed is not None and not write_allowed():
         return False
