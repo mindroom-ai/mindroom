@@ -44,6 +44,7 @@ _MAX_SLEEP_SECONDS = 60.0
 class _PendingVerify:
     """A posted prompt whose run has not ended yet."""
 
+    key: str
     room_id: str
     thread_id: str
     plan: CurationPlan
@@ -108,7 +109,7 @@ class AutomationRunner:
                 cron, due = self._next_due.get(key, ("", now))
                 if cron != automation.cron:
                     self._next_due[key] = (automation.cron, _next_time(automation.cron, now, config.timezone))
-                elif due <= now and key not in self._firing:
+                elif due <= now and not self._busy(key):
                     self._next_due[key] = (cron, _next_time(cron, now, config.timezone))
                     self._firing.add(key)
                     create_background_task(
@@ -121,6 +122,10 @@ class AutomationRunner:
             if pending.deadline <= now:
                 del self._pending[event_id]
                 create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
+
+    def _busy(self, key: str) -> bool:
+        """Return whether this automation is checking, or waiting on the run of its last prompt."""
+        return key in self._firing or any(pending.key == key for pending in self._pending.values())
 
     async def _run(self) -> None:
         while True:
@@ -162,13 +167,14 @@ class AutomationRunner:
                 trigger_dispatch=True,
             )
             if event_id is not None:
-                self._pending[event_id] = _PendingVerify(room_id, event_id, plan, now + _VERIFY_FALLBACK)
+                self._pending[event_id] = _PendingVerify(key, room_id, event_id, plan, now + _VERIFY_FALLBACK)
                 self._wake.set()
                 logger.info(
                     "Automation prompt posted",
                     agent=agent_name,
                     automation=automation.name,
-                    tokens=plan.measured_tokens,
+                    # A field named only "tokens" is redacted as a credential.
+                    file_tokens=plan.measured_tokens,
                     target_tokens=plan.upper_tokens,
                     floor_tokens=plan.floor_tokens,
                 )

@@ -151,6 +151,23 @@ async def test_a_run_that_never_reports_back_is_verified_after_an_hour(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) -> None:
+    """A frequent schedule never starts a second run on the same files before the first is verified."""
+    config, _paths, runner, bot = _setup(tmp_path)
+    config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, cron="* * * * *")]
+    await _tick(runner, NOON)
+    await _tick(runner, NOON + timedelta(minutes=1))
+    await _tick(runner, NOON + timedelta(minutes=2))
+    assert len(bot.sent) == 1
+
+    runner.response_finished(["$event1"])
+    assert await wait_for_background_tasks(5)
+    await _tick(runner, NOON + timedelta(minutes=3))
+
+    assert [message["thread_id"] for message in bot.sent] == [None, "$event1", None]
+
+
+@pytest.mark.asyncio
 async def test_files_under_the_trigger_post_nothing(tmp_path: Path) -> None:
     """The check runs in code, so a healthy agent costs no model call and sees no message."""
     _config, _paths, runner, bot = _setup(tmp_path, memory="# Memory\n- Prefers terse replies.\n")
