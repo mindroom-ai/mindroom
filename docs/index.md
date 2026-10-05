@@ -117,7 +117,7 @@ MindRoom takes the opposite approach.
 | Who they serve | Usually one person's assistant | Personal agents for everyone and shared agents for teams, in rooms where people and agents work together, with access control |
 | What agents can show | Whatever each app allows, mostly text and simple buttons | Its own client: approval cards, live tool traces, voice calls, a browser you can take over, and interactive pages |
 | How they connect | One adapter per messaging app | One open, encrypted protocol, plus bridges for reach |
-| Where messages go | Through each messaging platform | On servers you can run yourself, with end-to-end encrypted rooms |
+| Where messages go | Through each messaging platform | On servers you can run yourself, where rooms can be end-to-end encrypted |
 
 Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [Import from OpenClaw](openclaw.md).
 

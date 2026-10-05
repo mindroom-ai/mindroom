@@ -16,7 +16,7 @@ For first-run install steps, see [Getting Started](../getting-started.md#recomme
 | `mindroom.chat` | Hosted Matrix + provisioning API | Matrix transport and agent account registration |
 | `uvx mindroom run` | Your machine or server | Agent orchestration, tools, model calls |
 
-You need a Matrix account that can sign in to `chat.mindroom.chat` and at least one working model provider, such as a provider API key, a Codex CLI ChatGPT login, or a local Ollama server (see [Supported Providers](../configuration/models.md#supported-providers)).
+[Getting Started](../getting-started.md#recommended-your-computer-mindroom-chat) lists what you need before starting.
 `mindroom config init` (default `--matrix-server mindroom.chat`) and first-run `mindroom run` write the hosted defaults to `~/.mindroom/.env`: `MATRIX_HOMESERVER=https://mindroom.chat`, `MATRIX_SERVER_NAME=mindroom.chat`, and `MINDROOM_PROVISIONING_URL=https://mindroom.chat`.
 `mindroom run` pairs automatically before starting when `MINDROOM_PROVISIONING_URL` is set and none of `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or saved pairing credentials are present.
 After pairing, MindRoom creates its agent accounts on `mindroom.chat`, joins or creates the configured rooms, and starts answering.

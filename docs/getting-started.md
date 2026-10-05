@@ -26,7 +26,7 @@ MindRoom runs on your computer, while the Matrix homeserver is hosted at `mindro
 Before you start:
 
 - Install [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs Python when needed.
-- Have a model ready: an API key for a provider such as Anthropic, OpenAI, or OpenRouter, a subscription login such as Codex, or a local model through Ollama or llama.cpp.
+- Have a model ready: an API key for a provider such as Anthropic, OpenAI, or OpenRouter; a subscription login such as Codex; or a local model through Ollama or llama.cpp (see [Supported Providers](configuration/models.md#supported-providers)).
 - Sign in at [chat.mindroom.chat](https://chat.mindroom.chat); the first sign-in creates the MindRoom Chat account that approves the pairing.
 
 ### 1. Run MindRoom
@@ -104,7 +104,7 @@ See [`config init`](cli.md#config-init) for every option and the extra steps for
 ## Full stack Docker Compose
 
 Use this when you want everything local: the MindRoom dashboard, a Matrix homeserver, and the MindRoom Chat client in one stack.
-It requires Docker and Docker Compose.
+It requires Docker, Docker Compose, and Python 3 for the quickstart script.
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack

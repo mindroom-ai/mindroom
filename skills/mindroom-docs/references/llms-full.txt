@@ -118,7 +118,7 @@ MindRoom takes the opposite approach.
 | Who they serve | Usually one person's assistant | Personal agents for everyone and shared agents for teams, in rooms where people and agents work together, with access control |
 | What agents can show | Whatever each app allows, mostly text and simple buttons | Its own client: approval cards, live tool traces, voice calls, a browser you can take over, and interactive pages |
 | How they connect | One adapter per messaging app | One open, encrypted protocol, plus bridges for reach |
-| Where messages go | Through each messaging platform | On servers you can run yourself, with end-to-end encrypted rooms |
+| Where messages go | Through each messaging platform | On servers you can run yourself, where rooms can be end-to-end encrypted |
 
 Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [Import from OpenClaw](https://docs.mindroom.chat/openclaw/).
 
@@ -429,7 +429,7 @@ MindRoom runs on your computer, while the Matrix homeserver is hosted at `mindro
 Before you start:
 
 - Install [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs Python when needed.
-- Have a model ready: an API key for a provider such as Anthropic, OpenAI, or OpenRouter, a subscription login such as Codex, or a local model through Ollama or llama.cpp.
+- Have a model ready: an API key for a provider such as Anthropic, OpenAI, or OpenRouter; a subscription login such as Codex; or a local model through Ollama or llama.cpp (see [Supported Providers](https://docs.mindroom.chat/configuration/models/#supported-providers)).
 - Sign in at [chat.mindroom.chat](https://chat.mindroom.chat); the first sign-in creates the MindRoom Chat account that approves the pairing.
 
 ### 1. Run MindRoom
@@ -507,7 +507,7 @@ See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every optio
 ## Full stack Docker Compose
 
 Use this when you want everything local: the MindRoom dashboard, a Matrix homeserver, and the MindRoom Chat client in one stack.
-It requires Docker and Docker Compose.
+It requires Docker, Docker Compose, and Python 3 for the quickstart script.
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
@@ -15616,7 +15616,7 @@ Each option links to the page with its setup steps.
 
 | Method | Best For |
 |--------|----------|
-| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Recommended and simplest: run only `uvx mindroom run` locally |
+| [Your computer + MindRoom Chat](https://docs.mindroom.chat/deployment/hosted-matrix/) | Recommended and simplest: run only `uvx mindroom run` locally |
 | [NixOS LXC (Incus)](https://docs.mindroom.chat/getting-started/#advanced-agent-managed-nixos-container) | Give a MindRoom agent full freedom over its own persistent NixOS machine while the host controls what it sees |
 | [Full Stack (Docker Compose)](https://docs.mindroom.chat/getting-started/#full-stack-docker-compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime when you already have Matrix |
@@ -15660,7 +15660,7 @@ For first-run install steps, see [Getting Started](https://docs.mindroom.chat/ge
 | `mindroom.chat` | Hosted Matrix + provisioning API | Matrix transport and agent account registration |
 | `uvx mindroom run` | Your machine or server | Agent orchestration, tools, model calls |
 
-You need a Matrix account that can sign in to `chat.mindroom.chat` and at least one working model provider, such as a provider API key, a Codex CLI ChatGPT login, or a local Ollama server (see [Supported Providers](https://docs.mindroom.chat/configuration/models/#supported-providers)).
+[Getting Started](https://docs.mindroom.chat/getting-started/#recommended-your-computer-mindroom-chat) lists what you need before starting.
 `mindroom config init` (default `--matrix-server mindroom.chat`) and first-run `mindroom run` write the hosted defaults to `~/.mindroom/.env`: `MATRIX_HOMESERVER=https://mindroom.chat`, `MATRIX_SERVER_NAME=mindroom.chat`, and `MINDROOM_PROVISIONING_URL=https://mindroom.chat`.
 `mindroom run` pairs automatically before starting when `MINDROOM_PROVISIONING_URL` is set and none of `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or saved pairing credentials are present.
 After pairing, MindRoom creates its agent accounts on `mindroom.chat`, joins or creates the configured rooms, and starts answering.
