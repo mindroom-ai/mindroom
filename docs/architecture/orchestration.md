@@ -117,7 +117,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
 8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations, all while admission remains open.
    The bot inventory changes only under the replacement admission lock the reload already holds, so the plan stays exact through the drain.
-   When `ConfigUpdatePlan.requires_response_drain` is false, the reload skips the drain and closes the gate at once for the swap; admitted responses keep running and read the new config wherever they read it live.
+   When `ConfigUpdatePlan.requires_response_drain` is false, the reload skips the drain and the runtime-replacement hook and closes the gate at once for the swap; admitted responses and thread exports keep running, and responses read the new config wherever they read it live.
    That requires a plan that creates, restarts, removes, and re-rooms no entity and changes no reply-authorization input: `administrators`, `authorization`, `bot_accounts`, `mindroom_user`, `room_defaults`, `rooms`, `router.access`, `router.accept_invites`, `personal_rooms`, or `external_trigger_policy`.
    Per-entity access already restarts its entity, and keeping the drain for these inputs stops a policy change from committing between an admitted reply's authorization decision and the response it permits.
    Partial-publication repairs always drain, and MCP catalogs refreshed during a skipped-drain apply restart their dependents through the drained MCP catalog path instead of inline.

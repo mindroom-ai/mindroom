@@ -222,6 +222,8 @@ async def test_busy_reload_waits_only_for_restarts_or_reply_authorization_change
 
     # Admission is closed for the swap itself, over the busy response only when nothing restarts.
     assert observed_gate_states == [(True, 0 if waits_for_idle else 1)]
+    # A swap that replaces no runtime must not cancel running exports through the replacement hook.
+    assert lifecycle.before_runtime_replacement.await_count == (1 if waits_for_idle else 0)
     assert gate.closed is False
     assert lifecycle.status == ConfigReloadStatus(
         status="applied",

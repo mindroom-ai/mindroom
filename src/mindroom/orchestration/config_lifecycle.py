@@ -379,11 +379,14 @@ class ConfigReloadLifecycle:
     async def _apply_with_closed_admission(
         self,
         operation: Callable[[], Awaitable[None]],
+        *,
+        replaces_runtime: bool,
     ) -> None:
         """Apply one replacement with admission already closed, then always reopen it.
 
         Callers must close the gate immediately before calling, with no await in
-        between, so nothing can be admitted into the window.
+        between, so nothing can be admitted into the window. Only an operation
+        that replaces runtime runs the replacement hook, which cancels exports.
 
         The gate is closed but not held for the duration: applying the plan stops
         bots, and stopping a bot drains its detached responses, so holding the
@@ -392,7 +395,8 @@ class ConfigReloadLifecycle:
         """
         assert self.response_admission_gate.closed, "admission must be closed before applying"
         try:
-            await self.before_runtime_replacement()
+            if replaces_runtime:
+                await self.before_runtime_replacement()
             await operation()
         finally:
             self.response_admission_gate.reopen()
@@ -437,7 +441,11 @@ class ConfigReloadLifecycle:
         request_is_current: Callable[[], bool],
         wait_for_idle: bool = True,
     ) -> bool:
-        """Drain responses unless told not to, and report whether the operation was applied."""
+        """Drain responses, and report whether the serialized operation was applied.
+
+        ``wait_for_idle=False`` is only for an operation that replaces no runtime,
+        so it neither waits for responses nor runs the replacement hook.
+        """
         loop = asyncio.get_running_loop()
         drain_state = _ReplacementDrainState()
         while request_is_current():
@@ -460,7 +468,7 @@ class ConfigReloadLifecycle:
         else:
             return False
 
-        await self._apply_with_closed_admission(operation)
+        await self._apply_with_closed_admission(operation, replaces_runtime=wait_for_idle)
         return True
 
     async def _apply_queued_config_reload(self) -> None:
