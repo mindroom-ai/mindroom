@@ -2,7 +2,7 @@
 
 In this setup the Matrix homeserver and chat UI are hosted at `mindroom.chat`, and only the MindRoom backend runs on your machine.
 This page covers pairing that backend with your MindRoom Chat account (`mindroom connect`), the credentials pairing saves, what the hosted server can see, and how to point the same flow at your own deployment.
-For first-run install steps, see [Getting Started](https://docs.mindroom.chat/getting-started/#recommended-your-computer-mindroom-chat).
+For prerequisites and first-run install steps, see [Getting Started](https://docs.mindroom.chat/getting-started/#recommended-your-computer-mindroom-chat).
 
 ## What Runs Where
 
@@ -12,7 +12,6 @@ For first-run install steps, see [Getting Started](https://docs.mindroom.chat/ge
 | `mindroom.chat` | Hosted Matrix + provisioning API | Matrix transport and agent account registration |
 | `uvx mindroom run` | Your machine or server | Agent orchestration, tools, model calls |
 
-[Getting Started](https://docs.mindroom.chat/getting-started/#recommended-your-computer-mindroom-chat) lists what you need before starting.
 `mindroom config init` (default `--matrix-server mindroom.chat`) and first-run `mindroom run` write the hosted defaults to `~/.mindroom/.env`: `MATRIX_HOMESERVER=https://mindroom.chat`, `MATRIX_SERVER_NAME=mindroom.chat`, and `MINDROOM_PROVISIONING_URL=https://mindroom.chat`.
 `mindroom run` pairs automatically before starting when `MINDROOM_PROVISIONING_URL` is set and none of `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or saved pairing credentials are present.
 After pairing, MindRoom creates its agent accounts on `mindroom.chat`, joins or creates the configured rooms, and starts answering.

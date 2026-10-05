@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244
 MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
 Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
 Pick a [local model](https://docs.mindroom.chat/configuration/models/) for your private life or a frontier model for hard problems, and self-host the whole stack or run only the agents on your own computer.
-Everything in this repository is Apache 2.0 except `saas-platform/`, the code that runs the hosted service, which uses the [Business Source License](#license); the MindRoom Chat app is a separate [AGPL-3.0](https://github.com/mindroom-ai/mindroom-chat#license) project.
+Everything in this repository is Apache 2.0 except `saas-platform/`, the hosted service's portal, billing, and provisioning code, which uses the [Business Source License](#license); the MindRoom Chat app is a separate [AGPL-3.0](https://github.com/mindroom-ai/mindroom-chat#license) project.
 
 **Run it on any computer**
 
@@ -105,7 +105,7 @@ These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recor
 - Keep your calendar, reminders, and to-do lists in order, by voice.
 - Keep notes, a journal, and memories you can find months later.
 - Follow the topics you care about, with a digest only when something is new.
-- Look after your homelab and smart home, with approval for anything risky.
+- Look after your homelab and smart home, with approval for the actions you choose.
 - Build quick tools and scripts in the agent's own workspace.
 
 ### Work
@@ -479,7 +479,7 @@ Teams, per-room models, context compaction, history controls, and memory backend
 - **Docker** — single-container runtime ([guide](https://docs.mindroom.chat/deployment/docker/)).
 - **Kubernetes** — Helm charts for enterprise-scale, multi-tenant deployments ([guide](https://docs.mindroom.chat/deployment/kubernetes/)).
 - **NixOS LXC (Incus)** — the author's favorite for personal use: [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) provisions a persistent, agent-controlled NixOS container with the full stack, which the agent can rebuild and manage itself while the host controls what it sees.
-- **Bridges** — connect Slack, Telegram, WhatsApp, and more via [docs/deployment/bridges](https://docs.mindroom.chat/deployment/bridges/).
+- **Bridges** — connect Slack, Telegram, WhatsApp, and more via [Bridges](https://docs.mindroom.chat/deployment/bridges/).
 
 ## Why Matrix?
 
@@ -511,7 +511,7 @@ By building on it, MindRoom inherits instead of reimplements:
 - **Memory**: Mem0 + ChromaDB vector storage, persistent on disk
 - **UI**: web dashboard for administration; [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) (or any Matrix client) for chat
 
-See [docs/architecture](https://docs.mindroom.chat/architecture/) for internals.
+See the [architecture docs](https://docs.mindroom.chat/architecture/) for internals.
 
 ## Note for self-hosters
 
