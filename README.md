@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/f8325b3c-7ed0-4cd7-bc77-0c4cd74f226e
 MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
 Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
 Pick a [local model](https://docs.mindroom.chat/configuration/models/) for your private life or a frontier model for hard problems, and self-host the whole stack or run only the agents on your own computer.
-Everything in this repository is Apache 2.0 except `saas-platform/`, the hosted service's portal, billing, and provisioning code, which uses the [Business Source License](#license); the MindRoom Chat app is a separate [AGPL-3.0](https://github.com/mindroom-ai/mindroom-chat#license) project.
+Everything in this repository is Apache 2.0 except `saas-platform/` (the hosted service's website, portal, billing, and provisioning code), which uses the [Business Source License](#license); the MindRoom Chat app is a separate [AGPL-3.0](https://github.com/mindroom-ai/mindroom-chat#license) project.
 
 **Run it on any computer**
 
@@ -355,7 +355,7 @@ Matrix E2EE support is installed by default.
 
 ### First steps
 
-Open the **Personal** room in MindRoom Chat ([chat.mindroom.chat](https://chat.mindroom.chat), or the chat app of your own stack) and say hello: the starter agent is the only one there, so it answers without a mention.
+Open the **Personal** room in MindRoom Chat ([chat.mindroom.chat](https://chat.mindroom.chat), or the chat app of your own stack) and say hello: the starter agent `Mind` is the room's only responder, so it answers without a mention.
 
 Then add more agents and teams in the dashboard or `config.yaml` (see [Configuration](#configuration)), and mention several in one message to have them work together.
 
@@ -468,12 +468,12 @@ Teams, per-room models, context compaction, history controls, and memory backend
 
 ## Deployment
 
-- **Own homeserver** — set `MATRIX_HOMESERVER` and run against any Synapse, Conduit, or Dendrite instance.
+- **Own homeserver** — set `MATRIX_HOMESERVER` and run against any Synapse, Conduit, or Dendrite instance ([guide](https://docs.mindroom.chat/getting-started/#manual-install-with-your-own-matrix-homeserver)).
 - **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + MindRoom Chat via Docker.
-- **Hosted Matrix** — run only the backend locally against hosted Matrix at [mindroom.chat](https://mindroom.chat), pairing via [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](https://docs.mindroom.chat/deployment/hosted-matrix/)).
+- **Your computer + MindRoom Chat (hosted Matrix)** — run only the backend locally against hosted Matrix at [mindroom.chat](https://mindroom.chat), pairing via [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](https://docs.mindroom.chat/deployment/hosted-matrix/)).
 - **Docker** — single-container runtime ([guide](https://docs.mindroom.chat/deployment/docker/)).
 - **Kubernetes** — Helm charts for enterprise-scale, multi-tenant deployments ([guide](https://docs.mindroom.chat/deployment/kubernetes/)).
-- **NixOS LXC (Incus)** — the author's favorite for personal use: [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) provisions a persistent, agent-controlled NixOS container with the full stack, which the agent can rebuild and manage itself while the host controls what it sees.
+- **Agent-managed NixOS container (advanced)** — the author's favorite for personal use: [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) provisions a persistent, agent-controlled NixOS container with the full stack, which the agent can rebuild and manage itself while the host controls what it sees.
 - **Bridges** — connect Slack, Telegram, WhatsApp, and more via [Bridges](https://docs.mindroom.chat/deployment/bridges/).
 
 ## Why Matrix?

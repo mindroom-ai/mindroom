@@ -63,7 +63,7 @@ See [`mindroom service`](cli.md#service) for when the question is skipped.
 
 ### Verify
 
-- **Chat:** open `https://chat.mindroom.chat` and send `hello` in the `Personal` room; its only agent, `Mind`, answers without a mention.
+- **Chat:** open `https://chat.mindroom.chat` and send `hello` in the `Personal` room; `Mind` is its only responder, so it answers without a mention.
 - **Dashboard:** open `http://localhost:8765` to configure agents, models, and tools.
   It asks for the `MINDROOM_API_KEY` that setup generated in `~/.mindroom/.env`, because `mindroom run` serves the dashboard on every network interface by default.
 - **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](cli.md#doctor).
