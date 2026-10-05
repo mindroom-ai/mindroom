@@ -10,8 +10,10 @@ once, and the stored arguments run as stored unless any arguments were approved.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -49,7 +51,7 @@ __all__ = [
 _REFUSALS: dict[ScheduledCallRefusal, str] = {
     "missing": "this task has no stored call",
     "elsewhere": "the call belongs to another agent, conversation, or requester",
-    "withdrawn": "its approval was withdrawn when the task was cancelled or edited",
+    "withdrawn": "its approval was withdrawn when the task was cancelled",
     "not_approved": "the requester has not approved it",
     "not_armed": "its approval is not active; it activates when the task fires",
     "used": "its approval was already used",
@@ -59,10 +61,8 @@ _REFUSALS: dict[ScheduledCallRefusal, str] = {
 }
 
 
-# Refusals after which the requester can still approve the same call the ordinary way, such as after an edit.
-_ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset(
-    {"withdrawn", "not_approved", "not_armed", "late", "left_room"},
-)
+# Refusals after which the requester can still approve the same call the ordinary way.
+_ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset({"not_approved", "not_armed", "late", "left_room"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,13 +115,16 @@ def _resolve_live_function(agent: Agent, tool_name: str, toolkit_name: str | Non
     if len(candidates) > 1:
         return f"more than one of this agent's tools is named `{tool_name}`"
     [(owner, function)] = candidates.items()
+    entrypoint = None if function.entrypoint is None else inspect.unwrap(function.entrypoint)
     if (
         function.requires_user_input
         or function.external_execution
         or function.stop_after_tool_call
-        or (function.entrypoint is not None and entrypoint_accepts_media(function.entrypoint))
+        or (entrypoint is not None and entrypoint_accepts_media(entrypoint))
     ):
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
+    if entrypoint is not None and (inspect.isgeneratorfunction(entrypoint) or inspect.isasyncgenfunction(entrypoint)):
+        return f"`{tool_name}` streams its result, which a scheduled call cannot"
     return LiveFunction(
         toolkit_name=owner,
         function=function,
@@ -165,25 +168,23 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
     if isinstance(prepared, str):
         return _refused(task_id, prepared)
     live, arguments_text, approver_id = prepared
+    # Prepare before claiming, so a function that cannot be prepared spends nothing.
+    function = prepare_live_agent_function(agent, live.function, run_context)
     claimed = await claim_scheduled_call(call, arguments_json=arguments_text, approver_user_id=approver_id)
     if claimed is None:
         return _refused(task_id, "the approval runtime is not ready")
     if isinstance(claimed, str):
-        if claimed in _ASK_INSTEAD:
-            # The call can still go ahead the ordinary way, with an approval card now.
+        if claimed in _ASK_INSTEAD and time.time_ns() >= call.execute_at_ns:
+            # Once its time has come, the call can still go ahead the ordinary way, with an approval card now.
             return (
                 f"{_refused(task_id, _REFUSALS[claimed])} To ask the requester to approve it now, call "
                 f"`{call.tool_name}` with these arguments: {call.arguments_json}"
             )
+        if claimed in _ASK_INSTEAD:
+            return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
         return _refused(task_id, _REFUSALS[claimed])
     # The approval is spent; a call interrupted from here leaves its outcome unknown and is never retried.
-    execution = await _execute(
-        agent,
-        run_context,
-        live.function,
-        json.loads(arguments_text),
-        call_id=f"scheduled-{task_id}",
-    )
+    execution = await _execute(function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
     if execution.status == "success" and not isinstance(execution.result, Iterator | AsyncIterator):
         await record_scheduled_call_outcome(task_id, "completed")
         return execution.result
@@ -244,18 +245,15 @@ def _invalid_arguments(function: Function, arguments: dict[str, object]) -> str 
 
 
 async def _execute(
-    agent: Agent,
-    run_context: RunContext,
     function: Function,
     arguments: dict[str, object],
     *,
     call_id: str,
 ) -> FunctionExecutionResult:
     """Run one prepared function with its hooks, owning a synchronous body until it finishes."""
-    prepared = prepare_live_agent_function(agent, function, run_context)
     # A spent approval runs the tool body; a cached result would skip it and its hooks.
-    prepared.cache_results = False
-    call = OwnedAgentFunctionCall(function=prepared, call_id=call_id, arguments=arguments)
+    function.cache_results = False
+    call = OwnedAgentFunctionCall(function=function, call_id=call_id, arguments=arguments)
     tracker = SyncToolCompletionTracker()
 
     async def settle() -> None:

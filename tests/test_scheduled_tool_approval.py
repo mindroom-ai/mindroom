@@ -66,7 +66,7 @@ from tests.scheduling_helpers import joined_member_state
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from contextlib import AbstractContextManager
 
     from mindroom.approval_manager import ApprovalActionResult
@@ -1986,23 +1986,27 @@ async def test_replacement_arguments_run_only_under_an_any_arguments_approval(
 
 
 @pytest.mark.asyncio
-async def test_unapproved_call_offers_the_ordinary_way_with_its_stored_arguments(
+@pytest.mark.parametrize("fired", [True, False], ids=["after-its-time", "before-its-time"])
+async def test_unapproved_call_offers_the_ordinary_way_only_once_its_time_has_come(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
+    fired: bool,
 ) -> None:
-    """Without an approval the call does not run, and the agent learns how to ask for approval now."""
+    """Without an approval nothing runs; only at its time does the agent learn how to ask for approval instead."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
+    offset = timedelta(minutes=-1) if fired else timedelta(minutes=1)
     try:
-        assert await _schedule(manager)
+        assert await _schedule(manager, execute_at=datetime.now(UTC) + offset)
 
         result = await _run(manager, _live_agent(runs))
 
         assert isinstance(result, str)
         assert "has not approved it" in result
-        assert "call `post_slack_message` with these arguments" in result
-        assert canonical_arguments(_ARGUMENTS) in result
+        assert ("call `post_slack_message` with these arguments" in result) is fired
+        assert (canonical_arguments(_ARGUMENTS) in result) is fired
+        assert ("it runs when its task fires" in result) is not fired
         assert runs == []
     finally:
         await manager.shutdown()
@@ -2120,11 +2124,11 @@ def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_withdrawn_approval_points_to_the_ordinary_way(
+async def test_cancelled_task_runs_nothing_and_offers_no_other_way(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A withdrawn approval runs nothing, and the agent learns how to ask for approval the usual way."""
+    """A cancelled task's call does not run, and the agent is not pointed at making it anyway."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
@@ -2135,8 +2139,8 @@ async def test_withdrawn_approval_points_to_the_ordinary_way(
         result = await _run(manager, _live_agent(runs))
 
         assert isinstance(result, str)
-        assert "withdrawn" in result
-        assert "call `post_slack_message` with these arguments" in result
+        assert "withdrawn when the task was cancelled" in result
+        assert "with these arguments" not in result
         assert runs == []
     finally:
         await manager.shutdown()
@@ -2218,3 +2222,41 @@ async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsin
 
     parse.assert_not_awaited()
     context.client.room_put_state.assert_not_awaited()
+
+
+class _StreamingTools(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    def post_slack_message(self, channel: str, text: str = "") -> Iterator[str]:
+        """Stream a Slack message.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+
+        """
+        yield f"{channel}: {text}"
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_is_refused_before_its_approval_is_spent(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A tool whose body only runs when its stream is read cannot run as a scheduled call, and spends nothing."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    toolkit = _StreamingTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = _TOOLKIT
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, Agent(id="general", model=OpenAIChat(), tools=[toolkit]))
+
+        assert isinstance(result, str)
+        assert "streams its result" in result
+        assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
