@@ -145,13 +145,13 @@ const reasons: IconItem[] = [
   },
   {
     title: 'Private where it matters',
-    body: 'Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home.',
+    body: 'Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home, and what you tell a private agent stays out of shared ones.',
     icon: Lock,
     href: `${docsUrl}#private-where-it-matters`,
   },
   {
     title: 'Memory that keeps improving',
-    body: 'Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills, while what you tell a private agent stays out of shared ones.',
+    body: 'Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills.',
     icon: Brain,
     href: `${docsUrl}#they-remember-and-keep-improving`,
   },
@@ -492,7 +492,7 @@ function MobileMenu() {
   const linkClass = 'block rounded-md px-3 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-200 dark:hover:bg-white/8 dark:hover:text-white'
 
   return (
-    <div ref={containerRef} className="lg:hidden">
+    <div ref={containerRef} className="xl:hidden">
       <button
         ref={buttonRef}
         type="button"
@@ -538,7 +538,7 @@ export default function LandingPage() {
             <MindRoomLogo className="transition-transform duration-200 group-hover:scale-105" size={32} />
             <span className="text-lg font-semibold max-[359px]:sr-only">MindRoom</span>
           </Link>
-          <div className="hidden items-center gap-7 lg:flex">
+          <div className="hidden items-center gap-7 xl:flex">
             {navLinks.map((link) => (
               <Link key={link.href} href={link.href} className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
                 {link.label}
