@@ -478,6 +478,7 @@ depends_on = [
     "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
+    "mindroom.reply_lifecycle",
     "mindroom.turn_record",
 ]
 visibility = [
@@ -513,6 +514,14 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.cli_approval_waits",
 ]
+
+[[modules]]
+path = "mindroom.reply_lifecycle"
+depends_on = []
+
+[[modules]]
+path = "mindroom.reply_presentation"
+depends_on = ["mindroom.constants", "mindroom.tool_system.events"]
 
 [[modules]]
 path = "mindroom.event_journal.legacy_approval_recovery"

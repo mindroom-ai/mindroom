@@ -68,6 +68,7 @@ from .projection import (
     project,
     tombstoned_event_ids,
 )
+from .replies import ReplyStore
 from .scheduled_approvals import (  # noqa: TC001
     ScheduledApprovalArmState,
     ScheduledCall,
@@ -1678,6 +1679,11 @@ class PrincipalStore:
     def principal_id(self) -> str:
         """Return this view's durable principal identity."""
         return self._principal_id
+
+    @property
+    def replies(self) -> ReplyStore:
+        """Return this principal's reply records."""
+        return ReplyStore(_backend=self._backend, _principal_id=self._principal_id)
 
 
 def _turn_membership_is_current(

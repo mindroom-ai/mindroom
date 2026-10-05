@@ -15,9 +15,14 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .legacy_response_attempts import migrate_response_attempts
-from .legacy_schema import upgrade_approval_argument_digests, upgrade_approval_toolkit_origins, upgrade_legacy_journal
+from .legacy_schema import (
+    upgrade_approval_argument_digests,
+    upgrade_approval_toolkit_origins,
+    upgrade_legacy_journal,
+    upgrade_outbox_reply_rows,
+)
 from .offloading import ThreadOffload, settled
-from .schema import POSTGRES_DIALECT, render, schema_statements
+from .schema import OUTBOX_TABLE, POSTGRES_DIALECT, render, schema_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -133,6 +138,17 @@ class PostgresBackend:
             )
             existing_tables = frozenset(str(row["table_name"]) for row in cursor.fetchall())
             upgrade_legacy_journal(_PostgresTransaction(cursor), existing_tables)
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'matrix_delivery_outbox'",
+            )
+            outbox_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
+            upgrade_outbox_reply_rows(
+                _PostgresTransaction(cursor),
+                outbox_columns,
+                outbox_table_ddl=OUTBOX_TABLE,
+                sqlite=False,
+            )
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
             cursor.execute(

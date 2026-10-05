@@ -50,6 +50,45 @@ POSTGRES_DIALECT = _SchemaDialect(
 )
 
 
+OUTBOX_TABLE = """
+    CREATE TABLE IF NOT EXISTS matrix_delivery_outbox (
+        principal_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        stage TEXT NOT NULL CHECK (stage IN ('initial', 'final', 'edit')),
+        event_type TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        thread_id TEXT NOT NULL,
+        transaction_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        -- Local semantic facts needed after acknowledgement. These are not
+        -- Matrix event content and are never sent by the delivery worker.
+        result_json TEXT,
+        edits_event_id TEXT,
+        -- A durable edit can be reserved before the INITIAL event ID exists.
+        -- Its claim waits until INITIAL acknowledgement fills the target.
+        edit_target_pending INTEGER NOT NULL DEFAULT 0,
+        attempted INTEGER NOT NULL DEFAULT 0,
+        retired INTEGER NOT NULL DEFAULT 0,
+        permanent_failure_reason TEXT,
+        -- The device whose transaction ID the homeserver may already hold. A
+        -- transaction ID deduplicates within one device, so a row attempted by
+        -- a device this process is no longer logged in as carries an ID that
+        -- would be accepted as new -- and post the answer twice.
+        sending_device_id TEXT,
+        acknowledged_event_id TEXT,
+        created_at_ns BIGINT NOT NULL,
+        -- Rows that write an agent or team reply carry its identity and its
+        -- place in the reply's one write sequence, so every row of one reply,
+        -- across all of its spans and delivery ids, is sent in order.
+        reply_id TEXT,
+        span_id TEXT,
+        reply_sequence BIGINT,
+        PRIMARY KEY (principal_id, delivery_id, stage)
+    )
+"""
+
+
 _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS response_attempts (
@@ -333,37 +372,7 @@ _TABLES = (
         PRIMARY KEY (principal_id, room_id)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS matrix_delivery_outbox (
-        principal_id TEXT NOT NULL,
-        delivery_id TEXT NOT NULL,
-        stage TEXT NOT NULL CHECK (stage IN ('initial', 'final')),
-        event_type TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        membership_epoch BIGINT NOT NULL,
-        thread_id TEXT NOT NULL,
-        transaction_id TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        -- Local semantic facts needed after acknowledgement. These are not
-        -- Matrix event content and are never sent by the delivery worker.
-        result_json TEXT,
-        edits_event_id TEXT,
-        -- A durable edit can be reserved before the INITIAL event ID exists.
-        -- Its claim waits until INITIAL acknowledgement fills the target.
-        edit_target_pending INTEGER NOT NULL DEFAULT 0,
-        attempted INTEGER NOT NULL DEFAULT 0,
-        retired INTEGER NOT NULL DEFAULT 0,
-        permanent_failure_reason TEXT,
-        -- The device whose transaction ID the homeserver may already hold. A
-        -- transaction ID deduplicates within one device, so a row attempted by
-        -- a device this process is no longer logged in as carries an ID that
-        -- would be accepted as new -- and post the answer twice.
-        sending_device_id TEXT,
-        acknowledged_event_id TEXT,
-        created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, delivery_id, stage)
-    )
-    """,
+    OUTBOX_TABLE,
     """
     CREATE TABLE IF NOT EXISTS approval_cards (
         principal_id TEXT NOT NULL,
@@ -465,6 +474,108 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS reply_messages (
+        -- One agent or team reply: the single owner of what it shows, which
+        -- span may change it, and the Stop facts that reach it. Presentations
+        -- are opaque JSON written by the reply layer.
+        principal_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT,
+        membership_epoch BIGINT NOT NULL,
+        requester_id TEXT NOT NULL,
+        visibility_policy TEXT NOT NULL CHECK (visibility_policy IN ('normal', 'silent_schedule')),
+        -- Bound by the first acknowledged create, in any state.
+        event_id TEXT,
+        continuation_event_ids_json TEXT,
+        state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'completed', 'cancelled', 'failed', 'gone')),
+        current_span_id TEXT,
+        last_span_id TEXT NOT NULL,
+        presentation_json TEXT NOT NULL,
+        frozen_display_json TEXT,
+        -- What the latest write, durable or direct, may have shown, and its
+        -- place in the reply's write sequence. Matrix acknowledged it when
+        -- confirmed_seq has reached possibly_shown_seq.
+        possibly_shown_json TEXT,
+        possibly_shown_seq BIGINT,
+        confirmed_seq BIGINT,
+        -- Bumped by every transition that changes what a payload would hold.
+        revision BIGINT NOT NULL,
+        legacy_pending TEXT CHECK (legacy_pending IN ('presentation_read', 'adoption_scan')),
+        placeholder_only BOOLEAN NOT NULL,
+        stop_receipt_order BIGINT,
+        stop_applied_receipt_order BIGINT,
+        stop_button_event_id TEXT,
+        redaction_pending_json TEXT,
+        -- A durable write a transition decided without a payload; rendered
+        -- and enqueued by a follow-up under the reply's sending lock.
+        owed_write_json TEXT,
+        -- The last allocated value of the reply's one write sequence.
+        reply_sequence BIGINT NOT NULL,
+        approval_id TEXT,
+        created_at_ns BIGINT NOT NULL,
+        updated_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, reply_id),
+        UNIQUE (principal_id, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reply_spans (
+        -- One claim on a reply by one executor, with a write-once outcome.
+        principal_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('turn', 'replay', 'approval_resume', 'regeneration')),
+        -- The driving event: it keys the span's outbox rows and response
+        -- attempt, and spans of one reply can share it.
+        delivery_id TEXT NOT NULL,
+        approval_id TEXT,
+        approval_generation BIGINT,
+        bot_generation TEXT NOT NULL,
+        base_sequence BIGINT NOT NULL,
+        rollback_json TEXT,
+        outcome TEXT CHECK (outcome IN (
+            'completed', 'paused', 'cancelled', 'failed',
+            'suppressed', 'restored', 'released', 'superseded', 'lost')),
+        claimed_at_ns BIGINT NOT NULL,
+        ended_at_ns BIGINT,
+        PRIMARY KEY (principal_id, span_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reply_span_sources (
+        principal_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('pending', 'logical', 'discovery')),
+        ordinal BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, span_id, role, ordinal),
+        UNIQUE (principal_id, span_id, role, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pending_reply_stops (
+        -- A Stop on an event no reply is bound to yet; the create
+        -- acknowledgement that binds the event applies it.
+        principal_id TEXT NOT NULL,
+        target_event_id TEXT NOT NULL,
+        receipt_order BIGINT NOT NULL,
+        room_id TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, target_event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reply_principal_generations (
+        -- The bot instance that owns this principal's replies now. Spans of
+        -- any other generation can no longer write.
+        principal_id TEXT NOT NULL PRIMARY KEY,
+        generation TEXT NOT NULL,
+        started_at_ns BIGINT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_identity (
         -- Stable database identity checked against the install's journal
         -- binding before opening its turn, delivery, and recovery state.
@@ -560,6 +671,23 @@ _INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
     ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS reply_spans_reply ON reply_spans (principal_id, reply_id, claimed_at_ns)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS reply_spans_delivery ON reply_spans (principal_id, delivery_id/*bytes*/, claimed_at_ns)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS reply_span_sources_event ON reply_span_sources (principal_id, event_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS reply_messages_room ON reply_messages (principal_id, room_id, state)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_reply
+    ON matrix_delivery_outbox (principal_id, reply_id, reply_sequence)
+    WHERE reply_id IS NOT NULL
     """,
     """
     CREATE INDEX IF NOT EXISTS turn_records_anchor

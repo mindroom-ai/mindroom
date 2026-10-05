@@ -23,9 +23,14 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 
 from .legacy_response_attempts import migrate_response_attempts
-from .legacy_schema import upgrade_approval_argument_digests, upgrade_approval_toolkit_origins, upgrade_legacy_journal
+from .legacy_schema import (
+    upgrade_approval_argument_digests,
+    upgrade_approval_toolkit_origins,
+    upgrade_legacy_journal,
+    upgrade_outbox_reply_rows,
+)
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, render, schema_statements
+from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -221,6 +226,15 @@ class SqliteBackend:
                 str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             )
             upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
+            outbox_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
+            )
+            upgrade_outbox_reply_rows(
+                _SqliteTransaction(connection),
+                outbox_columns,
+                outbox_table_ddl=OUTBOX_TABLE,
+                sqlite=True,
+            )
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
             call_columns = frozenset(

@@ -127,3 +127,59 @@ def upgrade_approval_argument_digests(transaction: Transaction, columns: frozens
     """Add the argument digest column inside the schema transaction."""
     if "arguments_digest" not in columns:
         transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN arguments_digest TEXT")
+
+
+_PRE_REPLY_OUTBOX_COLUMNS = (
+    "principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id, "
+    "payload_json, result_json, edits_event_id, edit_target_pending, attempted, retired, "
+    "permanent_failure_reason, sending_device_id, acknowledged_event_id, created_at_ns"
+)
+
+
+# LEGACY_COMPAT: Outbox rows without reply identity and with only initial and final stages.
+# Legacy format: matrix_delivery_outbox without reply_id, span_id, and reply_sequence columns, whose stage
+# CHECK constraint admits only 'initial' and 'final'.
+# Last legacy release: v2026.10.162; replacement: the unreleased durable reply messages add the three nullable
+# columns and the 'edit' stage for non-terminal reply writes.
+# Handling: SQLite rebuilds the table under the new definition and copies every row unchanged, before the schema's
+# indexes are created; PostgreSQL adds the columns and replaces the stage constraint. Existing rows keep null reply
+# identity, which every reader treats as a delivery that is not a reply row.
+# Coverage: tests/test_journal_upgrade_boundary.py::test_outbox_upgrade_keeps_rows_and_admits_edit_stage.
+def upgrade_outbox_reply_rows(
+    transaction: Transaction,
+    outbox_columns: frozenset[str],
+    *,
+    outbox_table_ddl: str,
+    sqlite: bool,
+) -> None:
+    """Admit reply rows in an outbox created before them, inside the schema transaction."""
+    if not outbox_columns or "reply_id" in outbox_columns:
+        return
+    if sqlite:
+        transaction.execute("ALTER TABLE matrix_delivery_outbox RENAME TO matrix_delivery_outbox_pre_reply")
+        transaction.execute(outbox_table_ddl)
+        transaction.execute(
+            f"INSERT INTO matrix_delivery_outbox ({_PRE_REPLY_OUTBOX_COLUMNS}) "  # noqa: S608 - fixed columns
+            f"SELECT {_PRE_REPLY_OUTBOX_COLUMNS} FROM matrix_delivery_outbox_pre_reply",
+        )
+        # Dropping the renamed table drops the indexes that followed it; the
+        # schema statements that run next create them on the new table.
+        transaction.execute("DROP TABLE matrix_delivery_outbox_pre_reply")
+        return
+    transaction.execute("ALTER TABLE matrix_delivery_outbox ADD COLUMN IF NOT EXISTS reply_id TEXT")
+    transaction.execute("ALTER TABLE matrix_delivery_outbox ADD COLUMN IF NOT EXISTS span_id TEXT")
+    transaction.execute("ALTER TABLE matrix_delivery_outbox ADD COLUMN IF NOT EXISTS reply_sequence BIGINT")
+    # The released constraint is unnamed in its DDL; find it in the catalog
+    # rather than trusting the name PostgreSQL generated for it.
+    for row in transaction.fetchall(
+        """
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'matrix_delivery_outbox'::regclass AND contype = 'c'
+          AND strpos(pg_get_constraintdef(oid), 'stage') > 0
+        """,
+    ):
+        transaction.execute(f'ALTER TABLE matrix_delivery_outbox DROP CONSTRAINT "{row["conname"]}"')
+    transaction.execute(
+        "ALTER TABLE matrix_delivery_outbox ADD CONSTRAINT matrix_delivery_outbox_stage_check "
+        "CHECK (stage IN ('initial', 'final', 'edit'))",
+    )
