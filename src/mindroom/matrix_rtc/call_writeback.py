@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from html import escape
 from typing import TYPE_CHECKING
 
 from mindroom.constants import SKIP_MENTIONS_KEY
@@ -20,31 +22,46 @@ logger = get_logger(__name__)
 _MIN_WRITEBACK_SECONDS = 10
 
 
+@dataclass(frozen=True)
+class _CallWriteback:
+    """Plain and HTML bodies of one transcript message."""
+
+    body: str
+    formatted_body: str
+
+
 def format_call_writeback(
     *,
     turns: Sequence[tuple[str, str]],
     duration_seconds: float,
     caller_label: str,
     agent_label: str,
-) -> str | None:
-    """Render the transcript message, or ``None`` for calls not worth posting."""
+) -> _CallWriteback | None:
+    """Render the transcript message, or ``None`` for calls not worth posting.
+
+    Labels and spoken text are folded onto one line and HTML-escaped, so neither can start a speaker line or add markup.
+    """
     if duration_seconds < _MIN_WRITEBACK_SECONDS or not any(role == "user" for role, _ in turns):
         return None
     minutes = max(1, round(duration_seconds / 60))
+    heading = f"📞 Voice call · {minutes} min"
     labels = {"user": caller_label, "assistant": agent_label}
-    lines = [f"**{labels.get(role, role)}**: {text}" for role, text in turns]
-    transcript = "\n\n".join(lines)
-    return f"📞 Voice call · {minutes} min\n\n<details>\n<summary>Transcript</summary>\n\n{transcript}\n\n</details>"
+    lines = [(" ".join(labels.get(role, role).split()), " ".join(text.split())) for role, text in turns]
+    body = "\n\n".join([heading, "Transcript", *(f"{label}: {text}" for label, text in lines)])
+    transcript = "".join(f"<p><strong>{escape(label)}</strong>: {escape(text)}</p>" for label, text in lines)
+    formatted_body = f"<p>{heading}</p><details><summary>Transcript</summary>{transcript}</details>"
+    return _CallWriteback(body=body, formatted_body=formatted_body)
 
 
-async def post_call_writeback(*, context: ToolRuntimeContext, origin: CallOrigin, body: str) -> None:
+async def post_call_writeback(*, context: ToolRuntimeContext, origin: CallOrigin, writeback: _CallWriteback) -> None:
     """Send one transcript message into the origin thread or room."""
     latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
         room_id=origin.room_id,
         thread_id=origin.thread_id,
     )
     content = build_message_content(
-        body,
+        writeback.body,
+        formatted_body=writeback.formatted_body,
         thread_event_id=origin.thread_id,
         latest_thread_event_id=latest_thread_event_id,
         extra_content={SKIP_MENTIONS_KEY: True},

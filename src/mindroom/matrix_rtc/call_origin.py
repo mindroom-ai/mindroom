@@ -19,6 +19,8 @@ from mindroom.token_budget import approximate_o200k_tokens
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    import nio
+
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -169,14 +171,21 @@ async def resolve_call_origin_context(  # noqa: PLR0911
         body = message.body.strip()
         if not body:
             continue
-        label = "You" if message.sender == context.client.user_id else room.user_name(message.sender) or message.sender
-        messages.append(_CallBriefMessage(label=" ".join(label.split()), body=body))
+        label = "You" if message.sender == context.client.user_id else member_label(room, message.sender)
+        messages.append(_CallBriefMessage(label=label, body=body))
     return CallOriginContext(
         origin=origin,
         room_name=" ".join(room.display_name.split()),
         thread_title=thread_title,
         messages=tuple(messages),
     )
+
+
+def member_label(room: nio.MatrixRoom | None, user_id: str) -> str:
+    """Label a member by Matrix ID first, so no display name can pose as another speaker."""
+    user = room.users.get(user_id) if room is not None else None
+    display_name = " ".join(user.display_name.split()) if user is not None and user.display_name else ""
+    return f"{user_id} ({display_name})" if display_name else user_id
 
 
 def _capped(body: str) -> str:

@@ -43,6 +43,7 @@ from mindroom.matrix_rtc.call_origin import (
     CallOriginContext,
     build_call_brief,
     build_call_handoff_note,
+    member_label,
     parse_call_origin,
     resolve_call_origin_context,
 )
@@ -1290,13 +1291,13 @@ class CallManager:
         """Post one finished call's transcript once admitted, if the caller can still access the origin."""
         try:
             origin_room = self._client.rooms.get(origin.room_id)
-            body = format_call_writeback(
+            writeback = format_call_writeback(
                 turns=turns,
                 duration_seconds=duration_seconds,
-                caller_label=(origin_room.user_name(requester_id) if origin_room else None) or requester_id,
+                caller_label=member_label(origin_room, requester_id),
                 agent_label=self._config.agents[self._agent_name].display_name,
             )
-            if body is None:
+            if writeback is None:
                 return
             # The timeout starts once admitted: a long config apply holds admission closed and must not eat it.
             async with (
@@ -1313,7 +1314,7 @@ class CallManager:
                         agent=self._agent_name,
                     )
                     return
-                await post_call_writeback(context=context, origin=origin, body=body)
+                await post_call_writeback(context=context, origin=origin, writeback=writeback)
         except ResponseAdmissionRefusedError:
             return
         except TimeoutError:
