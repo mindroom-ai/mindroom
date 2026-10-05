@@ -240,7 +240,7 @@ class ScheduledWorkflow(BaseModel):
     silent: bool = False
     # LEGACY_COMPAT: Scheduled workflows without the pre-approved call flag.
     # Legacy format: Scheduled workflows omitted pre_approved_call before scheduled tool calls existed.
-    # Last legacy release: v2026.10.143; replacement: the next release writes the flag on every workflow.
+    # Last legacy release: v2026.10.148; replacement: the next release writes the flag on every workflow.
     # Handling: Pydantic defaults absence to False, which is correct because no earlier task carried an approval.
     # Coverage: tests/test_scheduled_tool_approval.py::test_workflow_without_flag_loads_as_ordinary_task.
     pre_approved_call: bool = Field(
