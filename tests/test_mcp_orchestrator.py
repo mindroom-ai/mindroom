@@ -1187,8 +1187,8 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=True),
     }
     updated_config = Config.validate_with_runtime(
         {

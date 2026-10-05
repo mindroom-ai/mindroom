@@ -43,6 +43,69 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
 )
 
 
+# AgentConfig fields running bots read from the live config where they use them, so an
+# edit reaches them without a restart; rooms reconcile memberships in place. Any other
+# field restarts the agent: display_name is set as its Matrix profile name at login,
+# accept_invites decides which invited rooms the bot loads when it is built, and private
+# sets the storage and session identity of requester-private state. A tool edit still
+# restarts the agent when it changes _agent_startup_tools().
+_AGENT_LIVE_FIELDS = frozenset(
+    {
+        "access",
+        "allow_self_config",
+        "compaction",
+        "compress_tool_results",
+        "context_files",
+        "credential_managers",
+        "delegate_to",
+        "file_access",
+        "include_default_tools",
+        "instructions",
+        "knowledge_bases",
+        "learning",
+        "learning_mode",
+        "markdown",
+        "max_tool_calls_from_history",
+        "max_tool_calls_per_turn",
+        "memory_backend",
+        "memory_search",
+        "mid_turn",
+        "minimal_instructions",
+        "model",
+        "num_history_messages",
+        "num_history_runs",
+        "participation",
+        "role",
+        "room_thread_modes",
+        "rooms",
+        "show_tool_calls",
+        "skill_learning",
+        "skills",
+        "thread_exports",
+        "thread_mode",
+        "tools",
+        "worker_scope",
+        "worker_tools",
+    },
+)
+# TeamConfig fields read live; display_name and accept_invites restart a team as they do an agent.
+_TEAM_LIVE_FIELDS = frozenset(
+    {
+        "access",
+        "agents",
+        "compaction",
+        "max_tool_calls_from_history",
+        "max_tool_calls_per_turn",
+        "mode",
+        "model",
+        "num_history_messages",
+        "num_history_runs",
+        "role",
+        "rooms",
+    },
+)
+
+
 @dataclass(frozen=True)
 class ConfigUpdatePlan:
     """Computed impact of one config reload."""
@@ -61,6 +124,7 @@ class ConfigUpdatePlan:
     reply_authorization_changed: bool = False
     added_entities: set[str] = field(default_factory=set)
     entities_to_reconcile_rooms: set[str] = field(default_factory=set)
+    live_updated_entities: set[str] = field(default_factory=set)
 
     @property
     def requires_response_drain(self) -> bool:
@@ -106,19 +170,38 @@ def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str
     return tuple(sorted(changed_paths))
 
 
-def _config_entries_differ(
-    old_entry: BaseModel | None,
-    new_entry: BaseModel | None,
-    *,
-    exclude: set[str] | None = None,
-) -> bool:
-    """Compare optional config models using the same shape as persisted YAML."""
-    if old_entry is None or new_entry is None:
-        return old_entry != new_entry
-    return old_entry.model_dump(exclude_none=True, exclude=exclude) != new_entry.model_dump(
-        exclude_none=True,
-        exclude=exclude,
-    )
+def _changed_entry_fields(old_entry: BaseModel, new_entry: BaseModel) -> set[str]:
+    """Return top-level fields that differ between two entries in persisted-YAML shape, ignoring rooms."""
+    old_fields = old_entry.model_dump(exclude_none=True, exclude={"rooms"})
+    new_fields = new_entry.model_dump(exclude_none=True, exclude={"rooms"})
+    return {name for name in old_fields.keys() | new_fields.keys() if old_fields.get(name) != new_fields.get(name)}
+
+
+def _restart_fields(
+    old_entry: BaseModel,
+    new_entry: BaseModel,
+    live_fields: frozenset[str],
+    bot: AgentBot | TeamBot | None,
+) -> set[str]:
+    """Return the changed entry fields that restart an entity's bot.
+
+    A bot that is not running restarts on any change, so the edit retries its failed startup.
+    """
+    changed_fields = _changed_entry_fields(old_entry, new_entry)
+    if changed_fields and bot is not None and not bot.running:
+        return changed_fields
+    return changed_fields - live_fields
+
+
+def _agent_startup_tools(config: Config, agent_name: str) -> tuple[bool, frozenset[str]]:
+    """Return the tool facts an agent bot acts on only when it starts.
+
+    Startup registers the Desktop pairing receiver and holds the agent back while a
+    required MCP server it uses is unavailable.
+    """
+    tool_names = set(config.resolve_entity(agent_name).available_tools)
+    mcp_tool_names = {mcp_tool_name(server_id) for server_id in config.mcp_servers}
+    return "desktop" in tool_names, frozenset(tool_names & mcp_tool_names)
 
 
 def _identify_entities_to_restart(
@@ -197,7 +280,7 @@ def _get_changed_agents(
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
-    """Return agent names whose config changed."""
+    """Return agents to restart: added, removed, or changed in what their bot reads only at startup."""
     if not config:
         return set()
 
@@ -208,15 +291,20 @@ def _get_changed_agents(
         old_agent = config.agents.get(agent_name)
         new_agent = new_config.agents.get(agent_name)
 
-        agents_differ = _config_entries_differ(old_agent, new_agent, exclude={"rooms"})
-
-        if agents_differ and (agent_name in agent_bots or new_agent is not None):
-            if old_agent and new_agent:
-                logger.debug("agent_configuration_changed_restart_required", agent=agent_name)
-            elif new_agent:
+        if old_agent is None or new_agent is None:
+            if new_agent is not None:
                 logger.info("new_agent_will_start", agent=agent_name)
-            else:
+                changed.add(agent_name)
+            elif agent_name in agent_bots:
                 logger.info("removed_agent_will_stop", agent=agent_name)
+                changed.add(agent_name)
+            continue
+
+        restart_fields = _restart_fields(old_agent, new_agent, _AGENT_LIVE_FIELDS, agent_bots.get(agent_name))
+        if _agent_startup_tools(config, agent_name) != _agent_startup_tools(new_config, agent_name):
+            restart_fields.add("tools")
+        if restart_fields:
+            logger.info("agent_configuration_changed_restart_required", agent=agent_name, fields=sorted(restart_fields))
             changed.add(agent_name)
 
     return changed
@@ -227,7 +315,7 @@ def _get_changed_teams(
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
-    """Return team names whose config changed."""
+    """Return teams to restart: added, removed, or changed in what their bot reads only at startup."""
     if not config:
         return set()
 
@@ -237,12 +325,28 @@ def _get_changed_teams(
     for team_name in all_teams:
         old_team = config.teams.get(team_name)
         new_team = new_config.teams.get(team_name)
-        teams_differ = _config_entries_differ(old_team, new_team, exclude={"rooms"})
-
-        if teams_differ and (team_name in agent_bots or new_team is not None):
+        if old_team is None or new_team is None:
+            if new_team is not None or team_name in agent_bots:
+                changed.add(team_name)
+            continue
+        if _restart_fields(old_team, new_team, _TEAM_LIVE_FIELDS, agent_bots.get(team_name)):
             changed.add(team_name)
 
     return changed
+
+
+def _entities_with_live_changes(config: Config, new_config: Config) -> set[str]:
+    """Return agents and teams whose live-read fields changed."""
+    sections = (
+        (config.agents, new_config.agents, _AGENT_LIVE_FIELDS),
+        (config.teams, new_config.teams, _TEAM_LIVE_FIELDS),
+    )
+    return {
+        name
+        for old_entries, new_entries, live_fields in sections
+        for name in old_entries.keys() & new_entries.keys()
+        if _changed_entry_fields(old_entries[name], new_entries[name]) & live_fields
+    }
 
 
 def _entities_with_room_changes(
@@ -263,11 +367,15 @@ def _entities_with_room_changes(
 def _reply_authorization_inputs_changed(config: Config, new_config: Config) -> bool:
     """Return whether config read by reply, invite, or trigger authorization changed.
 
-    Per-entity access and rooms are not listed because changing them already
-    restarts or re-rooms that entity.
+    Per-entity rooms and invite policies are not listed because changing them
+    already re-rooms or restarts that entity.
     """
     return (
         config.administrators != new_config.administrators
+        or {name: agent.access for name, agent in config.agents.items()}
+        != {name: agent.access for name, agent in new_config.agents.items()}
+        or {name: team.access for name, team in config.teams.items()}
+        != {name: team.access for name, team in new_config.teams.items()}
         or config.authorization != new_config.authorization
         or config.bot_accounts != new_config.bot_accounts
         or config.mindroom_user != new_config.mindroom_user
@@ -393,6 +501,9 @@ def build_config_update_plan(
 
     added_entities = configured_entities - existing_entities
     new_entities = added_entities - entities_to_restart
+    live_updated_entities = (
+        _entities_with_live_changes(current_config, new_config) & existing_entities
+    ) - entities_to_restart
 
     return ConfigUpdatePlan(
         new_config=new_config,
@@ -410,4 +521,5 @@ def build_config_update_plan(
         reply_authorization_changed=_reply_authorization_inputs_changed(current_config, new_config),
         added_entities=added_entities,
         entities_to_reconcile_rooms=entities_to_reconcile_rooms,
+        live_updated_entities=live_updated_entities,
     )

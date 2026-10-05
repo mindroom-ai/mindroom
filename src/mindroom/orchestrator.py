@@ -2103,7 +2103,7 @@ class _MultiAgentOrchestrator:
                 await self._finalize_config_reload(
                     new_config=new_config,
                     current_config=current_config,
-                    changed_entities=set(),
+                    changed_entities=plan.live_updated_entities,
                     added_entities=plan.added_entities,
                     removed_entities=plan.removed_entities,
                     plugin_changes=plugin_changes,
@@ -2128,7 +2128,7 @@ class _MultiAgentOrchestrator:
             await self._finalize_config_reload(
                 new_config=new_config,
                 current_config=current_config,
-                changed_entities=changed_entities,
+                changed_entities=changed_entities | plan.live_updated_entities,
                 added_entities=plan.added_entities,
                 removed_entities=plan.removed_entities,
                 plugin_changes=plugin_changes,

@@ -309,8 +309,6 @@ def create_bot_for_entity(
             runtime_paths=runtime_paths,
             rooms=rooms,
             config_path=config_path,
-            team_mode=team_config.mode,
-            team_model=team_config.model,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
@@ -2862,42 +2860,6 @@ class AgentBot:
 class TeamBot(AgentBot):
     """A bot that represents a team of agents working together."""
 
-    # Team configuration
-    team_mode: str
-    team_model: str | None
-
-    def __init__(
-        self,
-        agent_user: AgentMatrixUser,
-        storage_path: Path,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        rooms: list[str] | None = None,
-        config_path: Path | None = None,
-        *,
-        team_mode: str = "coordinate",
-        team_model: str | None = None,
-        enable_streaming: bool = True,
-        journal_store: EventJournalStore | None = None,
-        agent_reply_memberships: AgentReplyMembershipIndex,
-        room_activity_observer: Callable[[str], None] | None = None,
-    ) -> None:
-        """Initialize the team bot and its shared agent runtime."""
-        super().__init__(
-            agent_user=agent_user,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=runtime_paths,
-            rooms=rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            room_activity_observer=room_activity_observer,
-        )
-        self.team_mode = team_mode
-        self.team_model = team_model
-
     @cached_property
     def agent(self) -> Agent | None:
         """Teams don't have individual agents, return None."""
@@ -2928,7 +2890,8 @@ class TeamBot(AgentBot):
             )
         )
 
-        configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
+        team_config = self.config.teams[self.agent_name]
+        configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
         availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
             self.agent_name,
