@@ -84,6 +84,21 @@ def create_mid_turn_gate(
     )
 
 
+def _judgment_text(message: ResolvedVisibleMessage) -> str | None:
+    """Show earlier media as a placeholder, since most threads hold a file and the judge never reads one."""
+    msgtype = message.content.get("msgtype", "m.text")
+    if msgtype in {"m.text", "m.notice"}:
+        if not message.body.strip():
+            return None
+        return f"{message.body}\n[with attachments]" if message.content.get(ATTACHMENT_IDS_KEY) else message.body
+    kind = msgtype.removeprefix("m.") if isinstance(msgtype, str) else "media"
+    filename = message.content.get("filename")
+    if isinstance(filename, str) and filename.strip() and filename != message.body:
+        # With its own file name, a media event's body is a caption the sender wrote.
+        return f"[{kind}: {filename}]\n{message.body}"
+    return f"[{kind}: {message.body}]" if message.body.strip() else f"[{kind}]"
+
+
 def conversation_context_for_mid_turn(
     history: Sequence[ResolvedVisibleMessage],
     *,
@@ -95,7 +110,7 @@ def conversation_context_for_mid_turn(
     """Keep complete public text before this turn's first source, never future queued input.
 
     Preserve the conversation rather than guessing which old request is still active; the gate
-    clips long messages and keeps the newest that fit. Missing, partial, or media history cannot
+    clips long messages and keeps the newest that fit. Missing or partial history cannot
     authorize continued tool use.
     """
     if is_thread_history_degraded(history) or (
@@ -110,16 +125,13 @@ def conversation_context_for_mid_turn(
     for message in history:
         if message.event_id in source_event_ids:
             return tuple(context)
-        if message.content.get("msgtype", "m.text") not in {"m.text", "m.notice"} or message.content.get(
-            ATTACHMENT_IDS_KEY,
-        ):
-            return None
-        if not message.body.strip():
+        text = _judgment_text(message)
+        if text is None:
             return None
         role = (
             "assistant"
             if message.sender in internal_senders and not message.content.get(ORIGINAL_SENDER_KEY)
             else "user"
         )
-        context.append(JudgmentMessage(role, message.body))
+        context.append(JudgmentMessage(role, text))
     return None

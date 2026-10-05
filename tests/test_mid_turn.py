@@ -20,12 +20,13 @@ from mindroom import model_loading
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
+from mindroom.constants import ATTACHMENT_IDS_KEY
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
-from mindroom.mid_turn_judgment import create_mid_turn_gate
+from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
 from mindroom.response_lifecycle import _QueuedMessageState
-from tests.conftest import request_envelope, test_runtime_paths
+from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
 from tests.participation_helpers import ParticipationModel
 
@@ -774,6 +775,68 @@ async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget(
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
     assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
     assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]
+
+
+def test_earlier_media_reaches_the_judge_as_a_placeholder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A thread holding files or images is still judged, each shown only by its file name and caption."""
+    history = [
+        make_visible_message(body="report.pdf", event_id="$root", content={"msgtype": "m.file"}),
+        make_visible_message(body="Summarize this report", event_id="$ask"),
+        make_visible_message(
+            sender="@mindroom_helper:localhost",
+            body="Here is the chart",
+            event_id="$chart",
+            content={"msgtype": "m.image", "filename": "chart.png"},
+        ),
+        make_visible_message(event_id="$clip", content={"msgtype": "m.video"}),
+        make_visible_message(body="Use these too", event_id="$more", content={ATTACHMENT_IDS_KEY: ["att_1"]}),
+        make_visible_message(body="Continue", event_id="$source"),
+    ]
+    monkeypatch.setattr(
+        "mindroom.mid_turn_judgment.current_internal_sender_ids",
+        lambda *_: frozenset({"@mindroom_helper:localhost"}),
+    )
+
+    def context() -> tuple[JudgmentMessage, ...] | None:
+        return conversation_context_for_mid_turn(
+            history,
+            source_event_ids=("$source",),
+            thread_id="$root",
+            config=Config(),
+            runtime_paths=test_runtime_paths(tmp_path),
+        )
+
+    assert context() == (
+        JudgmentMessage("user", "[file: report.pdf]"),
+        JudgmentMessage("user", "Summarize this report"),
+        JudgmentMessage("assistant", "[image: chart.png]\nHere is the chart"),
+        JudgmentMessage("user", "[video]"),
+        JudgmentMessage("user", "Use these too\n[with attachments]"),
+    )
+    # An empty text message is still unreadable history.
+    history[1] = make_visible_message(event_id="$ask")
+    assert context() is None
+
+
+@pytest.mark.asyncio
+async def test_earlier_attachment_annotation_does_not_block_judgment() -> None:
+    """An earlier reply that repeats an attachment annotation is background, like a media placeholder."""
+    requests: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        requests.append(request)
+        return True
+
+    annotation = '[attachments: att_1 (file, "report.pdf")]'
+    gate = MidTurnGate(
+        active_text="Continue",
+        evaluate=evaluate,
+        conversation_context=(JudgmentMessage("assistant", f"Saved the report {annotation}"),),
+    )
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert len(requests) == 1
+    # The same annotation in a queued message still means an attachment the judge cannot open.
+    assert not await gate.should_finish((QueuedMessage("$newer", annotation),))
 
 
 def _skip_reasons(logs: list[dict]) -> list[str]:
