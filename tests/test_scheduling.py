@@ -2145,6 +2145,7 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
         )
 
     assert "Updated task" in result
+    assert result.endswith("Schedule edited; the call will ask for approval when it runs.")
     withdraw.assert_awaited_once()
     saved = await get_scheduled_task(client, "!test:server", "task123", runtime_paths)
     assert saved is not None

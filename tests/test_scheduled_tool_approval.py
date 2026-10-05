@@ -1711,6 +1711,39 @@ async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
     assert order == ["withdraw", "state"]
 
 
+@pytest.mark.asyncio
+async def test_cancelling_a_pre_approved_task_says_its_approval_is_withdrawn() -> None:
+    """The requester learns that an approval they already gave no longer applies."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(
+        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!test:server"),
+    )
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        message="@general call it",
+        description="Morning DM",
+        room_id="!test:server",
+        thread_id="$thread123",
+        pre_approved_call=True,
+    )
+    existing = {"status": "pending", "workflow": workflow.model_dump_json()}
+
+    with (
+        patch("mindroom.scheduling._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=AsyncMock()),
+    ):
+        result = await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task1234",
+            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+        )
+
+    assert result == "✅ Cancelled task `task1234`; any approval given for its scheduled call is withdrawn."
+
+
 def _response_event(content: dict[str, object]) -> nio.UnknownEvent:
     return nio.UnknownEvent.from_dict(
         {
@@ -1760,30 +1793,59 @@ def test_malformed_scheduled_scope_never_becomes_a_decision(content: dict[str, o
     assert payload.scheduled_scope is None
 
 
+_CREW = Config(
+    agents={"general": AgentConfig(display_name="General Agent")},
+    teams={"crew": TeamConfig(display_name="Crew", role="Ship things", agents=["general"])},
+)
+
+
 @pytest.mark.parametrize(
-    ("config", "tool_name", "arguments", "offered"),
+    ("config", "tool_name", "arguments", "entity_name", "approver_id", "offered"),
     [
-        (Config(), "post_slack_message", {"channel": "U1"}, True),
-        (Config(tool_approval=ToolApprovalConfig(scheduled_any_arguments=False)), "post_slack_message", {}, False),
+        (Config(), "post_slack_message", {"channel": "U1"}, "general", "@user:server", True),
+        (
+            Config(tool_approval=ToolApprovalConfig(scheduled_any_arguments=False)),
+            "post_slack_message",
+            {},
+            "general",
+            "@user:server",
+            False,
+        ),
         (
             Config(
                 mcp_servers={"files": MCPServerConfig(transport="streamable-http", url="https://files.example/mcp")},
             ),
             "files_call_tool",
             {"tool_name": "delete", "arguments": {"path": "/one"}},
+            "general",
+            "@user:server",
             False,
         ),
+        (_CREW, "post_slack_message", {}, "crew", "@user:server", False),
+        (Config(), "post_slack_message", {}, "general", "@owner:server", False),
     ],
-    ids=["plain-tool", "operator-disabled", "generic-mcp-dispatch"],
+    ids=["plain-tool", "operator-disabled", "generic-mcp-dispatch", "team", "approver-elsewhere"],
 )
-def test_any_arguments_is_offered_only_for_a_named_tool_operators_allow(
+def test_any_arguments_is_offered_only_where_a_timed_approval_could_apply(
     config: Config,
     tool_name: str,
     arguments: dict[str, object],
+    entity_name: str,
+    approver_id: str,
     offered: bool,
 ) -> None:
-    """Generic MCP dispatch and an operator opt-out keep scheduled approvals exact."""
-    assert scheduled_call_offers_any_arguments(config, tool_name, arguments) is offered
+    """Generic MCP dispatch, an operator opt-out, a team, or approvals sent elsewhere keep scheduled approvals exact."""
+    assert (
+        scheduled_call_offers_any_arguments(
+            config,
+            tool_name,
+            arguments,
+            entity_name=entity_name,
+            requester_id="@user:server",
+            approver_id=approver_id,
+        )
+        is offered
+    )
 
 
 def test_workflow_without_flag_loads_as_ordinary_task() -> None:

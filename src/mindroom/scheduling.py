@@ -2082,11 +2082,14 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
             execute_at=send_at,
             workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
             scheduled_for_text=_format_local_time(send_at, config.timezone),
-            # Like a timed approval, the broader scope needs the requester to approve their own calls,
-            # and it covers only the scheduling agent's own call, which a team never makes itself.
-            any_arguments_offered=approver_id == scheduled_by
-            and agent_name not in config.teams
-            and scheduled_call_offers_any_arguments(config, tool_name, arguments),
+            any_arguments_offered=scheduled_call_offers_any_arguments(
+                config,
+                tool_name,
+                arguments,
+                entity_name=agent_name,
+                requester_id=scheduled_by,
+                approver_id=approver_id,
+            ),
         ):
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
         await _persist_scheduled_task_state(
@@ -2168,6 +2171,8 @@ async def edit_scheduled_task(
     if edited_task_id is None:
         return f"❌ Failed to edit task `{task_id}`.\n\n{response_text}"
 
+    if existing_task.workflow.pre_approved_call:
+        response_text += f"\n\n{_SCHEDULE_EDITED_REASON}"
     return f"✅ Updated task `{task_id}`.\n\n{response_text}"
 
 
@@ -2291,6 +2296,9 @@ async def cancel_scheduled_task(
     if cancel_in_memory:
         _cancel_running_task(task_id)
 
+    record = _parse_scheduled_task_record(room_id, task_id, existing_content)
+    if record is not None and record.workflow.pre_approved_call:
+        return f"✅ Cancelled task `{task_id}`; any approval given for its scheduled call is withdrawn."
     return f"✅ Cancelled task `{task_id}`"
 
 

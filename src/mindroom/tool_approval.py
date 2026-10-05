@@ -291,14 +291,27 @@ async def handle_matrix_approval_action(
     )
 
 
-def scheduled_call_offers_any_arguments(config: Config, tool_name: str, arguments: dict[str, object]) -> bool:
+def scheduled_call_offers_any_arguments(
+    config: Config,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    entity_name: str,
+    requester_id: str,
+    approver_id: str,
+) -> bool:
     """Return whether a scheduled call's card may offer approving any arguments.
 
-    Generic MCP dispatch names its remote tool in the arguments, so approving any
-    arguments there would approve every tool on the server; it stays exact-only.
+    Like a timed approval, the broader scope needs requesters who approve their
+    own calls, and it covers only the scheduling agent's own call, which a team
+    never makes itself. Generic MCP dispatch names its remote tool in the
+    arguments, so approving any arguments there would approve every tool on the
+    server; it stays exact-only.
     """
+    if not config.tool_approval.scheduled_any_arguments or entity_name in config.teams or approver_id != requester_id:
+        return False
     operation = grant_operation(config, tool_name, arguments)
-    return config.tool_approval.scheduled_any_arguments and operation is not None and operation.mcp_server_id is None
+    return operation is not None and operation.mcp_server_id is None
 
 
 async def request_scheduled_call_approval(
