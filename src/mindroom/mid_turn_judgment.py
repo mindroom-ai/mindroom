@@ -11,6 +11,7 @@ from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.logging_config import get_logger
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.mid_turn import MID_TURN_QUESTION, MidTurnGate, message_text_for_judgment
@@ -86,17 +87,21 @@ def create_mid_turn_gate(
 
 def _judgment_text(message: ResolvedVisibleMessage) -> str | None:
     """Show earlier media as a placeholder, since most threads hold a file and the judge never reads one."""
+    if holds_unresolved_sidecar(message.content):
+        # A long-text preview is not the whole message.
+        return None
     msgtype = message.content.get("msgtype", "m.text")
-    if msgtype in {"m.text", "m.notice"}:
+    # A tuple compares without hashing, so a malformed list or dict msgtype cannot raise.
+    if msgtype in ("m.text", "m.notice"):
         if not message.body.strip():
             return None
         return f"{message.body}\n[with attachments]" if message.content.get(ATTACHMENT_IDS_KEY) else message.body
-    kind = msgtype.removeprefix("m.") if isinstance(msgtype, str) else "media"
+    kind = (msgtype.removeprefix("m.") if isinstance(msgtype, str) else "") or "media"
     filename = message.content.get("filename")
-    if isinstance(filename, str) and filename.strip() and filename != message.body:
-        # With its own file name, a media event's body is a caption the sender wrote.
-        return f"[{kind}: {filename}]\n{message.body}"
-    return f"[{kind}: {message.body}]" if message.body.strip() else f"[{kind}]"
+    name = filename if isinstance(filename, str) and filename.strip() else message.body
+    label = f"[{kind}: {name}]" if name.strip() else f"[{kind}]"
+    # With its own file name, a media event's body is a caption the sender wrote.
+    return f"{label}\n{message.body}" if name != message.body and message.body.strip() else label
 
 
 def conversation_context_for_mid_turn(

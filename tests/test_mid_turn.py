@@ -789,6 +789,8 @@ def test_earlier_media_reaches_the_judge_as_a_placeholder(tmp_path: Path, monkey
             content={"msgtype": "m.image", "filename": "chart.png"},
         ),
         make_visible_message(event_id="$clip", content={"msgtype": "m.video"}),
+        make_visible_message(event_id="$photo", content={"msgtype": "m.image", "filename": "photo.png"}),
+        make_visible_message(body="x", event_id="$odd", content={"msgtype": ["m.text"]}),
         make_visible_message(body="Use these too", event_id="$more", content={ATTACHMENT_IDS_KEY: ["att_1"]}),
         make_visible_message(body="Continue", event_id="$source"),
     ]
@@ -811,11 +813,25 @@ def test_earlier_media_reaches_the_judge_as_a_placeholder(tmp_path: Path, monkey
         JudgmentMessage("user", "Summarize this report"),
         JudgmentMessage("assistant", "[image: chart.png]\nHere is the chart"),
         JudgmentMessage("user", "[video]"),
+        JudgmentMessage("user", "[image: photo.png]"),
+        JudgmentMessage("user", "[media: x]"),
         JudgmentMessage("user", "Use these too\n[with attachments]"),
     )
-    # An empty text message is still unreadable history.
-    history[1] = make_visible_message(event_id="$ask")
-    assert context() is None
+    # An empty text message or a long-text preview whose full text was never fetched is still unreadable history.
+    for unreadable in (
+        make_visible_message(event_id="$ask"),
+        make_visible_message(
+            body="Preview",
+            event_id="$ask",
+            content={
+                "msgtype": "m.file",
+                "url": "mxc://localhost/full-text",
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            },
+        ),
+    ):
+        history[1] = unreadable
+        assert context() is None
 
 
 @pytest.mark.asyncio
