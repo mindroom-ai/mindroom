@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
 from mindroom.approval_failure import prepare_approval_failure
+from mindroom.cancellation import cancel_source_from_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -32,8 +33,6 @@ from mindroom.tool_approval import (
 )
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
-
-_USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
 
 def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
@@ -473,7 +472,7 @@ class ApprovalResponseCoordinator:
         )
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
-        user_stop = reason == _USER_STOP_FAILURE_REASON
+        user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
         visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if user_stop else redact_sensitive_text(reason))
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(

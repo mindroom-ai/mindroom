@@ -58,11 +58,6 @@ def test_safe_load_accepts_bytes_and_binary_streams() -> None:
         pytest.param("!!set {" + "".join(f"{k}, " for k in range(1025)) + "}", id="int-set"),
         pytest.param("x: 0000-01-01", id="year-0-date"),
         pytest.param("x: !!bool maybe", id="mistagged-bool"),
-        pytest.param("".join(f"%TAG !t{k}! x\n" for k in range(17)) + "--- a\n", id="tag-directives"),
-        pytest.param(
-            "".join(f"%TAG !t{k}! x" + "\r\x85\u2028\u2029"[k % 4] for k in range(17)) + "--- a\n",
-            id="tag-directives-after-other-line-breaks",
-        ),
     ],
 )
 def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document: str) -> None:

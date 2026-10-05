@@ -668,38 +668,6 @@ class TestSendFileMessage:
         client.upload.assert_awaited_once()
         assert client.room_send.await_count == 2
 
-    @pytest.mark.asyncio
-    async def test_caption_overrides_body(self, tmp_path: Path) -> None:
-        """When caption is set, body should use it instead of filename."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/c1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
-        file = tmp_path / "report.pdf"
-        file.write_bytes(b"%PDF")
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-                caption="Q4 Report",
-            )
-
-        assert sent_content is not None
-        assert sent_content["body"] == "Q4 Report"
-        assert sent_content["filename"] == "report.pdf"
-
 
 class TestSendAudioMessage:
     """Tests for direct Matrix audio voice sends."""

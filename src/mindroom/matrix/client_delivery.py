@@ -707,7 +707,6 @@ async def send_file_message(
     file_path: str | Path,
     *,
     thread_id: str | None = None,
-    caption: str | None = None,
     latest_thread_event_id: str | None = None,
     filename: str | None = None,
     mimetype: str | None = None,
@@ -744,7 +743,7 @@ async def send_file_message(
     msgtype = _msgtype_for_mimetype(mimetype)
     content: dict[str, Any] = {
         "msgtype": msgtype,
-        "body": caption or display_name,
+        "body": display_name,
         "info": info,
     }
     if msgtype == "m.file":
