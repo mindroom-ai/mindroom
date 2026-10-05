@@ -773,7 +773,7 @@ SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<ref> \
 
 ### Step 3: Development & Git
 
-- **Check for Changes**: Before starting, review the latest changes from the main branch with `git diff origin/main | cat`. Make sure to use `--no-pager`, or pipe the output to `cat`.
+- **Check for Changes**: Before starting, review this branch's changes against main with `git diff --merge-base origin/main | cat`. Make sure to use `--no-pager`, or pipe the output to `cat`.
 - **Commit Frequently**: Make small, frequent commits.
 - **Atomic Commits**: Ensure each commit corresponds to a tested, working state.
 - **Preserve Review History**: Do not amend commits or force-push PR branches unless the user explicitly asks for it. Prefer follow-up commits so PR history stays inspectable.
