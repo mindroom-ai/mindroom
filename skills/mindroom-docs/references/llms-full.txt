@@ -4683,6 +4683,44 @@ A restart, or a configuration reload that restarts the call agent, also drops it
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
 
+## Calling an agent about a thread
+
+A call used to start with the agent knowing nothing about what you wanted to talk about, so you had to explain the thread out loud first.
+
+In MindRoom Chat, start the call from a thread's header, or from the agent's profile while a thread is open.
+When the agent picks up, it receives a snapshot of that conversation and the thread title.
+The snapshot is the newest part of the thread that fits the call budget (about 6,000 tokens), with a note when older messages were left out.
+Each message is cut to 2,000 characters.
+Starting a call from a room's main timeline gives the agent the newest unthreaded messages of that room instead.
+
+The snapshot is taken once, when the agent joins; messages sent during the call are not added.
+It works with all three call profiles:
+
+| Backend | Where the snapshot goes |
+|---------|-------------------------|
+| `realtime` | Appended to the agent's instructions. |
+| `live` | Placed between the agent's prompt and the voice guidance, inside the 16,000 token instruction limit, and skipped when too little room is left. The delegated agent always gets it. |
+| `cascaded` | Given to each agent turn as call context. |
+
+The snapshot is used only when the call can safely see it.
+The caller must pass the normal reply permissions for the origin room and still be a member of it, the agent must have joined it, and a thread origin must point at the thread's first message.
+The origin must also be written by the call's only caller, for this agent.
+If any check fails, or reading the conversation takes longer than 5 seconds, the call proceeds without it.
+
+Clients ask for this with the `origin` field of the call room's `io.mindroom.agent_call` state event:
+
+```json
+{
+  "version": 1,
+  "agent_user_id": "@mindroom_assistant:example.org",
+  "creator_user_id": "@alice:example.org",
+  "ephemeral": true,
+  "origin": { "room_id": "!abc:example.org", "thread_id": "$root" }
+}
+```
+
+`thread_id` is `null` when the call starts from the room's main timeline, and `origin` may be left out entirely.
+
 ## Transcripts and memory
 
 Every call writes a markdown transcript as it goes.
