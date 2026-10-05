@@ -245,9 +245,9 @@ agents:
 
 ## [`google_drive`]
 
-<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b8f28170-351a-4c6a-b49a-f5b6bd2a3df1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/58281caf-f956-4584-87ec-15bd2a2242cb#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%" poster="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-light="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-dark="https://github.com/user-attachments/assets/ce6ffe08-b3c1-4bdd-9d75-8e3abbea1e65">
+  <source src="https://github.com/user-attachments/assets/ffba1923-b463-4674-88af-5a862de1613f" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/690273d3-7fee-4e49-a1b5-75e39be00d8b" type="video/mp4">
 </video>
 
 `google_drive` works with files in the connected Google account, including shared drives the account can access.

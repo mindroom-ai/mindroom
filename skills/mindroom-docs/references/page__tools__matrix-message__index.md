@@ -43,9 +43,9 @@ matrix_message(action="react", event_id="$message", message="✅")
 
 ## Agent conversations
 
-<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/845b92f1-fa94-4aab-af0c-381d3cab5fb1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/b9b9cb8d-e334-4319-8b33-d6a885d11580#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%" poster="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-light="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-dark="https://github.com/user-attachments/assets/dcd0bb4a-c51b-420f-8e32-f8ce140b1037">
+  <source src="https://github.com/user-attachments/assets/2dce4510-bb8a-440b-9bb3-0bcb0d324955" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/c4093417-247c-4961-b6bc-85f73f2e9b55" type="video/mp4">
 </video>
 
 List possible recipients with `matrix_room(action="agents")` and pass a result's `name` as `recipient`; no Matrix mention is needed.

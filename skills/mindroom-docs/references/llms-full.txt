@@ -13,9 +13,9 @@ They find what you need, write what you ask for, run recurring jobs on their own
 It is open source, and you choose each agent's model: a local one that keeps your private life at home, or a frontier one for hard problems.
 You can run all of it yourself: the chat app, the server, and the AI backend.
 
-<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-light="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-dark="https://github.com/user-attachments/assets/e126d12b-5609-4c97-b69f-e2f9289a0008">
+  <source src="https://github.com/user-attachments/assets/6ec88440-9b9a-4319-b4e9-88d452819bb6" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/af51cf1e-840a-415e-ae97-df453d2afdda" type="video/mp4">
 </video>
 
 **[Get started](https://docs.mindroom.chat/getting-started/)** · **[See it in action](https://docs.mindroom.chat/showcase/)** · **[Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/)**
@@ -140,33 +140,33 @@ Each video comes in a light and a dark recording to match your color scheme.
 
     Approvals, a team thread, code, documents, and the browser at work, then lights, trips, and dinners at home.
 
-    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/e3ce6dae-b730-41cc-a1e9-a7292e8e5766" aria-label="MindRoom at work and at home" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/383e9556-af82-4b4c-bdd4-8ba894481eec" type="video/mp4">
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/88accc8b-6666-494b-a415-6f7effaaf751" aria-label="MindRoom at work and at home" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/f35866c4-c226-408a-9f1f-b7588f76c564" type="video/mp4">
     </video>
-    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/70e6d774-5f5c-4d2c-862d-a992136dfd73" aria-label="MindRoom at work and at home" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/2c3227cf-0cea-475f-8c27-959a21504348" type="video/mp4">
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/7c8011bd-22b7-4795-8d4d-ab2864c7b118" aria-label="MindRoom at work and at home" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/f99556da-f289-49fe-a365-7c2a8bb93c77" type="video/mp4">
     </video>
 
 === "Short · 29 s"
 
     The same story with two moments at work and two at home, as in the README.
 
-    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/47832724-c39c-4a5f-86e6-0eba3aefde19" aria-label="The short version" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/41418624-06e8-43f4-8c70-a5c7558de84a" type="video/mp4">
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/a424646b-c904-482e-8328-ce158b581500" aria-label="The short version" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/8333a521-c8b1-4e71-834d-81f3010870ae" type="video/mp4">
     </video>
-    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/13bf22c5-5ca4-4677-b31e-595080773845" aria-label="The short version" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244" type="video/mp4">
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/6fcfba4c-ca70-45dc-a35a-bc21311d43cf" aria-label="The short version" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/28c957e3-d445-4341-b7d0-e3e689212209" type="video/mp4">
     </video>
 
 === "Work tour · 82 s"
 
     Thirteen moments at work, one after another, in an earlier full-screen style.
 
-    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/db242573-e9f9-4040-96c2-f8888172cbc1" aria-label="Narrated tour" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b" type="video/mp4">
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" aria-label="Narrated tour" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/af51cf1e-840a-415e-ae97-df453d2afdda" type="video/mp4">
     </video>
-    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/a7a759d9-f371-4a16-ba36-43bd4cf010a5" aria-label="Narrated tour" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4" type="video/mp4">
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/e126d12b-5609-4c97-b69f-e2f9289a0008" aria-label="Narrated tour" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/6ec88440-9b9a-4319-b4e9-88d452819bb6" type="video/mp4">
     </video>
 
 ## Canvases
@@ -189,36 +189,36 @@ See [Interactive Canvases](https://docs.mindroom.chat/canvases/).
 
     A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%" poster="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-light="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-dark="https://github.com/user-attachments/assets/df646508-7bd3-494f-b560-c49bd5ec0982">
+      <source src="https://github.com/user-attachments/assets/e6698792-c676-4a4f-9824-ae04c1e970da" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/89fb462e-4895-43a0-9cf6-44f91fd7084d" type="video/mp4">
     </video>
 
 === "Data"
 
     An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%" poster="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-light="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-dark="https://github.com/user-attachments/assets/f283e9b8-4b9a-40be-a8e9-da758ad163a1">
+      <source src="https://github.com/user-attachments/assets/39a4fa17-51f4-46df-821d-7391c2418071" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/62d2d1d3-5754-4d6a-a5a4-d70b0a354d43" type="video/mp4">
     </video>
 
 === "Slides"
 
     A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%" poster="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-light="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-dark="https://github.com/user-attachments/assets/1517814d-cb7f-47f1-be9f-d2fc52ceffa8">
+      <source src="https://github.com/user-attachments/assets/fa8b1989-9b8c-4dad-b55d-18dd0412013a" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/e215f9e4-ffdb-4e64-9782-e787d3dd464b" type="video/mp4">
     </video>
 
 === "Trip planner"
 
     One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
 
-    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%" poster="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-light="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-dark="https://github.com/user-attachments/assets/01cf9610-83fc-4752-ac72-64750807af71">
+      <source src="https://github.com/user-attachments/assets/dd5ab134-eeba-4cd5-93e3-4dd6e8d0a9cd" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/3e772d7a-1acc-44bf-8e6e-f7e3032ee374" type="video/mp4">
     </video>
 
 ## At work
@@ -228,9 +228,9 @@ See [Interactive Canvases](https://docs.mindroom.chat/canvases/).
 An agent finds two requests in the inbox, picks a free slot, and pauses for approval before it books the meeting.
 See [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval).
 
-<video controls playsinline preload="metadata" aria-label="Ask, approve, done" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/6a2033ea-3354-4afd-9d58-fc617b18cd24#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d62d98e8-c066-4e1f-8a8f-d840da7b0bd1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Ask, approve, done" style="width: 100%" poster="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-light="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-dark="https://github.com/user-attachments/assets/94181525-4b2b-43b4-b366-d85aa18f59b8">
+  <source src="https://github.com/user-attachments/assets/f3792ec9-ea73-4169-97ee-d09146cd65cc" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/cf813bb1-5f9d-43b2-a197-b4749696a86e" type="video/mp4">
 </video>
 
 ### One thread, the whole team
@@ -238,9 +238,9 @@ See [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval).
 Three colleagues work with one agent in a shared thread, and everyone sees each answer stream in live.
 See [Streaming Responses](https://docs.mindroom.chat/streaming/).
 
-<video controls playsinline preload="metadata" aria-label="One thread, the whole team" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b5772e74-de93-4559-8f4f-b045add92caa#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ec8dc609-e4b5-4db4-b806-d8c93fee52a0#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="One thread, the whole team" style="width: 100%" poster="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-light="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-dark="https://github.com/user-attachments/assets/54a96fc9-91dc-48a7-985c-7d4e41ad9be8">
+  <source src="https://github.com/user-attachments/assets/571db927-105b-4907-9c83-ed4f9ef1fc4a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/c913ed8a-4afb-43be-8d90-cdd2aa4158a9" type="video/mp4">
 </video>
 
 ### Bring the team in
@@ -248,9 +248,9 @@ See [Streaming Responses](https://docs.mindroom.chat/streaming/).
 New colleagues are invited to a room, and the agent tells them what is left before the deadline.
 See [Authorization](https://docs.mindroom.chat/authorization/).
 
-<video controls playsinline preload="metadata" aria-label="Bring the team in" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/a98cf35e-9c3d-40b8-9827-7f5d2a4dbc28#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/6ac07018-9961-465a-b38d-a3a34eba75b6#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Bring the team in" style="width: 100%" poster="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-light="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-dark="https://github.com/user-attachments/assets/d4b50091-0d28-4185-8ecb-3f2615542e74">
+  <source src="https://github.com/user-attachments/assets/83081f1a-9caf-476a-b147-3c5f93762471" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/5eb23908-4555-42ca-8b38-a2636097339b" type="video/mp4">
 </video>
 
 ### Tag two agents, get a team
@@ -258,9 +258,9 @@ See [Authorization](https://docs.mindroom.chat/authorization/).
 Mentioning two agents in one message forms a team that researches and answers together.
 See [Team Configuration](https://docs.mindroom.chat/configuration/teams/).
 
-<video controls playsinline preload="metadata" aria-label="Tag two agents, get a team" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b6ea7dff-8542-409f-823a-0cd3590a9555#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/3c28159d-4d3e-4e47-bc5e-07e4e0c5eed1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Tag two agents, get a team" style="width: 100%" poster="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-light="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-dark="https://github.com/user-attachments/assets/41849fb8-3dd1-4b9c-8eff-33bb10803f48">
+  <source src="https://github.com/user-attachments/assets/cb657cd9-3114-442f-a4fa-d8e6a96b6425" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/9ee83e64-1425-4165-b1f5-5d4aa978b46e" type="video/mp4">
 </video>
 
 ### From alert to all-clear
@@ -268,9 +268,9 @@ See [Team Configuration](https://docs.mindroom.chat/configuration/teams/).
 One agent traces failing signups to a deploy, rolls it back with approval, and hands the customer update to another agent.
 See [Agent conversations](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations).
 
-<video controls playsinline preload="metadata" aria-label="From alert to all-clear" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/845b92f1-fa94-4aab-af0c-381d3cab5fb1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/b9b9cb8d-e334-4319-8b33-d6a885d11580#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="From alert to all-clear" style="width: 100%" poster="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-light="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-dark="https://github.com/user-attachments/assets/dcd0bb4a-c51b-420f-8e32-f8ce140b1037">
+  <source src="https://github.com/user-attachments/assets/2dce4510-bb8a-440b-9bb3-0bcb0d324955" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/c4093417-247c-4961-b6bc-85f73f2e9b55" type="video/mp4">
 </video>
 
 ### Connect once, then just ask
@@ -278,9 +278,9 @@ See [Agent conversations](https://docs.mindroom.chat/tools/matrix-message/#agent
 A user connects an account from the conversation, and the agent answers from it.
 See [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
-<video controls playsinline preload="metadata" aria-label="Connect once, then just ask" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/9c301417-f0ee-43d1-ac42-8c974d42888f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/4689c253-d026-4dee-afb8-7f178ea793df#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Connect once, then just ask" style="width: 100%" poster="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-light="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-dark="https://github.com/user-attachments/assets/9849b052-508e-409a-867c-cf155a640d31">
+  <source src="https://github.com/user-attachments/assets/c3a4166f-79a4-4ccb-a176-3a7c9922b828" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/62767b38-9729-4277-b615-e2b7b6863234" type="video/mp4">
 </video>
 
 ### What the policy actually says
@@ -288,9 +288,9 @@ See [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 The agent answers a travel question from Confluence and Drive, with its sources.
 See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/).
 
-<video controls playsinline preload="metadata" aria-label="What the policy actually says" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/0dee9f09-80e1-4244-bac3-4da13072bab4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a2f812aa-bd2c-4996-bc13-f41b2f3a8f94#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="What the policy actually says" style="width: 100%" poster="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-light="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-dark="https://github.com/user-attachments/assets/95022cb5-336c-4abc-93e3-430d7dd8eb07">
+  <source src="https://github.com/user-attachments/assets/e0f957e4-d610-4408-b30b-87b9e553ee53" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a5a4917a-a373-499e-95d2-e8c30f354368" type="video/mp4">
 </video>
 
 ### Answers you can trust
@@ -298,9 +298,9 @@ See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/).
 The agent compares two Drive documents and flags a stale number before a drawing goes out.
 See [Google Drive](https://docs.mindroom.chat/tools/data-and-databases/#google_drive).
 
-<video controls playsinline preload="metadata" aria-label="Answers you can trust" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b8f28170-351a-4c6a-b49a-f5b6bd2a3df1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/58281caf-f956-4584-87ec-15bd2a2242cb#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Answers you can trust" style="width: 100%" poster="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-light="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-dark="https://github.com/user-attachments/assets/ce6ffe08-b3c1-4bdd-9d75-8e3abbea1e65">
+  <source src="https://github.com/user-attachments/assets/ffba1923-b463-4674-88af-5a862de1613f" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/690273d3-7fee-4e49-a1b5-75e39be00d8b" type="video/mp4">
 </video>
 
 ### Two policies, one draft
@@ -308,9 +308,9 @@ See [Google Drive](https://docs.mindroom.chat/tools/data-and-databases/#google_d
 The agent merges two travel policies into one draft and asks a multiple-choice question where they disagree.
 See [Interactive Q&A](https://docs.mindroom.chat/interactive/).
 
-<video controls playsinline preload="metadata" aria-label="Two policies, one draft" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/14da1dfa-9892-4ce8-a2ed-ad67673ea4b5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/9cef359e-15d0-4f0a-810a-ec34811cf561#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Two policies, one draft" style="width: 100%" poster="https://github.com/user-attachments/assets/0a47822d-348e-4ca1-9ab6-a704861f1327" data-poster-light="https://github.com/user-attachments/assets/0a47822d-348e-4ca1-9ab6-a704861f1327" data-poster-dark="https://github.com/user-attachments/assets/ba161463-03d9-41f7-bd99-7369c5542619">
+  <source src="https://github.com/user-attachments/assets/f49c4ff4-b0fe-4f4f-a36b-b8a3481f8147" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/6f31e382-0a78-4415-a610-a207744d4b73" type="video/mp4">
 </video>
 
 ### From numbers to a board deck
@@ -318,9 +318,9 @@ See [Interactive Q&A](https://docs.mindroom.chat/interactive/).
 The agent gathers the quarter's numbers and the launch status and builds a five-slide board deck.
 See [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/).
 
-<video controls playsinline preload="metadata" aria-label="From numbers to a board deck" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/d12003ab-9537-48fb-9200-025e89078ec1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/c599de91-25d6-4cce-b6f2-c7b288dfeece#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="From numbers to a board deck" style="width: 100%" poster="https://github.com/user-attachments/assets/a53021c3-8b79-41be-95c7-f269b42f02b5" data-poster-light="https://github.com/user-attachments/assets/a53021c3-8b79-41be-95c7-f269b42f02b5" data-poster-dark="https://github.com/user-attachments/assets/0ba728cb-5a3c-4bfa-9d7d-5d3a71769638">
+  <source src="https://github.com/user-attachments/assets/5dfdf732-4386-4171-9d08-99a83d10a9c4" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/ba9046b5-d6a9-400a-b3c1-5629c32a22d6" type="video/mp4">
 </video>
 
 ### Real analysis, real numbers
@@ -328,9 +328,9 @@ See [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
 The agent writes and runs an analysis script on its own computer and posts the fitted result with a plot.
 See [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/).
 
-<video controls playsinline preload="metadata" aria-label="Real analysis, real numbers" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/1bc1dc4d-742f-490b-a177-3679ae412ec2#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ac87d6b3-a82a-491d-ae5c-7d114f55539f#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Real analysis, real numbers" style="width: 100%" poster="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-light="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-dark="https://github.com/user-attachments/assets/b9ccd95c-1899-4fa2-9beb-a03d22ec6c46">
+  <source src="https://github.com/user-attachments/assets/e1a47a55-05a6-4035-b50c-b631e867b8c8" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a9d21f4f-d9c7-480f-b71b-8a7155903bfc" type="video/mp4">
 </video>
 
 ### It drives, you take the wheel
@@ -338,9 +338,9 @@ See [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
 The agent reorders supplies in its browser while the user watches, takes control, and hands it back.
 See [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#watch-take-control-and-resume).
 
-<video controls playsinline preload="metadata" aria-label="It drives, you take the wheel" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/63868e17-6824-4073-8904-e1b7abc4b173#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/cc079b2f-6dbf-4509-9fdc-4ec21da85d7a#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="It drives, you take the wheel" style="width: 100%" poster="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-light="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-dark="https://github.com/user-attachments/assets/19244c17-be66-410f-b2cf-b8e3edb4b228">
+  <source src="https://github.com/user-attachments/assets/6aa0e537-bd5e-462d-89e2-6592cd9e3be9" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/00f08e39-3b52-4556-860b-3b5b0b2d7287" type="video/mp4">
 </video>
 
 ### Your morning, already handled
@@ -348,9 +348,9 @@ See [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#watch-ta
 A scheduled task posts a morning brief.
 See [Scheduling](https://docs.mindroom.chat/scheduling/).
 
-<video controls playsinline preload="metadata" aria-label="Your morning, already handled" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/cfbbac8e-6942-4bac-a920-ac3946951174#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a3bacdb7-7d59-42d2-8d0f-33f391c412b2#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Your morning, already handled" style="width: 100%" poster="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-light="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-dark="https://github.com/user-attachments/assets/38261697-8f2a-478d-a256-32559e107315">
+  <source src="https://github.com/user-attachments/assets/e59e09c8-c8c7-4e90-8e3c-30b8f18b6de2" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/fdbc3860-9301-4d62-907a-857c818d4e73" type="video/mp4">
 </video>
 
 ### Nothing falls through the cracks
@@ -358,9 +358,9 @@ See [Scheduling](https://docs.mindroom.chat/scheduling/).
 A check asked for in conversation becomes a weekly scheduled report.
 See [Scheduler tool](https://docs.mindroom.chat/scheduling/#scheduler).
 
-<video controls playsinline preload="metadata" aria-label="Nothing falls through the cracks" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/41986747-dfb3-41cd-b3c6-b60f8eabdab8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d8729fbc-7377-4b80-b3c2-c39394eb19a4#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Nothing falls through the cracks" style="width: 100%" poster="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-light="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-dark="https://github.com/user-attachments/assets/6194d6c7-89e7-4e66-8810-048efc3b3001">
+  <source src="https://github.com/user-attachments/assets/2fa5d666-16bd-4864-b27f-fb212609e2a1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/7a68cee9-24d4-43cf-84de-599405fd16d7" type="video/mp4">
 </video>
 
 ### Say it, and it's handled
@@ -368,9 +368,9 @@ See [Scheduler tool](https://docs.mindroom.chat/scheduling/#scheduler).
 A voice message between meetings becomes a reminder.
 See [Voice Messages](https://docs.mindroom.chat/voice/).
 
-<video controls playsinline preload="metadata" aria-label="Say it, and it's handled" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/8abba58e-790f-4c80-a57d-62ab683ea18c#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7bf1bb2f-31c7-4ef4-ac07-4ec1b22b2da1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Say it, and it's handled" style="width: 100%" poster="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-light="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-dark="https://github.com/user-attachments/assets/9ec1837a-3566-4b0c-8274-7af7c30b988c">
+  <source src="https://github.com/user-attachments/assets/823df173-50ae-4304-b652-36a61bfbc911" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f048c8cc-3384-41e2-be59-000d3ab22099" type="video/mp4">
 </video>
 
 ## At home
@@ -380,9 +380,9 @@ See [Voice Messages](https://docs.mindroom.chat/voice/).
 A voice note from a phone locks up, turns off the lights, and lowers the heating.
 See [Home Assistant](https://docs.mindroom.chat/tools/location-commerce-and-home/#homeassistant).
 
-<video controls playsinline preload="metadata" aria-label="Lock up on the way out" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/ae8bf099-0f11-4097-8de1-de17efbb7bc8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/01e6b9c7-db21-49e9-897c-d03ced90ee14#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Lock up on the way out" style="width: 100%" poster="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-light="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-dark="https://github.com/user-attachments/assets/aac77c0a-6c51-4e8b-aaa6-e682ca08f228">
+  <source src="https://github.com/user-attachments/assets/51d85cfc-79de-4666-a3e2-aa2356f1c5ed" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/b5d7a6f2-11bb-45a5-b92e-03ab0d9c5ba0" type="video/mp4">
 </video>
 
 ### A weekend away, planned together
@@ -390,9 +390,9 @@ See [Home Assistant](https://docs.mindroom.chat/tools/location-commerce-and-home
 Two people plan a weekend trip, and the agent checks the calendar, offers options, and books the one they pick.
 See [Google Calendar](https://docs.mindroom.chat/tools/calendar-and-scheduling/#google_calendar).
 
-<video controls playsinline preload="metadata" aria-label="A weekend away, planned together" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/4fea9538-5d22-43b4-9147-7e8b496400a8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ba40bcb7-19aa-4085-9c28-e99f1d171320#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A weekend away, planned together" style="width: 100%" poster="https://github.com/user-attachments/assets/5dc33fcf-8ef3-4e35-a8d9-8e8d2946470f" data-poster-light="https://github.com/user-attachments/assets/5dc33fcf-8ef3-4e35-a8d9-8e8d2946470f" data-poster-dark="https://github.com/user-attachments/assets/1d522e45-873f-4ed3-b6f4-99bf44b3a423">
+  <source src="https://github.com/user-attachments/assets/936b2d54-9e2c-4fc7-aef3-fab8e0004665" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/2dc8de4b-f91d-4bb1-aeda-3dc0ffb42901" type="video/mp4">
 </video>
 
 ### Dinners that fit everyone
@@ -400,9 +400,9 @@ See [Google Calendar](https://docs.mindroom.chat/tools/calendar-and-scheduling/#
 The agent remembers each person's diet and plans the week's dinners.
 See [Memory System](https://docs.mindroom.chat/memory/).
 
-<video controls playsinline preload="metadata" aria-label="Dinners that fit everyone" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/75a32c85-7528-4b72-b268-0de8ec17f794#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/c4b6f6e3-03a9-40fd-808b-0d18abdaf263#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Dinners that fit everyone" style="width: 100%" poster="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-light="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-dark="https://github.com/user-attachments/assets/4ae62fd6-04fe-4dcc-aed6-d9b1de92b5f9">
+  <source src="https://github.com/user-attachments/assets/440c7742-da69-41e1-a131-788ca5307e31" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a7ccca20-2047-4d8c-8bf5-a2251e0946f3" type="video/mp4">
 </video>
 
 # Getting Started
@@ -2380,9 +2380,9 @@ Overrides set by the tool follow the same entity scope and team rules as [`!mode
 
 A team lets several agents answer one request together, either as a named team under `teams:` that has its own Matrix account, or as an ad hoc team formed when a message involves several agents.
 
-<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b6ea7dff-8542-409f-823a-0cd3590a9555#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/3c28159d-4d3e-4e47-bc5e-07e4e0c5eed1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-light="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-dark="https://github.com/user-attachments/assets/41849fb8-3dd1-4b9c-8eff-33bb10803f48">
+  <source src="https://github.com/user-attachments/assets/cb657cd9-3114-442f-a4fa-d8e6a96b6425" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/9ee83e64-1425-4165-b1f5-5d4aa978b46e" type="video/mp4">
 </video>
 
 ## Team Modes
@@ -2899,9 +2899,9 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
 
-<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/75a32c85-7528-4b72-b268-0de8ec17f794#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/c4b6f6e3-03a9-40fd-808b-0d18abdaf263#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-light="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-dark="https://github.com/user-attachments/assets/4ae62fd6-04fe-4dcc-aed6-d9b1de92b5f9">
+  <source src="https://github.com/user-attachments/assets/440c7742-da69-41e1-a131-788ca5307e31" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a7ccca20-2047-4d8c-8bf5-a2251e0946f3" type="video/mp4">
 </video>
 
 ## Choosing a Backend
@@ -3866,9 +3866,9 @@ Review log lines carry `kind: skill_learning`, so you can filter logs for them.
 Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
 Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
 
-<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/cfbbac8e-6942-4bac-a920-ac3946951174#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a3bacdb7-7d59-42d2-8d0f-33f391c412b2#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-light="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-dark="https://github.com/user-attachments/assets/38261697-8f2a-478d-a256-32559e107315">
+  <source src="https://github.com/user-attachments/assets/e59e09c8-c8c7-4e90-8e3c-30b8f18b6de2" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/fdbc3860-9301-4d62-907a-857c818d4e73" type="video/mp4">
 </video>
 
 ## Commands
@@ -3960,9 +3960,9 @@ Use `!list_schedules` to find task IDs.
 
 ## [`scheduler`]
 
-<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/41986747-dfb3-41cd-b3c6-b60f8eabdab8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d8729fbc-7377-4b80-b3c2-c39394eb19a4#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-light="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-dark="https://github.com/user-attachments/assets/6194d6c7-89e7-4e66-8810-048efc3b3001">
+  <source src="https://github.com/user-attachments/assets/2fa5d666-16bd-4864-b27f-fb212609e2a1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/7a68cee9-24d4-43cf-84de-599405fd16d7" type="video/mp4">
 </video>
 
 The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.
@@ -4236,9 +4236,9 @@ See [Cancellation and Errors](https://docs.mindroom.chat/streaming/#cancellation
 MindRoom streams agent responses to Matrix by progressively editing a single message, so users see text appear as the model generates it.
 This page covers when streaming is used, how to tune or disable it, how streamed messages show tool calls, completion, cancellation, and errors, and how oversized responses are delivered.
 
-<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b5772e74-de93-4559-8f4f-b045add92caa#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ec8dc609-e4b5-4db4-b806-d8c93fee52a0#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-light="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-dark="https://github.com/user-attachments/assets/54a96fc9-91dc-48a7-985c-7d4e41ad9be8">
+  <source src="https://github.com/user-attachments/assets/571db927-105b-4907-9c83-ed4f9ef1fc4a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/c913ed8a-4afb-43be-8d90-cdd2aa4158a9" type="video/mp4">
 </video>
 
 
@@ -4355,9 +4355,9 @@ Even with `split`, non-text payloads, metadata that alone exceeds the size budge
 This page covers Matrix voice messages sent to agents and teams: speech-to-text (STT) setup, transcript cleanup, what appears in the room, and what happens without STT.
 For live spoken conversations in Matrix calls, see [Voice Calls](https://docs.mindroom.chat/voice-calls/).
 
-<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/8abba58e-790f-4c80-a57d-62ab683ea18c#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7bf1bb2f-31c7-4ef4-ac07-4ec1b22b2da1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%" poster="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-light="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-dark="https://github.com/user-attachments/assets/9ec1837a-3566-4b0c-8274-7af7c30b988c">
+  <source src="https://github.com/user-attachments/assets/823df173-50ae-4304-b652-36a61bfbc911" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f048c8cc-3384-41e2-be59-000d3ab22099" type="video/mp4">
 </video>
 
 With voice enabled, MindRoom transcribes each voice message, cleans up the transcript, and handles it like a text message prefixed with `🎤`.
@@ -4976,9 +4976,9 @@ Pruning never deletes workspace files, the source files of registered attachment
 Agents can ask users a multiple-choice question that they answer by clicking an emoji reaction or typing the option number.
 Use this when an agent needs the user to pick between a few concrete options before it continues.
 
-<video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/14da1dfa-9892-4ce8-a2ed-ad67673ea4b5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/9cef359e-15d0-4f0a-810a-ec34811cf561#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%" poster="https://github.com/user-attachments/assets/0a47822d-348e-4ca1-9ab6-a704861f1327" data-poster-light="https://github.com/user-attachments/assets/0a47822d-348e-4ca1-9ab6-a704861f1327" data-poster-dark="https://github.com/user-attachments/assets/ba161463-03d9-41f7-bd99-7369c5542619">
+  <source src="https://github.com/user-attachments/assets/f49c4ff4-b0fe-4f4f-a36b-b8a3481f8147" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/6f31e382-0a78-4415-a610-a207744d4b73" type="video/mp4">
 </video>
 
 ## Asking a Question
@@ -5075,36 +5075,36 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
     A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%" poster="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-light="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-dark="https://github.com/user-attachments/assets/df646508-7bd3-494f-b560-c49bd5ec0982">
+      <source src="https://github.com/user-attachments/assets/e6698792-c676-4a4f-9824-ae04c1e970da" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/89fb462e-4895-43a0-9cf6-44f91fd7084d" type="video/mp4">
     </video>
 
 === "Data"
 
     An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%" poster="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-light="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-dark="https://github.com/user-attachments/assets/f283e9b8-4b9a-40be-a8e9-da758ad163a1">
+      <source src="https://github.com/user-attachments/assets/39a4fa17-51f4-46df-821d-7391c2418071" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/62d2d1d3-5754-4d6a-a5a4-d70b0a354d43" type="video/mp4">
     </video>
 
 === "Slides"
 
     A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%" poster="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-light="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-dark="https://github.com/user-attachments/assets/1517814d-cb7f-47f1-be9f-d2fc52ceffa8">
+      <source src="https://github.com/user-attachments/assets/fa8b1989-9b8c-4dad-b55d-18dd0412013a" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/e215f9e4-ffdb-4e64-9782-e787d3dd464b" type="video/mp4">
     </video>
 
 === "Trip planner"
 
     One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
 
-    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%" poster="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-light="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-dark="https://github.com/user-attachments/assets/01cf9610-83fc-4752-ac72-64750807af71">
+      <source src="https://github.com/user-attachments/assets/dd5ab134-eeba-4cd5-93e3-4dd6e8d0a9cd" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/3e772d7a-1acc-44bf-8e6e-f7e3032ee374" type="video/mp4">
     </video>
 
 ## Turn canvases on
@@ -7394,9 +7394,9 @@ Expose only this gateway; the worker's display has no public listener.
 
 ## Watch, take control, and resume
 
-<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/63868e17-6824-4073-8904-e1b7abc4b173#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/cc079b2f-6dbf-4509-9fdc-4ec21da85d7a#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%" poster="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-light="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-dark="https://github.com/user-attachments/assets/19244c17-be66-410f-b2cf-b8e3edb4b228">
+  <source src="https://github.com/user-attachments/assets/6aa0e537-bd5e-462d-89e2-6592cd9e3be9" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/00f08e39-3b52-4556-860b-3b5b0b2d7287" type="video/mp4">
 </video>
 
 - **Watch** shows the browser without input rights.
@@ -8011,9 +8011,9 @@ There is no live screen stream, multi-monitor selector, or unattended service in
 
 Use these tools to inspect and edit files, run shell commands or Python, manage Docker resources, do exact arithmetic, and generate files and charts.
 
-<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/1bc1dc4d-742f-490b-a177-3679ae412ec2#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ac87d6b3-a82a-491d-ae5c-7d114f55539f#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%" poster="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-light="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-dark="https://github.com/user-attachments/assets/b9ccd95c-1899-4fa2-9beb-a03d22ec6c46">
+  <source src="https://github.com/user-attachments/assets/e1a47a55-05a6-4035-b50c-b631e867b8c8" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a9d21f4f-d9c7-480f-b71b-8a7155903bfc" type="video/mp4">
 </video>
 
 ## Tools On This Page
@@ -8652,9 +8652,9 @@ agents:
 
 ## [`google_drive`]
 
-<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b8f28170-351a-4c6a-b49a-f5b6bd2a3df1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/58281caf-f956-4584-87ec-15bd2a2242cb#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%" poster="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-light="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-dark="https://github.com/user-attachments/assets/ce6ffe08-b3c1-4bdd-9d75-8e3abbea1e65">
+  <source src="https://github.com/user-attachments/assets/ffba1923-b463-4674-88af-5a862de1613f" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/690273d3-7fee-4e49-a1b5-75e39be00d8b" type="video/mp4">
 </video>
 
 `google_drive` works with files in the connected Google account, including shared drives the account can access.
@@ -10438,9 +10438,9 @@ matrix_message(action="react", event_id="$message", message="✅")
 
 ## Agent conversations
 
-<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/845b92f1-fa94-4aab-af0c-381d3cab5fb1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/b9b9cb8d-e334-4319-8b33-d6a885d11580#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%" poster="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-light="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-dark="https://github.com/user-attachments/assets/dcd0bb4a-c51b-420f-8e32-f8ce140b1037">
+  <source src="https://github.com/user-attachments/assets/2dce4510-bb8a-440b-9bb3-0bcb0d324955" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/c4093417-247c-4961-b6bc-85f73f2e9b55" type="video/mp4">
 </video>
 
 List possible recipients with `matrix_room(action="agents")` and pass a result's `name` as `recipient`; no Matrix mention is needed.
@@ -11342,9 +11342,9 @@ Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so 
 Additional Atlassian sites can be added as separate, independently connected tools through a small plugin.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
-<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/0dee9f09-80e1-4244-bac3-4da13072bab4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a2f812aa-bd2c-4996-bc13-f41b2f3a8f94#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%" poster="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-light="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-dark="https://github.com/user-attachments/assets/95022cb5-336c-4abc-93e3-430d7dd8eb07">
+  <source src="https://github.com/user-attachments/assets/e0f957e4-d610-4408-b30b-87b9e553ee53" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a5a4917a-a373-499e-95d2-e8c30f354368" type="video/mp4">
 </video>
 
 The separate `jira` and `confluence` tools on [Project Management](https://docs.mindroom.chat/tools/project-management/) use a shared API token or password and also support Jira and Confluence Data Center.
@@ -11644,9 +11644,9 @@ If an agent calls either tool before the account is connected, the tool returns 
 
 ## [`google_calendar`]
 
-<video controls playsinline preload="metadata" aria-label="Two people plan a weekend trip with an agent that checks the calendar and books it" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/4fea9538-5d22-43b4-9147-7e8b496400a8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ba40bcb7-19aa-4085-9c28-e99f1d171320#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Two people plan a weekend trip with an agent that checks the calendar and books it" style="width: 100%" poster="https://github.com/user-attachments/assets/5dc33fcf-8ef3-4e35-a8d9-8e8d2946470f" data-poster-light="https://github.com/user-attachments/assets/5dc33fcf-8ef3-4e35-a8d9-8e8d2946470f" data-poster-dark="https://github.com/user-attachments/assets/1d522e45-873f-4ed3-b6f4-99bf44b3a423">
+  <source src="https://github.com/user-attachments/assets/936b2d54-9e2c-4fc7-aef3-fab8e0004665" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/2dc8de4b-f91d-4bb1-aeda-3dc0ffb42901" type="video/mp4">
 </video>
 
 `google_calendar` provides `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
@@ -12702,9 +12702,9 @@ get_average_order_value(group_by="day", created_after="2026-03-01", created_befo
 
 ## `homeassistant`
 
-<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/ae8bf099-0f11-4097-8de1-de17efbb7bc8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/01e6b9c7-db21-49e9-897c-d03ced90ee14#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%" poster="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-light="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-dark="https://github.com/user-attachments/assets/aac77c0a-6c51-4e8b-aaa6-e682ca08f228">
+  <source src="https://github.com/user-attachments/assets/51d85cfc-79de-4666-a3e2-aa2356f1c5ed" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/b5d7a6f2-11bb-45a5-b92e-03ab0d9c5ba0" type="video/mp4">
 </video>
 
 `homeassistant` provides `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.
@@ -12756,9 +12756,9 @@ A Home Assistant URL on a private, local, or loopback network, such as `http://h
 This page explains who may talk to agents, teams, and the router, who may administer MindRoom and manage credentials, and who may open the dashboard.
 Use it to give people access to an agent, to work out why an agent ignored someone, or to map bridged identities to one person.
 
-<video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/a98cf35e-9c3d-40b8-9827-7f5d2a4dbc28#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/6ac07018-9961-465a-b38d-a3a34eba75b6#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%" poster="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-light="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-dark="https://github.com/user-attachments/assets/d4b50091-0d28-4185-8ecb-3f2615542e74">
+  <source src="https://github.com/user-attachments/assets/83081f1a-9caf-476a-b147-3c5f93762471" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/5eb23908-4555-42ca-8b38-a2636097339b" type="video/mp4">
 </video>
 
 See also [Rooms & Spaces](https://docs.mindroom.chat/rooms/), [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), and [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/).
@@ -12954,9 +12954,9 @@ None of these ownership rules grants responder access.
 
 # Tool Approval
 
-<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/6a2033ea-3354-4afd-9d58-fc617b18cd24#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d62d98e8-c066-4e1f-8a8f-d840da7b0bd1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%" poster="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-light="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-dark="https://github.com/user-attachments/assets/94181525-4b2b-43b4-b366-d85aa18f59b8">
+  <source src="https://github.com/user-attachments/assets/f3792ec9-ea73-4169-97ee-d09146cd65cc" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/cf813bb1-5f9d-43b2-a197-b4749696a86e" type="video/mp4">
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
@@ -13100,9 +13100,9 @@ MindRoom runs the whole OAuth flow for OAuth-backed tools and MCP servers: conne
 Each connection is stored for one credential scope, so the right person's account is used for each agent.
 Providers, built in or from plugins, supply only provider-specific details such as endpoints, scopes, and client configuration.
 
-<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/9c301417-f0ee-43d1-ac42-8c974d42888f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/4689c253-d026-4dee-afb8-7f178ea793df#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-light="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-dark="https://github.com/user-attachments/assets/9849b052-508e-409a-867c-cf155a640d31">
+  <source src="https://github.com/user-attachments/assets/c3a4166f-79a4-4ccb-a176-3a7c9922b828" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/62767b38-9729-4277-b615-e2b7b6863234" type="video/mp4">
 </video>
 
 ### Connect An Account

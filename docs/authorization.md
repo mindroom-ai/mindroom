@@ -7,9 +7,9 @@ icon: lucide/shield
 This page explains who may talk to agents, teams, and the router, who may administer MindRoom and manage credentials, and who may open the dashboard.
 Use it to give people access to an agent, to work out why an agent ignored someone, or to map bridged identities to one person.
 
-<video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/a98cf35e-9c3d-40b8-9827-7f5d2a4dbc28#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/6ac07018-9961-465a-b38d-a3a34eba75b6#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%" poster="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-light="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-dark="https://github.com/user-attachments/assets/d4b50091-0d28-4185-8ecb-3f2615542e74">
+  <source src="https://github.com/user-attachments/assets/83081f1a-9caf-476a-b147-3c5f93762471" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/5eb23908-4555-42ca-8b38-a2636097339b" type="video/mp4">
 </video>
 
 See also [Rooms & Spaces](rooms.md), [Routing & Responder Selection](configuration/router.md), and [Threads, Replies & Participation](configuration/threads.md).
