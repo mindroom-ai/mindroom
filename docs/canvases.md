@@ -23,36 +23,36 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
     A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%" poster="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-light="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-dark="https://github.com/user-attachments/assets/df646508-7bd3-494f-b560-c49bd5ec0982">
+      <source src="https://github.com/user-attachments/assets/e6698792-c676-4a4f-9824-ae04c1e970da" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/89fb462e-4895-43a0-9cf6-44f91fd7084d" type="video/mp4">
     </video>
 
 === "Data"
 
     An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%" poster="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-light="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-dark="https://github.com/user-attachments/assets/f283e9b8-4b9a-40be-a8e9-da758ad163a1">
+      <source src="https://github.com/user-attachments/assets/39a4fa17-51f4-46df-821d-7391c2418071" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/62d2d1d3-5754-4d6a-a5a4-d70b0a354d43" type="video/mp4">
     </video>
 
 === "Slides"
 
     A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%" poster="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-light="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-dark="https://github.com/user-attachments/assets/1517814d-cb7f-47f1-be9f-d2fc52ceffa8">
+      <source src="https://github.com/user-attachments/assets/fa8b1989-9b8c-4dad-b55d-18dd0412013a" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/e215f9e4-ffdb-4e64-9782-e787d3dd464b" type="video/mp4">
     </video>
 
 === "Trip planner"
 
     One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
 
-    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%" poster="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-light="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-dark="https://github.com/user-attachments/assets/01cf9610-83fc-4752-ac72-64750807af71">
+      <source src="https://github.com/user-attachments/assets/dd5ab134-eeba-4cd5-93e3-4dd6e8d0a9cd" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/3e772d7a-1acc-44bf-8e6e-f7e3032ee374" type="video/mp4">
     </video>
 
 ## Turn canvases on

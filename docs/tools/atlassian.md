@@ -9,9 +9,9 @@ Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so 
 Additional Atlassian sites can be added as separate, independently connected tools through a small plugin.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](../oauth-framework.md).
 
-<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/0dee9f09-80e1-4244-bac3-4da13072bab4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a2f812aa-bd2c-4996-bc13-f41b2f3a8f94#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%" poster="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-light="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-dark="https://github.com/user-attachments/assets/95022cb5-336c-4abc-93e3-430d7dd8eb07">
+  <source src="https://github.com/user-attachments/assets/e0f957e4-d610-4408-b30b-87b9e553ee53" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a5a4917a-a373-499e-95d2-e8c30f354368" type="video/mp4">
 </video>
 
 The separate `jira` and `confluence` tools on [Project Management](project-management.md) use a shared API token or password and also support Jira and Confluence Data Center.

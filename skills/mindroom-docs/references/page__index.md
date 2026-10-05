@@ -7,9 +7,9 @@ They find what you need, write what you ask for, run recurring jobs on their own
 It is open source, and you choose each agent's model: a local one that keeps your private life at home, or a frontier one for hard problems.
 You can run all of it yourself: the chat app, the server, and the AI backend.
 
-<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-light="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-dark="https://github.com/user-attachments/assets/e126d12b-5609-4c97-b69f-e2f9289a0008">
+  <source src="https://github.com/user-attachments/assets/6ec88440-9b9a-4319-b4e9-88d452819bb6" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/af51cf1e-840a-415e-ae97-df453d2afdda" type="video/mp4">
 </video>
 
 **[Get started](https://docs.mindroom.chat/getting-started/)** · **[See it in action](https://docs.mindroom.chat/showcase/)** · **[Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/)**
