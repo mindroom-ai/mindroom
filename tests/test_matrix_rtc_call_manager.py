@@ -269,6 +269,7 @@ def _config(*, enabled: bool = True, credentials_service: str = "openai") -> Con
                 instructions=["Be kind."],
                 rooms=[ROOM_ID],
                 access=ResponderAccessConfig(users=["@alice:example.org"]),
+                memory_backend="none",
             ),
         },
         models={},
@@ -1687,11 +1688,15 @@ async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: Path) -> None:
-    """Revocation is control-plane cleanup and must not wait for positive admission."""
+async def test_reply_revocation_stops_call_while_admission_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Revocation never waits for admission; the origin write-back does, and runs once admission reopens."""
+    post, access = _patch_call_writeback(monkeypatch)
     grant_room_id = "!grant:example.org"
     client = _client()
-    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
@@ -1713,11 +1718,13 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
         bridge,
         tmp_path,
         config,
+        tool_support=_origin_tool_support(),
         agent_reply_memberships=memberships,
         response_admission_gate=gate,
     )
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is GRANT
+    _record_two_minute_exchange(bridge)
     assert gate.close_if_idle()
 
     memberships.apply_member_event(
@@ -1741,7 +1748,13 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
 
     assert bridge.closed
     assert gate.closed
+    access.assert_not_awaited()
+    post.assert_not_awaited()
     gate.reopen()
+    await asyncio.wait_for(_drain_background_tasks(manager), timeout=1)
+    access.assert_awaited_once()
+    post.assert_awaited_once()
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2674,20 +2687,17 @@ def _patch_call_writeback(
     *,
     access_allowed: bool = True,
     post: AsyncMock | None = None,
-) -> AsyncMock:
-    """Stub origin resolution, the hang-up access check, posting, and transcript storage."""
+) -> tuple[AsyncMock, AsyncMock]:
+    """Stub origin resolution, the hang-up access check, and posting; return ``(post, access)``."""
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
         AsyncMock(return_value=_ORIGIN_CONTEXT),
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_manager.room_access_allowed",
-        AsyncMock(return_value=access_allowed),
-    )
+    access = AsyncMock(return_value=access_allowed)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.room_access_allowed", access)
     post = post or AsyncMock()
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.post_call_writeback", post)
-    monkeypatch.setattr(CallTranscript, "finalize", AsyncMock())
-    return post
+    return post, access
 
 
 def _record_two_minute_exchange(bridge: FakeBridge) -> None:
@@ -2722,7 +2732,7 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     tmp_path: Path,
 ) -> None:
     """Hanging up posts what was said into the conversation the call was started from."""
-    post = _patch_call_writeback(monkeypatch)
+    post, _ = _patch_call_writeback(monkeypatch)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
     origin_room = _room(room_id=_ORIGIN_CONTEXT.origin.room_id)
@@ -2750,7 +2760,7 @@ async def test_call_ended_by_shutdown_posts_nothing(
     tmp_path: Path,
 ) -> None:
     """A call that ends because MindRoom shuts down posts no transcript."""
-    post = _patch_call_writeback(monkeypatch)
+    post, _ = _patch_call_writeback(monkeypatch)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
     bridge = FakeBridge()
@@ -2771,7 +2781,7 @@ async def test_call_stop_without_origin_posts_nothing(
     tmp_path: Path,
 ) -> None:
     """A call that was not started from a conversation has nowhere to post its transcript."""
-    post = _patch_call_writeback(monkeypatch)
+    post, _ = _patch_call_writeback(monkeypatch)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
@@ -2791,7 +2801,7 @@ async def test_call_stop_skips_writeback_when_origin_access_was_revoked(
     tmp_path: Path,
 ) -> None:
     """A caller who lost access to the origin during the call gets nothing posted there."""
-    post = _patch_call_writeback(monkeypatch, access_allowed=False)
+    post, _ = _patch_call_writeback(monkeypatch, access_allowed=False)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
     bridge = FakeBridge()
@@ -2812,7 +2822,7 @@ async def test_writeback_failure_does_not_break_teardown(
     tmp_path: Path,
 ) -> None:
     """A failed transcript post is logged and the call still leaves cleanly."""
-    post = _patch_call_writeback(monkeypatch, post=AsyncMock(side_effect=RuntimeError("homeserver exploded")))
+    post, _ = _patch_call_writeback(monkeypatch, post=AsyncMock(side_effect=RuntimeError("homeserver exploded")))
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
     bridge = FakeBridge()
@@ -2828,76 +2838,6 @@ async def test_writeback_failure_does_not_break_teardown(
     failures = [log for log in logs if log["event"] == "call_writeback_failed"]
     assert [failure["error"] for failure in failures] == ["homeserver exploded"]
     assert not any(log["event"] == "call_session_stop_failed" for log in logs)
-    await manager.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_revocation_under_closed_admission_defers_writeback_until_reopen(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Call teardown never waits on admission; the write-back runs after reopen and re-checks origin access."""
-    post = _patch_call_writeback(monkeypatch)
-    access = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.room_access_allowed", access)
-    grant_room_id = "!grant:example.org"
-    client = _client()
-    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
-    bridge = FakeBridge()
-    config = _config()
-    config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    _set_helper_access(config, members_of_rooms=["grant"])
-    runtime_paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    state.save(runtime_paths=runtime_paths)
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[nio.RoomMember("@alice:example.org", None, None)],
-        room_id=grant_room_id,
-    )
-    memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
-    gate = ResponseAdmissionGate()
-    manager = _manager(
-        client,
-        bridge,
-        tmp_path,
-        config,
-        tool_support=_origin_tool_support(),
-        agent_reply_memberships=memberships,
-        response_admission_gate=gate,
-    )
-    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
-    _record_two_minute_exchange(bridge)
-    assert gate.close_if_idle()
-    memberships.apply_member_event(
-        config,
-        runtime_paths,
-        grant_room_id,
-        nio.RoomMemberEvent.from_dict(
-            {
-                "type": "m.room.member",
-                "event_id": "$grant-leave-writeback",
-                "sender": "@alice:example.org",
-                "state_key": "@alice:example.org",
-                "origin_server_ts": 1,
-                "content": {"membership": "leave"},
-                "unsigned": {"prev_content": {"membership": "join"}},
-            },
-        ),
-        control_user_id=BOT_USER,
-    )
-
-    await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
-
-    assert bridge.closed
-    access.assert_not_awaited()
-    gate.reopen()
-    await asyncio.wait_for(_drain_background_tasks(manager), timeout=1)
-    access.assert_awaited_once()
-    post.assert_awaited_once()
     await manager.shutdown()
 
 

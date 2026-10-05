@@ -1272,31 +1272,31 @@ class CallManager:
     ) -> None:
         """Post one finished call's transcript once admitted, if the caller can still access the origin."""
         try:
-            async with asyncio.timeout(_CALL_WRITEBACK_TIMEOUT_S):
-                origin_room = self._client.rooms.get(origin.room_id)
-                body = format_call_writeback(
-                    turns=turns,
-                    duration_seconds=duration_seconds,
-                    caller_label=(origin_room.user_name(requester_id) if origin_room else None) or requester_id,
-                    agent_label=self._config.agents[self._agent_name].display_name,
-                )
-                if body is None:
+            origin_room = self._client.rooms.get(origin.room_id)
+            body = format_call_writeback(
+                turns=turns,
+                duration_seconds=duration_seconds,
+                caller_label=(origin_room.user_name(requester_id) if origin_room else None) or requester_id,
+                agent_label=self._config.agents[self._agent_name].display_name,
+            )
+            if body is None:
+                return
+            # The timeout starts once admitted: a long config apply holds admission closed and must not eat it.
+            async with (
+                admitted_response_decision(self._response_admission_gate, self._wait_for_admission_or_shutdown),
+                asyncio.timeout(_CALL_WRITEBACK_TIMEOUT_S),
+            ):
+                context = self._call_room_context(room_id, requester_id)
+                if context is None:
                     return
-                async with admitted_response_decision(
-                    self._response_admission_gate,
-                    self._wait_for_admission_or_shutdown,
-                ):
-                    context = self._call_room_context(room_id, requester_id)
-                    if context is None:
-                        return
-                    if not await room_access_allowed(context, origin.room_id):
-                        logger.info(
-                            "call_writeback_skipped_access_revoked",
-                            room_id=origin.room_id,
-                            agent=self._agent_name,
-                        )
-                        return
-                    await post_call_writeback(context=context, origin=origin, body=body)
+                if not await room_access_allowed(context, origin.room_id):
+                    logger.info(
+                        "call_writeback_skipped_access_revoked",
+                        room_id=origin.room_id,
+                        agent=self._agent_name,
+                    )
+                    return
+                await post_call_writeback(context=context, origin=origin, body=body)
         except ResponseAdmissionRefusedError:
             return
         except TimeoutError:
