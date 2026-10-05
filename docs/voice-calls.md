@@ -253,7 +253,7 @@ For a rejected credential, update the credential MindRoom uses, restart MindRoom
 ## Calling an agent about a thread
 
 In MindRoom Chat, start the call from a thread's header, or from the agent's profile while a thread is open.
-When the agent picks up, it receives a snapshot of that conversation and the thread title.
+When the agent picks up, it receives a snapshot of that conversation, plus the thread title when the thread has one.
 The snapshot is the newest part of the thread that fits the call budget (about 6,000 tokens), with a note when older messages were left out.
 Each message is cut to 2,000 characters.
 Starting a call from a room's main timeline gives the agent the newest unthreaded messages of that room instead.
@@ -269,8 +269,15 @@ It works with all three call profiles:
 
 The snapshot is used only when the call can safely see it.
 The caller must pass the normal reply permissions for the origin room and still be a member of it, the agent must have joined it, and a thread origin must point at the thread's first message.
-The origin must also be written by the call's only caller, for this agent.
+The origin must also be written by the call's only caller, for this agent, and name a room other than the call room.
 If any check fails, or reading the conversation takes longer than 5 seconds, the call proceeds without it.
+
+When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
+The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, so later replies in the thread know what was said.
+Calls shorter than 10 seconds, calls in which the caller said nothing, calls whose conversation snapshot was skipped, and calls cut off by a MindRoom restart post nothing.
+The transcript holds only what was said; tool use is left out.
+Before posting, the agent checks the caller's access to the origin room again, and posts nothing if the caller lost that access during the call.
+If the agent's media connection drops and it rejoins the same call, each part of the call posts its own message.
 
 Clients ask for this with the `origin` field of the call room's `io.mindroom.agent_call` state event:
 

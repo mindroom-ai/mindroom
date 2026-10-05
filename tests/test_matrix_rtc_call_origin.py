@@ -189,6 +189,7 @@ def _origin_room() -> nio.MatrixRoom:
 
 def _resolve_context(*, rooms: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(
+        room_id="!call:example.org",
         client=SimpleNamespace(user_id=AGENT, rooms={ORIGIN_ROOM: _origin_room()} if rooms is None else rooms),
         conversation_reader=make_conversation_reader_mock(),
         config=object(),
@@ -336,6 +337,23 @@ async def test_resolve_rejects_caller_without_origin_access(monkeypatch: pytest.
         context=_resolve_context(),  # type: ignore[arg-type]
     )
     assert resolved is None
+    read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_access")
+async def test_resolve_rejects_the_call_room_as_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An origin in the call room itself is rejected before any read."""
+    read = AsyncMock()
+    monkeypatch.setattr(call_origin, "complete_thread_history", read)
+    context = _resolve_context()
+    context.room_id = ORIGIN_ROOM
+    resolved = await resolve_call_origin_context(
+        CallOrigin(room_id=ORIGIN_ROOM, thread_id="$root"),
+        context=context,  # type: ignore[arg-type]
+    )
+    assert resolved is None
+    call_origin.room_access_allowed.assert_not_awaited()
     read.assert_not_awaited()
 
 

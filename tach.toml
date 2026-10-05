@@ -3341,6 +3341,7 @@ visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix_rtc.call_manager",
+    "mindroom.matrix_rtc.call_writeback",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.scheduling",
     "mindroom.scheduling_executor",
@@ -3998,12 +3999,14 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.config.voice",
     "mindroom.credentials_sync",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix_rtc.call_origin",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
+    "mindroom.matrix_rtc.call_writeback",
     "mindroom.matrix_rtc.events",
     "mindroom.matrix_rtc.focus",
     "mindroom.matrix_rtc.key_transport",
@@ -4045,6 +4048,15 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.conversation_reads",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_writeback"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
 ]
 
 [[modules]]
