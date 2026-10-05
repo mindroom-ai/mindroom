@@ -14,9 +14,9 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix_rtc import call_origin
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
-    CallBriefMessage,
     CallOrigin,
     CallOriginContext,
+    _CallBriefMessage,
     build_call_brief,
     parse_call_origin,
     resolve_call_origin_context,
@@ -86,7 +86,7 @@ def _context(messages: list[tuple[str, str]], *, title: str | None = "Trip plann
         origin=CallOrigin(room_id="!origin:example.org", thread_id="$root"),
         room_name="Lobby",
         thread_title=title,
-        messages=tuple(CallBriefMessage(label=label, body=body) for label, body in messages),
+        messages=tuple(_CallBriefMessage(label=label, body=body) for label, body in messages),
     )
 
 
@@ -217,8 +217,8 @@ async def test_resolve_builds_labelled_snapshot_with_thread_title(monkeypatch: p
     assert resolved.room_name == "Lobby"
     assert resolved.thread_title == "Trip planning"
     assert resolved.messages == (
-        CallBriefMessage(label="Alice", body="Plan the trip"),
-        CallBriefMessage(label="You", body="Sure"),
+        _CallBriefMessage(label="Alice", body="Plan the trip"),
+        _CallBriefMessage(label="You", body="Sure"),
     )
 
 
@@ -266,8 +266,8 @@ async def test_resolve_skips_empty_bodies_and_falls_back_to_ids(monkeypatch: pyt
     assert resolved.thread_title is None
     assert resolved.room_name == unnamed.display_name
     assert resolved.messages == (
-        CallBriefMessage(label="Alice", body="Plan the trip"),
-        CallBriefMessage(label=stranger, body="Hello"),
+        _CallBriefMessage(label="Alice", body="Plan the trip"),
+        _CallBriefMessage(label=stranger, body="Hello"),
     )
 
 
@@ -294,7 +294,7 @@ async def test_resolve_reads_the_bounded_room_conversation_for_room_origin(monke
     )
 
     assert resolved is not None
-    assert resolved.messages == (CallBriefMessage(label="Alice", body="Hi"),)
+    assert resolved.messages == (_CallBriefMessage(label="Alice", body="Hi"),)
     context.conversation_reader.read_strict.assert_awaited_once_with(room_id=ORIGIN_ROOM, thread_id=None, limit=200)
     assert projections == [(page, False)]
     thread_read.assert_not_awaited()
@@ -419,5 +419,5 @@ async def test_resolve_uses_cross_room_membership_policy(
         context=await _integration_context(tmp_path, requester_joined=True),
     )
     assert allowed is not None
-    assert allowed.messages == (CallBriefMessage(label=_REQUESTER_ID, body="Plan the trip"),)
+    assert allowed.messages == (_CallBriefMessage(label=_REQUESTER_ID, body="Plan the trip"),)
     read.assert_awaited_once()

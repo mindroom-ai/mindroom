@@ -39,9 +39,9 @@ from mindroom.matrix_rtc.call_manager import (
 )
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
-    CallBriefMessage,
     CallOrigin,
     CallOriginContext,
+    _CallBriefMessage,
 )
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
 from mindroom.matrix_rtc.call_tools import CallAgentResponse, CallAgentTooling
@@ -2383,7 +2383,7 @@ _ORIGIN_CONTEXT = CallOriginContext(
     origin=CallOrigin(room_id="!origin:example.org", thread_id="$root"),
     room_name="Lobby",
     thread_title="Trip planning",
-    messages=(CallBriefMessage(label="Alice", body="Book the 9am train"),),
+    messages=(_CallBriefMessage(label="Alice", body="Book the 9am train"),),
 )
 
 
@@ -2608,7 +2608,7 @@ def test_live_instructions_include_origin_brief_within_limit() -> None:
         room_name="Lobby",
         thread_title=None,
         messages=tuple(
-            CallBriefMessage(label="Alice", body=f"Note {index}: " + "details about the plan " * 40)
+            _CallBriefMessage(label="Alice", body=f"Note {index}: " + "details about the plan " * 40)
             for index in range(2_000)
         ),
     )

@@ -40,7 +40,7 @@ class CallOrigin:
 
 
 @dataclass(frozen=True)
-class CallBriefMessage:
+class _CallBriefMessage:
     """One origin message, labelled for the voice agent."""
 
     label: str
@@ -54,7 +54,7 @@ class CallOriginContext:
     origin: CallOrigin
     room_name: str
     thread_title: str | None
-    messages: tuple[CallBriefMessage, ...]
+    messages: tuple[_CallBriefMessage, ...]
 
 
 def parse_call_origin(
@@ -150,7 +150,7 @@ async def resolve_call_origin_context(
 
     trusted_sender_ids = current_internal_sender_ids(context.config, context.runtime_paths)
     thread_title: str | None = None
-    messages: list[CallBriefMessage] = []
+    messages: list[_CallBriefMessage] = []
     for message in history:
         if message.sender in trusted_sender_ids and isinstance(message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
             summary = message.content[_THREAD_SUMMARY_CONTENT_KEY].get("summary")
@@ -160,7 +160,7 @@ async def resolve_call_origin_context(
         if not body:
             continue
         label = "You" if message.sender == context.client.user_id else room.user_name(message.sender) or message.sender
-        messages.append(CallBriefMessage(label=label, body=body))
+        messages.append(_CallBriefMessage(label=label, body=body))
     return CallOriginContext(
         origin=origin,
         room_name=room.display_name or origin.room_id,
