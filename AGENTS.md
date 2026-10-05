@@ -34,11 +34,11 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 
 - The primary reader of `docs/` is an AI agent running inside MindRoom, which loads whole pages through the bundled `mindroom-docs` skill to explain, configure, operate, and troubleshoot MindRoom for its user.
   Every sentence on a page costs context on every question that page answers, so a sentence belongs only when that agent needs it.
-- **Default to no change in user docs**, meaning every page outside `docs/architecture/`.
+- **Default to no change in user docs**, meaning the pages in the `zensical.toml` nav, which the `mindroom-docs` skill bundles.
   Bug fixes that restore documented behavior, refactors, and hardening or internal limits that normal use never reaches need none; contributor pages such as the code map, `migrations.md`, and `agno-compatibility.md` follow their own update rules.
   Change docs only when configuration, user-visible behavior, or an operator procedure changes, and then add only the sentences that change an answer to a user question.
 - **Name the question before writing a sentence**: keep it only when the agent would answer a realistic user question worse without it, such as how to set something up, what a setting does, or why something did or did not happen.
-  If you cannot name that question, the sentence does not belong outside `docs/architecture/`.
+  If you cannot name that question, the sentence does not belong in user docs.
 - Document what a reader can do, configure, observe, or rely on: features and when to use them, behavior and limits that normal use reaches, errors and how to resolve them, and operator procedures such as install, deploy, upgrade, migrate, back up, and recover.
 - Document each public config field once, on its owning page, with its type, default, valid values, and any inheritance or prerequisites.
   Show a few examples of realistic tasks instead of one example per field.
@@ -46,11 +46,11 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - Leave out implementation mechanics: locks, transactions, journals, caches, retries, internal IDs, module and class names, ordering internals, encoding details, and change history such as "previously" or "now".
   Also leave out hardening limits that normal use never reaches, and behavior on rare failure, cancellation, recovery, and replay paths unless a user would plausibly ask about it.
   Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
-  `docs/architecture/` pages are for contributors and may explain mechanisms; other pages name implementation details only when a documented procedure needs them.
+  Pages outside the nav, such as most of `docs/architecture/` and `docs/dev/`, are for contributors and operators and may explain mechanisms; user docs name implementation details only when a documented procedure needs them.
 - Sentences like these fail the question test:
-  - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." describes a cache, not anything a user does or sees.
+  - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." states a hardening limit normal use never reaches, with no effect a user sees.
   - "Restart recovery now checks the handled-turn ledger before replaying journal events." narrates a mechanism and its history; the outcome is "restarts do not produce duplicate replies".
-  These pass: "Edits to an agent's `instructions`, `model`, or `tools` apply from its next reply without restarting it." answers "do I need to restart?", and the history page's note that a voice-call reply or a reply resuming after a tool approval can still use a redacted message is a rare path that answers "can the agent still see what I deleted?".
+  These pass: "Edits to an agent's `instructions`, `model`, or `tools` apply from its next reply without restarting it." answers "do I need to restart?", and the note in `docs/configuration/history.md` that a voice-call reply or a reply resuming after a tool approval can still use a redacted message is a rare path that answers "can the agent still see what I deleted?".
 - Each topic has one owning page that states each of its facts once; other pages link to it instead of splitting its rules across pages.
 
 ### Refactor Policy

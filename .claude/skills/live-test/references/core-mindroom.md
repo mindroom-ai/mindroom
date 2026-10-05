@@ -120,7 +120,7 @@ room_defaults:
   join_policy: public
 ```
 
-To exercise Mem0 memory instead of `backend: file`, set `memory.backend: mem0` and an `embedder` with `provider: openai` and a `config.model` the local server serves, such as `embeddinggemma:300m` (see `docs/memory.md`).
+To exercise Mem0 memory instead of `backend: file`, set `memory.backend: mem0` and an `embedder` with `provider: openai`, `config.host: http://localhost:9292/v1`, and a `config.model` the local server serves, such as `embeddinggemma:300m` (see `docs/memory.md`); without `host`, embedding calls go to `OPENAI_BASE_URL` or api.openai.com.
 
 Then export an isolated runtime.
 
@@ -224,6 +224,7 @@ Use the actual alias created by the active config.
 ## Read and Send Messages with Matty
 
 Matty accepts per-command credentials with `-u` and `-p`.
+Without `-u` and `-p`, Matty uses `MATRIX_USERNAME` and `MATRIX_PASSWORD` from the environment or the working directory's `.env`, then credentials saved with `matty auth`.
 Matty refers to messages by handles `m1`, `m2`, … and to threads by `t1`, `t2`, …; thread handles persist across sessions.
 `matty messages` takes `--limit` (default 20), `matty thread-start "$room_id" m2 "text"` starts a thread from a message, and every command has a short alias (`r`, `m`, `t`, `th`, `ts`, `tr`, …; see `matty --help`).
 Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b`).
