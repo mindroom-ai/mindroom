@@ -44,11 +44,14 @@ curl -s http://localhost:8008/_matrix/client/versions | head -c 200
 curl -s http://localhost:9292/v1/models | head -c 200
 ```
 
-If you switched homeservers or see `M_FORBIDDEN`, clear local Matrix state before restarting MindRoom.
+If you switched homeservers or see `M_FORBIDDEN`, stop the backend and clear the selected runtime's Matrix state before restarting MindRoom.
 
 ```bash
-rm -f mindroom_data/matrix_state.yaml
+uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
 ```
+
+This uses the same config and storage selection as `mindroom run`, including `MINDROOM_CONFIG_PATH` and `MINDROOM_STORAGE_PATH`; a hardcoded `mindroom_data/matrix_state.yaml` only covers default storage beside the repository's config.
+For a full destructive reset of the local homeserver, read the `just local-matrix-reset` warning in `docs/dev/ops/README.md` first.
 
 ## Fast Path: Use Existing Repo Config
 
@@ -271,8 +274,16 @@ MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
 uv run --python 3.13 matty thread "$room_id" t1 -u "$username" -p "$password" --format json
 ```
 
-Agents usually reply in threads and may stream by editing the same event.
-If you see partial output, wait and read the thread again.
+Reply in an existing thread:
+
+```bash
+MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
+uv run --python 3.13 matty thread-reply "$room_id" t1 "$agent_id continue" -u "$username" -p "$password"
+```
+
+Agents usually reply in threads and may stream by editing the same event, which can take 10 seconds or more.
+Inspect the latest `io.mindroom.stream_status` in a client or event view that exposes it: `pending` and `streaming` mean the reply is still in progress, and `completed` confirms success.
+Record `cancelled` or `error` as terminal outcomes; body ellipses are not a completion signal.
 When reading threads through the raw `/messages` API, the streamed edits are `m.replace` events whose `m.relates_to.event_id` is the placeholder reply, not the thread root, so collect the thread events first and then apply every `m.replace` whose target is one of them; filtering on the root alone leaves the reply stuck at `Thinking...`.
 A deterministic stub on 9292 can also emit an OpenAI `tool_calls` delta when the user text contains a marker, which exercises MindRoom's tool hook chain end to end without a provider key.
 If `matty threads` looks empty or flaky, use `matty messages --format json` to discover the thread handle and then read it directly with `matty thread`.

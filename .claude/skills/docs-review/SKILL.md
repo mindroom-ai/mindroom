@@ -18,7 +18,7 @@ Don't waste time on these—CI and pre-commit hooks handle them:
 Focus on things that require judgment:
 
 1. **Accuracy**: Does the documentation match what the code actually does?
-2. **Completeness**: Are there undocumented features, config options, user-visible behaviors, or operator procedures?
+2. **Completeness**: Are there undocumented features, config options, user-visible behaviors, or operator procedures? Internal limits, hardening, and failure or recovery paths are not gaps.
 3. **Relevance**: Does every sentence pass the Documentation Policy, or does it describe implementation mechanics or change history?
 4. **Clarity**: Would a MindRoom agent answering a user question find and apply this? Are examples realistic?
 5. **Consistency**: Do different docs contradict each other or repeat the same fact?
@@ -65,10 +65,9 @@ Check:
 git ls-files "src/mindroom/**/*.py"
 ```
 
-Check `docs/architecture/` and the Architecture section of `AGENTS.md`:
+Check `docs/architecture/`, including the module rows in `docs/architecture/code-map.md`:
 - Listed modules exist and descriptions match what the code does
-- No source modules are missing from the `AGENTS.md` listing; `docs/architecture/` covers components and data flow, not every module
-- Both locations can drift independently — check both
+- No source modules are missing from the code map; the other `docs/architecture/` pages cover components and data flow, not every module
 
 ### 4. Verify Feature Docs Against Implementation
 
