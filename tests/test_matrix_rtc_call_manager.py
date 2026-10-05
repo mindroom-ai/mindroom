@@ -33,6 +33,7 @@ from mindroom.matrix_rtc.call_manager import (
     _LIVE_VOICE_INSTRUCTIONS,
     _MAX_PENDING_KEYS_PER_ROOM,
     _PENDING_KEY_TTL_MS,
+    _VOICE_STYLE_ADDENDUM,
     CallManager,
     _build_call_instructions,
     _build_live_instructions,
@@ -2500,6 +2501,7 @@ async def test_realtime_call_instructions_include_validated_origin_brief(
     assert "Book the 9am train" in instructions
     assert instructions.endswith("lists, or other written formatting.")
     assert "never use markdown" in instructions
+    assert "Starting work from this call" not in instructions
     resolver.assert_awaited_once()
     assert resolver.await_args.args == (CallOrigin(room_id="!origin:example.org", thread_id="$root"),)
     assert resolver.await_args.kwargs == {"context": origin_tool_context}
@@ -2508,6 +2510,68 @@ async def test_realtime_call_instructions_include_validated_origin_brief(
     assert build_context.call_args.kwargs["user_id"] == "@alice:example.org"
     assert build_context.call_args.kwargs["agent_name"] == "helper"
     assert client.room_get_state.await_count == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_realtime_agent_with_matrix_message_learns_to_start_work_in_the_origin_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An agent that can message is told to start longer work in the origin thread, after the brief."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(return_value=_ORIGIN_CONTEXT),
+    )
+    config = _config()
+    config.agents["helper"].tools = ["matrix_message"]
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config, tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert isinstance(bridge.agent_options, VoiceAgentOptions)
+    instructions = bridge.agent_options.instructions
+    assert 'room_id "!origin:example.org", thread_id "$root"' in instructions
+    assert 'recipient="helper"' in instructions
+    brief_at = instructions.index("Book the 9am train")
+    assert brief_at < instructions.index("Starting work from this call") < instructions.index(_VOICE_STYLE_ADDENDUM)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_call_without_origin_asks_the_caller_where_to_start_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without an origin, an agent that can message asks which room to use instead of the call room."""
+    tooling_kwargs: dict[str, object] = {}
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    config = _cascaded_config()
+    config.agents["helper"].tools = ["matrix_message"]
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config, tool_support=_origin_tool_support())
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
+    note = cast("str", tooling_kwargs["origin_brief"])
+    assert note.startswith("## Starting work from this call")
+    assert "ask which one" in note
     await manager.shutdown()
 
 

@@ -20,6 +20,7 @@ from mindroom.matrix_rtc.call_origin import (
     CallOriginContext,
     _CallBriefMessage,
     build_call_brief,
+    build_call_handoff_note,
     parse_call_origin,
     resolve_call_origin_context,
 )
@@ -553,3 +554,26 @@ async def test_resolve_uses_cross_room_membership_policy(
     assert allowed is not None
     assert allowed.messages == (_CallBriefMessage(label=_REQUESTER_ID, body="Plan the trip"),)
     read.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected_target"),
+    [
+        (
+            CallOrigin(room_id="!r:x", thread_id="$root"),
+            'the thread this call came from (room_id "!r:x", thread_id "$root")',
+        ),
+        (CallOrigin(room_id="!r:x", thread_id=None), 'the room this call came from (room_id "!r:x")'),
+        (None, "ask which one, then pass its name or ID as room_id"),
+    ],
+)
+def test_handoff_note_points_at_the_origin_never_the_call_room(
+    origin: CallOrigin | None,
+    expected_target: str,
+) -> None:
+    """Longer work goes to the origin conversation, or a room the caller names, via a self-dispatch."""
+    note = build_call_handoff_note(origin, agent_name="helper")
+
+    assert expected_target in note
+    assert 'recipient="helper"' in note
+    assert note.endswith("Never post in this call room.")

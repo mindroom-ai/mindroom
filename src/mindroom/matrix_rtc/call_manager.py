@@ -42,6 +42,7 @@ from mindroom.matrix_rtc.call_origin import (
     CALL_BRIEF_TOKEN_BUDGET,
     CallOriginContext,
     build_call_brief,
+    build_call_handoff_note,
     parse_call_origin,
     resolve_call_origin_context,
 )
@@ -52,7 +53,12 @@ from mindroom.matrix_rtc.call_session import (
     CallStartRevokedError,
     required_device_id,
 )
-from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools, record_call_voice_usage
+from mindroom.matrix_rtc.call_tools import (
+    CallAgentTooling,
+    build_call_tools,
+    matrix_message_available_during_call,
+    record_call_voice_usage,
+)
 from mindroom.matrix_rtc.call_writeback import format_call_writeback, post_call_writeback
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
@@ -1351,12 +1357,16 @@ class CallManager:
             voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
             active_model_name=active_model_name,
             reconcile_spoken_response=self._call_config.backend != "live",
-            origin_brief=(
-                build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET)
-                if origin_context and enable_responder
-                else None
-            ),
+            origin_brief=self._call_context_text(origin_context) if enable_responder else None,
         )
+
+    def _call_context_text(self, origin_context: CallOriginContext | None) -> str:
+        """Return the origin brief plus, when the agent can message, where to start longer work."""
+        parts = [build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET) if origin_context else ""]
+        if matrix_message_available_during_call(self._config, self._agent_name):
+            origin = origin_context.origin if origin_context else None
+            parts.append(build_call_handoff_note(origin, agent_name=self._agent_name))
+        return "\n\n".join(part for part in parts if part)
 
     @asynccontextmanager
     async def _admitted_call_requester_operation(
@@ -1462,10 +1472,7 @@ class CallManager:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
             return VoiceAgentOptions(
-                instructions=_build_call_instructions(
-                    tooling.instructions,
-                    build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET) if origin_context else "",
-                ),
+                instructions=_build_call_instructions(tooling.instructions, self._call_context_text(origin_context)),
                 model=realtime_config.model,
                 api_key=backend.realtime_api_key,
                 voice=realtime_config.voice,
