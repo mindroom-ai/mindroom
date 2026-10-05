@@ -44,6 +44,9 @@ class CurationPlan:
     snapshot: Mapping[str, bytes]
     # memory/ topic files as they were at fire time, so a run that deletes archived detail can be undone.
     memory_snapshot: Mapping[str, str]
+    # Every memory/ topic file the scan read at fire time, including ones past the read cap, so verify measures
+    # content loss against what it reads afterwards.
+    memory_tokens: int
     curated: Mapping[str, int]
     upper_tokens: int
     floor_tokens: int
@@ -92,6 +95,21 @@ def _memory_dir_files(root: Path, exclude: Iterable[str]) -> dict[str, tuple[str
     }
 
 
+def _memory_after_run(plan: CurationPlan) -> dict[str, tuple[str, bool]]:
+    """Return memory/ topic files after the run, reading any snapshotted file the scan skipped directly."""
+    memory_now = _memory_dir_files(plan.root, exclude=plan.snapshot)
+    # The scan stops at its byte budget, so a skipped file may still exist; only an absent one counts as deleted.
+    for path in plan.memory_snapshot.keys() - memory_now.keys():
+        try:
+            payload = _read(plan.root, path)
+            if payload is not None:
+                memory_now[path] = (payload.decode("utf-8"), True)
+        except (OSError, ValueError):
+            # Present but not readable whole: never restored, and counted as empty so the loss guard errs safe.
+            memory_now[path] = ("", False)
+    return memory_now
+
+
 def _restored_archive(archived: str, current: str) -> str:
     """Return a topic file's archived text followed by everything the run left in it, so nothing is lost."""
     if not current:
@@ -133,15 +151,15 @@ def plan_curation(
     }
     snapshot = {**curated_payloads, **protected_payloads}
     upper = max(round(measured * (1 - settings.min_reduction)), round(_STOP_RATIO * settings.trigger_tokens))
+    memory_files = _memory_dir_files(root, exclude=snapshot)
     return CurationPlan(
         agent_name=agent_name,
         root=root,
         settings=settings,
         snapshot=snapshot,
         # Only whole files can be restored, so only those are snapshotted.
-        memory_snapshot={
-            path: text for path, (text, whole) in _memory_dir_files(root, exclude=snapshot).items() if whole
-        },
+        memory_snapshot={path: text for path, (text, whole) in memory_files.items() if whole},
+        memory_tokens=sum(estimate_text_tokens(text) for text, _whole in memory_files.values()),
         curated=curated,
         upper_tokens=upper,
         floor_tokens=upper - round(measured * (settings.max_reduction - settings.min_reduction)),
@@ -198,7 +216,7 @@ def _violations(
 
 def _content_loss(plan: CurationPlan, curated_tokens: int, memory_now: Mapping[str, tuple[str, bool]]) -> str | None:
     """Describe memory content deleted instead of moved beyond the allowance, or return None."""
-    before = plan.measured_tokens + sum(estimate_text_tokens(text) for text in plan.memory_snapshot.values())
+    before = plan.measured_tokens + plan.memory_tokens
     lost = before - (curated_tokens + sum(estimate_text_tokens(text) for text, _whole in memory_now.values()))
     if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
         return None
@@ -234,7 +252,7 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
     """Check the files against the plan, writing the snapshot back over every changed file when a guard fails."""
     after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
     changed = [path for path, payload in plan.snapshot.items() if after_run[path] != payload]
-    memory_now = _memory_dir_files(plan.root, exclude=plan.snapshot)
+    memory_now = _memory_after_run(plan)
     # Appending keeps a topic file's archived text; deleting, truncating, or rewriting it does not.
     damaged = [
         path

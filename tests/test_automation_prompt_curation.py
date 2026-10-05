@@ -302,6 +302,39 @@ def test_an_archive_appended_past_the_read_cap_is_left_alone(tmp_path: Path) -> 
     assert (root / "memory" / "projects.md").read_text().endswith("bring the insurance card.\n")
 
 
+def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_path: Path) -> None:
+    """The loss baseline counts a topic file that was past 1 MiB at fire time, so it cannot pass as moved detail."""
+    config, automation, root = _setup(tmp_path)
+    (root / "memory" / "big.md").write_text("Old detail.\n" * 100_000, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    before = _snapshot(root)
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert "161 tokens of memory were deleted instead of moved to memory/ (at most 65)" in result.violations
+    assert _snapshot(root) == before
+
+
+def test_a_topic_file_the_scan_skipped_is_not_treated_as_deleted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshotted topic file past the scan's byte budget is read directly, so its appended facts survive."""
+    plan, root = _plan_with_archive(tmp_path)
+    monkeypatch.setattr("mindroom.memory._file_backend._MAX_MEMORY_SCAN_BYTES", 1)
+    with (root / "memory" / "projects.md").open("a", encoding="utf-8") as archive:
+        archive.write("- Dentist on Friday.\n")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "- Dentist on Friday.\n"
+
+
 def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
     """Moving detail out of a context file that lives under memory/ is a move, not a deletion."""
     config, automation, root = _setup(tmp_path)
