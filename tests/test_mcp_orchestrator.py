@@ -1230,3 +1230,71 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         await orchestrator.config_reload._update_config()
 
     assert call_order[:2] == ["stop", "sync"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "plan_requires_drain"),
+    [
+        pytest.param({"defaults": {"enable_streaming": False}}, False, id="publishes-during-replies"),
+        pytest.param(
+            {"external_trigger_policy": {"default_max_body_bytes": 4096, "max_body_bytes": 4096}},
+            True,
+            id="drained",
+        ),
+    ],
+)
+async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drain(
+    tmp_path: Path,
+    changes: dict[str, object],
+    plan_requires_drain: bool,
+) -> None:
+    """A reload that may run during replies leaves catalog-refresh restarts to the drained MCP path."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path)
+    new_config = Config.validate_with_runtime(
+        {**current_config.authored_model_dump(), **changes},
+        _runtime_paths(tmp_path),
+    )
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        entity_name: MagicMock(spec=AgentBot) for entity_name in (ROUTER_AGENT_NAME, "code", "plain", "dev_team")
+    }
+    plan = build_config_update_plan(
+        current_config=current_config,
+        new_config=new_config,
+        configured_entities=set(orchestrator.agent_bots),
+        existing_entities=set(orchestrator.agent_bots),
+        agent_bots=orchestrator.agent_bots,
+    )
+    assert plan.requires_response_drain is plan_requires_drain
+
+    with (
+        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator.plugin_watch, "sync_roots"),
+        patch.object(orchestrator, "_activate_hook_registry"),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value={"demo"})),
+        patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
+        patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
+        patch.object(orchestrator, "_notify_mcp_catalog_change", new=AsyncMock()) as mock_notify,
+        patch.object(
+            orchestrator,
+            "_restart_changed_entities",
+            new=AsyncMock(return_value=(set(), [], [])),
+        ) as mock_restart,
+        patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+    ):
+        await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+    if plan_requires_drain:
+        mock_notify.assert_not_awaited()
+        assert mock_restart.await_args.args[0].entities_to_restart == {"code", "dev_team"}
+    else:
+        mock_notify.assert_awaited_once_with("demo")
+        mock_restart.assert_not_awaited()

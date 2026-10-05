@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from agno.agent._tools import determine_tools_for_model
+from agno.agent._tools import determine_tools_for_model, parse_tools
 from agno.team._tools import _determine_tools_for_model
 from agno.tools.function import Function, FunctionCall
 from pydantic import PrivateAttr
@@ -117,6 +117,25 @@ def prepare_agent_tools(
         session=session,
         async_mode=True,
     )
+
+
+# AGNO_COMPAT: One configured function must run inside a live turn outside the model's tool loop.
+# Reason: Agno prepares the per-run Function a call executes (bound Agent, processed schema,
+# hooks) only through private parse_tools, which also resets the Agent's tool instructions,
+# and binds the run context only in private determine_tools_for_model.
+# Upstream issue: Tracking gap; no public API prepares one Function for execution in a running turn.
+# Upstream PR: None identified.
+# Remove when: Agno exposes public per-run Function preparation that leaves live instruction state intact.
+# Coverage: tests/test_scheduled_tool_approval.py::test_live_function_runs_with_its_hooks_and_keeps_tool_instructions.
+def prepare_live_agent_function(agent: Agent, function: Function, run_context: RunContext) -> Function:
+    """Prepare one of a running Agent's own Functions for execution, as Agno prepares it for the model."""
+    assert agent.model is not None
+    with temporary_tool_instructions(agent, ()):
+        prepared = parse_tools(agent, tools=[function], model=agent.model, run_context=run_context, async_mode=True)
+    [function_copy] = prepared
+    assert isinstance(function_copy, Function)
+    function_copy._run_context = run_context
+    return function_copy
 
 
 # AGNO_COMPAT: Model generator consumers and synchronous leaf threads outlive their call owner.

@@ -457,7 +457,7 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
         continuation = await journal.principal("agent@code").approval_continuation("subsequent")
         assert continuation is not None
         assert continuation.calls[0].decision.value == "approved"
-        await owner.maintain_approval_grants()
+        await owner.maintain_automatic_approvals()
         assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
     finally:
         await manager.shutdown()
@@ -495,7 +495,7 @@ async def test_republished_receipt_aliases_remain_terminal(
             == "$replacement-receipt"
         )
         if retire_before_reply:
-            await owner.maintain_approval_grants()
+            await owner.maintain_automatic_approvals()
 
         async def get_event(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
             response = nio.RoomGetEventResponse()
@@ -545,7 +545,7 @@ async def test_republished_receipt_aliases_remain_terminal(
             )
             assert result.consumed is True
             before_consume.assert_awaited_once()
-        await owner.maintain_approval_grants()
+        await owner.maintain_automatic_approvals()
         assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=old_event_id)
         assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id="$replacement-receipt")
         continuation = await journal.principal("agent@code").approval_continuation("subsequent")
@@ -633,7 +633,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
 
         manager.send_delivery = fail_send
         await _card(journal, manager, "deferred", command="original command")
-        await manager.cards.maintain_approval_grants()
+        await manager.cards.maintain_automatic_approvals()
         pending = await manager.cards.load_matrix_delivery(delivery_id="card-deferred", stage=DeliveryStage.INITIAL)
         assert pending is not None
         assert pending.payload["arguments"] == {"command": "original command"}

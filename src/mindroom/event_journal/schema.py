@@ -128,6 +128,39 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS scheduled_call_approvals (
+        -- One tool call a requester approved while scheduling it. The
+        -- decision lives on the shared detached-card row; this row holds the
+        -- stored call, its one-shot claim and outcome, and the receipt
+        -- maintenance looks up by its delivery.
+        principal_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        toolkit_name TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        workflow_digest TEXT NOT NULL,
+        execute_at_ns BIGINT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        card_event_id TEXT,
+        decided_at_ns BIGINT,
+        decided_by TEXT,
+        approved_scope TEXT,
+        armed_at_ns BIGINT,
+        revoked_at_ns BIGINT,
+        consumed_at_ns BIGINT,
+        consumed_delivery_id TEXT,
+        outcome TEXT,
+        PRIMARY KEY (principal_id, task_id),
+        UNIQUE (principal_id, delivery_id),
+        UNIQUE (principal_id, consumed_delivery_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS matrix_sync_consumers (
         principal_id TEXT NOT NULL PRIMARY KEY,
         consumer_generation TEXT NOT NULL,

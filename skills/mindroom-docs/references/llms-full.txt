@@ -1312,7 +1312,8 @@ mindroom config validate --path /path/to/config.yaml
 ```
 
 Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which need a restart.
-A reload waits for active responses to finish, for at most 600 seconds.
+An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition or knowledge base change, applies within seconds even while agents are replying.
+Other edits, including changes to an agent's or team's own settings, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](https://docs.mindroom.chat/deployment/config-bundles/#config-fingerprint-and-config-check-applied).
 
 ## Minimal Configuration
@@ -2715,15 +2716,15 @@ Missing credentials, a full limit, a timeout, a provider error, malformed output
 ## Mid-Turn Coalescing
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
-Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the active task finishes.
-The setting applies in every room where the agent may reply, including ad hoc rooms, and has no per-room override.
-Omitting it or setting it to `null` keeps the wrap-up notice, and teams do not inherit it from their members.
+A "thanks" or "is this still running?" can therefore cut a long task short.
+Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
+The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `judgment` | object | Required | LLM model alias or TypeSafe backend; see [Judgment Backends](#judgment-backends) |
-| `instructions` | string | `""` | Extra guidance for the finish-or-wrap-up decision |
-| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait; nonblank and at most 64 characters |
+| `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
+| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
 
 ```yaml
 agents:
@@ -2738,24 +2739,31 @@ agents:
         timeout_seconds: 5
 ```
 
-The judge asks whether any queued message requires an immediate change, pause, or stop.
-Acknowledgements, praise, thanks, "continue", and "do not interrupt" let the task continue, while corrections and relevant changes take priority even alongside praise.
-Unrelated requests wait for a later turn unless the user asks for an immediate switch.
-With TypeSafe, the task continues when `1 - P(interrupt) >= threshold`, so the default `0.8` tolerates interruption probabilities up to `0.2`.
-With the LLM backend, an explicit `false` answer lets the task continue.
-Abstentions, timeouts, missing credentials, a full judgment limit, and backend errors keep the wrap-up behavior.
+The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
+It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
+When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
+With TypeSafe, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
+
+The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
+Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
+Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
+Attachment contents, tool arguments and results, system prompts, and memory are never sent, but message text can still contain private information.
+
+The agent gets the wrap-up notice without a judgment when:
+
+- the thread's history could not be read completely;
+- the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;
+- the active request and queued messages alone exceed 16 KB, or more than eight messages are queued;
+- anything the judge would see looks like a credential;
+- the agent replies in `thread_mode: room`.
+
+Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
-The judge sees the active request, earlier public conversation, up to eight queued human messages, the configured guidance, and the agent's visible reply text as published when each message was queued.
-Private tool results and arguments, system prompts, memory, and attachment contents are not sent, but message text can still contain private information.
-Within the judge's 16 KB limit, the active request and queued messages are always sent whole, while older conversation drops out first and long earlier messages are shortened.
-The wrap-up notice is sent without a judgment when conversation history is missing, incomplete, or contains media, when the active request and queued messages alone exceed the limit, when a message the judge would see contains attachments or text that looks like a credential, and for `thread_mode: room` turns.
-Each skipped judgment logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and backend errors log `Mid-turn continuation evaluated` with a `failure`.
-
-Queued messages stay queued and are handled after the active response finishes.
-A finish decision covers only the messages it saw, so a later message needs a new decision, and a wrap-up notice once sent is not reversed.
-The wrap-up notice asks the model to hand off; it does not cancel tools, abort the response, or show the model the queued text, and stopping responses and tool approval work as usual.
-With `defer_reaction` set, each message that can wait gets the reaction once; wrap-up decisions and failed judgments never react.
+Queued messages are handled after the active response finishes either way.
+A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
+The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
+With `defer_reaction` set, each message that can wait gets that reaction once.
 
 ## Message Edits
 
@@ -3972,6 +3980,8 @@ agents:
 | --- | --- |
 | `schedule(request, new_thread, history_limit=None, silent=None, model=None)` | `new_thread` is required |
 | `edit_schedule(task_id, request, history_limit=None, silent=None, model=None)` | Omitted arguments keep the task's current settings |
+| `schedule_tool_call(tool_name, arguments_json, execute_at, description)` | One approval-gated call that the requester approves now; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
+| `run_scheduled_call(task_id, arguments_json=None)` | Runs a pre-approved scheduled call when its task asks; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
 | `list_schedules()` | |
 | `cancel_schedule(task_id)` | |
 
@@ -4038,6 +4048,36 @@ The model applies to the whole scheduled response, including a team's coordinato
 It takes precedence over room and thread model settings without changing them for later messages.
 Omitting `model` on creation uses normal model selection; omitting it on an edit keeps the saved choice, and an empty string restores normal model selection.
 Parsing the scheduling request itself always uses the default model.
+
+## Pre-Approved Tool Calls
+
+An agent can store one of its own approval-gated tool calls to run later, and the requester approves it while scheduling it, so a gated action such as an external message runs at its time without a second approval.
+The agent calls `schedule_tool_call(tool_name, arguments_json, execute_at, description)` from a thread.
+`tool_name` must be one of that agent's own tools, `arguments_json` is a JSON object of the call's arguments, and `execute_at` is an ISO 8601 time with a UTC offset, such as `2026-10-04T09:00:00-04:00`.
+The `tool_approval` policy must require approval for the call (or the tool must ask for its own confirmation), the scheduler must be an agent rather than a team, and the agent must be able to reply to the requester in that room; otherwise the scheduler refuses it.
+
+```python
+schedule_tool_call(
+    tool_name="post_slack_message",
+    arguments_json='{"channel": "U0123ABCD", "text": "Good morning! The report is ready."}',
+    execute_at="2026-10-04T09:00:00-04:00",
+    description="Morning report DM",
+)
+```
+
+MindRoom stores the call and posts an approval card in the thread showing the tool, its arguments, and the send time; only the requester can approve or deny it, and it expires at the send time.
+The requester approves either the stored arguments or, when the card offers it, any arguments to the same tool.
+Approving any arguments lets the agent decide the arguments for that tool when the task runs, following the task's description, so choose it only when the content must be decided later.
+The card offers it only when requesters approve their own calls; operators can stop offering it with [`tool_approval.scheduled_any_arguments`](https://docs.mindroom.chat/tool-approval/), and generic MCP `*_call_tool` calls and tools that ask for their own confirmation are always approved exactly.
+
+When the task runs, it asks the agent to call `run_scheduled_call(task_id)`, which runs the stored call once with the stored arguments, without a new card, and posts an approved receipt naming who approved it, when, and for which scope.
+With an any-arguments approval the agent may pass `arguments_json` to `run_scheduled_call` to replace the arguments for the same tool.
+The approval can be used once, by that agent for that requester in that thread, from when the task runs until 15 minutes after its scheduled time.
+If the card was not approved in time, `run_scheduled_call` runs nothing and the agent can call the tool directly, which asks for approval as usual.
+If the requester denies the card, the task does not run, and cancelling the task withdraws the approval.
+A pre-approved task cannot be edited; cancel it and schedule the call again.
+The arguments are not posted in the task or its trigger message; MindRoom keeps them with the approval, and the card shows them with secrets hidden.
+Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
@@ -4678,7 +4718,7 @@ Tools that need confirmation, user input, external execution, or [`tool_approval
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart, or a configuration reload that restarts the call agent, also drops it from the call.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
@@ -5214,7 +5254,11 @@ chat_ui.show_canvas(
 - **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
-- **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
+- **Saved state:** call `window.mindroom.saveState(value)` on every change to keep what the user did in the page; Chat batches the writes, and a value over 256K characters of JSON throws.
+  Later loads of the canvas, after a reload, an update, or a switch to another version, start with it in `window.mindroom.state`, which is `undefined` when nothing is saved.
+  Read it defensively, since an earlier version of the page may have saved it in another shape.
+  It stays in that browser and never reaches the agent, so anything the agent needs belongs in the answer.
+  The browser keeps it for the 100 most recently saved canvases and deletes it when the user logs out.
 - **Checking a page:** an agent with the [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
   Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
   The browser also does not block everything the panel blocks.
@@ -7320,6 +7364,9 @@ Chat shows the Computer action when this origin is set and the room has a joined
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
+For the bundled MindRoom Chat iOS app, explicitly add `"capacitor://localhost"` alongside the trusted HTTPS web origins, for example `["https://chat.mindroom.chat", "capacitor://localhost"]`.
+Other custom-scheme origins and opaque `"null"` origins are refused.
+The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
 Each entry must be a scheme and host with an optional port, with no path or wildcard, and HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
 
@@ -12938,6 +12985,7 @@ tool_approval:
 | `rules[].action` | `auto_approve` or `require_approval` | — | Fixed decision; set exactly one of `action` or `script` |
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
+| `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
 ## Approving and Denying
 
@@ -12947,6 +12995,7 @@ tool_approval:
   When an agent acts on a request relayed by another agent's reply, the original human is asked.
 - Tool calls requested by agents, the system, or configured bridge bots are denied instead of waiting for approval.
 - An unanswered card expires after its `timeout_days` and the call is denied.
+- A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 
 While approval is pending, the agent stops typing and the conversation can continue.
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
@@ -12956,7 +13005,7 @@ The approved call runs only with the exact arguments shown on the card.
 
 Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
 It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments.
-It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves or for background-script approvals.
+It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
 ## Approval Card Contents

@@ -12,6 +12,7 @@ import pytest
 import mindroom.orchestration.config_lifecycle as lifecycle_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, load_config
+from mindroom.config_reload import ConfigReloadStatus
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, _ReplacementDrainState
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.runtime import create_logged_task
@@ -170,6 +171,64 @@ async def test_reload_drains_active_responses_before_applying(
     await asyncio.wait_for(task, timeout=1)
     lifecycle.apply_update_plan.assert_awaited_once()
     assert gate.closed is False
+
+
+_AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("new_yaml", "waits_for_idle"),
+    [
+        pytest.param(_AGENT1_YAML + "defaults:\n  enable_streaming: false\n", False, id="restarts-nothing"),
+        pytest.param(_AGENT1_YAML + "    role: Changed\n", True, id="restarts-agent"),
+        pytest.param(_AGENT1_YAML + "administrators:\n  - '@admin:localhost'\n", True, id="reply-authorization"),
+    ],
+)
+async def test_busy_reload_waits_only_for_restarts_or_reply_authorization_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    new_yaml: str,
+    waits_for_idle: bool,
+) -> None:
+    """A reload that restarts nothing applies during replies and still reports its fingerprint applied."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text(_AGENT1_YAML, encoding="utf-8")
+    gate = ResponseAdmissionGate()
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        current_config=load_config(runtime_paths),
+        agent_bots={"router": MagicMock(), "agent1": MagicMock()},
+        response_admission_gate=gate,
+    )
+    runtime_paths.config_path.write_text(new_yaml, encoding="utf-8")
+    observed_gate_states: list[tuple[bool, int]] = []
+
+    async def apply_plan(*_args: object) -> bool:
+        observed_gate_states.append((gate.closed, gate.in_flight_response_count))
+        return True
+
+    lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
+
+    assert gate.admit()
+    update_task = asyncio.create_task(lifecycle._update_config())
+    try:
+        done, _pending = await asyncio.wait({update_task}, timeout=0.5)
+        assert bool(done) is not waits_for_idle
+    finally:
+        gate.release()
+    assert await asyncio.wait_for(update_task, timeout=1) is True
+
+    # Admission is closed for the swap itself, over the busy response only when nothing restarts.
+    assert observed_gate_states == [(True, 0 if waits_for_idle else 1)]
+    # A swap that replaces no runtime must not cancel running exports through the replacement hook.
+    assert lifecycle.before_runtime_replacement.await_count == (1 if waits_for_idle else 0)
+    assert gate.closed is False
+    assert lifecycle.status == ConfigReloadStatus(
+        status="applied",
+        fingerprint=load_config(runtime_paths).source_fingerprint,
+    )
 
 
 @pytest.mark.asyncio

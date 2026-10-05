@@ -208,7 +208,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 **In the chat**
 
 - **Interactive canvases** — an agent can open a page it wrote, such as a dashboard, slide deck, form, or picker, beside the conversation, and what you pick there comes back as your next message ([Interactive Canvases](docs/canvases.md)).
-- **Approvals and questions** — one-tap approval cards show exactly what will be sent and to whom, and agents can ask multiple-choice questions you answer with a click ([Tool Approval](docs/tool-approval.md), [Interactive Questions](docs/interactive.md)).
+- **Approvals and questions** — one-tap approval cards show exactly what will be sent and to whom, a scheduled send can be approved when it is scheduled, and agents can ask multiple-choice questions you answer with a click ([Tool Approval](docs/tool-approval.md), [Interactive Questions](docs/interactive.md)).
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
 - **Voice** — voice messages are transcribed, agents can join Element Call voice calls and talk in real time, and text-to-speech tools use OpenAI, Groq, ElevenLabs, and Cartesia ([Voice Messages](docs/voice.md), [Voice Calls](docs/voice-calls.md)).
 - **Model routing** — a different model per agent, room, or thread (`!model` and `!room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.

@@ -121,6 +121,8 @@ agents:
 | --- | --- |
 | `schedule(request, new_thread, history_limit=None, silent=None, model=None)` | `new_thread` is required |
 | `edit_schedule(task_id, request, history_limit=None, silent=None, model=None)` | Omitted arguments keep the task's current settings |
+| `schedule_tool_call(tool_name, arguments_json, execute_at, description)` | One approval-gated call that the requester approves now; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
+| `run_scheduled_call(task_id, arguments_json=None)` | Runs a pre-approved scheduled call when its task asks; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
 | `list_schedules()` | |
 | `cancel_schedule(task_id)` | |
 
@@ -187,6 +189,36 @@ The model applies to the whole scheduled response, including a team's coordinato
 It takes precedence over room and thread model settings without changing them for later messages.
 Omitting `model` on creation uses normal model selection; omitting it on an edit keeps the saved choice, and an empty string restores normal model selection.
 Parsing the scheduling request itself always uses the default model.
+
+## Pre-Approved Tool Calls
+
+An agent can store one of its own approval-gated tool calls to run later, and the requester approves it while scheduling it, so a gated action such as an external message runs at its time without a second approval.
+The agent calls `schedule_tool_call(tool_name, arguments_json, execute_at, description)` from a thread.
+`tool_name` must be one of that agent's own tools, `arguments_json` is a JSON object of the call's arguments, and `execute_at` is an ISO 8601 time with a UTC offset, such as `2026-10-04T09:00:00-04:00`.
+The `tool_approval` policy must require approval for the call (or the tool must ask for its own confirmation), the scheduler must be an agent rather than a team, and the agent must be able to reply to the requester in that room; otherwise the scheduler refuses it.
+
+```python
+schedule_tool_call(
+    tool_name="post_slack_message",
+    arguments_json='{"channel": "U0123ABCD", "text": "Good morning! The report is ready."}',
+    execute_at="2026-10-04T09:00:00-04:00",
+    description="Morning report DM",
+)
+```
+
+MindRoom stores the call and posts an approval card in the thread showing the tool, its arguments, and the send time; only the requester can approve or deny it, and it expires at the send time.
+The requester approves either the stored arguments or, when the card offers it, any arguments to the same tool.
+Approving any arguments lets the agent decide the arguments for that tool when the task runs, following the task's description, so choose it only when the content must be decided later.
+The card offers it only when requesters approve their own calls; operators can stop offering it with [`tool_approval.scheduled_any_arguments`](tool-approval.md), and generic MCP `*_call_tool` calls and tools that ask for their own confirmation are always approved exactly.
+
+When the task runs, it asks the agent to call `run_scheduled_call(task_id)`, which runs the stored call once with the stored arguments, without a new card, and posts an approved receipt naming who approved it, when, and for which scope.
+With an any-arguments approval the agent may pass `arguments_json` to `run_scheduled_call` to replace the arguments for the same tool.
+The approval can be used once, by that agent for that requester in that thread, from when the task runs until 15 minutes after its scheduled time.
+If the card was not approved in time, `run_scheduled_call` runs nothing and the agent can call the tool directly, which asks for approval as usual.
+If the requester denies the card, the task does not run, and cancelling the task withdraws the approval.
+A pre-approved task cannot be edited; cancel it and schedule the call again.
+The arguments are not posted in the task or its trigger message; MindRoom keeps them with the approval, and the card shows them with secrets hidden.
+Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 

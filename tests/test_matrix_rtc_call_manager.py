@@ -1657,8 +1657,24 @@ async def test_call_start_holds_response_admission_through_session_handoff(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: Path) -> None:
-    """Activity reporting sees a call from its first SFU step until the agent leaves it."""
+async def test_active_call_requesters_cover_starting_and_joined_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Activity reporting sees a call from tool materialization until the agent leaves it."""
+    tools_started = asyncio.Event()
+    release_tools = asyncio.Event()
+
+    async def blocking_tools(**kwargs: object) -> CallAgentTooling:
+        tools_started.set()
+        await release_tools.wait()
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", blocking_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = _BlockingConnectBridge()
@@ -1666,6 +1682,9 @@ async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: 
     assert manager.active_call_requesters == ()
 
     reconcile = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(tools_started.wait(), timeout=1)
+    assert manager.active_call_requesters == ("@alice:example.org",)
+    release_tools.set()
     await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
     assert manager.active_call_requesters == ("@alice:example.org",)
     bridge.release_connect.set()
@@ -1684,6 +1703,57 @@ async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.closed
     assert manager.active_call_requesters == ()
+
+
+@pytest.mark.asyncio
+async def test_call_admitted_before_forced_replacement_joins_with_published_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call whose state fetch outlives a forced replacement's planning joins only with the published config."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_RETRY_DELAYS_S", (0.0,))
+    tool_configs: list[Config] = []
+    tools_built = asyncio.Event()
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tool_configs.append(cast("Config", kwargs["config"]))
+        tools_built.set()
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def paused_state(_room_id: str) -> nio.RoomGetStateResponse:
+        fetch_started.set()
+        await release_fetch.wait()
+        return _state_response(_remote_member_event())
+
+    client = _client()
+    client.room_get_state.side_effect = paused_state
+    gate = ResponseAdmissionGate()
+    manager = _manager(client, FakeBridge(), tmp_path, response_admission_gate=gate)
+
+    reconcile = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(fetch_started.wait(), timeout=1)
+    gate.close()
+    assert manager.active_call_requesters == ()
+    release_fetch.set()
+    await reconcile
+    assert tool_configs == []
+
+    published_config = _config()
+    manager.update_config(published_config)
+    gate.reopen()
+    await asyncio.wait_for(tools_built.wait(), timeout=1)
+
+    assert len(tool_configs) == 1
+    assert tool_configs[0] is published_config
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -4116,8 +4186,8 @@ async def test_call_events_cannot_bypass_pending_join_backoff(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["cascaded", "live"])
-async def test_delegated_call_retries_reuse_logical_call_session_id(
+@pytest.mark.parametrize("backend", ["realtime", "cascaded", "live"])
+async def test_call_retries_reuse_per_call_session_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     backend: str,
@@ -4137,7 +4207,7 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    config = _live_config() if backend == "live" else _cascaded_config()
+    config = {"realtime": _config, "cascaded": _cascaded_config, "live": _live_config}[backend]()
     manager = _manager(client, FakeBridge(), tmp_path, config)
     results = iter(("retry", "joined", "joined"))
 
@@ -4161,6 +4231,7 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
 
     assert len(session_ids) == 2
     assert session_ids[0] == session_ids[1]
+    assert session_ids[0].startswith(f"{ROOM_ID}:call:")
 
     client.room_get_state.return_value = _state_response()
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))

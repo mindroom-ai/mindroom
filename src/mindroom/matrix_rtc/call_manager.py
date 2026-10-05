@@ -204,7 +204,7 @@ class _LogicalCallState:
     """State that survives media-session reconnects for one logical call."""
 
     requester_id: str
-    agent_session_id: str | None
+    agent_session_id: str
     join_blocked: bool = False
 
 
@@ -322,6 +322,7 @@ class CallManager:
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
         self._starting_calls: dict[str, _StartingCall] = {}
+        self._joining_requesters: dict[str, str] = {}
         self._pending_keys: dict[str, dict[tuple[str, str, int], _PendingFrameKey]] = {}
         self._observed_rooms: dict[str, nio.MatrixRoom] = {}
         self._departed_rooms: set[str] = set()
@@ -339,10 +340,11 @@ class CallManager:
     def active_call_requesters(self) -> tuple[str, ...]:
         """Return the requester of each call this agent has joined or is joining."""
         sessions = {room_id: starting.session for room_id, starting in self._starting_calls.items()} | self._sessions
-        return tuple(session.requester_id for session in sessions.values())
+        requesters = self._joining_requesters | {room_id: session.requester_id for room_id, session in sessions.items()}
+        return tuple(requesters.values())
 
     def update_config(self, config: Config) -> None:
-        """Replace the live config used by authorization-only hot reloads."""
+        """Adopt a reloaded config for authorization checks and for calls started after this point."""
         self._config = config
         self._call_config = config.calls.resolve_agent_config(self._agent_name)
         if self._shutting_down:
@@ -693,7 +695,16 @@ class CallManager:
         logical_call = self._logical_calls[room.room_id]
         if logical_call.join_blocked or (room.room_id in self._retry_attempts and not retrying):
             return
-        result = await self._join(room, members, agent_call_events=agent_call_events)
+        if self._response_admission_gate.closed:
+            # A forced replacement may have planned this agent as idle; join once it publishes its config.
+            self._schedule_reconcile_retry(room)
+            return
+        # Count the call as active before tool materialization captures the current config.
+        self._joining_requesters[room.room_id] = members[0].user_id
+        try:
+            result = await self._join(room, members, agent_call_events=agent_call_events)
+        finally:
+            self._joining_requesters.pop(room.room_id, None)
         if result == "joined":
             self._clear_reconcile_retry(room.room_id)
         elif result == "retry":
@@ -1370,9 +1381,7 @@ class CallManager:
 
     def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
         """Create the state shared by every media attempt for one caller presence."""
-        session_id = None
-        if self._call_config.backend in {"cascaded", "live"}:
-            session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
+        session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
         logical_call = _LogicalCallState(requester_id=requester_id, agent_session_id=session_id)
         self._logical_calls[room_id] = logical_call
         return logical_call

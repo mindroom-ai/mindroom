@@ -20,12 +20,23 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
 
-from . import approval_card_state, approval_continuations, approval_grants, background_approvals, outbox, reads
+from . import (
+    approval_card_state,
+    approval_continuations,
+    approval_grants,
+    background_approvals,
+    outbox,
+    reads,
+    scheduled_approvals,
+)
 from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
 from .identity import decode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
+# Automatic receipts are approved originals published without a pending card.
+_AUTOMATIC_RECEIPT = f"({approval_grants.GRANT_RECEIPT} OR {scheduled_approvals.RECEIPT})"
+_ApprovalTargetKind = Literal["continuation", "background_script", "scheduled_call"]
 logger = get_logger(__name__)
 _CARD_COLUMNS = """
     cards.delivery_id AS delivery_id,
@@ -72,7 +83,7 @@ class StoredApprovalCard:
     continuation_generation: int
     tool_call_id: str
     continuation_entity_name: str | None
-    target_kind: Literal["continuation", "background_script"] = "continuation"
+    target_kind: _ApprovalTargetKind = "continuation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +237,7 @@ def resolve_card(
         (principal_id, selector_value),
     )
     if background is not None:
-        return background_approvals.resolve(
+        recorded = background_approvals.resolve(
             transaction,
             principal_id,
             card_event_id=card_event_id,
@@ -235,6 +246,14 @@ def resolve_card(
             reason=reason,
             metadata=metadata,
         )
+        scheduled_approvals.record_decision(
+            transaction,
+            principal_id,
+            recorded=recorded,
+            requested_status=requested_status,
+            metadata=metadata,
+        )
+        return recorded
     return _resolve_continuation(
         transaction,
         principal_id,
@@ -815,7 +834,7 @@ def remember_terminal_alias(
     card_event_id: str,
     delivery_id: str,
 ) -> None:
-    """Remember a transport-verified alias only when retained grant audit proves it terminal."""
+    """Remember a transport-verified alias only when a retained automatic approval proves it terminal."""
     transaction.execute(
         """
         INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
@@ -830,6 +849,53 @@ def remember_terminal_alias(
         """,
         (card_event_id, principal_id, room_id, delivery_id),
     )
+    scheduled_approvals.remember_receipt_alias(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        card_event_id=card_event_id,
+        delivery_id=delivery_id,
+    )
+
+
+def retire_automatic_receipts(transaction: Transaction, principal_id: str) -> None:
+    """Release acknowledged automatic receipts while retaining their action identity."""
+    approval_grants.lock(transaction, principal_id)
+    transaction.execute(
+        f"""
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT initial.principal_id, initial.room_id, initial.acknowledged_event_id
+        FROM matrix_delivery_outbox AS initial
+        WHERE initial.principal_id = ? AND initial.stage = 'initial'
+          AND initial.acknowledged_event_id IS NOT NULL
+          AND {_AUTOMATIC_RECEIPT.format(initial="initial")}
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = initial.principal_id AND cards.delivery_id = initial.delivery_id
+          )
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        """,  # noqa: S608 - a fixed predicate, not interpolated input
+        (principal_id,),
+    )
+    transaction.execute(
+        f"""
+        DELETE FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND stage = 'initial'
+          AND {_AUTOMATIC_RECEIPT.format(initial="matrix_delivery_outbox")}
+          AND EXISTS (
+              SELECT 1 FROM approval_action_tombstones AS terminal
+              WHERE terminal.principal_id = matrix_delivery_outbox.principal_id
+                AND terminal.room_id = matrix_delivery_outbox.room_id
+                AND terminal.card_event_id = matrix_delivery_outbox.acknowledged_event_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = matrix_delivery_outbox.principal_id
+                AND cards.delivery_id = matrix_delivery_outbox.delivery_id
+          )
+        """,  # noqa: S608 - a fixed predicate, not interpolated input
+        (principal_id,),
+    )
 
 
 def is_terminal_card(
@@ -841,22 +907,20 @@ def is_terminal_card(
 ) -> bool:
     """Recognize terminal approvals before and after their payloads are retired."""
     row = transaction.fetchone(
-        """
+        f"""
         SELECT 1 AS present FROM approval_action_tombstones
         WHERE principal_id = ? AND room_id = ? AND card_event_id = ?
         UNION ALL
         SELECT 1 AS present FROM matrix_delivery_outbox AS initial
-        JOIN approval_grant_cards AS audit
-          ON audit.principal_id = initial.principal_id AND audit.delivery_id = initial.delivery_id
         WHERE initial.principal_id = ? AND initial.room_id = ?
           AND initial.acknowledged_event_id = ? AND initial.stage = 'initial'
-          AND audit.grant_id IS NOT NULL
+          AND {_AUTOMATIC_RECEIPT.format(initial="initial")}
           AND NOT EXISTS (
               SELECT 1 FROM approval_cards AS cards
               WHERE cards.principal_id = initial.principal_id AND cards.delivery_id = initial.delivery_id
           )
         LIMIT 1
-        """,
+        """,  # noqa: S608 - a fixed predicate, not interpolated input
         (principal_id, room_id, card_event_id, principal_id, room_id, card_event_id),
     )
     return row is not None
@@ -993,15 +1057,20 @@ def _card(row: Row) -> StoredApprovalCard | None:
         )
         background_run_id = cast("str | None", row["background_run_id"])
         if background_run_id is None:
-            target_kind: Literal["continuation", "background_script"] = "continuation"
+            target_kind: _ApprovalTargetKind = "continuation"
             card_identity = _native_identity(card)
             continuation_entity_name = cast("str | None", row["continuation_entity_name"])
         else:
-            target_kind = "background_script"
             continuation_entity_name = None
             background_call_id = _required_background_call_id(row)
             stored_identity = (background_run_id, -1, background_call_id)
-            card_run_id, card_call_id = background_approvals.background_identity(card)
+            scheduled_identity = scheduled_approvals.card_identity(card)
+            if scheduled_identity is None:
+                target_kind = "background_script"
+                card_run_id, card_call_id = background_approvals.background_identity(card)
+            else:
+                target_kind = "scheduled_call"
+                card_run_id, card_call_id = scheduled_identity
             card_identity = (card_run_id, -1, card_call_id)
         resolution = approval_card_state.decode_resolution(row["resolution_json"])
     except (json.JSONDecodeError, TypeError, ValueError):
