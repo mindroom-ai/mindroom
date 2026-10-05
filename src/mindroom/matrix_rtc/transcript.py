@@ -86,7 +86,6 @@ class CallTranscript:
     started_at: datetime
     reference_root: Path
     execution_identity: ToolExecutionIdentity | None
-    _turns: int = field(default=0, init=False)
     _spoken: list[tuple[str, str]] = field(default_factory=list, init=False)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
@@ -128,7 +127,6 @@ class CallTranscript:
         text = text.strip()
         if not text:
             return
-        self._turns += 1
         self._spoken.append((speaker, text))
         stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
         self._pending.append(f"- `{stamp}` **{speaker}**: {text}\n")
@@ -212,7 +210,7 @@ class CallTranscript:
                 error=str(error),
             )
             return
-        if self._turns == 0:
+        if not self._spoken:
             return
         memory_backend = config.resolve_entity(self.agent_name).memory_backend
         if memory_backend == "none":
@@ -220,7 +218,7 @@ class CallTranscript:
         transcript_path = self.path.relative_to(self.reference_root).as_posix()
         summary = (
             f"Joined a voice call in {self.room_display_name} ({self.room_id}): "
-            f"{self._turns} spoken turns over ~{duration_minutes} min. "
+            f"{len(self._spoken)} spoken turns over ~{duration_minutes} min. "
             f"Transcript: {transcript_path}"
         )
         try:

@@ -101,7 +101,7 @@ async def test_transcript_writes_turns_incrementally(tmp_path: Path) -> None:
     assert "# Voice call in Lobby" in content
     assert "**user**: Hello agent" in content
     assert "**assistant**: Hi! How can I help?" in content
-    assert transcript._turns == 2
+    assert len(transcript.spoken_turns) == 2
 
 
 def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:
@@ -255,7 +255,7 @@ async def test_finalize_contains_transcript_io_failure(tmp_path: Path) -> None:
     blocker.parent.mkdir(parents=True, exist_ok=True)
     blocker.write_text("block")
     transcript.path = blocker / "transcript.md"
-    transcript._turns = 1
+    transcript._spoken.append(("user", "preserved"))
     transcript._pending.append("- preserved\n")
 
     await transcript.finalize(
