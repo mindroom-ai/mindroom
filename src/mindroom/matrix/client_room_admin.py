@@ -92,7 +92,7 @@ def _create_room_initial_state(
     admin_users: list[str] | None,
     *,
     encrypted: bool,
-    creators: frozenset[str] = frozenset(),
+    creators: frozenset[str],
 ) -> list[dict[str, Any]]:
     """Build the initial state events for one managed room creation.
 

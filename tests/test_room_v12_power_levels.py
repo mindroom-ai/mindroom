@@ -176,14 +176,16 @@ async def test_an_unreadable_create_event_fails_the_admin_check_closed() -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["send", "json"])
+@pytest.mark.parametrize("failure", ["send", "json", "status"])
 async def test_an_unreadable_capabilities_probe_falls_back_to_the_server_default(failure: str) -> None:
     """Room creation proceeds without pinning a version when capabilities cannot be read."""
     client = _creating_client("12")
     if failure == "send":
         client.send.side_effect = TimeoutError("capabilities timed out")
-    else:
+    elif failure == "json":
         client.send.return_value.json.side_effect = ValueError("not json")
+    else:
+        client.send.return_value.status = 404
 
     assert await client_room_admin.create_room(client, "Personal", admin_users=[OWNER]) == ROOM
 

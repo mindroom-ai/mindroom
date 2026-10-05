@@ -578,21 +578,28 @@ async def _assert_requester_joined_room(
     raise ThreadTagsError(msg)
 
 
-def _assert_user_can_write_thread_tags(
+async def _assert_user_can_write_thread_tags(
+    client: nio.AsyncClient,
     power_levels_content: Mapping[str, object],
     room_id: str,
     *,
     subject_label: str,
     user_id: str,
-    creators: frozenset[str],
 ) -> None:
     """Assert one Matrix user can send the thread-tags state event."""
     required_power_level = _required_state_event_power_level(
         power_levels_content,
         event_type=THREAD_TAGS_EVENT_TYPE,
     )
-    level = user_power_level(power_levels_content, user_id, creators)
+    level = user_power_level(power_levels_content, user_id)
     if level >= required_power_level:
+        return
+    # Room version 12 never lists its creators, whose power is unlimited, so they matter only on a shortfall.
+    creators = await read_room_creators(client, room_id)
+    if creators is None:
+        msg = f"Failed to read the creators of {room_id}"
+        raise ThreadTagsError(msg)
+    if user_id in creators:
         return
     _raise_insufficient_power_level(
         room_id,
@@ -682,25 +689,13 @@ async def _assert_thread_tags_write_allowed(
         msg = f"Failed to parse Matrix power levels for {room_id}: {response.content!r}"
         raise ThreadTagsError(msg)
     power_levels_content = response.content
-    required_power_level = _required_state_event_power_level(power_levels_content, event_type=THREAD_TAGS_EVENT_TYPE)
-    creators: frozenset[str] | None = None
 
-    async def creators_for(user_id: str) -> frozenset[str]:
-        """Read the room's creators only when the listed power falls short, the one case they can change."""
-        nonlocal creators
-        if creators is None and user_power_level(power_levels_content, user_id) < required_power_level:
-            creators = await read_room_creators(client, room_id)
-            if creators is None:
-                msg = f"Failed to read the creators of {room_id}"
-                raise ThreadTagsError(msg)
-        return creators or frozenset()
-
-    _assert_user_can_write_thread_tags(
+    await _assert_user_can_write_thread_tags(
+        client,
         power_levels_content,
         room_id,
         subject_label="the Matrix client",
         user_id=actor_user_id,
-        creators=await creators_for(actor_user_id),
     )
     if requester_user_id is None:
         return
@@ -717,12 +712,12 @@ async def _assert_thread_tags_write_allowed(
         room_id,
         requester_user_id=normalized_requester_user_id,
     )
-    _assert_user_can_write_thread_tags(
+    await _assert_user_can_write_thread_tags(
+        client,
         power_levels_content,
         room_id,
         subject_label="the requester",
         user_id=normalized_requester_user_id,
-        creators=await creators_for(normalized_requester_user_id),
     )
 
 

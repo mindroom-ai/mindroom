@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -21,7 +21,7 @@ class RoomStateSnapshot:
     room_id: str
     events: dict[tuple[str, str], dict[str, Any]]
     # Users the room version gives unlimited power: room version 12 creators, which power levels never list.
-    creators: frozenset[str] = field(default_factory=frozenset)
+    creators: frozenset[str]
 
     def present_user_ids(self) -> set[str]:
         """Return joined or invited users, both of which already satisfy invitation."""
