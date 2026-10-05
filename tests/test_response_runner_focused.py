@@ -9784,7 +9784,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
         finish = await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),))
-    if failure not in {None, "oversized"}:
+    if failure not in {None, "oversized", "media"}:
         assert not finish
         assert payloads == []
     else:
@@ -9793,7 +9793,8 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
         evidence = json.loads(conversation[-1]["text"])
         assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
         root = conversation[0]["text"]
-        assert root.startswith("Sleep thirty times for two seconds each")
+        # Earlier media reaches the judge as a placeholder rather than disabling judgment.
+        assert root.startswith("[image: " if failure == "media" else "Sleep thirty times for two seconds each")
         if failure == "oversized":
             # A long message reaches the judge as its start and end rather than disabling judgment.
             assert root.endswith("Log every sleep.")
