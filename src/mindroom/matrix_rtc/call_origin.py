@@ -14,7 +14,6 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, projected_thread_history
-from mindroom.matrix.event_info import EventInfo
 from mindroom.token_budget import approximate_o200k_tokens
 
 if TYPE_CHECKING:
@@ -106,11 +105,13 @@ async def _read_origin_history(origin: CallOrigin, context: ToolRuntimeContext) 
     """Read the origin conversation, or return ``None`` when a thread origin is not a real thread root."""
     if origin.thread_id is not None:
         history = await complete_thread_history(context.conversation_reader, origin.room_id, origin.thread_id)
-        # The read returns the stamped event first even when it is a reply, so its own relation decides.
+        # The read returns the stamped event first even when it is a reply, so its stored thread decides.
+        # Visible content cannot: an edit's ``m.new_content`` carries no relation, and a root may be a rich reply.
         is_root = (
             bool(history)
             and history[0].event_id == origin.thread_id
-            and EventInfo.from_event({"content": history[0].content}).can_be_thread_root
+            and history[0].thread_id is None
+            and history[0].thread_id_known
         )
         return history if is_root else None
     page = await context.conversation_reader.read_strict(

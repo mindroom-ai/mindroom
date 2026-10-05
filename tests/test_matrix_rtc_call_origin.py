@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -165,7 +166,7 @@ def _message(event_id: str, sender: str, body: str, content: dict | None = None)
         event_id=event_id,
         timestamp=1_000,
         content=content or {"msgtype": "m.text", "body": body},
-        thread_id="$root",
+        thread_id=None if event_id == "$root" else "$root",
     )
 
 
@@ -385,6 +386,47 @@ async def test_resolve_rejects_a_thread_reply_stamped_as_the_root() -> None:
 
     assert resolved is None
     context.conversation_reader.read_strict.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_access")
+async def test_resolve_rejects_an_edited_thread_reply_stamped_as_the_root() -> None:
+    """An edit drops the reply's relation from its visible content, but its stored thread still shows it is a reply."""
+    context = _resolve_context()
+    page = _page(("$reply", "$root", {"msgtype": "m.text", "body": "Edited reply"}))
+    edited = replace(page.messages[0], revision_event_id="$edit", revision_ts=2_000)
+    context.conversation_reader.read_strict.return_value = replace(page, messages=(edited,))
+
+    resolved = await resolve_call_origin_context(
+        CallOrigin(room_id=ORIGIN_ROOM, thread_id="$reply"),
+        context=context,  # type: ignore[arg-type]
+    )
+
+    assert resolved is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_access")
+async def test_resolve_accepts_a_thread_whose_root_is_a_rich_reply() -> None:
+    """A root that replies to an earlier message still roots its thread."""
+    root_content = {
+        "msgtype": "m.text",
+        "body": "Following up on the earlier plan",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$earlier"}},
+    }
+    context = _resolve_context()
+    context.conversation_reader.read_strict.return_value = _page(
+        ("$root", None, root_content),
+        ("$2", "$root", {"msgtype": "m.text", "body": "Noted"}),
+    )
+
+    resolved = await resolve_call_origin_context(
+        CallOrigin(room_id=ORIGIN_ROOM, thread_id="$root"),
+        context=context,  # type: ignore[arg-type]
+    )
+
+    assert resolved is not None
+    assert [message.body for message in resolved.messages] == ["Following up on the earlier plan", "Noted"]
 
 
 @pytest.mark.asyncio
