@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html as html_lib
+import json
 import unicodedata
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
 from agno.tools import Toolkit
+from nio.api import RelationshipType
 
 from mindroom.constants import UI_ACTION_CONTENT_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -22,6 +26,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.identity import parse_historical_matrix_user_id
 from mindroom.matrix.large_messages import EDIT_MESSAGE_SIZE_LIMIT, calculate_event_size
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -54,6 +59,9 @@ _CANVAS_TITLE_ERROR = (
 # Larger pages are uploaded as (encrypted) Matrix media and the event carries a reference.
 _CANVAS_SIZE_PROBE_EVENT_ID = "$" + "x" * 64
 _CANVAS_PAGE_MAX_BYTES = 4 * 1024 * 1024
+# Chat shares a canvas's state as this event, a reference to the canvas, so one relations call finds the newest.
+_CANVAS_STATE_EVENT_TYPE = "io.mindroom.canvas_state"
+_CANVAS_STATE_SCAN_LIMIT = 50
 # Added to the agent's instructions. The map lists only the functions the agent has (see
 # ChatUITools.instructions), so include_tools or exclude_tools never advertise a missing function.
 _CHAT_UI_INSTRUCTIONS = (
@@ -141,7 +149,7 @@ class ChatUITools(Toolkit):
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
         if enable_show_canvas:
-            tools.append(self.show_canvas)
+            tools.extend([self.show_canvas, self.read_canvas_state])
         super().__init__(name="chat_ui", add_instructions=True, tools=tools)
 
     @property
@@ -417,6 +425,7 @@ class ChatUITools(Toolkit):
         html: str | None = None,
         path: str | None = None,
         canvas_event_id: str | None = None,
+        share_state: bool = False,
     ) -> str:
         """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
 
@@ -466,7 +475,10 @@ class ChatUITools(Toolkit):
         ``window.mindroom.state``, which is ``undefined`` when nothing is saved. Read it
         defensively: an earlier version of the page may have saved it. Saved state
         stays on the user's device, only the 100 most recently saved canvases keep it,
-        and it never reaches you.
+        and it reaches you only when the canvas shares it: with ``share_state=True``
+        (decided when the canvas is first shown; Chat tells the user), Chat keeps a
+        copy in the room and ``read_canvas_state`` returns it whenever you want, so a
+        page like a checklist or a form needs no send button.
 
         If the page throws an error or loads something Chat blocks, the user can send
         you the errors as ``Canvas error (<canvas_event_id>, revision <event_id>):``
@@ -482,6 +494,7 @@ class ChatUITools(Toolkit):
             html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
+            share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
 
         """
         validated = self._validated_context("show_canvas")
@@ -494,7 +507,7 @@ class ChatUITools(Toolkit):
         page = self._canvas_input_error(title, html, path, canvas_event_id) or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
-        target = await self._canvas_metadata(context, requester_id, canvas_event_id, title)
+        target = await self._canvas_metadata(context, requester_id, canvas_event_id, title, share_state=share_state)
         if isinstance(target, str):
             return target
         metadata, title = target
@@ -508,10 +521,62 @@ class ChatUITools(Toolkit):
                 requester_id,
                 "show_canvas",
                 body,
-                {"canvas": canvas},
+                {"canvas": canvas, **({"share_state": True} if share_state else {})},
                 formatted_body=html_lib.escape(body),
             )
         return await self._update_canvas(context, canvas_event_id, body, {**metadata, "canvas": canvas})
+
+    async def read_canvas_state(self, canvas_event_id: str) -> str:
+        """Read what the user last did in a canvas you showed with ``share_state=True``.
+
+        Returns the page's saved state (what it passed to ``window.mindroom.saveState``)
+        and its kept input values (by ``#id`` or name) as the user's Chat last shared
+        them, and when. Nothing is shared until the user changes something. The user
+        does not have to send anything, so call this whenever you need their current
+        choices, for example from a scheduled task.
+
+        Args:
+            canvas_event_id: Event ID of a canvas from this conversation shown with share_state=True.
+
+        """
+        action = "read_canvas_state"
+        validated = self._validated_context(action)
+        if isinstance(validated, str):
+            return validated
+        context, requester_id = validated
+        if not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$"):
+            return self._payload(
+                "error",
+                action=action,
+                message="canvas_event_id must be the event ID returned by an earlier show_canvas call.",
+            )
+        original = await self._canvas_target(context, requester_id, canvas_event_id, action=action)
+        if isinstance(original, str):
+            return original
+        if original.get("share_state") is not True:
+            return self._payload(
+                "error",
+                action=action,
+                canvas_event_id=canvas_event_id,
+                message="This canvas does not share its state; show a new canvas with share_state=True.",
+            )
+        shared = await _latest_shared_canvas_state(context.client, context.room_id, canvas_event_id, requester_id)
+        if shared is None:
+            return self._payload(
+                "ok",
+                action=action,
+                canvas_event_id=canvas_event_id,
+                message="Nothing shared yet: the user has not changed anything in this canvas.",
+            )
+        state, inputs, shared_at = shared
+        return self._payload(
+            "ok",
+            action=action,
+            canvas_event_id=canvas_event_id,
+            shared_at=shared_at,
+            state=state,
+            inputs=inputs,
+        )
 
     @classmethod
     async def _canvas_metadata(
@@ -520,6 +585,8 @@ class ChatUITools(Toolkit):
         requester_id: str,
         canvas_event_id: str | None,
         title: str,
+        *,
+        share_state: bool = False,
     ) -> tuple[dict[str, object], str] | str:
         """Return the request metadata and the title; an update without one keeps the canvas's first title."""
         metadata = cls._action_metadata(context, requester_id, "show_canvas", {})
@@ -528,8 +595,16 @@ class ChatUITools(Toolkit):
         original = await cls._canvas_target(context, requester_id, canvas_event_id)
         if isinstance(original, str):
             return original
-        # Chat accepts an edit only when its authority fields equal the original request's.
+        # Chat accepts an edit only when its authority fields equal the original request's, and
+        # whether a canvas shares its state is one of them, so the user is told before anything is shared.
         metadata["thread_id"] = original.get("thread_id")
+        if original.get("share_state") is True:
+            metadata["share_state"] = True
+        elif share_state:
+            return cls._canvas_error(
+                "Sharing is decided when a canvas is first shown; show a new canvas with share_state=True.",
+                canvas_event_id=canvas_event_id,
+            )
         match original.get("canvas"):
             case {"title": str(first_title)} if not title:
                 title = first_title
@@ -709,19 +784,23 @@ class ChatUITools(Toolkit):
         context: ToolRuntimeContext,
         requester_id: str,
         canvas_event_id: str,
+        *,
+        action: str = "show_canvas",
     ) -> dict[str, object] | str:
         """Return the original request of this agent's own canvas for the same requester and room."""
+        update = action == "show_canvas"
+        instead = "; call show_canvas without canvas_event_id instead." if update else "."
 
         def error(message: str) -> str:
-            return cls._canvas_error(message, canvas_event_id=canvas_event_id)
+            return cls._payload("error", action=action, message=message, canvas_event_id=canvas_event_id)
 
         response = await context.client.room_get_event(context.room_id, canvas_event_id)
         if not isinstance(response, nio.RoomGetEventResponse) or isinstance(response.event, nio.MegolmEvent):
-            return error("The canvas to update could not be read in this room.")
+            return error(f"The canvas {'to update ' if update else ''}could not be read in this room.")
         source = response.event.source if isinstance(response.event.source, dict) else {}
         unsigned = source.get("unsigned")
         if isinstance(unsigned, dict) and "redacted_because" in unsigned:
-            return error("That canvas was deleted; call show_canvas without canvas_event_id instead.")
+            return error(f"That canvas was deleted{instead}")
         content = source.get("content")
         metadata = content.get(UI_ACTION_CONTENT_KEY) if isinstance(content, dict) else None
         relation = content.get("m.relates_to") if isinstance(content, dict) else None
@@ -744,7 +823,7 @@ class ChatUITools(Toolkit):
             or metadata.get("agent_user_id") != context.client.user_id
             or (isinstance(relation, dict) and relation.get("rel_type") == "m.replace")
         ):
-            return error("Only your own canvases can be updated; call show_canvas without canvas_event_id instead.")
+            return error(f"Only your own canvases can be {'updated' if update else 'read'}{instead}")
         # A room-level canvas is answered by a reply that starts a thread, so any thread of the room may update it.
         thread_id = metadata.get("thread_id")
         if (
@@ -752,5 +831,62 @@ class ChatUITools(Toolkit):
             or metadata.get("room_id") != context.room_id
             or (thread_id is not None and thread_id != context.resolved_thread_id)
         ):
-            return error("That canvas belongs to another conversation; show a new canvas here instead.")
+            return error(
+                "That canvas belongs to another conversation"
+                + ("; show a new canvas here instead." if update else "."),
+            )
         return metadata
+
+
+def _parsed_json(value: object) -> object:
+    """A JSON text Chat shared, parsed; anything else is left out."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return json.loads(value)
+    except ValueError:
+        return None
+
+
+async def _latest_shared_canvas_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    canvas_event_id: str,
+    requester_id: str,
+) -> tuple[object, object, str] | None:
+    """Return the page state, kept inputs, and time of the newest copy the requester's Chat shared."""
+    relations = client.room_get_event_relations(
+        room_id,
+        canvas_event_id,
+        RelationshipType.reference,
+        direction=nio.MessageDirection.back,
+    )
+    async with contextlib.aclosing(relations):
+        scanned = 0
+        async for related in relations:
+            scanned += 1
+            if scanned > _CANVAS_STATE_SCAN_LIMIT:
+                return None
+            if related.sender != requester_id:
+                continue
+            event = related
+            if isinstance(event, nio.MegolmEvent):
+                # Encrypted rooms hide the event type, so it is checked after decrypting.
+                if client.olm is None:
+                    continue
+                try:
+                    event = client.decrypt_event(event)
+                except nio.EncryptionError:
+                    continue
+            source = event.source if isinstance(event.source, dict) else {}
+            if (
+                getattr(event, "type", None) != _CANVAS_STATE_EVENT_TYPE
+                and source.get("type") != _CANVAS_STATE_EVENT_TYPE
+            ):
+                continue
+            content = (await resolve_event_source_content(source, client)).get("content")
+            if not isinstance(content, dict) or content.get("version") != 1:
+                continue
+            shared_at = datetime.fromtimestamp(related.server_timestamp / 1000, tz=UTC).isoformat()
+            return _parsed_json(content.get("json")), _parsed_json(content.get("inputs")), shared_at
+    return None
