@@ -205,6 +205,7 @@ def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Con
             included_lines=entrypoint.included_lines,
             total_lines=entrypoint.total_lines,
             max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+            max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
             memory_path=entrypoint.source_path,
         )
         if entrypoint.omitted_lines

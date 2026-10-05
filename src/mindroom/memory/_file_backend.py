@@ -20,6 +20,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.timing import timed
+from mindroom.token_budget import estimate_text_tokens
 
 from ._policy import (
     allowed_scope_storage_paths,
@@ -797,6 +798,20 @@ def _replace_scope_path_memory_entry(
     return True
 
 
+def _lines_within_token_cap(lines: list[str], max_tokens: int) -> list[str]:
+    """Keep the leading whole lines whose joined text stays within ``max_tokens``.
+
+    A long line is withheld whole rather than cut, so the preload never shows a
+    partial fact and the truncation marker accounts for every withheld line.
+    """
+    kept_tokens = 0
+    for index, line in enumerate(lines):
+        kept_tokens += estimate_text_tokens(f"{line}\n")
+        if kept_tokens > max_tokens:
+            return lines[:index]
+    return lines
+
+
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
 def _load_scope_entrypoint_context(
     scope_user_id: str,
@@ -810,6 +825,7 @@ def _load_scope_entrypoint_context(
         return MemoryEntrypointContext()
     entrypoint_path = _scope_entrypoint_path(scope_path)
     max_lines = config.memory.file.max_entrypoint_lines
+    max_tokens = config.memory.file.max_entrypoint_tokens
     lines = _decode_capped_text(payload).splitlines()
     # An oversized entrypoint still reports at least one withheld line, so the
     # preamble tells the model to read the file instead of claiming completeness.
@@ -822,6 +838,7 @@ def _load_scope_entrypoint_context(
         )
     if max_lines < total_lines:
         lines = lines[:max_lines]
+    lines = _lines_within_token_cap(lines, max_tokens)
     return MemoryEntrypointContext(
         text="\n".join(lines).strip(),
         source_path=entrypoint_path,
