@@ -21,7 +21,7 @@ Open source under Apache 2.0 · Any model, local or cloud · Self-host the whole
 
 </div>
 
-https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244
+https://github.com/user-attachments/assets/f8325b3c-7ed0-4cd7-bc77-0c4cd74f226e
 
 MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
 Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
@@ -69,13 +69,13 @@ See [Quick start](#quick-start) for every way to run it.
 <p><b>Canvases you can click</b><br />An agent lays out free slots or a trip budget beside the chat and acts on what you pick.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/1392c1f2-146f-4131-a966-360f7d83f14a" /><img src="https://github.com/user-attachments/assets/bd3107c6-907d-4df3-922e-73f0da14055c" alt="A thread next to a data canvas with a fitted curve and its parameters" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6ccc9db8-6155-4d50-ae60-f4e011d39617" /><img src="https://github.com/user-attachments/assets/c8492e0c-4864-4753-ad1b-4a7d66e70c91" alt="A data canvas with a fitted curve, its parameters, and one point left out" /></picture></a>
 <p><b>Data you can explore</b><br />Leave a point out of a fit, then send the new result back to the agent.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ca52372b-8fc5-442a-8f2b-90d7a3d16d8e" /><img src="https://github.com/user-attachments/assets/1884d9d2-1c4b-4279-ba55-d6cbdc4d43ba" alt="An agent's browser waits on an order page while the user can take control" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ddf9402f-a451-4f50-b070-1b50aab739c8" /><img src="https://github.com/user-attachments/assets/6b7a2673-d9b9-446a-b9a7-4e4240241489" alt="The agent hands over the passkey step next to its browser on the order page" /></picture></a>
 <p><b>It drives, you take the wheel</b><br />Watch an agent work in its own browser and take over when it needs your passkey.</p>
 </td>
 <td width="50%" valign="top">
@@ -89,7 +89,7 @@ See [Quick start](#quick-start) for every way to run it.
 <p><b>From your phone</b><br />One voice note locks up the house; another becomes a reminder.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#your-morning-already-handled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/d37616c8-3dd4-4e35-a065-988249227c81" /><img src="https://github.com/user-attachments/assets/03a931bc-6654-44b4-a15e-696921305fd3" alt="A scheduled morning brief with today's meetings and what needs attention" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#your-morning-already-handled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/a78ee8fb-0828-45bc-9cc4-08d4181d017b" /><img src="https://github.com/user-attachments/assets/1ae37f4e-63b9-4cb0-aefd-e0c2431b997a" alt="A scheduled morning brief with today's meetings and what needs attention" /></picture></a>
 <p><b>Your morning, already handled</b><br />A scheduled brief with today's meetings and what needs you.</p>
 </td>
 </tr>

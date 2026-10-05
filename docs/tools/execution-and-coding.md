@@ -6,9 +6,9 @@ icon: lucide/code
 
 Use these tools to inspect and edit files, run shell commands or Python, manage Docker resources, do exact arithmetic, and generate files and charts.
 
-<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/1bc1dc4d-742f-490b-a177-3679ae412ec2#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ac87d6b3-a82a-491d-ae5c-7d114f55539f#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%" poster="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-light="https://github.com/user-attachments/assets/64437d95-27eb-4ec7-916f-c09150c5fb95" data-poster-dark="https://github.com/user-attachments/assets/b9ccd95c-1899-4fa2-9beb-a03d22ec6c46">
+  <source src="https://github.com/user-attachments/assets/e1a47a55-05a6-4035-b50c-b631e867b8c8" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a9d21f4f-d9c7-480f-b71b-8a7155903bfc" type="video/mp4">
 </video>
 
 ## Tools On This Page

@@ -4,9 +4,9 @@ icon: lucide/shield-check
 
 # Tool Approval
 
-<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/6a2033ea-3354-4afd-9d58-fc617b18cd24#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d62d98e8-c066-4e1f-8a8f-d840da7b0bd1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%" poster="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-light="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-dark="https://github.com/user-attachments/assets/94181525-4b2b-43b4-b366-d85aa18f59b8">
+  <source src="https://github.com/user-attachments/assets/f3792ec9-ea73-4169-97ee-d09146cd65cc" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/cf813bb1-5f9d-43b2-a197-b4749696a86e" type="video/mp4">
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.

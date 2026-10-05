@@ -130,9 +130,9 @@ Expose only this gateway; the worker's display has no public listener.
 
 ## Watch, take control, and resume
 
-<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/63868e17-6824-4073-8904-e1b7abc4b173#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/cc079b2f-6dbf-4509-9fdc-4ec21da85d7a#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%" poster="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-light="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-dark="https://github.com/user-attachments/assets/19244c17-be66-410f-b2cf-b8e3edb4b228">
+  <source src="https://github.com/user-attachments/assets/6aa0e537-bd5e-462d-89e2-6592cd9e3be9" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/00f08e39-3b52-4556-860b-3b5b0b2d7287" type="video/mp4">
 </video>
 
 - **Watch** shows the browser without input rights.
