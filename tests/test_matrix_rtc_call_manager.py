@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
-from types import SimpleNamespace
+from datetime import timedelta
+from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -59,6 +60,7 @@ from mindroom.matrix_rtc.events import (
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.frame_keys import _SharedWith
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
+from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     CascadedVoiceAgentOptions,
@@ -2665,6 +2667,132 @@ def test_build_call_instructions_places_origin_brief_before_voice_guidance() -> 
     assert _build_call_instructions("CHAT", "BRIEF").startswith("CHAT\n\nBRIEF\n\n")
     assert _build_call_instructions("CHAT", "") == _build_call_instructions("CHAT")
     assert "\n\n\n" not in _build_call_instructions("CHAT", "")
+
+
+def _patch_call_writeback(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    access_allowed: bool = True,
+    post: AsyncMock | None = None,
+) -> AsyncMock:
+    """Stub origin resolution, the hang-up access check, posting, and transcript storage."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.resolve_call_origin_context",
+        AsyncMock(return_value=_ORIGIN_CONTEXT),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.room_access_allowed",
+        AsyncMock(return_value=access_allowed),
+    )
+    post = post or AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.post_call_writeback", post)
+    monkeypatch.setattr(CallTranscript, "finalize", AsyncMock())
+    return post
+
+
+async def _talk_then_hang_up(manager: CallManager, client: AsyncMock, bridge: FakeBridge) -> None:
+    """Record one exchange in a two-minute call, then end it through the room's call state."""
+    assert bridge.agent_options is not None
+    on_turn = bridge.agent_options.on_conversation_turn
+    assert isinstance(on_turn, MethodType)
+    transcript = on_turn.__self__
+    assert isinstance(transcript, CallTranscript)
+    on_turn("user", "Book the train")
+    on_turn("assistant", "Booked")
+    transcript.started_at -= timedelta(minutes=2)
+    client.room_get_state.return_value = _state_response()
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+
+@pytest.mark.asyncio
+async def test_call_stop_posts_transcript_to_validated_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hanging up posts what was said into the conversation the call was started from."""
+    post = _patch_call_writeback(monkeypatch)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    await _talk_then_hang_up(manager, client, bridge)
+
+    assert bridge.closed is True
+    post.assert_awaited_once()
+    assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
+    body = post.await_args.kwargs["body"]
+    assert body.startswith("📞 Voice call · 2 min")
+    assert "**@alice:example.org**: Book the train" in body
+    assert "**Helper**: Booked" in body
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_stop_without_origin_posts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A call that was not started from a conversation has nowhere to post its transcript."""
+    post = _patch_call_writeback(monkeypatch)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    await _talk_then_hang_up(manager, client, bridge)
+
+    assert bridge.closed is True
+    post.assert_not_awaited()
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_stop_skips_writeback_when_origin_access_was_revoked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A caller who lost access to the origin during the call gets nothing posted there."""
+    post = _patch_call_writeback(monkeypatch, access_allowed=False)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    with capture_logs() as logs:
+        await _talk_then_hang_up(manager, client, bridge)
+
+    post.assert_not_awaited()
+    assert any(log["event"] == "call_writeback_skipped_access_revoked" for log in logs)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_writeback_failure_does_not_break_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed transcript post is logged and the call still leaves cleanly."""
+    post = _patch_call_writeback(monkeypatch, post=AsyncMock(side_effect=RuntimeError("homeserver exploded")))
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    with capture_logs() as logs:
+        await _talk_then_hang_up(manager, client, bridge)
+
+    post.assert_awaited_once()
+    assert bridge.closed is True
+    assert ROOM_ID not in manager._sessions
+    failures = [log for log in logs if log["event"] == "call_writeback_failed"]
+    assert [failure["error"] for failure in failures] == ["homeserver exploded"]
+    assert not any(log["event"] == "call_session_stop_failed" for log in logs)
+    await manager.shutdown()
 
 
 def _member(

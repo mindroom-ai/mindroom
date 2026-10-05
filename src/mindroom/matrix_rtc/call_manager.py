@@ -16,6 +16,7 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -29,6 +30,7 @@ from nio import AuthenticatedToDeviceEvent
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.voice import normalize_speech_base_url
 from mindroom.credentials_sync import get_api_key_for_service
+from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
@@ -51,6 +53,7 @@ from mindroom.matrix_rtc.call_session import (
     required_device_id,
 )
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools, record_call_voice_usage
+from mindroom.matrix_rtc.call_writeback import format_call_writeback, post_call_writeback
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -95,7 +98,7 @@ if TYPE_CHECKING:
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
     from mindroom.matrix_rtc.focus import SfuGrant
     from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
-    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
 
 logger = get_logger(__name__)
 
@@ -971,9 +974,11 @@ class CallManager:
                         requester_id,
                         logical_call,
                     ),
-                    on_stopped=lambda: transcript.finalize(
-                        config=self._config,
-                        runtime_paths=self._runtime_paths,
+                    on_stopped=lambda: self._finish_call(
+                        transcript,
+                        room_id=room_id,
+                        requester_id=requester_id,
+                        origin_context=origin_context,
                     ),
                     on_failure=lambda message: self._send_call_failure_notice(
                         room_id,
@@ -1207,7 +1212,14 @@ class CallManager:
         )
         if origin is None:
             return None
-        context = self._tool_support.build_context(
+        context = self._call_room_context(room_id, requester_id)
+        if context is None:
+            return None
+        return await resolve_call_origin_context(origin, context=context)
+
+    def _call_room_context(self, room_id: str, requester_id: str) -> ToolRuntimeContext | None:
+        """Build the caller's tool context, anchored in the call room rather than the origin."""
+        return self._tool_support.build_context(
             MessageTarget(
                 room_id=room_id,
                 source_thread_id=None,
@@ -1218,9 +1230,49 @@ class CallManager:
             user_id=requester_id,
             agent_name=self._agent_name,
         )
-        if context is None:
-            return None
-        return await resolve_call_origin_context(origin, context=context)
+
+    async def _finish_call(
+        self,
+        transcript: CallTranscript,
+        *,
+        room_id: str,
+        requester_id: str,
+        origin_context: CallOriginContext | None,
+    ) -> None:
+        """Finalize the transcript, then post it into the conversation the call was started from.
+
+        The caller's access to the origin is checked again, since it may have
+        been revoked during the call. Posting never raises into session teardown.
+        """
+        await transcript.finalize(config=self._config, runtime_paths=self._runtime_paths)
+        if origin_context is None:
+            return
+        origin = origin_context.origin
+        try:
+            origin_room = self._client.rooms.get(origin.room_id)
+            body = format_call_writeback(
+                turns=transcript.spoken_turns,
+                duration_seconds=(datetime.now(UTC) - transcript.started_at).total_seconds(),
+                caller_label=(origin_room.user_name(requester_id) if origin_room else None) or requester_id,
+                agent_label=self._config.agents[self._agent_name].display_name,
+            )
+            if body is None:
+                return
+            async with admitted_response_decision(
+                self._response_admission_gate,
+                self._wait_for_admission_or_shutdown,
+            ):
+                context = self._call_room_context(room_id, requester_id)
+                if context is None:
+                    return
+                if not await room_access_allowed(context, origin.room_id):
+                    logger.info("call_writeback_skipped_access_revoked", room_id=origin.room_id, agent=self._agent_name)
+                    return
+                await post_call_writeback(context=context, origin=origin, body=body)
+        except ResponseAdmissionRefusedError:
+            return
+        except Exception as error:
+            logger.warning("call_writeback_failed", room_id=origin.room_id, agent=self._agent_name, error=str(error))
 
     async def _build_tooling(
         self,
