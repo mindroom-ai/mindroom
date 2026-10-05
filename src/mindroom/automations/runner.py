@@ -72,7 +72,8 @@ class AutomationRunner:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
-    _next_due: dict[str, tuple[str, datetime]] = field(default_factory=dict, init=False)
+    # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
+    _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
     _firing: set[str] = field(default_factory=set, init=False)
     _pending: dict[str, _PendingVerify] = field(default_factory=dict, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -95,6 +96,8 @@ class AutomationRunner:
         for event_id in source_event_ids:
             if (pending := self._pending.pop(event_id, None)) is not None:
                 create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
+                # A held automation may be due again now.
+                self._wake.set()
 
     async def _tick(self, now: datetime) -> None:
         """Fire every automation that is due at ``now`` and verify prompts whose run never reported back."""
@@ -106,11 +109,12 @@ class AutomationRunner:
             for automation in config.resolve_entity(agent_name).automations:
                 key = f"{agent_name}:{automation.name}"
                 enabled.add(key)
-                cron, due = self._next_due.get(key, ("", now))
-                if cron != automation.cron:
-                    self._next_due[key] = (automation.cron, _next_time(automation.cron, now, config.timezone))
+                schedule = (automation.cron, config.timezone)
+                scheduled, due = self._next_due.get(key, (("", ""), now))
+                if scheduled != schedule:
+                    self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
                 elif due <= now and not self._busy(key):
-                    self._next_due[key] = (cron, _next_time(cron, now, config.timezone))
+                    self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
                     self._firing.add(key)
                     create_background_task(
                         self._fire(config, agent_name, automation, key, now),
@@ -131,8 +135,11 @@ class AutomationRunner:
         while True:
             now = datetime.now(UTC)
             await self._tick(now)
-            deadlines = [due for _cron, due in self._next_due.values()] + [p.deadline for p in self._pending.values()]
-            sleep = min([_MAX_SLEEP_SECONDS, *((deadline - now).total_seconds() for deadline in deadlines)])
+            deadlines = [due for _schedule, due in self._next_due.values()] + [
+                p.deadline for p in self._pending.values()
+            ]
+            # A held automation keeps its past due time; response_finished wakes the loop instead of a busy poll.
+            sleep = min([_MAX_SLEEP_SECONDS, *((d - now).total_seconds() for d in deadlines if d > now)])
             self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=max(sleep, 1.0))
@@ -152,15 +159,19 @@ class AutomationRunner:
             if plan is None:
                 return
             room_id = _room_id(config, self.runtime_paths, agent_name, automation.room)
-            bot = self.bot_provider(agent_name)
-            if room_id is None or bot is None:
+            if room_id is None:
                 logger.warning("Automation has no room to post in", agent=agent_name, automation=automation.name)
+                return
+            bot = self.bot_provider(agent_name)
+            if bot is None:
+                logger.warning("Automation agent is not running", agent=agent_name, automation=automation.name)
                 return
             # Like a todo poke without a human requester, the prompt runs as MindRoom's internal user.
             original_sender = mindroom_user_id(config, self.runtime_paths)
             event_id = await bot._hook_send_message(
                 room_id,
-                curation_prompt(config, plan),
+                # Only a mentioned agent answers a top-level message in a room with other responders.
+                f"@{agent_name} {curation_prompt(config, plan)}",
                 None,
                 _SOURCE_HOOK,
                 {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None,

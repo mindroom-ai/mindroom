@@ -186,13 +186,26 @@ def _restore(root: Path, path: str, payload: bytes) -> None:
         )
 
 
+def _read_after_run(root: Path, path: str) -> bytes | None | OSError | ValueError:
+    """Read one file after the run, returning a read failure instead of raising it."""
+    try:
+        return _read(root, path)
+    except (OSError, ValueError) as error:
+        return error
+
+
 def verify_curation(plan: CurationPlan) -> _CurationResult:
     """Check the files against the plan, writing the snapshot back over every changed file when a guard fails."""
-    current = {path: _read(plan.root, path) for path in plan.snapshot}
-    changed = [path for path, payload in plan.snapshot.items() if current[path] != payload]
+    after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
+    changed = [path for path, payload in plan.snapshot.items() if after_run[path] != payload]
     if not changed:
         return _CurationResult(tokens_after=plan.measured_tokens, changed=False)
-    if violations := _violations(plan, current):
+    # A run that replaced a file with a link or grew it past the read cap is restored like any other miss.
+    unreadable = [
+        f"{path} cannot be read ({error})" for path, error in after_run.items() if isinstance(error, Exception)
+    ]
+    current = {path: None if isinstance(payload, Exception) else payload for path, payload in after_run.items()}
+    if violations := unreadable or _violations(plan, current):
         for path in changed:
             _restore(plan.root, path, plan.snapshot[path])
         return _CurationResult(tokens_after=plan.measured_tokens, changed=True, violations=tuple(violations))

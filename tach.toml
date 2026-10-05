@@ -7934,7 +7934,7 @@ visibility = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.config.automations"
-depends_on = ["mindroom.config.validation"]
+depends_on = ["mindroom.config.validation", "mindroom.tool_system.worker_routing"]
 visibility = ["mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
 
 [[modules]]

@@ -152,6 +152,17 @@ def _corrupt(root: Path) -> None:
     (root / "MEMORY.md").write_bytes(MEMORY.encode() + b"caf\xe9\n")
 
 
+def _grow_past_the_read_cap(root: Path) -> None:
+    (root / "MEMORY.md").write_bytes(b"x" * ((1 << 20) + 1))
+
+
+def _replace_with_a_link(root: Path) -> None:
+    outside = root.parent / "outside.md"
+    outside.write_text("planted\n", encoding="utf-8")
+    (root / "MEMORY.md").unlink()
+    (root / "MEMORY.md").symlink_to(outside)
+
+
 @pytest.mark.parametrize(
     ("change", "violation"),
     [
@@ -160,6 +171,8 @@ def _corrupt(root: Path) -> None:
         (_grow, "the files did not shrink (1296 tokens)"),
         (_delete_a_file, "USER.md shrank 100% (more than 25%)"),
         (_corrupt, "MEMORY.md is no longer valid UTF-8"),
+        (_grow_past_the_read_cap, "MEMORY.md cannot be read (File exceeds its size limit: MEMORY.md)"),
+        (_replace_with_a_link, "MEMORY.md cannot be read ([Errno 40] Too many levels of symbolic links: 'MEMORY.md')"),
     ],
 )
 def test_a_run_that_misses_the_bounds_is_restored_byte_identical(

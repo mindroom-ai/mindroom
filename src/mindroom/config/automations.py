@@ -2,30 +2,24 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.validation import duplicate_items
+from mindroom.tool_system.worker_routing import agent_workspace_relative_path
+
+_CRON_FIELDS = 5
 
 
 def _validate_cron(value: str) -> str:
     # why-lazy: croniter stays out of the config import surface.
     from croniter import croniter  # noqa: PLC0415
 
-    if not croniter.is_valid(value):
-        msg = f"Invalid cron expression: {value!r}"
+    if len(value.split()) != _CRON_FIELDS or not croniter.is_valid(value):
+        msg = f"Automation cron must be a valid five-field expression: {value!r}"
         raise ValueError(msg)
     return value
-
-
-def _workspace_markdown_path(value: str) -> str:
-    path = PurePosixPath(value.strip())
-    if not path.parts or path.is_absolute() or ".." in path.parts or path.suffix != ".md":
-        msg = f"Protected files must be workspace-relative Markdown paths: {value!r}"
-        raise ValueError(msg)
-    return path.as_posix()
 
 
 class PromptCurationAutomation(BaseModel):
@@ -86,7 +80,7 @@ class PromptCurationAutomation(BaseModel):
     @classmethod
     def validate_protected_files(cls, values: list[str]) -> list[str]:
         """Normalize protected paths and reject paths outside the workspace."""
-        return [_workspace_markdown_path(value) for value in values]
+        return [agent_workspace_relative_path(value).as_posix() for value in values]
 
     @model_validator(mode="after")
     def validate_reductions(self) -> Self:

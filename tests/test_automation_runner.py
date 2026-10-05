@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -106,10 +107,46 @@ async def test_a_due_check_posts_a_visible_prompt_that_the_agent_answers(tmp_pat
     assert prompt["thread_id"] is None
     assert prompt["source_hook"] == "prompt_curation"
     assert prompt["trigger_dispatch"] is True
-    assert prompt["body"].startswith(
-        "🧹 Prompt maintenance: the files loaded into every one of your prompts total 1286",
-    )
-    assert prompt["extra_content"] is None or ORIGINAL_SENDER_KEY in prompt["extra_content"]
+    assert prompt["body"].startswith("@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts")
+    # No internal user is provisioned in this runtime, so no original sender is attached.
+    assert prompt["extra_content"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_internal_user_is_the_prompts_requester(tmp_path: Path) -> None:
+    """Like a todo poke without a human, the prompt runs as MindRoom's internal user."""
+    _config, _paths, runner, bot = _setup(tmp_path)
+
+    with patch("mindroom.automations.runner.mindroom_user_id", return_value="@mindroom_user:example.test"):
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+
+    assert bot.sent[0]["extra_content"] == {ORIGINAL_SENDER_KEY: "@mindroom_user:example.test"}
+
+
+@pytest.mark.asyncio
+async def test_a_configured_room_overrides_the_first_agent_room(tmp_path: Path) -> None:
+    """`room` sends the prompt somewhere other than the agent's first room."""
+    config, _paths, runner, bot = _setup(tmp_path)
+    config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, room="!other:example.test")]
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert bot.sent[0]["room_id"] == "!other:example.test"
+
+
+@pytest.mark.asyncio
+async def test_a_changed_schedule_on_reload_moves_the_next_run(tmp_path: Path) -> None:
+    """Editing the cron reschedules from now instead of keeping the old due time."""
+    config, _paths, runner, bot = _setup(tmp_path)
+    await _tick(runner, NOON)
+
+    config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, cron="0 0 1 1 *")]
+    await _tick(runner, NOON + timedelta(minutes=1))
+    await _tick(runner, DAY_LATER)
+
+    assert bot.sent == []
 
 
 @pytest.mark.asyncio

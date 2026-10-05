@@ -1850,30 +1850,31 @@ class Config(BaseModel):
         # exclude_none keeps the "None inherits" tri-state; deep copy avoids aliasing memory.search.include.
         return self.memory.search.model_copy(update=override.model_dump(exclude_none=True), deep=True)
 
-    def _agent_automations(self, agent_name: str) -> list[PromptCurationAutomation]:
-        """Get one agent's built-in automations: its own list, or the defaults for an eligible agent.
+    def _automation_block_reason(self, agent_name: str) -> str | None:
+        """Return why an agent cannot run automations, or None when it can.
 
         Automations run unattended, so requester-private agents have no identity to run them as, and
         prompt curation moves detail into file memory, which needs the file backend.
         """
+        if self.get_agent(agent_name).private is not None:
+            return "is private; automations run unattended and need a shared agent"
+        if self._agent_memory_backend(agent_name) != "file":
+            return "needs memory_backend: file for prompt_curation"
+        return None
+
+    def _agent_automations(self, agent_name: str) -> list[PromptCurationAutomation]:
+        """Get one agent's built-in automations: its own list, or the defaults when it can run them."""
         agent = self.get_agent(agent_name)
         if agent.automations is not None:
             return agent.automations
-        if agent.private is not None or self._agent_memory_backend(agent_name) != "file":
-            return []
-        return self.defaults.automations
+        return [] if self._automation_block_reason(agent_name) is not None else self.defaults.automations
 
     @model_validator(mode="after")
     def validate_agent_automations(self) -> Config:
         """Reject automations an agent lists but cannot run."""
         for agent_name, agent in self.agents.items():
-            if not agent.automations:
-                continue
-            if agent.private is not None:
-                msg = f"Agent {agent_name!r} is private; automations run unattended and need a shared agent"
-                raise ValueError(msg)
-            if self._agent_memory_backend(agent_name) != "file":
-                msg = f"Agent {agent_name!r} needs memory_backend: file for prompt_curation"
+            if agent.automations and (reason := self._automation_block_reason(agent_name)) is not None:
+                msg = f"Agent {agent_name!r} {reason}"
                 raise ValueError(msg)
         return self
 
