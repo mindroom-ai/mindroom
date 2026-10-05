@@ -302,6 +302,20 @@ def test_an_archive_appended_past_the_read_cap_is_left_alone(tmp_path: Path) -> 
     assert (root / "memory" / "projects.md").read_text().endswith("bring the insurance card.\n")
 
 
+def test_an_archive_that_stops_being_utf8_is_left_alone(tmp_path: Path) -> None:
+    """A topic file that is no longer valid UTF-8 cannot be compared safely, so a restore leaves its bytes alone."""
+    plan, root = _plan_with_archive(tmp_path)
+    with (root / "memory" / "projects.md").open("ab") as archive:
+        archive.write(b"caf\xe9\n")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "MEMORY.md").read_text() == MEMORY
+    assert (root / "memory" / "projects.md").read_bytes() == ARCHIVE.encode() + b"caf\xe9\n"
+
+
 def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_path: Path) -> None:
     """The loss baseline counts a topic file that was past 1 MiB at fire time, so it cannot pass as moved detail."""
     config, automation, root = _setup(tmp_path)
