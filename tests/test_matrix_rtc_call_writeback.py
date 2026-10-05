@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix_rtc import call_writeback
 from mindroom.matrix_rtc.call_origin import CallOrigin
@@ -51,7 +52,7 @@ def test_format_call_writeback_skips_brief_or_silent_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_post_call_writeback_replies_in_origin_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The transcript lands in the origin thread with an MSC3440 fallback to the latest event."""
+    """The transcript lands in the origin thread with an MSC3440 fallback, and its quoted speech wakes no agent."""
     send = AsyncMock(return_value=SimpleNamespace(event_id="$posted"))
     monkeypatch.setattr(call_writeback, "send_message_result", send)
     reader = AsyncMock()
@@ -72,6 +73,7 @@ async def test_post_call_writeback_replies_in_origin_thread(monkeypatch: pytest.
     assert relation["event_id"] == "$root"
     assert relation["is_falling_back"] is True
     assert relation["m.in_reply_to"]["event_id"] == "$latest"
+    assert content[SKIP_MENTIONS_KEY] is True
 
 
 @pytest.mark.asyncio

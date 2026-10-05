@@ -4052,6 +4052,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_writeback"
 depends_on = [
+    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
