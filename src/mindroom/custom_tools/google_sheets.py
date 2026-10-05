@@ -82,6 +82,15 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         return build("sheets", "v4", http=self._google_authorized_http(creds))
 
+    # AGNO_COMPAT: Agno renders Any in tool parameter types as an empty closed object.
+    # Reason: Agno 3.0.9 turns the values of `list[dict[str, Any]]` into
+    # `{"type": "object", "properties": {}, "additionalProperties": false}`, so local
+    # argument validation rejects every real request; bare `dict` yields open objects.
+    # Upstream issue: https://github.com/agno-agi/agno/issues/10422
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10423 (open).
+    # Remove when: the pinned Agno renders `dict[str, Any]` values unconstrained; then annotate
+    # `requests` as `list[dict[str, Any]]`.
+    # Coverage: tests/test_google_sheets_oauth_tool.py::test_google_sheets_batch_update_schema_accepts_sheets_api_requests
     @authenticate
     def batch_update_sheet(self, spreadsheet_id: str, requests: list[dict]) -> str:
         """Apply Google Sheets API batchUpdate requests to one spreadsheet, in order.
