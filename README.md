@@ -26,7 +26,6 @@ https://github.com/user-attachments/assets/f8325b3c-7ed0-4cd7-bc77-0c4cd74f226e
 MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
 Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
 Pick a [local model](https://docs.mindroom.chat/configuration/models/) for your private life or a frontier model for hard problems, and self-host the whole stack or run only the agents on your own computer.
-Everything in this repository is Apache 2.0 except `saas-platform/` (the hosted service's website, portal, billing, and provisioning code), which uses the [Business Source License](#license); the MindRoom Chat app is a separate [AGPL-3.0](https://github.com/mindroom-ai/mindroom-chat#license) project.
 
 **Run it on any computer**
 
