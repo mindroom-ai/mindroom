@@ -558,7 +558,7 @@ export default function LandingPage() {
               GitHub
             </a>
             <DarkModeToggle />
-            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white xl:inline-flex">
+            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white md:inline-flex">
               Sign in
             </Link>
             <a href={chatUrl} className="hidden items-center gap-2 whitespace-nowrap rounded-md border border-gray-300 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10 sm:inline-flex">
