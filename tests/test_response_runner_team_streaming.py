@@ -321,20 +321,20 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
 
 @pytest.mark.asyncio
 async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path) -> None:
-    """Team turns ask the response's room which events their history derives from were redacted."""
+    """Team turns ask about redactions in the response's own conversation."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
     lookups: list[tuple[str, tuple[str, ...]]] = []
 
-    async def redacted_event_ids(room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
-        lookups.append((room_id, event_ids))
-        return frozenset()
+    async def redacted_history_events(target: MessageTarget, event_ids: tuple[str, ...]) -> dict[str, str | None]:
+        lookups.append((target.session_id, event_ids))
+        return {}
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
         turn_context = kwargs["ctx"]
-        assert turn_context.redacted_event_ids is not None
-        await turn_context.redacted_event_ids(("$event",))
+        assert turn_context.redacted_history_events is not None
+        await turn_context.redacted_history_events(("$event",))
         return "Team answer"
 
     with (
@@ -350,7 +350,7 @@ async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps = replace(coordinator.deps, redacted_event_ids=redacted_event_ids)
+        coordinator.deps = replace(coordinator.deps, redacted_history_events=redacted_history_events)
         _install_inert_post_response_effects(coordinator)
 
         await coordinator.generate_team_response_helper(
@@ -359,7 +359,7 @@ async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path
             team_mode="coordinate",
         )
 
-    assert lookups == [("!test:localhost", ("$event",))]
+    assert lookups == [("!test:localhost:$thread-root", ("$event",))]
 
 
 @pytest.mark.asyncio

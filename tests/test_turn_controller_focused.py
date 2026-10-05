@@ -5036,7 +5036,6 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
     assert record.redacted_source_event_ids == (selection_event_id,)
-    assert record.pending_redaction_cleanup_event_ids == ()
     assert record.response_event_id == "$ack:localhost"
     assert harness.turn_store.is_handled(selection_event_id) is True
     assert harness.turn_store.is_handled(selection.question_event_id) is False

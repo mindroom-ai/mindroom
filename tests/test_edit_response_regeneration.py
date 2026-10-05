@@ -3459,6 +3459,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
+        patch("mindroom.turn_store.remove_history_of_redacted_events", new=AsyncMock(return_value=[])),
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -3771,6 +3772,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
+        patch("mindroom.turn_store.remove_history_of_redacted_events", new=AsyncMock(return_value=[])),
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,

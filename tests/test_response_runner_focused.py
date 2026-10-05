@@ -188,7 +188,7 @@ from tests.test_response_turn import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
     from pathlib import Path
     from typing import Literal
 
@@ -6705,7 +6705,7 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
 
 @pytest.mark.asyncio
 async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Path) -> None:
-    """The turn driver's redaction lookup reads the tombstones the bot's journal recorded for the room."""
+    """The turn driver's redaction lookup reads the tombstones the bot's own journal recorded for the room."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     store = coordinator.deps.approval_store
@@ -6732,11 +6732,11 @@ async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Pa
             redacts_event_id="$older",
         ),
     )
-    found: list[frozenset[str]] = []
+    found: list[Mapping[str, str | None]] = []
 
     async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
-        assert ctx.redacted_event_ids is not None
-        found.append(await ctx.redacted_event_ids(("$older", "$kept")))
+        assert ctx.redacted_history_events is not None
+        found.append(await ctx.redacted_history_events(("$older", "$kept")))
         return "final text"
 
     with (
@@ -6752,7 +6752,7 @@ async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Pa
     ):
         await coordinator._process_and_respond(_plain_request(_target()))
 
-    assert found == [frozenset({"$older"})]
+    assert found == [{"$older": None}]
 
 
 @pytest.mark.asyncio

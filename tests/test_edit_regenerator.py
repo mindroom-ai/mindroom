@@ -2265,7 +2265,6 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
     async def generate(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
-        assert not store.get_turn_record(first).pending_redaction_cleanup_event_ids
         prompts.append(request.prompt)
         await _acknowledge_test_edit(tmp_path, request, RESPONSE_EVENT_ID, store, journal_store=journal_store)
         return RESPONSE_EVENT_ID
@@ -2402,7 +2401,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
     assert owner.source_event_revisions[second] == (event.server_timestamp, event.event_id)
     assert owner.revision_watermark(first) == (10, "$deleted-edit")
     assert owner.revision_replay["$deleted-edit"].response_event_id == RESPONSE_EVENT_ID
-    assert not owner.revision_replay["$deleted-edit"].cleanup_pending
+    assert owner.revision_replay["$deleted-edit"].redacted
     assert harness.regenerator._mailboxes == {}
 
 
