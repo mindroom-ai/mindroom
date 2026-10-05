@@ -19,15 +19,22 @@ import threading
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from uuid import uuid4
 
-from agno.agent import Agent
-from agno.run.base import RunStatus
+from agno.metrics import RunMetrics
+from agno.models.message import Message
+from agno.run.agent import RunOutput
 
 from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage
-from mindroom.background_tasks import create_background_task
+from mindroom.agno_compat_model_hooks import install_response_request_gate
+from mindroom.background_tasks import (
+    create_background_task,
+    run_blocking_until_complete,
+    run_coroutine_until_complete,
+)
+from mindroom.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.history.storage import new_scope_session
 from mindroom.llm_request_logging import bind_llm_request_log_context
@@ -50,7 +57,7 @@ from mindroom.tool_call_budget import install_model_call_cap
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
+    from agno.tools.function import Function
 
     from mindroom.config.main import Config
     from mindroom.config.prompt_curation import PromptCurationConfig
@@ -64,9 +71,12 @@ _STATE_FILENAME = "prompt_curation_state.json"
 _STATE_LOCK = threading.Lock()
 # Each failed pass doubles the cooldown, up to 8x.
 _MAX_BACKOFF_DOUBLINGS = 3
-# Moving one section takes two calls, so a pass can move ten sections; with install_model_call_cap the pass ends
-# after 22 model requests, each of which resends the curated files.
+# Moving one section takes two calls, so a pass can move ten sections; install_model_call_cap ends it after 22
+# model requests.
 _TOOL_CALL_LIMIT = 20
+# Every request resends the conversation, so a pass may send at most this many times its first request in total.
+_INPUT_BUDGET_REQUESTS = 8
+_CURATION_GATE = "_mindroom_prompt_curation_gate"
 _MEMORY_LISTING_LIMIT = 200
 
 type _PassOutcome = Literal["accepted", "rejected", "conflict", "failed", "timeout"]
@@ -261,7 +271,7 @@ class PromptCurationRunner:
         return task
 
     async def stop(self) -> None:
-        """Cancel every running pass; a cancelled pass publishes nothing."""
+        """Cancel every running pass; a pass cancelled before publication publishes nothing."""
         self._stopped = True
         tasks = list(self._tasks.values())
         for task in tasks:
@@ -335,22 +345,18 @@ class PromptCurationRunner:
         logger.info(
             "Prompt curation started",
             tokens=before.curated_tokens,
+            trigger_tokens=bounds.trigger_tokens,
+            stop_tokens=bounds.stop_tokens,
             target_tokens=bounds.upper_tokens,
             floor_tokens=bounds.floor_tokens,
         )
         try:
-            response = await asyncio.wait_for(
-                self._run_model(config, scope, staged, before, bounds, settings),
-                timeout=settings.timeout_seconds,
-            )
+            await asyncio.wait_for(self._run_model(config, scope, due, settings), timeout=settings.timeout_seconds)
         except TimeoutError:
             logger.warning("Prompt curation timed out", timeout_seconds=settings.timeout_seconds)
             return "timeout", before.curated_tokens
         except Exception:
             logger.exception("Prompt curation model run failed")
-            return "failed", before.curated_tokens
-        if response.status == RunStatus.error:
-            logger.warning("Prompt curation model run failed", error=str(response.content))
             return "failed", before.curated_tokens
         after = staged.measurement()
         if violations := validate_pass(before, after, bounds, settings):
@@ -383,11 +389,10 @@ class PromptCurationRunner:
         self,
         config: Config,
         scope: _CurationScope,
-        staged: StagedWorkspace,
-        before: PassMeasurement,
-        bounds: PassBounds,
+        due: _DuePass,
         settings: PromptCurationConfig,
-    ) -> RunOutput:
+    ) -> None:
+        """Run the agent's model with the pass's tools; its usage is recorded however the run ends."""
         model_name = config.resolve_entity(scope.agent_name).model_name
         model = model_loading.get_model_instance(
             config,
@@ -396,21 +401,54 @@ class PromptCurationRunner:
             execution_identity=scope.identity,
         )
         install_model_call_cap(model, entity_name=scope.agent_name)
-        curator = Agent(
-            name="PromptCurator",
-            model=model,
-            tools=[PromptCurationTools(staged, bounds, settings, before)],
-            tool_call_limit=_TOOL_CALL_LIMIT,
-            telemetry=False,
-        )
+        functions = PromptCurationTools(due.staged, due.bounds, settings, due.before).get_functions().values()
+        for function in functions:
+            function.process_entrypoint()
+        tools: list[Function | dict[str, Any]] = list(functions)
+        prompt = _curation_prompt(config, scope.agent_name, due.staged, due.before, due.bounds, settings)
+        first_messages = [Message(role="user", content=prompt)]
+        messages = list(first_messages)
+        budget_tokens = _INPUT_BUDGET_REQUESTS * estimate_text_tokens(prompt)
+        sent_tokens = 0
+
+        def allow_request() -> bool:
+            # Each request resends the whole conversation, including every file the model re-read.
+            nonlocal sent_tokens
+            sent_tokens += sum(estimate_text_tokens(message.get_content_string()) for message in messages)
+            if sent_tokens <= budget_tokens:
+                return True
+            logger.info("Prompt curation reached its input budget", budget_tokens=budget_tokens)
+            return False
+
         invocation_id = uuid4().hex
-        response = await curator.arun(
-            _curation_prompt(config, scope.agent_name, staged, before, bounds, settings),
+        # Agno adds the usage of each request to the run's metrics, so a timeout or stop still reports it.
+        run = RunOutput(
             run_id=invocation_id,
-            session_id=f"prompt_curation:{scope.key}",
+            session_id=scope.session_id,
+            model=model.id,
+            model_provider=model.provider,
+            metrics=RunMetrics(),
         )
+        try:
+            # Opening a Claude client does blocking credential and TLS work, and the pass owns the client.
+            await run_blocking_until_complete(prewarm_anthropic_async_client, model)
+            install_response_request_gate(model, marker=_CURATION_GATE, open_gate=lambda _limit: allow_request)
+            await model.aresponse(
+                messages=messages,
+                tools=tools,
+                tool_call_limit=_TOOL_CALL_LIMIT,
+                run_response=run,
+            )
+        finally:
+            await run_coroutine_until_complete(aclose_anthropic_async_client(model))
+            run.messages = messages[len(first_messages) :]
+            if run.messages:
+                await self._record_usage(config, scope, run, invocation_id)
+
+    async def _record_usage(self, config: Config, scope: _CurationScope, run: RunOutput, invocation_id: str) -> None:
+        """Count the pass's usage against the conversation whose completed reply started it."""
         await record_helper_usage(
-            response,
+            run,
             owner=HelperUsageOwner(
                 storage_factory=partial(
                     create_session_storage,
@@ -431,4 +469,3 @@ class PromptCurationRunner:
             kind="prompt_curation",
             requester_id=scope.identity.requester_id if scope.identity is not None else None,
         )
-        return response

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,7 @@ from mindroom.prompt_curation.runner import PromptCurationRunner
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.usage_stats import collect_admin_usage
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -61,6 +63,11 @@ class _ScriptedModel(SyntheticModel):
     log_contexts: list[dict[str, object]] = field(default_factory=list)
     request_log_contexts: list[dict[str, object]] = field(default_factory=list)
     before_answer: Callable[[], None] | None = None
+    failure: Exception | None = None
+    # Requests after this many wait for ``release``, setting ``blocked`` first.
+    released_requests: int | None = None
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    blocked: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def ainvoke(
         self,
@@ -72,6 +79,11 @@ class _ScriptedModel(SyntheticModel):
         self.requests.append([message.get_content_string() for message in messages])
         self.log_contexts.append(structlog.contextvars.get_contextvars())
         self.request_log_contexts.append(current_llm_request_log_context())
+        if self.failure is not None:
+            raise self.failure
+        if self.released_requests is not None and len(self.requests) > self.released_requests:
+            self.blocked.set()
+            await self.release.wait()
         usage = MessageMetrics(input_tokens=100, output_tokens=5, total_tokens=105)
         if not self.script:
             if self.before_answer is not None:
@@ -98,11 +110,16 @@ def _setup(
     memory: str = MEMORY,
     private: bool = False,
     enabled: bool = True,
+    timeout_seconds: int | None = None,
 ) -> tuple[Config, RuntimePaths, Path]:
     agent = AgentConfig(
         display_name="Mind",
         memory_backend="file",
-        prompt_curation=AgentPromptCurationConfig(trigger_tokens=1_000, enabled=enabled),
+        prompt_curation=AgentPromptCurationConfig(
+            trigger_tokens=1_000,
+            enabled=enabled,
+            timeout_seconds=timeout_seconds,
+        ),
         private=AgentPrivateConfig(per="user") if private else None,
     )
     config = Config(agents={"mind": agent}, models={"default": ModelConfig(provider="openai", id="gpt-6-astra")})
@@ -121,6 +138,11 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 
 def _state(paths: RuntimePaths) -> dict[str, Any]:
     return json.loads((paths.storage_root / "prompt_curation_state.json").read_text())["scopes"]
+
+
+def _usage_kinds(config: Config, paths: RuntimePaths) -> set[str]:
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    return {row.kind for row in report.request_breakdown or []}
 
 
 async def _curate(
@@ -153,6 +175,7 @@ async def test_moving_detail_into_memory_within_bounds_is_published(tmp_path: Pa
     assert (root / "memory" / "topics.md").read_text() == SECTIONS[3]
     assert (root / "SOUL.md").read_text() == "Be kind.\n"
     assert 0.85 * len(MEMORY) <= len(curated) <= 0.9 * len(MEMORY)
+    assert _usage_kinds(config, paths) == {"prompt_curation"}
     assert _state(paths)["mind"] == {
         "active": True,
         "consecutive_failures": 0,
@@ -215,6 +238,86 @@ async def test_a_rewrite_during_the_pass_discards_it_without_counting_a_failure(
     assert (root / "MEMORY.md").read_text() == rewritten
     assert not (root / "memory" / "topics.md").exists()
     assert _state(paths)["mind"]["consecutive_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_pass_reports_its_usage_and_changes_nothing(tmp_path: Path) -> None:
+    """A pass that runs out of time publishes nothing, counts as a failure, and still reports what it spent."""
+    config, paths, root = _setup(tmp_path, timeout_seconds=1)
+    before = _snapshot(root)
+    model = _model(MOVE)
+    model.released_requests = 1
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        outcome = await _curate(PromptCurationRunner(paths), config)
+
+    assert outcome == "timeout"
+    assert _snapshot(root) == before
+    assert _usage_kinds(config, paths) == {"prompt_curation"}
+    assert _state(paths)["mind"]["consecutive_failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failing_model_run_counts_as_a_failure(tmp_path: Path) -> None:
+    """A provider error ends the pass without publishing and backs off like a rejection."""
+    config, paths, root = _setup(tmp_path)
+    before = _snapshot(root)
+    model = _model(MOVE)
+    model.failure = RuntimeError("provider down")
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        outcome = await _curate(PromptCurationRunner(paths), config)
+
+    assert outcome == "failed"
+    assert _snapshot(root) == before
+    assert _state(paths)["mind"] == {
+        "active": True,
+        "consecutive_failures": 1,
+        "last_attempt_at": _state(paths)["mind"]["last_attempt_at"],
+        "last_outcome": "failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_one_pass_runs_per_workspace_and_stop_cancels_it_unpublished(tmp_path: Path) -> None:
+    """A second reply does not start a second pass, and shutdown cancels the running one before it publishes."""
+    config, paths, root = _setup(tmp_path)
+    before = _snapshot(root)
+    model = _model(MOVE)
+    model.released_requests = 1
+    runner = PromptCurationRunner(paths)
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        task = runner.maybe_start(config, agent_name="mind", session_id="session", identity=None)
+        assert task is not None
+        await model.blocked.wait()
+        assert runner.maybe_start(config, agent_name="mind", session_id="other", identity=None) is None
+        await runner.stop()
+
+    assert task.cancelled()
+    assert _snapshot(root) == before
+    state = _state(paths)["mind"]
+    assert state["active"] is True
+    assert state["last_attempt_at"] is not None
+    assert runner.maybe_start(config, agent_name="mind", session_id="session", identity=None) is None
+
+
+@pytest.mark.asyncio
+async def test_rereading_files_stops_at_the_input_budget(tmp_path: Path) -> None:
+    """Every request resends the conversation, so a model that keeps re-reading files is stopped early."""
+    config, paths, root = _setup(tmp_path)
+    before = _snapshot(root)
+    model = _model(*([("read_file", {"path": "MEMORY.md"})] for _ in range(15)))
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        outcome = await _curate(PromptCurationRunner(paths), config)
+
+    assert outcome == "rejected"
+    assert _snapshot(root) == before
+    first_request_tokens = sum(len(content) for content in model.requests[0]) // 4
+    sent_tokens = sum(sum(len(content) for content in request) // 4 for request in model.requests)
+    assert len(model.requests) < 8
+    assert sent_tokens <= 8 * first_request_tokens
 
 
 @pytest.mark.asyncio

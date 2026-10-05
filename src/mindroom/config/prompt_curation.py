@@ -22,7 +22,7 @@ def _workspace_markdown_path(value: str) -> str:
     if not parts or path.is_absolute() or ".." in parts:
         msg = f"Prompt curation paths must be relative paths inside the agent workspace: {value!r}"
         raise ValueError(msg)
-    if path.suffix.lower() != ".md":
+    if path.suffix != ".md":
         msg = f"Prompt curation paths must be Markdown files: {value!r}"
         raise ValueError(msg)
     if parts[0] == _MEMORY_DIR or any(part.casefold() == ".git" for part in parts):
@@ -96,7 +96,7 @@ class PromptCurationConfig(BaseModel):
         gt=0,
         description="Minimum hours between passes for one agent workspace; doubles after each failed pass, up to 8x",
     )
-    timeout_seconds: int = Field(default=600, ge=30, le=3600, description="Maximum seconds per pass")
+    timeout_seconds: int = Field(default=600, ge=1, le=3600, description="Maximum seconds per pass")
     files: list[str] = Field(
         default_factory=lambda: list(_DEFAULT_FILES),
         min_length=1,
@@ -150,7 +150,7 @@ class AgentPromptCurationConfig(BaseModel):
     max_file_shrink: float | None = Field(default=None, gt=0, le=1, description="Per-agent per-file shrink cap")
     max_content_loss: float | None = Field(default=None, ge=0, lt=1, description="Per-agent net content-loss cap")
     cooldown_hours: float | None = Field(default=None, gt=0, description="Per-agent hours between passes")
-    timeout_seconds: int | None = Field(default=None, ge=30, le=3600, description="Per-agent pass timeout")
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600, description="Per-agent pass timeout")
     files: list[str] | None = Field(default=None, min_length=1, description="Per-agent curatable files")
     protected_files: list[str] | None = Field(default=None, description="Per-agent protected files")
 

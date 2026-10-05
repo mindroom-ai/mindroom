@@ -70,6 +70,10 @@ MindRoom's architecture consists of several key components working together.
 | `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
 | `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
+| `prompt_curation/policy.py` | When a prompt-curation pass is due, the band it must land in, and the guards that keep or discard its result |
+| `prompt_curation/staging.py` | The in-memory staged copy a curation pass edits, with compare-and-swap publication to the workspace |
+| `prompt_curation/tools.py` | The pass's read, edit, and append tools, which refuse over-cuts and report progress against the band |
+| `prompt_curation/runner.py` | Background curation after completed replies: cooldown, hysteresis, and backoff state, the agent's model run, validation, and publication |
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
@@ -118,6 +122,7 @@ MindRoom's architecture consists of several key components working together.
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
+| `config/prompt_curation.py` | Prompt-curation defaults, per-agent overrides, and path validation |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |

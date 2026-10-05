@@ -7427,6 +7427,7 @@ visibility = [
     "mindroom.provider_stream_retry",
     "mindroom.claude_prompt_cache",
     "mindroom.tool_call_budget",
+    "mindroom.prompt_curation.runner",
     "mindroom.skill_learning.capture",
     "mindroom.skill_learning.reviewer",
 ]
@@ -7962,6 +7963,7 @@ visibility = ["mindroom.prompt_curation.runner"]
 path = "mindroom.prompt_curation.runner"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.agno_compat_model_hooks",
     "mindroom.background_tasks",
     "mindroom.helper_usage",
     "mindroom.history.storage",

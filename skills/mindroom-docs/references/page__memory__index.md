@@ -302,7 +302,7 @@ agents:
 ```
 
 1. After each completed reply, a background check measures the curatable `files` with the estimate behind `static_prompt_tokens` (characters / 4); it never delays the reply.
-2. Above `trigger_tokens`, a pass is due at most once per `cooldown_hours`, and later passes continue until the files are under `target_ratio` of the trigger.
+2. Above `trigger_tokens`, a pass is due at most once per `cooldown_hours`, and later passes continue until the files are at or under `target_ratio` of the trigger.
 3. MindRoom computes the pass's band from the measured size, for example "at most 64800 tokens, but not below 61200" for 72000 tokens, and gives it to the agent's own model with three tools on a staged copy of the workspace: `read_file`, `edit_file` for the curatable files, and `append_file` for Markdown files under `memory/`.
 4. The model keeps durable facts concise, moves detail verbatim into topic files such as `memory/projects.md`, and leaves one-line pointers.
 5. MindRoom validates the result and publishes it only when every guard holds.
@@ -316,8 +316,9 @@ A pass is discarded, leaving every live file byte-identical, when:
 - total memory content (the curatable files plus `memory/**`) dropped by more than `max_content_loss` of the curatable files' size, because detail was deleted instead of moved.
 
 An edit that would over-cut a file or the total is refused as soon as the model makes it, and `memory/` files can only grow during a pass.
-Each failed pass doubles the cooldown, up to eight times, and attempt times survive restarts in `prompt_curation_state.json` in the storage directory.
-When a reply rewrites a curated file while a pass runs, the pass is discarded; lines a reply only appended are kept.
+A pass ends after 20 tool calls, after sending eight times its first request in total, or after `timeout_seconds`, and its usage is recorded however it ends.
+Each failed pass doubles the wait before the next one, up to eight times the cooldown, and attempt times survive restarts in `prompt_curation_state.json` in the storage directory.
+When a reply rewrites a curated file while a pass runs, the pass is discarded; lines a reply appended before publication are kept.
 After a published pass, a `semantic` memory index is refreshed so moved detail stays searchable.
 
 Passes post nothing to Matrix, so neither people nor the router see them.
@@ -334,7 +335,7 @@ Their log lines and LLM usage logs carry `caller_label=prompt_curation`, a publi
 | `max_file_shrink` | `0.25` | Largest shrink of any single curatable file per pass |
 | `max_content_loss` | `0.05` | Largest net drop in total memory content per pass, as a fraction of the curatable files' size |
 | `cooldown_hours` | `24` | Minimum hours between passes for one workspace |
-| `timeout_seconds` | `600` (30 to 3600) | Time limit for one pass |
+| `timeout_seconds` | `600` (1 to 3600) | Time limit for one pass |
 | `files` | `[MEMORY.md]` | Workspace-relative Markdown files a pass may condense; never under `memory/` |
 | `protected_files` | `[SOUL.md, IDENTITY.md, AGENTS.md]` | Files a pass never changes; `files` may not name them |
 

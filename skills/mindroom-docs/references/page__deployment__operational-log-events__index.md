@@ -129,7 +129,7 @@ notify    at most once per hour
 
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
-Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
+Skill reviews and [prompt curation](https://docs.mindroom.chat/memory/#prompt-curation) passes also log this record under the agent's name, with fixed budgets of 16 and 20 that `max_tool_calls_per_turn` does not change.
 
 ## Debug Logging
 

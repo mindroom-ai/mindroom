@@ -42,7 +42,8 @@ def _is_memory_markdown(path: str) -> bool:
         and 2 <= len(parts) <= _MAX_MEMORY_PATH_PARTS
         and ".." not in parts
         and not any(part.casefold() == ".git" for part in parts)
-        and PurePosixPath(path).suffix.lower() == ".md"
+        # Case-sensitive, like the file-memory listing, so search always finds what a pass moved.
+        and path.endswith(".md")
     )
 
 

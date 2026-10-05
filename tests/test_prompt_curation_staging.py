@@ -71,6 +71,7 @@ def test_measurement_counts_curated_files_and_all_memory_content(tmp_path: Path)
         ("append", "MEMORY.md", "only append to Markdown files under memory/"),
         ("append", "memory/../SOUL.md", "only append to Markdown files under memory/"),
         ("append", "memory/notes.txt", "only append to Markdown files under memory/"),
+        ("append", "memory/notes.MD", "only append to Markdown files under memory/"),
         ("append", "memory/.git/x.md", "only append to Markdown files under memory/"),
         ("read", "../outside.md", "can only read the curatable files and memory/"),
     ],
@@ -119,6 +120,18 @@ def test_a_rewrite_during_the_pass_aborts_publication(tmp_path: Path) -> None:
     staged.append("memory/projects.md", "Moved.")
     staged.edit("MEMORY.md", "- Prefers terse replies.\n", "")
     (tmp_path / "MEMORY.md").write_text("# Memory\nRewritten by a live turn.\n", encoding="utf-8")
+    before = _snapshot(tmp_path)
+
+    assert staged.publish() == "conflict"
+    assert _snapshot(tmp_path) == before
+
+
+def test_a_curatable_file_deleted_during_the_pass_aborts_publication(tmp_path: Path) -> None:
+    """A curatable file removed while the pass runs is not recreated from the staged copy."""
+    staged = _workspace(tmp_path)
+    staged.append("memory/projects.md", "Moved.")
+    staged.edit("MEMORY.md", "- Prefers terse replies.\n", "")
+    (tmp_path / "MEMORY.md").unlink()
     before = _snapshot(tmp_path)
 
     assert staged.publish() == "conflict"

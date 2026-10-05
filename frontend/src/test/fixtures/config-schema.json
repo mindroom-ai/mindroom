@@ -813,7 +813,7 @@
           "anyOf": [
             {
               "maximum": 3600,
-              "minimum": 30,
+              "minimum": 1,
               "type": "integer"
             },
             {
@@ -3385,7 +3385,7 @@
           "default": 600,
           "description": "Maximum seconds per pass",
           "maximum": 3600,
-          "minimum": 30,
+          "minimum": 1,
           "title": "Timeout Seconds",
           "type": "integer"
         },
