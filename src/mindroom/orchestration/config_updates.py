@@ -75,6 +75,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "num_history_messages",
         "num_history_runs",
         "participation",
+        "prompt_curation",
         "role",
         "room_thread_modes",
         "rooms",
