@@ -2005,6 +2005,7 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
     [
         pytest.param({"defaults": {"enable_streaming": False}}, False, id="defaults"),
         pytest.param({"router": {"model": "fast"}}, False, id="router-model"),
+        pytest.param({"matrix_space": {"name": "Team Space"}}, False, id="space-name"),
         pytest.param({"agents": {"general": {"display_name": "General", "role": "New"}}}, True, id="agent-restart"),
         pytest.param({"administrators": ["@admin:localhost"]}, True, id="administrators"),
         pytest.param({"authorization": {"aliases": {"@alice:localhost": ["@tg_1:localhost"]}}}, True, id="aliases"),

@@ -65,10 +65,10 @@ class ConfigUpdatePlan:
     def requires_response_drain(self) -> bool:
         """Return whether publication must wait for in-flight responses.
 
-        A plan that touches no entity, room, or reply-authorization input only
+        A plan that touches no entity and no reply-authorization input only
         replaces config that responses read live, so it can publish while they run.
         """
-        return self.reply_authorization_changed or not self.only_support_service_changes
+        return self.reply_authorization_changed or self._has_entity_changes
 
     @property
     def _has_entity_changes(self) -> bool:
