@@ -2715,15 +2715,15 @@ Missing credentials, a full limit, a timeout, a provider error, malformed output
 ## Mid-Turn Coalescing
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
-Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the active task finishes.
-The setting applies in every room where the agent may reply, including ad hoc rooms, and has no per-room override.
-Omitting it or setting it to `null` keeps the wrap-up notice, and teams do not inherit it from their members.
+A "thanks" or "is this still running?" can therefore cut a long task short.
+Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
+The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `judgment` | object | Required | LLM model alias or TypeSafe backend; see [Judgment Backends](#judgment-backends) |
-| `instructions` | string | `""` | Extra guidance for the finish-or-wrap-up decision |
-| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait; nonblank and at most 64 characters |
+| `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
+| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
 
 ```yaml
 agents:
@@ -2738,25 +2738,31 @@ agents:
         timeout_seconds: 5
 ```
 
-The judge asks whether any queued message requires an immediate change, pause, or stop.
-Acknowledgements, praise, thanks, "continue", and "do not interrupt" let the task continue, while corrections and relevant changes take priority even alongside praise.
-Unrelated requests wait for a later turn unless the user asks for an immediate switch.
-With TypeSafe, the task continues when `1 - P(interrupt) >= threshold`, so the default `0.8` tolerates interruption probabilities up to `0.2`.
-With the LLM backend, an explicit `false` answer lets the task continue.
-Abstentions, timeouts, missing credentials, a full judgment limit, and backend errors keep the wrap-up behavior.
+The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
+It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
+When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
+With TypeSafe, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
+
+The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
+Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
+Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
+Attachment contents, tool calls and results, system prompts, and memory are never sent, but message text can still contain private information.
+
+The agent gets the wrap-up notice without a judgment when:
+
+- the thread's history could not be read completely;
+- the active request or a queued message has an attachment, or the turn was not started by a typed message, such as a scheduled task or a voice message;
+- the active request and queued messages alone exceed 16 KB, or more than eight messages are queued;
+- anything the judge would see looks like a credential;
+- the agent replies in `thread_mode: room`.
+
+Each skip logs `Mid-turn judgment skipped` with a `reason`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
-The judge sees the active request, earlier public conversation, up to eight queued human messages, the configured guidance, and the agent's visible reply text as published when each message was queued.
-Private tool results and arguments, system prompts, memory, and attachment contents are not sent, but message text can still contain private information.
-Earlier files and images reach the judge as a placeholder with their file name and any caption, such as `[file: report.pdf]`, so a thread that holds media can still be judged.
-Within the judge's 16 KB limit, the active request and queued messages are always sent whole, while older conversation drops out first and long earlier messages are shortened.
-The wrap-up notice is sent without a judgment when conversation history is missing or incomplete, when the active request and queued messages alone exceed the limit, when the active request or a queued message has attachments, when a message the judge would see contains text that looks like a credential, and for `thread_mode: room` turns.
-Each skipped judgment logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and backend errors log `Mid-turn continuation evaluated` with a `failure`.
-
-Queued messages stay queued and are handled after the active response finishes.
-A finish decision covers only the messages it saw, so a later message needs a new decision, and a wrap-up notice once sent is not reversed.
-The wrap-up notice asks the model to hand off; it does not cancel tools, abort the response, or show the model the queued text, and stopping responses and tool approval work as usual.
-With `defer_reaction` set, each message that can wait gets the reaction once; wrap-up decisions and failed judgments never react.
+Queued messages are handled after the active response finishes either way.
+A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
+The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
+With `defer_reaction` set, each message that can wait gets that reaction once.
 
 ## Message Edits
 
