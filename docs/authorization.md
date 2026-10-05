@@ -111,7 +111,6 @@ In an ad-hoc room an agent joined first, have the agent use its `invite_router` 
 
 `accept_invites` decides only whether an entity joins a room it is invited to.
 Accepting an invitation never grants permission to interact; every later message still goes through `access`.
-An entity that accepts an invitation to a configured room it is not listed for in `rooms` does not answer there; when mentioned, it replies that it is not configured for this room.
 
 ### Agents mentioning other agents
 
