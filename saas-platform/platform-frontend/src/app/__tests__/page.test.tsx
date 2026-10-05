@@ -118,6 +118,26 @@ describe('LandingPage', () => {
     expect(document.getElementById('mobile-menu')).toBeNull()
   })
 
+  it('closes the menu when keyboard focus leaves it', () => {
+    render(<LandingPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Menu' }))
+    const signIn = within(document.getElementById('mobile-menu') as HTMLElement).getByRole('link', { name: 'Sign in' })
+
+    fireEvent.blur(signIn, { relatedTarget: screen.getByRole('link', { name: 'Try hosted MindRoom' }) })
+
+    expect(document.getElementById('mobile-menu')).toBeNull()
+  })
+
+  it('keeps the menu open while focus moves between its links', () => {
+    render(<LandingPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Menu' }))
+    const menu = within(document.getElementById('mobile-menu') as HTMLElement)
+
+    fireEvent.blur(menu.getByRole('link', { name: 'Docs' }), { relatedTarget: menu.getByRole('link', { name: 'GitHub' }) })
+
+    expect(document.getElementById('mobile-menu')).not.toBeNull()
+  })
+
   it('closes the menu after following a link', () => {
     render(<LandingPage />)
     fireEvent.click(screen.getByRole('button', { name: 'Menu' }))

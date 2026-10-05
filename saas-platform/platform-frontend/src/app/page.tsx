@@ -489,7 +489,14 @@ function MobileMenu() {
   const linkClass = 'block rounded-md px-3 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-200 dark:hover:bg-white/8 dark:hover:text-white'
 
   return (
-    <div ref={containerRef} className="lg:hidden">
+    <div
+      ref={containerRef}
+      className="lg:hidden"
+      onBlur={(event) => {
+        // Keyboard focus leaving the menu would otherwise land on controls hidden beneath it.
+        if (!containerRef.current?.contains(event.relatedTarget as Node | null)) setOpen(false)
+      }}
+    >
       <button
         ref={buttonRef}
         type="button"
