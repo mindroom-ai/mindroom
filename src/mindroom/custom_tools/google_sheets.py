@@ -6,12 +6,15 @@ credentials stored in MindRoom's unified credentials location.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import json
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.google.sheets import GoogleSheetsTools as AgnoGoogleSheetsTools
+from agno.tools.google.sheets import authenticate
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_http_error_result
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
@@ -69,6 +72,9 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
 
         # Pass credentials to parent class
         super().__init__(creds=creds, **kwargs)
+        if "update_sheet" in self.functions:
+            self.tools = [*self.tools, self.batch_update_sheet]
+            self.register(self.batch_update_sheet)
 
         # Store original auth method for fallback
         self._set_original_auth(AgnoGoogleSheetsTools._resolve_creds)
@@ -76,6 +82,33 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         return build("sheets", "v4", http=self._google_authorized_http(creds))
+
+    @authenticate
+    def batch_update_sheet(self, spreadsheet_id: str, requests: list[dict[str, Any]]) -> str:
+        """Apply Google Sheets API batchUpdate requests to one spreadsheet, in order.
+
+        Use this for changes that update_sheet cannot make, such as cell formatting, column widths,
+        frozen rows, filters, conditional formatting, merged cells, and adding or renaming sheets.
+        Each request is one Sheets API Request object, for example
+        {"repeatCell": {"range": {"sheetId": 0, "endRowIndex": 1},
+        "cell": {"userEnteredFormat": {"textFormat": {"bold": true}}}, "fields": "userEnteredFormat.textFormat.bold"}}.
+
+        Args:
+            spreadsheet_id: The ID of the Google Sheet.
+            requests: Sheets API batchUpdate Request objects.
+
+        Returns:
+            JSON with the spreadsheet ID and one reply per request.
+
+        """
+        try:
+            service = cast("Any", self.service)
+            response = (
+                service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
+            )
+        except HttpError as exc:
+            return google_http_error_result("Google Sheets", "batch_update", exc)
+        return json.dumps(response)
 
     def _normalize_dashboard_config_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Map dashboard field names onto Agno's constructor argument names."""

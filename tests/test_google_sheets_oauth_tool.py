@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -88,6 +90,11 @@ def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_
     assert result["provider"] == "google_sheets"
     assert "/api/oauth/google_sheets/authorize?connect_token=" in result["connect_url"]
 
+    result = json.loads(writable_tool.batch_update_sheet("sheet-id", []))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_sheets"
+
 
 def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     credentials_manager = CredentialsManager(tmp_path / "credentials")
@@ -135,7 +142,22 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     assert [registered.__name__ for registered in tool.tools] == [
         "create_sheet",
         "update_sheet",
+        "batch_update_sheet",
     ]
+
+
+def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> None:
+    tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"update": False},
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleSheetsTools)
+    assert "batch_update_sheet" not in tool.functions
 
 
 def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: Path) -> None:
@@ -152,6 +174,73 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
         "read_sheet",
         "create_sheet",
         "update_sheet",
+        "batch_update_sheet",
+    }
+
+
+class _FakeSheetsRequest:
+    def __init__(self, response: dict[str, object]) -> None:
+        self._response = response
+
+    def execute(self) -> dict[str, object]:
+        return self._response
+
+
+class _FakeSpreadsheetsResource:
+    def __init__(self) -> None:
+        self.batch_update_kwargs: dict[str, object] | None = None
+
+    def batchUpdate(self, **kwargs: object) -> _FakeSheetsRequest:  # noqa: N802
+        self.batch_update_kwargs = kwargs
+        return _FakeSheetsRequest({"spreadsheetId": kwargs["spreadsheetId"], "replies": [{}]})
+
+
+class _FakeSheetsService:
+    def __init__(self) -> None:
+        self.spreadsheets_resource = _FakeSpreadsheetsResource()
+
+    def spreadsheets(self) -> _FakeSpreadsheetsResource:
+        return self.spreadsheets_resource
+
+
+def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> None:
+    tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=GoogleOAuthCredentials(
+            token="valid-access-token",  # noqa: S106
+            refresh_token="valid-refresh-token",  # noqa: S106
+            token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+            client_id="client-id",
+            client_secret="client-secret",  # noqa: S106
+            scopes=("https://www.googleapis.com/auth/spreadsheets",),
+            expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+        ),
+    )
+    service = _FakeSheetsService()
+    tool.service = service
+    requests: list[dict[str, object]] = [
+        {
+            "updateSheetProperties": {
+                "properties": {"sheetId": 0, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            },
+        },
+        {
+            "repeatCell": {
+                "range": {"sheetId": 0, "endRowIndex": 1},
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat.textFormat.bold",
+            },
+        },
+    ]
+
+    result = json.loads(tool.batch_update_sheet("sheet-id", requests))
+
+    assert result == {"spreadsheetId": "sheet-id", "replies": [{}]}
+    assert service.spreadsheets_resource.batch_update_kwargs == {
+        "spreadsheetId": "sheet-id",
+        "body": {"requests": requests},
     }
 
 
