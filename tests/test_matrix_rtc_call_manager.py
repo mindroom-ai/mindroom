@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2690,8 +2690,8 @@ def _patch_call_writeback(
     return post
 
 
-async def _talk_then_hang_up(manager: CallManager, client: AsyncMock, bridge: FakeBridge) -> None:
-    """Record one exchange in a two-minute call, then end it through the room's call state."""
+def _record_two_minute_exchange(bridge: FakeBridge) -> None:
+    """Record one spoken exchange in the live call and backdate its start by two minutes."""
     assert bridge.agent_options is not None
     on_turn = bridge.agent_options.on_conversation_turn
     assert isinstance(on_turn, MethodType)
@@ -2700,8 +2700,20 @@ async def _talk_then_hang_up(manager: CallManager, client: AsyncMock, bridge: Fa
     on_turn("user", "Book the train")
     on_turn("assistant", "Booked")
     transcript.started_at -= timedelta(minutes=2)
+
+
+async def _drain_background_tasks(manager: CallManager) -> None:
+    """Wait for background work the manager scheduled, such as a transcript write-back."""
+    while tasks := tuple(manager._background_tasks):
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _talk_then_hang_up(manager: CallManager, client: AsyncMock, bridge: FakeBridge) -> None:
+    """Record one exchange in a two-minute call, end it through the room's call state, and await the write-back."""
+    _record_two_minute_exchange(bridge)
     client.room_get_state.return_value = _state_response()
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    await _drain_background_tasks(manager)
 
 
 @pytest.mark.asyncio
@@ -2726,6 +2738,33 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert body.startswith("📞 Voice call · 2 min")
     assert "**@alice:example.org**: Book the train" in body
     assert "**Helper**: Booked" in body
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_duration_excludes_transcript_finalization_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A slow transcript finalization at hang-up does not lengthen the posted call duration."""
+    post = _patch_call_writeback(monkeypatch)
+    clock = [datetime.now(UTC)]
+
+    async def slow_finalize(**_kwargs: object) -> None:
+        clock[0] += timedelta(minutes=9)
+
+    monkeypatch.setattr(CallTranscript, "finalize", AsyncMock(side_effect=slow_finalize))
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.datetime", SimpleNamespace(now=lambda _tz: clock[0]))
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    await _talk_then_hang_up(manager, client, bridge)
+
+    post.assert_awaited_once()
+    assert post.await_args.kwargs["body"].startswith("📞 Voice call · 2 min")
     await manager.shutdown()
 
 
@@ -2792,6 +2831,78 @@ async def test_writeback_failure_does_not_break_teardown(
     failures = [log for log in logs if log["event"] == "call_writeback_failed"]
     assert [failure["error"] for failure in failures] == ["homeserver exploded"]
     assert not any(log["event"] == "call_session_stop_failed" for log in logs)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("origin_access_allowed", [True, False])
+async def test_revocation_under_closed_admission_defers_writeback_until_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    origin_access_allowed: bool,
+) -> None:
+    """Call teardown never waits on admission; the write-back runs after reopen and re-checks origin access."""
+    post = _patch_call_writeback(monkeypatch)
+    access = AsyncMock(return_value=origin_access_allowed)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.room_access_allowed", access)
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    gate = ResponseAdmissionGate()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        tool_support=_origin_tool_support(),
+        agent_reply_memberships=memberships,
+        response_admission_gate=gate,
+    )
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    _record_two_minute_exchange(bridge)
+    assert gate.close_if_idle()
+    memberships.apply_member_event(
+        config,
+        runtime_paths,
+        grant_room_id,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-leave-writeback",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        ),
+        control_user_id=BOT_USER,
+    )
+
+    await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
+
+    assert bridge.closed
+    access.assert_not_awaited()
+    gate.reopen()
+    await asyncio.wait_for(_drain_background_tasks(manager), timeout=1)
+    access.assert_awaited_once()
+    assert post.await_count == (1 if origin_access_allowed else 0)
     await manager.shutdown()
 
 

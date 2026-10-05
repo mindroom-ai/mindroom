@@ -122,6 +122,7 @@ _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
 _RECONCILE_MIN_INTERVAL_S = 1.0
 # Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
 _ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
+_CALL_WRITEBACK_TIMEOUT_S = 30.0
 _OPENAI_SPEECH_BASE_URL = "https://api.openai.com/v1"
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
@@ -1240,38 +1241,71 @@ class CallManager:
         requester_id: str,
         origin_context: CallOriginContext | None,
     ) -> None:
-        """Finalize the transcript, then post it into the conversation the call was started from.
+        """Finalize the transcript, then hand posting it to the origin to a background task.
 
-        The caller's access to the origin is checked again, since it may have
-        been revoked during the call. Posting never raises into session teardown.
+        Teardown runs under the room lock, sometimes while a config reload keeps
+        response admission closed, so it must never wait for the post.
         """
+        ended_at = datetime.now(UTC)
         await transcript.finalize(config=self._config, runtime_paths=self._runtime_paths)
-        if origin_context is None:
+        if origin_context is None or self._shutting_down:
             return
-        origin = origin_context.origin
+        task = asyncio.create_task(
+            self._post_call_transcript(
+                transcript.spoken_turns,
+                duration_seconds=(ended_at - transcript.started_at).total_seconds(),
+                room_id=room_id,
+                requester_id=requester_id,
+                origin=origin_context.origin,
+            ),
+        )
+        self._track_background_task(task, event="call_writeback_failed", room_id=room_id)
+
+    async def _post_call_transcript(
+        self,
+        turns: tuple[tuple[str, str], ...],
+        *,
+        duration_seconds: float,
+        room_id: str,
+        requester_id: str,
+        origin: CallOrigin,
+    ) -> None:
+        """Post one finished call's transcript once admitted, if the caller can still access the origin."""
         try:
-            origin_room = self._client.rooms.get(origin.room_id)
-            body = format_call_writeback(
-                turns=transcript.spoken_turns,
-                duration_seconds=(datetime.now(UTC) - transcript.started_at).total_seconds(),
-                caller_label=(origin_room.user_name(requester_id) if origin_room else None) or requester_id,
-                agent_label=self._config.agents[self._agent_name].display_name,
-            )
-            if body is None:
-                return
-            async with admitted_response_decision(
-                self._response_admission_gate,
-                self._wait_for_admission_or_shutdown,
-            ):
-                context = self._call_room_context(room_id, requester_id)
-                if context is None:
+            async with asyncio.timeout(_CALL_WRITEBACK_TIMEOUT_S):
+                origin_room = self._client.rooms.get(origin.room_id)
+                body = format_call_writeback(
+                    turns=turns,
+                    duration_seconds=duration_seconds,
+                    caller_label=(origin_room.user_name(requester_id) if origin_room else None) or requester_id,
+                    agent_label=self._config.agents[self._agent_name].display_name,
+                )
+                if body is None:
                     return
-                if not await room_access_allowed(context, origin.room_id):
-                    logger.info("call_writeback_skipped_access_revoked", room_id=origin.room_id, agent=self._agent_name)
-                    return
-                await post_call_writeback(context=context, origin=origin, body=body)
+                async with admitted_response_decision(
+                    self._response_admission_gate,
+                    self._wait_for_admission_or_shutdown,
+                ):
+                    context = self._call_room_context(room_id, requester_id)
+                    if context is None:
+                        return
+                    if not await room_access_allowed(context, origin.room_id):
+                        logger.info(
+                            "call_writeback_skipped_access_revoked",
+                            room_id=origin.room_id,
+                            agent=self._agent_name,
+                        )
+                        return
+                    await post_call_writeback(context=context, origin=origin, body=body)
         except ResponseAdmissionRefusedError:
             return
+        except TimeoutError:
+            logger.warning(
+                "call_writeback_timed_out",
+                room_id=origin.room_id,
+                agent=self._agent_name,
+                timeout_s=_CALL_WRITEBACK_TIMEOUT_S,
+            )
         except Exception as error:
             logger.warning("call_writeback_failed", room_id=origin.room_id, agent=self._agent_name, error=str(error))
 
