@@ -104,6 +104,17 @@ async def test_transcript_writes_turns_incrementally(tmp_path: Path) -> None:
     assert transcript._turns == 2
 
 
+def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:
+    """Spoken turns exclude tool-use rounds and blank text, and are stripped."""
+    transcript = _transcript(tmp_path)
+    transcript.record("user", " hi ")
+    transcript.record("assistant", "hello")
+    transcript.record_tool_use(["web"])
+    transcript.record("user", "  ")
+
+    assert transcript.spoken_turns == (("user", "hi"), ("assistant", "hello"))
+
+
 @pytest.mark.asyncio
 async def test_finalize_stores_relative_transcript_memory_reference(
     tmp_path: Path,
