@@ -97,7 +97,7 @@ def _origin_from_event(
     return CallOrigin(room_id=room_id, thread_id=thread_id)
 
 
-def _reject(origin: CallOrigin, reason: str, **fields: str) -> None:
+def _reject(origin: CallOrigin, reason: str, **fields: object) -> None:
     logger.warning("call_origin_rejected", room_id=origin.room_id, thread_id=origin.thread_id, reason=reason, **fields)
 
 
@@ -130,7 +130,7 @@ async def resolve_call_origin_context(
     try:
         access_allowed = await room_access_allowed(context, origin.room_id)
     except Exception as error:
-        _reject(origin, "caller_cannot_access_origin", error=str(error))
+        _reject(origin, "caller_cannot_access_origin", exc_info=True, error=str(error))
         return None
     if not access_allowed:
         _reject(origin, "caller_cannot_access_origin")

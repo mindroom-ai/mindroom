@@ -27,6 +27,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.invite_router import InviteRouterTools
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
@@ -1652,6 +1653,68 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     assert tooling.close is not None
     await tooling.close()
     assert close_agent_mock.call_args_list[-1].args == (second_agent,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin_brief", "expected_origin_items"),
+    [
+        (None, ()),
+        ("brief text", (EnrichmentItem(key="call_origin", text="brief text", cache_policy="stable"),)),
+    ],
+)
+async def test_call_responder_adds_origin_brief_enrichment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    origin_brief: str | None,
+    expected_origin_items: tuple[EnrichmentItem, ...],
+) -> None:
+    """The delegate agent sees the call origin brief as stable system enrichment after the voice rules."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    turns: list[ResponseTurnContext] = []
+
+    async def fake_ai_response(turn: ResponseTurnContext, **_kwargs: object) -> str:
+        turns.append(turn)
+        return "answer"
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        MagicMock(return_value=SimpleNamespace(additional_context="base", model=None)),
+    )
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=SimpleNamespace(
+            build_context=lambda target, **_kwargs: _runtime_context(
+                config=config,
+                runtime_paths=runtime_paths,
+                target=target,
+            ),
+            build_execution_identity=lambda **_kwargs: SimpleNamespace(),
+            run_in_context=lambda **kwargs: kwargs["operation"](),
+        ),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+        origin_brief=origin_brief,
+    )
+    assert tooling.responder is not None
+
+    await tooling.responder("What did we decide?", None)
+
+    assert turns[0].system_enrichment_items == (
+        EnrichmentItem(key="voice_call", text="Speak briefly.", cache_policy="stable"),
+        *expected_origin_items,
+    )
 
 
 @pytest.mark.asyncio

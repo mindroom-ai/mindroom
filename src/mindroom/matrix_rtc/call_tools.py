@@ -452,6 +452,7 @@ async def build_call_tools(
     reconcile_spoken_response: bool = True,
     voice_instructions: str | None = None,
     active_model_name: str | None = None,
+    origin_brief: str | None = None,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
@@ -500,6 +501,11 @@ async def build_call_tools(
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
             voice_enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
+        if origin_brief:
+            voice_enrichment_items = (
+                *voice_enrichment_items,
+                EnrichmentItem(key="call_origin", text=origin_brief, cache_policy="stable"),
+            )
         response_tracker = _CallResponseTracker(
             agent_name=agent_name,
             config=config,

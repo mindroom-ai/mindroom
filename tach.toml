@@ -4000,6 +4000,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix_rtc.call_origin",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.matrix_rtc.events",
