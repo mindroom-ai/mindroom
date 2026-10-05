@@ -1254,7 +1254,13 @@ def apply_tool_approval_capability(
             and function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
             and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
         )
-        return not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name)
+        # A scheduled call runs only with the approval its requester gave when it was scheduled.
+        is_scheduled_call_runner = registered_tool_name == "scheduler" and function.name == "run_scheduled_call"
+        return (
+            not is_matrix_room_runtime_function
+            and not is_scheduled_call_runner
+            and tool_may_require_approval(config, function.name)
+        )
 
     if supports_native_tool_approval:
         for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):

@@ -241,10 +241,54 @@ Tools that need confirmation, user input, external execution, or [`tool_approval
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart, or a configuration reload that restarts the call agent, also drops it from the call.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
+
+## Calling an agent about a thread
+
+In MindRoom Chat, start the call from a thread's header, or from the agent's profile while a thread is open.
+When the agent picks up, it receives a snapshot of that conversation, plus the thread title when the thread has one.
+The snapshot is the newest part of the thread that fits the call budget (about 6,000 tokens), with a note when older messages were left out.
+Each message is cut to 2,000 characters.
+Starting a call from a room's main timeline gives the agent the newest unthreaded messages of that room instead.
+
+The snapshot is taken once, when the agent joins; messages sent during the call are not added.
+It works with all three call profiles:
+
+| Backend | Where the snapshot goes |
+|---------|-------------------------|
+| `realtime` | Appended to the agent's instructions. |
+| `live` | Placed between the agent's prompt and the voice guidance, inside the 16,000 token instruction limit, and skipped when too little room is left. The delegated agent always gets it. |
+| `cascaded` | Given to each agent turn as call context. |
+
+The snapshot is used only when the call can safely see it.
+The caller must pass the normal reply permissions for the origin room and still be a member of it, the agent must have joined it, and a thread origin must point at the thread's first message.
+The origin must also be written by the call's only caller, for this agent, and name a room other than the call room.
+If any check fails, or reading the conversation takes longer than 5 seconds, the call proceeds without it.
+
+When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
+The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, so later replies in the thread know what was said.
+Calls shorter than 10 seconds, calls in which the caller said nothing, calls whose conversation snapshot was skipped, and calls cut off by a MindRoom restart post nothing.
+The transcript holds only what was said; tool use is left out.
+Before posting, the agent checks the caller's access to the origin room again, and posts nothing if the caller lost that access during the call.
+If the agent's media connection drops and it rejoins the same call, each part of the call posts its own message.
+
+Clients ask for this with the `origin` field of the call room's `io.mindroom.agent_call` state event:
+
+```json
+{
+  "version": 1,
+  "agent_user_id": "@mindroom_assistant:example.org",
+  "creator_user_id": "@alice:example.org",
+  "ephemeral": false,
+  "origin": { "room_id": "!abc:example.org", "thread_id": "$root" }
+}
+```
+
+`thread_id` is `null` when the call starts from the room's main timeline, and `origin` may be left out entirely.
+MindRoom Chat keeps one call room per caller and agent and re-writes `origin` before every call, so an origin always describes the current call.
 
 ## Transcripts and memory
 

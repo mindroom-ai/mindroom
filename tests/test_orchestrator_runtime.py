@@ -4768,6 +4768,7 @@ class TestMultiAgentOrchestrator:
             added_entities=set(),
             removed_entities=set(),
             only_support_service_changes=True,
+            requires_response_drain=True,
         )
         generation_refreshes: list[Config] = []
 
@@ -4839,6 +4840,7 @@ class TestMultiAgentOrchestrator:
             added_entities=set(),
             removed_entities=set(),
             only_support_service_changes=True,
+            requires_response_drain=True,
         )
 
         with (
@@ -4887,6 +4889,7 @@ class TestMultiAgentOrchestrator:
             configured_entities=set(),
             removed_entities=set(),
             only_support_service_changes=True,
+            requires_response_drain=True,
         )
 
         with (

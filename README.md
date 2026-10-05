@@ -59,7 +59,7 @@ See [Quick start](#quick-start) for every way to run it.
 <p><b>Approve before it acts</b><br />Actions you choose wait for your OK, with the exact arguments in view.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/39a572a8-74d7-4349-ad68-2ee1b0c16a21" /><img src="https://github.com/user-attachments/assets/1efa0323-6502-4d7c-82c9-6c39f906ce89" alt="Three colleagues see the same agent thread side by side" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/635ce3ef-217d-494a-a8e5-01e3dd78454d" /><img src="https://github.com/user-attachments/assets/fbd1295d-025d-41d1-9ee8-0cc674706b98" alt="Three colleagues see the same agent thread side by side" /></picture></a>
 <p><b>The whole team, one thread</b><br />Colleagues share an agent in a thread and see every answer stream in live.</p>
 </td>
 </tr>
@@ -190,7 +190,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 **In the chat**
 
 - **Interactive canvases** — an agent can open a page it wrote, such as a dashboard, slide deck, form, or picker, beside the conversation, and what you pick there comes back as your next message ([Interactive Canvases](https://docs.mindroom.chat/canvases/)).
-- **Approvals and questions** — one-tap approval cards show exactly what will be sent and to whom, and agents can ask multiple-choice questions you answer with a click ([Tool Approval](https://docs.mindroom.chat/tool-approval/), [Interactive Questions](https://docs.mindroom.chat/interactive/)).
+- **Approvals and questions** — one-tap approval cards show exactly what will be sent and to whom, a scheduled send can be approved when it is scheduled, and agents can ask multiple-choice questions you answer with a click ([Tool Approval](https://docs.mindroom.chat/tool-approval/), [Interactive Questions](https://docs.mindroom.chat/interactive/)).
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
 - **Voice** — voice messages are transcribed, agents can join Element Call voice calls and talk in real time, and text-to-speech tools use OpenAI, Groq, ElevenLabs, and Cartesia ([Voice Messages](https://docs.mindroom.chat/voice/), [Voice Calls](https://docs.mindroom.chat/voice-calls/)).
 - **Model routing** — a different model per agent, room, or thread (`!model` and `!room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.
@@ -355,11 +355,7 @@ Matrix E2EE support is installed by default.
 
 ### First steps
 
-Open the **Personal** room in MindRoom Chat ([chat.mindroom.chat](https://chat.mindroom.chat), or the chat app of your own stack) and greet the starter agent:
-
-```text
-@mind hello
-```
+Open the **Personal** room in MindRoom Chat ([chat.mindroom.chat](https://chat.mindroom.chat), or the chat app of your own stack) and say hello: the starter agent is the only one there, so it answers without a mention.
 
 Then add more agents and teams in the dashboard or `config.yaml` (see [Configuration](#configuration)), and mention several in one message to have them work together.
 

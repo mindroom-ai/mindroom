@@ -9,7 +9,7 @@ import tempfile
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -63,6 +63,7 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+    from collections.abc import Set as AbstractSet
 
     from mindroom.message_target import MessageTarget
 
@@ -71,7 +72,6 @@ def _calls_for(
     agent_name: str,
     *,
     enabled: bool = True,
-    model: str = "gpt-realtime",
     voice: str = "marin",
 ) -> CallsConfig:
     return CallsConfig(
@@ -79,7 +79,7 @@ def _calls_for(
         profiles={
             "voice": RealtimeCallProfile(
                 backend="realtime",
-                model=model,
+                model="gpt-realtime",
                 credentials_service="openai",
                 voice=voice,
             ),
@@ -120,6 +120,14 @@ def _delegated_calls_for(agent_name: str, *, model: str | None, backend: str) ->
         },
         agents={agent_name: "voice"},
     )
+
+
+def _call_bots(entities: Iterable[str], *, in_call: AbstractSet[str] = frozenset()) -> dict[str, AsyncMock]:
+    """Return running bots, with the agents in ``in_call`` holding an active voice call."""
+    return {
+        entity: AsyncMock(active_call_requesters=("@caller:example.org",) if entity in in_call else ())
+        for entity in entities
+    }
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -2000,6 +2008,47 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
     assert plan.only_support_service_changes is False
 
 
+@pytest.mark.parametrize(
+    ("changes", "requires_drain"),
+    [
+        pytest.param({"defaults": {"enable_streaming": False}}, False, id="defaults"),
+        pytest.param({"router": {"model": "fast"}}, False, id="router-model"),
+        pytest.param({"matrix_space": {"name": "Team Space"}}, False, id="space-name"),
+        pytest.param({"agents": {"general": {"display_name": "General", "role": "New"}}}, True, id="agent-restart"),
+        pytest.param({"administrators": ["@admin:localhost"]}, True, id="administrators"),
+        pytest.param({"authorization": {"aliases": {"@alice:localhost": ["@tg_1:localhost"]}}}, True, id="aliases"),
+        pytest.param({"bot_accounts": ["@bridge:localhost"]}, True, id="bot-accounts"),
+        pytest.param({"room_defaults": {"invite_users": ["@alice:localhost"]}}, True, id="room-defaults"),
+        pytest.param({"router": {"access": {"users": ["@alice:localhost"]}}}, True, id="router-access"),
+        pytest.param({"router": {"accept_invites": False}}, True, id="router-invites"),
+        pytest.param({"external_trigger_policy": {"enabled": False}}, True, id="trigger-policy"),
+    ],
+)
+def test_config_update_plan_drains_responses_only_for_restarts_or_reply_authorization(
+    changes: dict[str, object],
+    requires_drain: bool,
+) -> None:
+    """Edits that restart nothing and leave reply authorization alone may publish during replies."""
+    base = {
+        "agents": {"general": {"display_name": "General"}},
+        "models": {
+            "default": {"provider": "openai", "id": "gpt-6-sol"},
+            "fast": {"provider": "openai", "id": "gpt-6-luna"},
+        },
+    }
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=_runtime_bound_config(Config.model_validate(base)),
+        new_config=_runtime_bound_config(Config.model_validate({**base, **changes})),
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.requires_response_drain is requires_drain
+
+
 def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes() -> None:
     """The tool output auto-save threshold is captured when agent and team toolkits are built."""
     old_config = _runtime_bound_config(
@@ -2072,73 +2121,100 @@ def test_config_update_plan_restarts_old_and_new_call_agents_when_calls_change()
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities),
     )
 
     assert plan.entities_to_restart == {"general", "writer"}
 
 
-def test_config_update_plan_restarts_call_agents_when_profile_changes() -> None:
-    """A call profile change rebuilds managers assigned to it."""
-    old_config = _runtime_bound_config(
-        Config(
-            agents={"general": AgentConfig(display_name="General Agent")},
-            calls=_calls_for("general", model="gpt-realtime-old"),
-            router=RouterConfig(model="default"),
+def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = None) -> Config:
+    speech_service = {"provider": "openai_compatible", "model": "local-speech", "host": "http://127.0.0.1:9000"}
+    realtime_profile = {
+        "backend": "realtime",
+        "model": "gpt-realtime",
+        "credentials_service": "openai",
+        "voice": "marin",
+    }
+    data: dict[str, Any] = {
+        "agents": {
+            "general": {"display_name": "General Agent"},
+            "writer": {"display_name": "Writer Agent"},
+            "helper": {"display_name": "Helper Agent", "instructions": ["Be brief."]},
+        },
+        "models": {
+            "default": {"provider": "openai", "id": "default-model"},
+            "call": {"provider": "openai", "id": "call-model"},
+        },
+        "calls": {
+            "enabled": True,
+            "profiles": {
+                "realtime": realtime_profile,
+                "realtime-copy": dict(realtime_profile),
+                "cascaded": {"backend": "cascaded", "model": "call", "stt": speech_service, "tts": speech_service},
+            },
+            "agents": {"general": "realtime", "writer": "cascaded"},
+        },
+        "router": {"model": "default"},
+    }
+    if change is not None:
+        change(data)
+    return _runtime_bound_config(Config.model_validate(data))
+
+
+@pytest.mark.parametrize(
+    ("change", "expected_call_restarts"),
+    [
+        pytest.param(lambda d: d["agents"]["helper"].update(instructions=["Be thorough."]), set(), id="other-agent"),
+        pytest.param(lambda d: d["router"].update(model="call"), set(), id="router-model"),
+        pytest.param(lambda d: d.update(administrators=["@admin:example.org"]), set(), id="administrators"),
+        pytest.param(
+            lambda d: d.update(tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]}),
+            set(),
+            id="tool-approval",
         ),
-    )
-    new_config = _runtime_bound_config(
-        Config(
-            agents={"general": AgentConfig(display_name="General Agent")},
-            calls=_calls_for("general", model="gpt-realtime-new"),
-            router=RouterConfig(model="default"),
+        pytest.param(lambda d: d["models"]["default"].update(id="new-default"), set(), id="agent-model-definition"),
+        pytest.param(lambda d: d["calls"]["profiles"]["realtime"].update(voice="cedar"), {"general"}, id="voice"),
+        pytest.param(
+            lambda d: d["calls"]["profiles"]["realtime"].update(model="gpt-realtime-new"),
+            {"general"},
+            id="realtime-model",
         ),
-    )
-    running_entities = {ROUTER_AGENT_NAME, "general"}
+        pytest.param(lambda d: d["models"]["call"].update(id="new-call-model"), {"writer"}, id="profile-model"),
+        pytest.param(lambda d: d["calls"]["agents"].update(general="cascaded"), {"general"}, id="profile-assignment"),
+        pytest.param(
+            lambda d: d["calls"]["agents"].update(general="realtime-copy"),
+            {"general"},
+            id="equal-profile-assignment",
+        ),
+        pytest.param(
+            lambda d: d["calls"].update(livekit_service_url="https://livekit.example.org"),
+            {"general", "writer"},
+            id="livekit-service-url",
+        ),
+    ],
+)
+@pytest.mark.parametrize("in_call", [frozenset(), frozenset({"general"})], ids=["idle", "general-in-call"])
+def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_in_progress(
+    change: Callable[[dict[str, Any]], object],
+    expected_call_restarts: set[str],
+    in_call: frozenset[str],
+) -> None:
+    """Idle call agents restart only for their own call setup; an agent in a call restarts for any change."""
+    running_entities = {ROUTER_AGENT_NAME, "general", "writer", "helper"}
 
     plan = build_config_update_plan(
-        current_config=old_config,
-        new_config=new_config,
+        current_config=_two_call_agents_config(),
+        new_config=_two_call_agents_config(change),
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.entities_to_restart == {"general"}
-
-
-def test_config_update_plan_restarts_call_agent_when_profile_voice_changes() -> None:
-    """Changing a profile voice rebuilds its assigned call manager."""
-    common = {
-        "agents": {"general": AgentConfig(display_name="General Agent")},
-        "router": RouterConfig(model="default"),
-    }
-    old_config = _runtime_bound_config(
-        Config(
-            **common,
-            calls=_calls_for("general", voice="marin"),
-        ),
-    )
-    new_config = _runtime_bound_config(
-        Config(
-            **common,
-            calls=_calls_for("general", voice="cedar"),
-        ),
-    )
-
-    plan = build_config_update_plan(
-        current_config=old_config,
-        new_config=new_config,
-        configured_entities={ROUTER_AGENT_NAME, "general"},
-        existing_entities={ROUTER_AGENT_NAME, "general"},
-        agent_bots={ROUTER_AGENT_NAME: AsyncMock(), "general": AsyncMock()},
-    )
-
-    assert plan.entities_to_restart == {"general"}
+    assert plan.entities_to_restart & {"general", "writer"} == expected_call_restarts | in_call
 
 
 def test_config_update_plan_restarts_call_agents_when_administrators_change() -> None:
-    """Call tool contexts rebuild so administrator changes cannot leave stale policy."""
+    """Active call tool contexts rebuild so administrator changes cannot leave stale policy."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -2162,7 +2238,7 @@ def test_config_update_plan_restarts_call_agents_when_administrators_change() ->
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2192,7 +2268,7 @@ def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2223,7 +2299,7 @@ def test_config_update_plan_restarts_call_agent_when_inherited_tools_change() ->
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2254,7 +2330,7 @@ def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() ->
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2292,14 +2368,14 @@ def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities),
     )
 
     assert plan.entities_to_restart == {"general"}
 
 
 def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_changes() -> None:
-    """Realtime call tooling rebuilds when the normal agent's model definition changes."""
+    """An active realtime call rebuilds when the normal agent's model definition changes."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -2323,7 +2399,7 @@ def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_change
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2331,7 +2407,7 @@ def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_change
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
 def test_config_update_plan_restarts_implicit_delegated_call_agent_when_room_model_changes(backend: str) -> None:
-    """Implicit delegated model selection rebuilds when configured room routing changes."""
+    """An active call's implicit delegated model selection rebuilds when room routing changes."""
     models = {
         "default": ModelConfig(provider="openai", id="default-model"),
         "focused": ModelConfig(provider="openai", id="focused-model"),
@@ -2362,7 +2438,7 @@ def test_config_update_plan_restarts_implicit_delegated_call_agent_when_room_mod
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2378,7 +2454,7 @@ def test_config_update_plan_restarts_implicit_delegated_call_agent_when_room_mod
 def test_config_update_plan_restarts_call_agents_when_room_encryption_policy_changes(
     encryption_config: dict[str, object],
 ) -> None:
-    """Call sessions must rebuild when their rooms switch to encrypted media."""
+    """Active call sessions must rebuild when their rooms switch to encrypted media."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
@@ -2401,7 +2477,7 @@ def test_config_update_plan_restarts_call_agents_when_room_encryption_policy_cha
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2438,14 +2514,14 @@ def test_config_update_plan_restarts_call_agent_when_knowledge_definition_change
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
-    """Replacing a call agent must terminate sessions in rooms it leaves."""
+    """Replacing a call agent in a call must terminate sessions in rooms it leaves."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
@@ -2467,7 +2543,7 @@ def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == {"general"}
@@ -2548,7 +2624,7 @@ def test_config_update_plan_stops_call_agents_when_calls_are_disabled() -> None:
         new_config=new_config,
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        agent_bots=_call_bots(running_entities),
     )
 
     assert plan.entities_to_restart == {"general"}

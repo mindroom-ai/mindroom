@@ -781,7 +781,7 @@ async def test_continuation_decision_wakes_its_owning_bot_sources() -> None:
 async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_cards(tmp_path: Path) -> None:
     """One corrupt visible deadline cannot abort the room's remaining recovery page."""
     cards = MagicMock()
-    cards.maintain_approval_grants = AsyncMock(return_value=())
+    cards.maintain_automatic_approvals = AsyncMock(return_value=())
     cards.unacknowledged_matrix_deliveries = AsyncMock(return_value=())
     cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
     cards.pending_approval_cards = AsyncMock(
@@ -861,7 +861,7 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
 async def test_startup_recovery_counts_an_unreadable_card_as_failed_debt(tmp_path: Path) -> None:
     """A corrupt durable row keeps startup cleanup retryable instead of disappearing."""
     cards = MagicMock()
-    cards.maintain_approval_grants = AsyncMock(return_value=())
+    cards.maintain_automatic_approvals = AsyncMock(return_value=())
     cards.unacknowledged_matrix_deliveries = AsyncMock(return_value=())
     cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
     cards.pending_approval_cards = AsyncMock(
@@ -894,7 +894,7 @@ async def test_startup_recovery_drops_a_transport_failure_settled_by_the_same_pa
     """A successful immediate retry must not report delivery debt that is gone."""
     delivery_id = "approval-card-1"
     cards = MagicMock()
-    cards.maintain_approval_grants = AsyncMock(return_value=())
+    cards.maintain_automatic_approvals = AsyncMock(return_value=())
     cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
     cards.pending_approval_cards = AsyncMock(
         return_value=(

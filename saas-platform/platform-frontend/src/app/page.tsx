@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
@@ -19,6 +19,7 @@ import {
   Globe,
   Laptop,
   Lock,
+  Menu,
   MessageSquare,
   Network,
   Server,
@@ -26,6 +27,7 @@ import {
   Smartphone,
   SquareTerminal,
   TabletSmartphone,
+  X,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -48,12 +50,14 @@ type PricePlan = {
 const docsUrl = 'https://docs.mindroom.chat/'
 const githubUrl = 'https://github.com/mindroom-ai/mindroom'
 const installGuideUrl = `${docsUrl}getting-started/`
+const showcaseUrl = `${docsUrl}showcase/`
 const macAppUrl = `${docsUrl}installation/macos-app/`
 
 type InstallOption = {
   label: string
   icon: LucideIcon
   command: string
+  note: ReactNode
   steps: [title: string, body: string][]
   guide: { href: string; label: string }
 }
@@ -63,9 +67,18 @@ const installOptions: InstallOption[] = [
     label: 'Terminal',
     icon: SquareTerminal,
     command: 'uvx mindroom run',
+    note: (
+      <>
+        Needs{' '}
+        <a href="https://docs.astral.sh/uv/getting-started/installation/" className="underline decoration-gray-400 underline-offset-2 hover:text-gray-950 dark:hover:text-white">
+          uv
+        </a>{' '}
+        and a model: an API key, a subscription login, or a local model.
+      </>
+    ),
     steps: [
       ['Run MindRoom on your computer', 'One command installs and starts it, with a starter agent.'],
-      ['Approve the pairing link', 'Connect it to your MindRoom Chat account in the browser.'],
+      ['Approve the pairing link', 'Sign in to MindRoom Chat in your browser and approve it.'],
     ],
     guide: { href: installGuideUrl, label: 'Read the install guide' },
   },
@@ -73,8 +86,9 @@ const installOptions: InstallOption[] = [
     label: 'macOS app',
     icon: Laptop,
     command: 'brew install --cask mindroom-ai/tap/mindroom',
+    note: 'Needs an Apple silicon Mac with macOS 14 or later.',
     steps: [
-      ['Open the MindRoom app', 'It installs MindRoom and runs your agents on your Mac in the background. Needs an Apple silicon Mac with macOS 14 or later.'],
+      ['Open the MindRoom app', 'It installs MindRoom and runs your agents on your Mac in the background, with one-click local models.'],
       ['Connect your chat account', 'Approve the pairing link without leaving the app.'],
     ],
     guide: { href: macAppUrl, label: 'Read the macOS app guide' },
@@ -94,6 +108,14 @@ const navLinks = [
   { href: '#hosted', label: 'Hosted' },
 ]
 
+const menuLinks: { href: string; label: string; external?: boolean; newTab?: boolean }[] = [
+  ...navLinks,
+  { href: showcaseUrl, label: 'Showcase', external: true },
+  { href: docsUrl, label: 'Docs', external: true },
+  { href: githubUrl, label: 'GitHub', external: true, newTab: true },
+  { href: '/auth/login', label: 'Sign in' },
+]
+
 const heroFacts = ['Open source, Apache 2.0', 'Any model, local or cloud', 'Self-host the whole stack']
 
 const personalUses = [
@@ -101,7 +123,7 @@ const personalUses = [
   'Keep your calendar, reminders, and to-do lists in order, by voice.',
   'Keep notes, a journal, and memories you can find months later.',
   'Follow the topics you care about, with a digest only when something is new.',
-  'Look after your homelab and smart home, with approval for anything risky.',
+  'Look after your homelab and smart home, with approval for the actions you choose.',
   'Build quick tools and scripts in the agent’s own workspace.',
 ]
 
@@ -117,13 +139,13 @@ const workUses = [
 const reasons: IconItem[] = [
   {
     title: 'Connected to your tools and documents',
-    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, search your own documents, and can use any computer you pair, even from a server across the world.',
+    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents. Even from a server across the world, they can use a computer you pair.',
     icon: Bot,
     href: `${docsUrl}#agents-that-know-you-and-your-work`,
   },
   {
     title: 'Private where it matters',
-    body: 'Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home.',
+    body: 'Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home, and what you tell a private agent stays out of shared ones.',
     icon: Lock,
     href: `${docsUrl}#private-where-it-matters`,
   },
@@ -135,7 +157,7 @@ const reasons: IconItem[] = [
   },
   {
     title: 'Safe to give real access',
-    body: 'One-tap approval for anything risky, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
+    body: 'One-tap approval for the actions you choose, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
     icon: Shield,
     href: `${docsUrl}#safe-to-give-real-access`,
   },
@@ -155,7 +177,7 @@ const reasons: IconItem[] = [
 
 const setups: (IconItem & { cta: string })[] = [
   {
-    title: 'Your computer, hosted chat',
+    title: 'Your computer + MindRoom Chat',
     body: 'Run the backend on your machine with one command and pair it with MindRoom Chat. Your agents, memory, and keys live on your machine, and there is no server to run.',
     icon: Laptop,
     href: installGuideUrl,
@@ -215,7 +237,8 @@ const plans: PricePlan[] = [
 const footerLinks = [
   { href: docsUrl, label: 'Docs' },
   { href: installGuideUrl, label: 'Install guide' },
-  { href: `${docsUrl}showcase/`, label: 'Showcase' },
+  { href: showcaseUrl, label: 'Showcase' },
+  { href: `${docsUrl}architecture/security-posture/`, label: 'Security' },
   { href: githubUrl, label: 'GitHub' },
   { href: 'https://pypi.org/project/mindroom/', label: 'PyPI' },
 ]
@@ -371,6 +394,7 @@ function RunItYourself() {
           })}
         </div>
         <CopyCommand key={option.label} command={option.command} />
+        <p className="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">{option.note}</p>
         <ol className="mt-6 space-y-5">
           {steps.map(([title, body], index) => (
             <li key={title} className="flex gap-4">
@@ -439,6 +463,72 @@ function ReasonRows({ items }: { items: IconItem[] }) {
   )
 }
 
+function MobileMenu() {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setOpen(false)
+      buttonRef.current?.focus()
+    }
+    // A tap outside, or keyboard focus moving to a control the open menu would hide, closes it.
+    const closeOutside = (event: Event) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('focusin', closeOutside)
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape)
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('focusin', closeOutside)
+    }
+  }, [open])
+
+  const linkClass = 'block rounded-md px-3 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-200 dark:hover:bg-white/8 dark:hover:text-white'
+
+  return (
+    <div ref={containerRef} className="xl:hidden">
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-label="Menu"
+        aria-expanded={open}
+        aria-controls={open ? 'mobile-menu' : undefined}
+        onClick={() => setOpen(!open)}
+        className="flex h-9 w-9 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white"
+      >
+        {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+      </button>
+      {open && (
+        <div id="mobile-menu" className="absolute inset-x-0 top-full max-h-[calc(100dvh-4rem)] overflow-y-auto overscroll-contain border-b border-gray-200 bg-white px-4 py-3 shadow-lg dark:border-gray-800 dark:bg-gray-950">
+          {menuLinks.map((link) =>
+            link.external ? (
+              <a
+                key={link.label}
+                href={link.href}
+                onClick={() => setOpen(false)}
+                className={linkClass}
+                {...(link.newTab ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+              >
+                {link.label}
+              </a>
+            ) : (
+              <Link key={link.label} href={link.href} onClick={() => setOpen(false)} className={linkClass}>
+                {link.label}
+              </Link>
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function LandingPage() {
   return (
     <main className="min-h-screen bg-white text-gray-950 dark:bg-gray-950 dark:text-white">
@@ -446,16 +536,19 @@ export default function LandingPage() {
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
           <Link href="/" className="group flex items-center gap-3" aria-label="MindRoom home">
             <MindRoomLogo className="transition-transform duration-200 group-hover:scale-105" size={32} />
-            <span className="text-lg font-semibold">MindRoom</span>
+            <span className="text-lg font-semibold max-[359px]:sr-only">MindRoom</span>
           </Link>
-          <div className="hidden items-center gap-7 lg:flex">
+          <div className="hidden items-center gap-7 xl:flex">
             {navLinks.map((link) => (
               <Link key={link.href} href={link.href} className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
                 {link.label}
               </Link>
             ))}
           </div>
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1 sm:gap-3">
+            <a href={showcaseUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white xl:inline-flex">
+              Showcase
+            </a>
             <a href={docsUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
               Docs
             </a>
@@ -463,13 +556,14 @@ export default function LandingPage() {
               GitHub
             </a>
             <DarkModeToggle />
-            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white sm:inline-flex">
+            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white md:inline-flex">
               Sign in
             </Link>
             <a href={installGuideUrl} className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200 sm:px-4">
               Get started
-              <ArrowRight className="h-4 w-4" />
+              <ArrowRight className="hidden h-4 w-4 sm:block" />
             </a>
+            <MobileMenu />
           </div>
         </div>
       </nav>
@@ -618,7 +712,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="border-y border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800">
+      <section className="border-y border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800 dark:bg-gray-900">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
             <h2 className="text-3xl font-semibold text-white">Run MindRoom today.</h2>
