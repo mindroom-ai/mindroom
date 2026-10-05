@@ -249,6 +249,6 @@ def build_call_handoff_note(origin: CallOrigin | None, *, agent_name: str) -> st
         "## Starting work from this call\n"
         f"For work that needs more than a quick spoken answer, send a self-contained task with matrix_message to {target}. "
         f'Set recipient="{agent_name}" to do it yourself there, or another agent\'s name to hand it over; '
-        "without a recipient nobody acts on it. It runs in the background, so tell the caller it has started. "
+        "without a recipient nobody acts on it. It runs in the background, so tell the caller once it is sent. "
         "Never post in this call room."
     )
