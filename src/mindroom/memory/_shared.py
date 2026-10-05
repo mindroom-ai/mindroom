@@ -97,7 +97,7 @@ class MemoryEntrypointContext:
 
     The line counts make the preload self-describing: the prompt layer can tell
     the model that its `MEMORY.md` is already inlined, and how much of the file
-    the ``memory.file.max_entrypoint_lines`` cap withheld.
+    the ``memory.file.max_entrypoint_lines`` and ``max_entrypoint_tokens`` caps withheld.
     """
 
     text: str = ""

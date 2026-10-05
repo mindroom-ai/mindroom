@@ -2582,7 +2582,8 @@
           "$ref": "#/$defs/_MemoryFileConfig",
           "default": {
             "path": null,
-            "max_entrypoint_lines": 200
+            "max_entrypoint_lines": 200,
+            "max_entrypoint_tokens": 50000
           },
           "description": "File-backed memory configuration"
         },
@@ -4059,6 +4060,13 @@
           "minimum": 1,
           "title": "Max Entrypoint Lines",
           "type": "integer"
+        },
+        "max_entrypoint_tokens": {
+          "default": 50000,
+          "description": "Maximum estimated tokens (characters / 4) of whole lines to preload from MEMORY.md",
+          "minimum": 1,
+          "title": "Max Entrypoint Tokens",
+          "type": "integer"
         }
       },
       "title": "_MemoryFileConfig",
@@ -4279,6 +4287,7 @@
         "llm": null,
         "file": {
           "max_entrypoint_lines": 200,
+          "max_entrypoint_tokens": 50000,
           "path": null
         },
         "search": {
