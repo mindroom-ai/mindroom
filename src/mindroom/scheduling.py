@@ -72,6 +72,7 @@ _MESSAGE_PREVIEW_LENGTH = 50
 # Reasons shown on a scheduled tool call's approval card when its task changes.
 _SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
 _SCHEDULE_EDITED_REASON = "Schedule edited; the call will ask for approval when it runs."
+_SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
 
 # Shared validation message for edit attempts that change task type.
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
@@ -1555,6 +1556,8 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     task_id,
                     matrix_admin,
                 )
+                if approval_state == "armed" and outcome.status != "delivered":
+                    await _withdraw_unsent_scheduled_call(task_id)
                 final_status = "completed" if outcome.status == "delivered" else "failed"
 
             try:
@@ -1940,6 +1943,14 @@ async def _withdraw_scheduled_call(task_id: str, *, reason: str) -> None:
     except Exception as exc:
         msg = f"could not withdraw the approval for its scheduled call ({exc})"
         raise ValueError(msg) from exc
+
+
+async def _withdraw_unsent_scheduled_call(task_id: str) -> None:
+    """Withdraw an armed approval whose trigger never went out, so no other call can use it."""
+    try:
+        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_UNSENT_REASON)
+    except ValueError:
+        logger.exception("scheduled_tool_call_withdrawal_failed", task_id=task_id)
 
 
 async def _arm_scheduled_call(

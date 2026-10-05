@@ -1496,6 +1496,67 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_state", "outcome", "withdraws"),
+    [
+        ("armed", "suppressed", True),
+        ("armed", "failed", True),
+        ("armed", "delivered", False),
+        ("unarmed", "failed", False),
+    ],
+)
+async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
+    approval_state: str,
+    outcome: str,
+    withdraws: bool,
+) -> None:
+    """A suppressed or failed fire withdraws its armed approval, so no other call can use it."""
+    client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state = AsyncMock()
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="@general call it",
+        description="Morning DM",
+        room_id="!test:server",
+        thread_id="$thread123",
+        pre_approved_call=True,
+    )
+    record = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+    withdraw = AsyncMock()
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.arm_scheduled_call_approval", new=AsyncMock(return_value=approval_state)),
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason="no")),
+        ),
+    ):
+        await _run_once_task(
+            client,
+            "task1234",
+            workflow,
+            Config(),
+            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+            AsyncMock(),
+        )
+
+    assert withdraw.await_count == int(withdraws)
+    expected = "completed" if outcome == "delivered" else "failed"
+    assert client.room_put_state.await_args.kwargs["content"]["status"] == expected
+
+
+@pytest.mark.asyncio
 async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it() -> None:
     """Cancelling keeps its error result when the approval cannot be withdrawn, and publishes nothing."""
     client = AsyncMock()
