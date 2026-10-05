@@ -28,6 +28,15 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
+from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
+    PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
+    clean_partial_reply_text,
+    format_stream_error_note,
+)
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     deserialize_tool_trace,
@@ -39,15 +48,10 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 PRESENTATION_VERSION = 1
-AGENT_PLACEHOLDER = "Thinking..."
-TEAM_PLACEHOLDER = "🤝 Team Response: Thinking..."
-
-CANCELLED_NOTE = "**[Response cancelled by user]**"
-INTERRUPTED_NOTE = "**[Response interrupted]**"
-RESTART_NOTE = "**[Response interrupted by service restart]**"
+AGENT_PLACEHOLDER = PROGRESS_PLACEHOLDER
+TEAM_PLACEHOLDER = TEAM_PROGRESS_PLACEHOLDER
 DELIVERY_FAILED_NOTE = "Response delivery failed. Please retry."
 APPROVAL_START_FAILED_NOTE = "Tool approval could not be started. Please try again."
-_STREAM_ERROR_NOTE_PREFIX = "**[Response interrupted by an error"
 
 
 class NoteKind(StrEnum):
@@ -65,6 +69,9 @@ class NoteKind(StrEnum):
 class WriteKind(StrEnum):
     """Which write of a reply is being rendered; it decides the wire status (DESIGN §5.3)."""
 
+    # A placeholder sent before the model runs: ``pending``, as a plain message.
+    PLACEHOLDER = "placeholder"
+    # A stream's first send when no placeholder exists: ``pending``, as a notice.
     CREATE = "create"
     STREAM_TERMINAL_CREATE = "stream_terminal_create"
     HOOK_FAILURE_NOTICE = "hook_failure_notice"
@@ -77,19 +84,15 @@ class WriteKind(StrEnum):
 
 def format_error_note(error: object) -> str:
     """Return the note a stream ended by an exception shows."""
-    normalized = " ".join(str(error).split())
-    if not normalized:
-        return f"{_STREAM_ERROR_NOTE_PREFIX}. Please retry.]**"
-    if len(normalized) > 220:
-        normalized = f"{normalized[:219]}…"
-    return f"{_STREAM_ERROR_NOTE_PREFIX}: {normalized}]**"
+    return format_stream_error_note(str(error))
 
 
 _FIXED_NOTE_TEXTS = {
-    NoteKind.RESTART: RESTART_NOTE,
-    NoteKind.CANCELLED: CANCELLED_NOTE,
-    NoteKind.INTERRUPTED: INTERRUPTED_NOTE,
+    NoteKind.RESTART: RESTART_INTERRUPTED_RESPONSE_NOTE,
+    NoteKind.CANCELLED: CANCELLED_RESPONSE_NOTE,
+    NoteKind.INTERRUPTED: INTERRUPTED_RESPONSE_NOTE,
     NoteKind.DELIVERY_FAILED: DELIVERY_FAILED_NOTE,
+    NoteKind.APPROVAL_FAILED: APPROVAL_START_FAILED_NOTE,
 }
 
 
@@ -146,7 +149,7 @@ class RenderedReply:
     body: str
     tool_trace: tuple[ToolTraceEntry, ...]
     stream_status: str | None
-    # Matrix suppresses push rules for m.notice, which in-progress edits rely on.
+    # Sent as m.notice, which Matrix push rules suppress; only stream sends and edits are.
     in_progress: bool
     placeholder_only: bool
 
@@ -212,7 +215,7 @@ def _terminal_status(state: str) -> str:
 def stream_status_for(write: WriteKind, *, state: str, needs_human_decision: bool = False) -> str | None:
     """Return the wire status one write carries, following main's rules."""
     match write:
-        case WriteKind.CREATE:
+        case WriteKind.PLACEHOLDER | WriteKind.CREATE:
             return STREAM_STATUS_PENDING
         case WriteKind.PROGRESS:
             return STREAM_STATUS_STREAMING
@@ -244,7 +247,9 @@ def render(
         body=body,
         tool_trace=trace if shown.show_tool_calls else (),
         stream_status=status,
-        in_progress=status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING},
+        # Only the stream's own sends and edits are notices; a placeholder or a
+        # pause is a plain message, so push rules still apply to it.
+        in_progress=write in {WriteKind.CREATE, WriteKind.PROGRESS},
         placeholder_only=body == shown.placeholder,
     )
 
@@ -269,16 +274,30 @@ def folded(presentation: Presentation) -> Presentation:
     return replace(presentation, segments=(Segment(kind="answer", text=body, tool_trace=trace),), trailing_note=None)
 
 
+def shown_work(possibly_shown: Presentation) -> Segment | None:
+    """Return what a stopped reply showed of its work, without its notes, as main reads it back.
+
+    Trailing cancel, interruption, restart, and error notes are dropped, so a
+    reply interrupted twice before its continuation showed anything carries
+    one restart note, not two. ``None`` means only a placeholder or notes.
+    """
+    body, trace = _combined(folded(possibly_shown).segments, possibly_shown.placeholder)
+    text = clean_partial_reply_text(body)
+    if not text and not trace:
+        return None
+    return Segment(kind="answer", text=text, tool_trace=trace)
+
+
 def after_restart(possibly_shown: Presentation) -> Presentation:
     """Return what a replay continues below: the shown work and the restart note, or nothing.
 
     A reply that showed only its placeholder is replaced rather than
     annotated, as main's continuation does.
     """
-    base = folded(possibly_shown)
-    if not visible_work(base):
-        return replace(base, segments=(), trailing_note=None)
-    return replace(base, segments=(*base.segments, note_segment(NoteKind.RESTART)))
+    work = shown_work(possibly_shown)
+    if work is None:
+        return replace(possibly_shown, segments=(), trailing_note=None)
+    return replace(possibly_shown, segments=(work, note_segment(NoteKind.RESTART)), trailing_note=None)
 
 
 def with_answer(presentation: Presentation, answer: Segment) -> Presentation:

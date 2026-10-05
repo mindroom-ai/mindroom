@@ -261,7 +261,7 @@ def test_approval_resume_with_debt_is_refused() -> None:
 
 def test_interactive_span_is_adopted_or_replayed_when_lost() -> None:
     """A selection's acknowledgement span becomes current, unless its bot instance is gone."""
-    created = rl.interactive_acknowledgement(_request("ack-span"))
+    created = rl.interactive_acknowledgement(_request("ack-span"), shown="ack")
     assert created.reply is not None
     assert created.reply.placeholder_only
     ack = created.spans[0]
@@ -292,8 +292,7 @@ def test_write_ahead_allocates_the_next_sequence_and_confirms_the_previous_edit(
         reply,
         span,
         shown="p1",
-        previous_ok=False,
-        previous_event_id=None,
+        previous=None,
         active_generation=GEN,
         now_ns=NOW,
     )
@@ -304,8 +303,7 @@ def test_write_ahead_allocates_the_next_sequence_and_confirms_the_previous_edit(
         first.reply,
         span,
         shown="p2",
-        previous_ok=True,
-        previous_event_id="$reply",
+        previous=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False),
         active_generation=GEN,
         now_ns=NOW,
     )
@@ -323,8 +321,7 @@ def test_write_ahead_of_an_older_generation_is_refused() -> None:
         reply,
         span,
         shown="p",
-        previous_ok=False,
-        previous_event_id=None,
+        previous=None,
         active_generation="gen-3",
         now_ns=NOW,
     )
@@ -630,7 +627,7 @@ def test_pause_with_an_unapplied_stop_defers_to_the_stop_path() -> None:
         in_place=False,
         now_ns=NOW,
     )
-    assert transition.outcome is Outcome.RECOMPUTE
+    assert transition.outcome is Outcome.STOPPED
 
 
 def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
@@ -931,3 +928,202 @@ def test_span_outcome_is_written_once() -> None:
     ended = replace(span, outcome=SpanOutcome.COMPLETED)
     with pytest.raises(rl.InvalidTransitionError):
         rl._end(ended, SpanOutcome.FAILED, NOW)
+
+
+# --- regressions from review ----------------------------------------------
+
+
+def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -> None:
+    """A placeholder later replaced by real progress is substantive content, not a placeholder."""
+    reply, span = _turn()
+    initial = rl.enqueue_initial(
+        reply,
+        span,
+        shown="ph",
+        placeholder_only=True,
+        prepared_revision=reply.revision,
+        now_ns=NOW,
+    )
+    assert initial.reply is not None
+    assert initial.row is not None
+    acked = rl.write_acknowledged(
+        initial.reply,
+        WriteFacts(WriteStage.INITIAL, initial.row.sequence, span.span_id, creates_event=True, placeholder_only=True),
+        event_id="$reply",
+        now_ns=NOW,
+    )
+    assert acked.reply is not None
+    progress = rl.write_ahead(acked.reply, span, shown="p1", previous=None, active_generation=GEN, now_ns=NOW)
+    assert progress.reply is not None
+    final = rl.finish(
+        progress.reply,
+        span,
+        replace(
+            _write(progress.reply, ReplyState.COMPLETED),
+            confirms=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False),
+        ),
+        now_ns=NOW,
+    )
+    assert final.reply is not None
+    assert not final.reply.placeholder_only
+    ended = _span_after(final, span.span_id)
+    failed = rl.terminal_write_failed(final.reply, ended, reason="delivery_failed", first_create=False, now_ns=NOW)
+    assert failed.reply is not None
+    assert failed.reply.owed_write is None
+    assert failed.reply.state is ReplyState.FAILED
+    assert failed.reply.redaction_pending == ()
+
+
+def test_regeneration_replaces_a_frozen_display() -> None:
+    """A regenerated answer is shown, not the old post-hook display; the rollback keeps the old one."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    reply = replace(reply, state=ReplyState.COMPLETED, frozen_display="old frozen")
+    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regen.reply is not None
+    assert regen.claimed is not None
+    assert regen.reply.frozen_display is None
+    assert regen.claimed.rollback is not None
+    assert regen.claimed.rollback.frozen_display == "old frozen"
+    final = rl.finish(regen.reply, regen.claimed, _write(regen.reply, ReplyState.COMPLETED, "new"), now_ns=NOW)
+    assert final.reply is not None
+    assert final.reply.frozen_display is None
+    assert final.reply.presentation == "new"
+
+
+@pytest.mark.parametrize("stage", [WriteStage.EDIT, WriteStage.INITIAL])
+def test_failed_pause_row_of_an_in_place_wait_fences_and_cancels_the_waiter(stage: WriteStage) -> None:
+    """A refused pause of a response-local wait, or a pause that was the reply's create, fails the handoff."""
+    reply, span = _turn()
+    if stage is WriteStage.EDIT:
+        reply = replace(reply, event_id="$reply")
+    paused = rl.pause(
+        reply,
+        span,
+        rl.PauseWrite(shown="paused", prepared_revision=reply.revision, stage=stage),
+        approval_id="approval-1",
+        in_place=True,
+        now_ns=NOW,
+    )
+    assert paused.reply is not None
+    assert paused.row is not None
+    failed = rl.write_failed(
+        paused.reply,
+        span,
+        rl.FailedWrite(
+            WriteFacts(
+                stage,
+                paused.row.sequence,
+                span.span_id,
+                creates_event=stage is WriteStage.INITIAL,
+                placeholder_only=False,
+            ),
+            "refused",
+        ),
+        now_ns=NOW,
+    )
+    assert failed.reply is not None
+    assert failed.reply.state is ReplyState.FAILED
+    assert failed.reply.current_span_id is None
+    assert FenceApproval("approval-1", "failed") in failed.effects
+    assert CancelSpan(span.span_id) in failed.effects
+    assert _span_after(failed, span.span_id).outcome is SpanOutcome.FAILED
+
+
+def test_late_create_after_departure_binds_without_redaction() -> None:
+    """A create acknowledged after the room was left owes nothing to it."""
+    reply, span = _turn()
+    departed = rl.departed(reply, span, now_ns=NOW)
+    assert departed.reply is not None
+    acked = rl.write_acknowledged(
+        departed.reply,
+        WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
+        event_id="$late",
+        membership_current=False,
+        now_ns=NOW,
+    )
+    assert acked.reply is not None
+    assert acked.reply.event_id == "$late"
+    assert acked.reply.redaction_pending == ()
+
+
+def test_interactive_acknowledgement_records_its_create() -> None:
+    """The acknowledgement's create is the reply's first sequenced write."""
+    created = rl.interactive_acknowledgement(_request("ack-span"), shown="ack")
+    assert created.row is not None
+    assert created.row.stage is WriteStage.INITIAL
+    assert created.reply is not None
+    assert created.reply.possibly_shown == "ack"
+    assert created.reply.possibly_shown_seq == created.row.sequence == 1
+
+
+def test_stop_after_restart_during_an_approval_resume_fences_the_approval() -> None:
+    """A resume an older bot instance left running belongs to approval recovery, not the direct Stop path."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.PAUSED)
+    reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1")
+    resume = rl.claim(_request("span-2", approval_id="approval-1"), _context(reply, span))
+    assert resume.reply is not None
+    assert resume.claimed is not None
+    stale_resume = replace(resume.claimed, bot_generation=OLD_GEN)
+    stop = rl.stop(resume.reply, stale_resume, StopFacts(3, newer_edit=False, span_live=False), now_ns=NOW)
+    assert stop.effects == (FenceApproval("approval-1", "cancelled_by_user"), WakeApproval("approval-1"))
+    assert stop.reply is not None
+    assert stop.reply.state is ReplyState.ACTIVE
+    released = rl.approval_released(replace(stop.reply, state=ReplyState.CANCELLED), stale_resume, now_ns=NOW)
+    assert released.outcome is Outcome.DUPLICATE
+
+
+def test_direct_stop_ends_a_span_nobody_runs() -> None:
+    """A Stop on a selection not yet admitted, or on an older instance's span, ends that span."""
+    created = rl.interactive_acknowledgement(_request("ack-span"), shown="ack")
+    assert created.reply is not None
+    ack = created.spans[0]
+    stop = rl.stop(created.reply, ack, StopFacts(2, newer_edit=False, span_live=False), now_ns=NOW)
+    assert stop.reply is not None
+    assert stop.reply.state is ReplyState.CANCELLED
+    assert _span_after(stop, "ack-span").outcome is SpanOutcome.CANCELLED
+
+
+def test_superseded_span_whose_sources_settle_ends_the_reply() -> None:
+    """A rebuild that is then ignored leaves no reply waiting forever."""
+    reply, span = _turn()
+    reply, span = _ended(replace(reply, event_id="$reply"), span, SpanOutcome.SUPERSEDED)
+    settled = rl.sources_settled_without_reply(reply, span, now_ns=NOW)
+    assert settled.reply is not None
+    assert settled.reply.state is ReplyState.FAILED
+    orphan = rl.owner_lost(reply, span, rl.OwnerLostFacts(active_generation=GEN, sources_pending=False), now_ns=NOW)
+    assert orphan.reply is not None
+    assert orphan.reply.state is ReplyState.FAILED
+
+
+def test_restoring_an_active_reply_returns_it_to_its_waiting_span() -> None:
+    """A regeneration of a reply waiting for a retry, rolled back, leaves that retry claimable."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.RELEASED)
+    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regen.reply is not None
+    assert regen.claimed is not None
+    failed = rl.fail(regen.reply, regen.claimed, None, phase="pre_delivery", now_ns=NOW)
+    assert failed.reply is not None
+    assert failed.reply.state is ReplyState.ACTIVE
+    assert failed.reply.last_span_id == span.span_id
+    retry = rl.claim(_request("span-3"), _context(failed.reply, span))
+    assert retry.claimed is not None
+    assert retry.claimed.kind is SpanKind.REPLAY
+
+
+def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
+    """Only a Stop still to apply, or a user's cancellation, makes a failed approval read as cancelled."""
+    reply, _span, _transition = _paused()
+    stopped_before = replace(reply, stop_receipt_order=3, stop_applied_receipt_order=3)
+    failed = rl.approval_settled(
+        stopped_before,
+        None,
+        approval_id="approval-1",
+        result="failed",
+        disposition="failed",
+        now_ns=NOW,
+    )
+    assert failed.reply is not None
+    assert failed.reply.state is ReplyState.FAILED

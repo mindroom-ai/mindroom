@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
+    from mindroom.reply_lifecycle import CancelSpan, WakeApproval
     from mindroom.turn_record import TurnRecord
 
     from .projection import ProjectedEvent
@@ -133,10 +134,17 @@ class DeliveryProjectionPendingError(RuntimeError):
 
 
 class DeliveryStage(StrEnum):
-    """The delivery points that must survive a crash."""
+    """The delivery points that must survive a crash.
+
+    ``EDIT`` is a non-terminal durable write of an agent or team reply (a
+    pause, or a note that keeps the reply's sources pending). It lives on a
+    delivery id derived from the span's, so readers of a turn's ``INITIAL``
+    and ``FINAL`` keep their meaning.
+    """
 
     INITIAL = "initial"
     FINAL = "final"
+    EDIT = "edit"
 
 
 class DepartureSource(StrEnum):
@@ -417,6 +425,11 @@ class MatrixDelivery:
     # device this process is no longer logged in as carries an ID the
     # homeserver would accept as new.
     sending_device_id: str | None = None
+    # Set on rows that write an agent or team reply: the rows of one reply
+    # are sent in ``reply_sequence`` order, across all of its delivery ids.
+    reply_id: str | None = None
+    span_id: str | None = None
+    reply_sequence: int | None = None
 
     @property
     def permanently_failed(self) -> bool:
@@ -473,6 +486,9 @@ class DeliveryAcknowledgement:
     # The only thing that licenses writing anything beside the row.
     bound: bool
     terminal_turn: TerminalTurnWrite | None = None
+    # Work a reply row's acknowledgement left for after the commit, such as
+    # cancelling a span a Stop that waited for this event now reaches.
+    reply_effects: tuple[CancelSpan | WakeApproval, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

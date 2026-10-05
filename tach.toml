@@ -507,6 +507,7 @@ visibility = [
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.matrix_delivery",
+    "mindroom.reply_scope",
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.turn_controller",
@@ -521,7 +522,17 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.reply_presentation"
-depends_on = ["mindroom.constants", "mindroom.tool_system.events"]
+depends_on = ["mindroom.constants", "mindroom.streaming", "mindroom.tool_system.events"]
+
+[[modules]]
+path = "mindroom.reply_scope"
+depends_on = [
+    "mindroom.event_journal",
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_presentation",
+    "mindroom.streaming",
+    "mindroom.tool_system.events",
+]
 
 [[modules]]
 path = "mindroom.event_journal.legacy_approval_recovery"
@@ -2208,6 +2219,9 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix_delivery",
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_presentation",
+    "mindroom.reply_scope",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
     "mindroom.turn_record",
@@ -2719,6 +2733,7 @@ depends_on = [
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
+    "mindroom.reply_presentation",
     "mindroom.runtime_resolution",
     "mindroom.ai_runtime",
     "mindroom.mid_turn",

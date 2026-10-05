@@ -219,7 +219,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         lambda self: (
             self.model.reply is not None
             and self.model.reply.current_span_id is None
-            and (self.model.reply.state is not ReplyState.ACTIVE or self.model.reply.last_span_id in self.model.settled)
             and not (self.model.approval is not None and self.model.approval.state != "waiting")
         ),
     )
@@ -261,8 +260,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self.model.reply,  # type: ignore[arg-type]
                 span,
                 shown="progress",
-                previous_ok=previous_ok,
-                previous_event_id="$reply" if previous_ok else None,
+                previous=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False) if previous_ok else None,
                 active_generation=self.generation,
                 now_ns=self._now(),
             ),
@@ -515,7 +513,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             in_place=in_place,
             now_ns=self._now(),
         )
-        if transition.outcome is Outcome.RECOMPUTE:
+        if transition.outcome is Outcome.STOPPED:
             assert reply.unapplied_stop
             return
         self._apply(transition)
@@ -604,11 +602,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         last = self._current() or self._last()
         assert reply is not None
         assert last is not None
-        if last.kind is SpanKind.APPROVAL_RESUME and last.outcome is None:
-            # Main's approval recovery releases an interrupted resume to replay.
-            self._apply(rl.approval_released(reply, last, now_ns=self._now()))
-            self.model.approval = None
-            return
         self._apply(
             rl.owner_lost(
                 reply,
@@ -620,6 +613,22 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 now_ns=self._now(),
             ),
         )
+
+    @precondition(
+        lambda self: (
+            self._current() is not None
+            and self._current().kind is SpanKind.APPROVAL_RESUME
+            and self._current().bot_generation != self.generation
+        ),
+    )
+    @rule()
+    def recover_interrupted_resume(self) -> None:
+        """Main's approval recovery releases a resume an older instance left to replay."""
+        current = self._current()
+        assert current is not None
+        transition = self._apply(rl.approval_released(self.model.reply, current, now_ns=self._now()))  # type: ignore[arg-type]
+        if transition.applied:
+            self.model.approval = None
 
     @precondition(lambda self: self.model.reply is not None and not self.model.reply.terminal)
     @rule()
@@ -641,7 +650,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.current_span_id is None
             and not self.model.reply.unapplied_stop
-            and self.model.spans[self.model.reply.last_span_id].outcome in {SpanOutcome.RELEASED, SpanOutcome.LOST}
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
+            and self.model.reply.last_span_id not in self.model.settled
         ),
     )
     @rule()

@@ -90,6 +90,7 @@ from mindroom.orchestration.runtime import (
 from mindroom.participation import ParticipationGate
 from mindroom.participation_judgment import create_participation_decider
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
+from mindroom.reply_presentation import APPROVAL_START_FAILED_NOTE
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_shutdown_diagnostics import (
     ResponseShutdownPhase,
@@ -3906,7 +3907,7 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Replace an unowned pause with durable failure, even after streaming began."""
         event_id = progress.tracked_event_id or request.existing_event_id
-        text = "Tool approval could not be started. Please try again."
+        text = APPROVAL_START_FAILED_NOTE
         extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
         delivered = False
         if event_id is not None:

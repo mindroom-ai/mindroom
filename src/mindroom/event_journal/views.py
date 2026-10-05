@@ -56,6 +56,7 @@ if TYPE_CHECKING:
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
+    from .replies import ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from .scheduled_approvals import (
         ScheduledApprovalArmState,
         ScheduledCall,
@@ -331,6 +332,11 @@ class MatrixDeliveryView(Protocol):
         """Return the principal whose delivery rows this view owns."""
         ...
 
+    @property
+    def replies(self) -> ReplyStore:
+        """Return this principal's reply records."""
+        ...
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
         ...
@@ -422,6 +428,30 @@ class MatrixDeliveryView(Protocol):
         after: tuple[int, str, str] | None = None,
     ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
+        ...
+
+    async def enqueue_reply_row(
+        self,
+        *,
+        request: ReplyRowRequest,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
+        response_attempt: ResponseAttempt | None = None,
+        event_type: str = "m.room.message",
+        permanent_failure_reason: str | None = None,
+    ) -> ReplyRowEnqueue | None:
+        """Decide and record one durable write of an agent or team reply, or refuse both."""
+        ...
+
+    async def unresolved_reply_rows(
+        self,
+        reply_id: str,
+        *,
+        before_sequence: int | None = None,
+    ) -> tuple[tuple[str, DeliveryStage, int], ...]:
+        """Return a reply's rows whose Matrix outcome is unknown, in write order."""
         ...
 
 

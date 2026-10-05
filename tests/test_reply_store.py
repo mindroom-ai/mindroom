@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import reply_messages, reply_spans
+from mindroom.event_journal import DeliveryStage, DepartureSource, replies, reply_messages, reply_spans
+from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyRowRequest
 from mindroom.reply_lifecycle import (
     ClaimContext,
     ClaimRequest,
@@ -20,10 +21,11 @@ from mindroom.reply_lifecycle import (
     SpanOutcome,
     SpanSources,
 )
+from tests.journal_membership_helpers import admit_room_membership
 from tests.test_event_journal_store import ROOM, admit
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal import EventJournalStore, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -48,6 +50,11 @@ def _request(span_id: str = "span-1", *, reply_id: str = "reply-1", source: str 
     )
 
 
+async def _apply(journal_store: EventJournalStore, transition: rl.Transition) -> AppliedTransition:
+    """Write a transition decided in the test, the way the journal layer does inside its transactions."""
+    return await journal_store.backend.write(lambda tx: replies.apply(tx, PRINCIPAL, transition))
+
+
 def _first_claim(**changes: object) -> rl.Transition:
     return rl.claim(
         _request(**changes),  # type: ignore[arg-type]
@@ -66,7 +73,7 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
     """Every reply column and span column restores as written."""
     principal = journal_store.principal(PRINCIPAL)
     transition = _first_claim()
-    applied = await principal.replies.apply(transition)
+    applied = await _apply(journal_store, transition)
     assert applied.post_commit == ()
     assert transition.reply is not None
     assert transition.claimed is not None
@@ -89,7 +96,7 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
         approval_id="approval-1",
         revision=7,
     )
-    await principal.replies.apply(rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply))
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply))
 
     assert await principal.replies.load("reply-1") == reply
     assert await principal.replies.for_event("$reply") == reply
@@ -103,7 +110,7 @@ async def test_span_outcome_is_write_once_and_rollback_round_trips(journal_store
     """A span's outcome can be written once; a conflicting second outcome is refused."""
     principal = journal_store.principal(PRINCIPAL)
     transition = _first_claim()
-    await principal.replies.apply(transition)
+    await _apply(journal_store, transition)
     assert transition.claimed is not None
     rollback = Rollback(presentation="old", frozen_display=None, state=ReplyState.COMPLETED, presentation_known=False)
     regen = replace(transition.claimed, span_id="span-2", kind=SpanKind.REGENERATION, rollback=rollback)
@@ -124,12 +131,12 @@ async def test_lookups_by_sources_and_delivery_prefer_the_newest(journal_store: 
     """A source finds its newest reply; a delivery id names its latest span."""
     principal = journal_store.principal(PRINCIPAL)
     first = _first_claim()
-    await principal.replies.apply(first)
+    await _apply(journal_store, first)
     second = rl.claim(
         replace(_request("span-2", reply_id="reply-2"), now_ns=20),
         ClaimContext(None, None, None, None, durable_write_debt=False, active_generation="gen-1"),
     )
-    await principal.replies.apply(second)
+    await _apply(journal_store, second)
 
     found = await principal.replies.for_sources(("$other", "$source"))
     assert found is not None
@@ -143,9 +150,8 @@ async def test_lookups_by_sources_and_delivery_prefer_the_newest(journal_store: 
 
 async def test_room_and_work_queries(journal_store: EventJournalStore) -> None:
     """Replies are found by room and state, and by owed work."""
-    principal = journal_store.principal(PRINCIPAL)
     transition = _first_claim()
-    await principal.replies.apply(transition)
+    await _apply(journal_store, transition)
     assert transition.reply is not None
     active = await journal_store.backend.read(
         lambda tx: reply_messages.for_room(tx, PRINCIPAL, ROOM, states=(ReplyState.ACTIVE, ReplyState.PAUSED)),
@@ -153,7 +159,7 @@ async def test_room_and_work_queries(journal_store: EventJournalStore) -> None:
     assert [reply.reply_id for reply in active] == ["reply-1"]
     assert await journal_store.backend.read(lambda tx: reply_messages.with_pending_work(tx, PRINCIPAL)) == ()
     owed = replace(transition.reply, owed_write=OwedWrite("span-1", rl.NOTE_RESTART))
-    await principal.replies.apply(rl.Transition(outcome=rl.Outcome.APPLIED, reply=owed))
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=owed))
     pending = await journal_store.backend.read(lambda tx: reply_messages.with_pending_work(tx, PRINCIPAL))
     assert [reply.reply_id for reply in pending] == ["reply-1"]
     other = journal_store.principal("agent@bob")
@@ -201,7 +207,7 @@ async def test_applying_a_terminal_transition_settles_the_span_sources(journal_s
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     claim = _first_claim()
-    await principal.replies.apply(claim)
+    await _apply(journal_store, claim)
     assert claim.reply is not None
     assert claim.claimed is not None
     assert await principal.is_pending("$source")
@@ -212,7 +218,7 @@ async def test_applying_a_terminal_transition_settles_the_span_sources(journal_s
         rl.TerminalWrite(shown="answer", prepared_revision=claim.reply.revision, state=ReplyState.COMPLETED),
         now_ns=30,
     )
-    await principal.replies.apply(finished)
+    await _apply(journal_store, finished)
 
     assert not await principal.is_pending("$source")
     stored = await principal.replies.load("reply-1")
@@ -227,11 +233,257 @@ async def test_post_commit_effects_are_returned(journal_store: EventJournalStore
     """Cancellation of a live span is left for after the commit."""
     principal = journal_store.principal(PRINCIPAL)
     claim = _first_claim()
-    await principal.replies.apply(claim)
+    await _apply(journal_store, claim)
     assert claim.reply is not None
     stop = rl.stop(claim.reply, claim.claimed, rl.StopFacts(3, newer_edit=False, span_live=True), now_ns=40)
-    applied = await principal.replies.apply(stop)
+    applied = await _apply(journal_store, stop)
     assert applied.post_commit == (rl.CancelSpan("span-1"),)
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.stop_receipt_order == 3
+
+
+# --- reply rows -------------------------------------------------------------
+
+
+async def _claimed(principal: PrincipalStore) -> tuple[rl.Reply, rl.Span]:
+    await admit(principal, "$source")
+    await principal.replies.write_generation("gen-1", now_ns=1)
+    claim = (await principal.replies.claim(_request(), ClaimLookup())).transition
+    assert claim.reply is not None
+    assert claim.claimed is not None
+    assert claim.reply.membership_epoch == await principal.membership_epoch(ROOM)
+    return claim.reply, claim.claimed
+
+
+def _finish(write_state: ReplyState = ReplyState.COMPLETED, *, revision: int = 0) -> Decide:
+    def decide(reply: rl.Reply, span: rl.Span) -> rl.Transition:
+        return rl.finish(
+            reply,
+            span,
+            rl.TerminalWrite(shown="answer", prepared_revision=revision, state=write_state),
+            now_ns=50,
+        )
+
+    return decide
+
+
+async def test_terminal_row_settles_sources_and_its_ack_binds_the_reply(journal_store: EventJournalStore) -> None:
+    """A finished span's FINAL is a sequenced reply row; its acknowledgement binds the event."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert enqueued is not None
+    assert enqueued.delivery_id == "$source"
+    assert enqueued.stage is rl.WriteStage.FINAL
+    assert enqueued.settled_event_ids == ("$source",)
+    assert not await principal.is_pending("$source")
+    delivery = await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert delivery is not None
+    assert (delivery.reply_id, delivery.span_id, delivery.reply_sequence) == ("reply-1", "span-1", 1)
+    assert await principal.replies.has_unresolved_rows("reply-1")
+
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    acknowledged = await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$answer",
+        delivered_projections=(),
+    )
+    assert acknowledged.bound
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    assert stored.state is ReplyState.COMPLETED
+    assert stored.event_id == "$answer"
+    assert stored.confirmed_seq == 1
+    assert not await principal.replies.has_unresolved_rows("reply-1")
+
+
+async def test_a_stop_committed_after_rendering_writes_nothing(journal_store: EventJournalStore) -> None:
+    """A payload rendered for an older revision is refused with Recompute and settles nothing."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await _apply(journal_store, rl.stop(reply, span, rl.StopFacts(4, newer_edit=False, span_live=True), now_ns=40))
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish(revision=0)),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert enqueued is not None
+    assert enqueued.transition.outcome is rl.Outcome.RECOMPUTE
+    assert enqueued.transaction_id is None
+    assert await principal.is_pending("$source")
+    assert await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None
+
+
+async def test_edit_row_waits_for_the_create_and_targets_its_event(journal_store: EventJournalStore) -> None:
+    """A non-terminal row enqueued before the create is acknowledged edits the event that create binds."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    initial = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, span: rl.enqueue_initial(
+                reply,
+                span,
+                shown="ph",
+                placeholder_only=True,
+                prepared_revision=reply.revision,
+                now_ns=60,
+            ),
+            placeholder_only=True,
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "Thinking..."},
+    )
+    assert initial is not None
+    assert initial.stage is rl.WriteStage.INITIAL
+    pause = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, span: rl.fail(
+                reply,
+                span,
+                rl.TerminalWrite(shown="note", prepared_revision=reply.revision, state=ReplyState.ACTIVE),
+                phase="pre_delivery",
+                now_ns=70,
+            ),
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "note"},
+    )
+    assert pause is not None
+    assert pause.stage is rl.WriteStage.EDIT
+    assert pause.delivery_id == "$source:edit:2"
+    assert await principal.is_pending("$source")
+    assert [row[2] for row in await principal.unresolved_reply_rows("reply-1")] == [1, 2]
+    assert await principal.claim_matrix_delivery(delivery_id="$source:edit:2", stage=DeliveryStage.EDIT) is None
+
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.INITIAL,
+        event_id="$reply",
+        delivered_projections=(),
+    )
+    claimed_edit = await principal.claim_matrix_delivery(delivery_id="$source:edit:2", stage=DeliveryStage.EDIT)
+    assert claimed_edit is not None
+    assert claimed_edit.edits_event_id == "$reply"
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    assert stored.event_id == "$reply"
+    assert stored.placeholder_only
+
+
+async def test_permanent_failure_of_a_terminal_row_applies_its_rule(journal_store: EventJournalStore) -> None:
+    """A terminal row Matrix refuses for good leaves the reply failed, with the span's outcome kept."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, event_id="$reply")))
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert enqueued is not None
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    await principal.record_permanent_matrix_delivery_failure(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        reason="too large",
+    )
+    await principal.record_permanent_matrix_delivery_failure(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        reason="too large",
+    )
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    assert stored.state is ReplyState.FAILED
+    span_after = await principal.replies.span("span-1")
+    assert span_after is not None
+    assert span_after.outcome is SpanOutcome.COMPLETED
+
+
+async def test_rows_for_a_departed_membership_are_refused_whole(journal_store: EventJournalStore) -> None:
+    """A row the outbox refuses leaves the reply exactly as it was."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert enqueued is None
+    stored = await principal.replies.load("reply-1")
+    assert stored == reply
+
+
+async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_store: EventJournalStore) -> None:
+    """A Stop on an event not yet bound reaches the running span once the create is acknowledged."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, span: rl.enqueue_initial(
+                reply,
+                span,
+                shown="ph",
+                placeholder_only=True,
+                prepared_revision=reply.revision,
+                now_ns=60,
+            ),
+            placeholder_only=True,
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "Thinking..."},
+    )
+    await journal_store.backend.write(
+        lambda tx: reply_messages.record_pending_stop(
+            tx,
+            PRINCIPAL,
+            target_event_id="$reply",
+            receipt_order=9,
+            room_id=ROOM,
+            now_ns=1,
+        ),
+    )
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    acknowledged = await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.INITIAL,
+        event_id="$reply",
+        delivered_projections=(),
+    )
+    assert acknowledged.reply_effects == (rl.CancelSpan("span-1"),)
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    assert stored.stop_receipt_order == 9
+
+
+async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:
+    """Locking returns the stored reply; state queries return only the asked states."""
+    transition = _first_claim()
+    await _apply(journal_store, transition)
+    locked = await journal_store.backend.write(lambda tx: reply_messages.lock(tx, PRINCIPAL, "reply-1"))
+    assert locked == transition.reply
+    assert await journal_store.backend.write(lambda tx: reply_messages.lock(tx, PRINCIPAL, "missing")) is None
+    active = await journal_store.backend.read(lambda tx: reply_messages.in_states(tx, PRINCIPAL, (ReplyState.ACTIVE,)))
+    assert [reply.reply_id for reply in active] == ["reply-1"]
+    assert await journal_store.backend.read(lambda tx: reply_messages.in_states(tx, PRINCIPAL, (ReplyState.GONE,))) == ()

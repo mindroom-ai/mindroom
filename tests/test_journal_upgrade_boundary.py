@@ -558,3 +558,7 @@ async def test_outbox_upgrade_keeps_rows_and_admits_edit_stage(legacy_database: 
     )
     assert ("matrix_delivery_outbox_reply",) in indexes
     assert ("matrix_delivery_outbox_unacknowledged_scan",) in indexes
+    with pytest.raises((sqlite3.IntegrityError, psycopg.errors.CheckViolation)):
+        legacy_database.execute(
+            "UPDATE matrix_delivery_outbox SET stage = 'bogus' WHERE stage = 'final'",
+        )

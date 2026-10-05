@@ -182,6 +182,7 @@ def test_folded_turns_a_frozen_display_into_history() -> None:
 @pytest.mark.parametrize(
     ("write", "state", "decision", "expected"),
     [
+        (WriteKind.PLACEHOLDER, "active", False, STREAM_STATUS_PENDING),
         (WriteKind.CREATE, "active", False, STREAM_STATUS_PENDING),
         (WriteKind.PROGRESS, "active", False, STREAM_STATUS_STREAMING),
         (WriteKind.PAUSE, "paused", True, STREAM_STATUS_APPROVAL_PENDING),
@@ -220,7 +221,23 @@ def test_render_uses_a_frozen_display_and_hides_trace_when_tool_calls_are_hidden
 
 def test_render_of_an_empty_reply_is_its_placeholder() -> None:
     """A reply with nothing to show renders its kind's placeholder and says so."""
-    rendered = render(Presentation(placeholder=TEAM_PLACEHOLDER), WriteKind.CREATE, state="active")
+    rendered = render(Presentation(placeholder=TEAM_PLACEHOLDER), WriteKind.PLACEHOLDER, state="active")
     assert rendered.body == TEAM_PLACEHOLDER
     assert rendered.placeholder_only
-    assert rendered.in_progress
+
+
+def test_restart_after_a_noted_interruption_carries_one_note() -> None:
+    """Notes a stopped reply already showed are dropped before the restart note, as main reads them back."""
+    interrupted = with_trailing_note(Presentation(segments=(_answer("partial"),)), note_segment(NoteKind.INTERRUPTED))
+    once = after_restart(interrupted)
+    assert render_body(once)[0] == "partial\n\n**[Response interrupted by service restart]**"
+    twice = after_restart(once)
+    assert render_body(twice)[0] == render_body(once)[0]
+
+
+def test_only_stream_sends_and_edits_are_notices() -> None:
+    """Placeholders and pauses stay plain messages so push rules apply to them."""
+    assert not render(Presentation(), WriteKind.PLACEHOLDER, state="active").in_progress
+    assert not render(Presentation(), WriteKind.PAUSE, state="paused").in_progress
+    assert render(Presentation(), WriteKind.CREATE, state="active").in_progress
+    assert render(Presentation(), WriteKind.PROGRESS, state="active").in_progress

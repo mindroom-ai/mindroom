@@ -31,6 +31,9 @@ from . import (
     membership_hooks,
     outbox,
     reads,
+    replies,
+    reply_messages,
+    reply_spans,
     response_attempts,
     scheduled_approvals,
     turn_records,
@@ -68,7 +71,7 @@ from .projection import (
     project,
     tombstoned_event_ids,
 )
-from .replies import ReplyStore
+from .replies import ReplyRowEnqueue, ReplyRowRequest, ReplyStore
 from .scheduled_approvals import (  # noqa: TC001
     ScheduledApprovalArmState,
     ScheduledCall,
@@ -781,6 +784,57 @@ class PrincipalStore:
             ),
         )
 
+    async def enqueue_reply_row(
+        self,
+        *,
+        request: ReplyRowRequest,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
+        response_attempt: ResponseAttempt | None = None,
+        event_type: str = "m.room.message",
+        permanent_failure_reason: str | None = None,
+    ) -> ReplyRowEnqueue | None:
+        """Decide and record one durable write of an agent or team reply.
+
+        ``None`` means the outbox refused the row (the membership that owns
+        the reply has ended), and nothing the rule decided was written.
+        """
+        try:
+            return await self._backend.write(
+                lambda transaction: _enqueue_reply_row(
+                    transaction,
+                    self._principal_id,
+                    request=request,
+                    event_type=event_type,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    payload=payload,
+                    result=result,
+                    response_attempt=response_attempt,
+                    permanent_failure_reason=permanent_failure_reason,
+                ),
+            )
+        except _ReplyRowRefusedError:
+            return None
+
+    async def unresolved_reply_rows(
+        self,
+        reply_id: str,
+        *,
+        before_sequence: int | None = None,
+    ) -> tuple[tuple[str, DeliveryStage, int], ...]:
+        """Return a reply's rows whose Matrix outcome is unknown, in write order."""
+        return await self._backend.read(
+            lambda transaction: outbox.unresolved_reply_rows(
+                transaction,
+                self._principal_id,
+                reply_id,
+                before_sequence=before_sequence,
+            ),
+        )
+
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
         """Return whether a turn still speaks for the room's current membership."""
         return await self._backend.read(
@@ -866,15 +920,22 @@ class PrincipalStore:
         reason: str,
     ) -> str | None:
         """Stop retrying one definitively refused immutable payload, or return its ACK."""
-        return await self._backend.write(
-            lambda transaction: outbox.record_permanent_failure(
+
+        def record(transaction: Transaction) -> str | None:
+            failed_now, acknowledged = outbox.record_permanent_failure(
                 transaction,
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
                 reason=reason,
-            ),
-        )
+            )
+            if failed_now:
+                delivery = outbox.load(transaction, self._principal_id, delivery_id=delivery_id, stage=stage)
+                if delivery is not None:
+                    replies.fail_row(transaction, self._principal_id, delivery, reason=reason)
+            return acknowledged
+
+        return await self._backend.write(record)
 
     async def retire_matrix_delivery(
         self,
@@ -1013,7 +1074,24 @@ class PrincipalStore:
                     event_id=event_id,
                 )
             if bound:
-                return DeliveryAcknowledgement(settled_event_id=event_id, bound=True, terminal_turn=committed_terminal)
+                delivery = outbox.load(transaction, self._principal_id, delivery_id=delivery_id, stage=stage)
+                reply_applied = (
+                    None
+                    if delivery is None
+                    else replies.acknowledge_row(
+                        transaction,
+                        self._principal_id,
+                        delivery,
+                        event_id=event_id,
+                        membership_current=may_project,
+                    )
+                )
+                return DeliveryAcknowledgement(
+                    settled_event_id=event_id,
+                    bound=True,
+                    terminal_turn=committed_terminal,
+                    reply_effects=() if reply_applied is None else reply_applied.post_commit,
+                )
             # Lost the row. Whatever is on it now is the answer this delivery
             # resolves to, and the caller has to be told that rather than its
             # own event id -- everything downstream records what `flush`
@@ -1736,6 +1814,10 @@ def _enqueue_matrix_delivery(
     edits_event_id: str | None,
     settle_source_event_ids: tuple[str, ...],
     permanent_failure_reason: str | None,
+    edit_target_pending: bool = False,
+    reply_id: str | None = None,
+    span_id: str | None = None,
+    reply_sequence: int | None = None,
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
@@ -1809,7 +1891,11 @@ def _enqueue_matrix_delivery(
         payload=payload,
         result=result,
         edits_event_id=edits_event_id,
+        edit_target_pending=edit_target_pending,
         permanent_failure_reason=permanent_failure_reason,
+        reply_id=reply_id,
+        span_id=span_id,
+        reply_sequence=reply_sequence,
     )
     if transaction_id is None:
         return None
@@ -1841,6 +1927,110 @@ def _enqueue_matrix_delivery(
         )
     journal.settle_many(transaction, principal_id, settle_source_event_ids)
     return transaction_id
+
+
+class _ReplyRowRefusedError(Exception):
+    """The outbox refused a reply row the lifecycle had already decided; roll both back."""
+
+
+def _enqueue_reply_row(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    request: ReplyRowRequest,
+    event_type: str,
+    room_id: str,
+    thread_id: str | None,
+    payload: Mapping[str, object],
+    result: Mapping[str, object] | None,
+    response_attempt: ResponseAttempt | None,
+    permanent_failure_reason: str | None,
+) -> ReplyRowEnqueue:
+    """Decide one reply write with its lifecycle rule and record the row it chose, in one transaction.
+
+    The rule runs against the locked reply and its span as they are now, so a
+    payload rendered before a Stop or deletion committed is refused rather
+    than written (``Outcome.RECOMPUTE``). Sources the rule settles are settled
+    here, replacing the turn handoff a plain ``FINAL`` carries.
+    """
+    reply = reply_messages.lock(transaction, principal_id, request.reply_id)
+    span = reply_spans.load(transaction, principal_id, request.span_id)
+    if reply is None or span is None:
+        msg = f"Reply {request.reply_id} or span {request.span_id} does not exist"
+        raise RuntimeError(msg)
+    transition = request.decide(reply, span)
+    if not transition.applied or transition.row is None:
+        return ReplyRowEnqueue(
+            applied=replies.apply(transaction, principal_id, transition),
+            settled_event_ids=replies.settled_event_ids(transaction, principal_id, transition),
+        )
+    row = transition.row
+    stage = DeliveryStage(row.stage.value)
+    edits_event_id = None if stage is DeliveryStage.INITIAL else reply.event_id
+    edit_target_pending = (
+        edits_event_id is None
+        and stage is not DeliveryStage.INITIAL
+        and (stage is DeliveryStage.EDIT or replies.has_unresolved_rows(transaction, principal_id, reply.reply_id))
+    )
+    row_fields = {
+        "reply_id": reply.reply_id,
+        "span_id": span.span_id,
+        "reply_sequence": row.sequence,
+    }
+    stored_result = replies.row_result(result, placeholder_only=request.placeholder_only)
+    if stage is DeliveryStage.EDIT:
+        delivery_id = replies.edit_delivery_id(span.delivery_id, row.sequence)
+        if not reads.claim_membership_epoch(
+            transaction,
+            principal_id,
+            room_id=reply.room_id,
+            expected_membership_epoch=reply.membership_epoch,
+        ):
+            raise _ReplyRowRefusedError
+        transaction_id = outbox.enqueue(
+            transaction,
+            principal_id,
+            delivery_id=delivery_id,
+            stage=stage,
+            event_type=event_type,
+            room_id=reply.room_id,
+            membership_epoch=reply.membership_epoch,
+            thread_id=thread_id,
+            payload=payload,
+            result=stored_result,
+            edits_event_id=edits_event_id,
+            edit_target_pending=edit_target_pending,
+            permanent_failure_reason=permanent_failure_reason,
+            **row_fields,
+        )
+    else:
+        delivery_id = span.delivery_id
+        transaction_id = _enqueue_matrix_delivery(
+            transaction,
+            principal_id,
+            delivery_id=delivery_id,
+            stage=stage,
+            event_type=event_type,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            result=stored_result,
+            response_attempt=response_attempt if stage is DeliveryStage.FINAL else None,
+            edits_event_id=edits_event_id,
+            settle_source_event_ids=(),
+            permanent_failure_reason=permanent_failure_reason,
+            edit_target_pending=edit_target_pending,
+            **row_fields,
+        )
+    if transaction_id is None:
+        raise _ReplyRowRefusedError
+    return ReplyRowEnqueue(
+        applied=replies.apply(transaction, principal_id, transition),
+        delivery_id=delivery_id,
+        stage=row.stage,
+        transaction_id=transaction_id,
+        settled_event_ids=replies.settled_event_ids(transaction, principal_id, transition),
+    )
 
 
 def _settle_history_recovery(
