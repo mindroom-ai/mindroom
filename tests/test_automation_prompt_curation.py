@@ -33,7 +33,7 @@ USER = "Name: Sam\n"
 
 
 def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAutomation, Path]:
-    automation = PromptCurationAutomation(trigger_tokens=1_000, **settings)
+    automation = PromptCurationAutomation(**{"trigger_tokens": 1_000, **settings})
     agent = AgentConfig(
         display_name="Mind",
         memory_backend="file",
@@ -82,6 +82,13 @@ def test_the_plan_covers_memory_and_every_context_file_with_a_gradual_band(tmp_p
     assert plan.measured_tokens == 1292
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
     assert plan.memory_tokens == 3
+
+
+def test_the_band_is_the_configured_reductions_of_the_measured_size(tmp_path: Path) -> None:
+    """The band follows min_reduction and max_reduction even when that ends well below the trigger."""
+    plan, _config, _root = _plan(tmp_path, trigger_tokens=1_200, min_reduction=0.2, max_reduction=0.25)
+
+    assert (plan.upper_tokens, plan.floor_tokens) == (1034, 969)
 
 
 def test_protected_files_are_excluded_from_the_band(tmp_path: Path) -> None:
@@ -255,6 +262,20 @@ def test_deleting_archived_memory_while_cutting_is_reported(tmp_path: Path) -> N
 
     assert any("deleted rather than moved" in finding for finding in result.findings)
     assert not (root / "memory" / "projects.md").exists()
+
+
+def test_deleting_archived_memory_with_the_prompt_files_untouched_is_reported(tmp_path: Path) -> None:
+    """A run that only empties a memory/ topic file still deleted detail, so it gets a re-check."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").unlink()
+    after = _snapshot(root)
+
+    result = verify_curation(plan)
+
+    assert not result.changed
+    assert len(result.findings) == 1
+    assert "deleted rather than moved" in result.findings[0]
+    assert _snapshot(root) == after
 
 
 def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_path: Path) -> None:

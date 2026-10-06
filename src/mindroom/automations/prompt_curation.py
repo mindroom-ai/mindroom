@@ -184,18 +184,26 @@ def _findings(
         findings.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")
     if total >= plan.measured_tokens:
         findings.append(f"the files did not shrink ({total} tokens)")
-    memory_after = _memory_dir_tokens(plan.root, exclude=plan.snapshot)
-    lost = plan.measured_tokens + plan.memory_tokens - (total + memory_after)
-    if lost > (max_loss := round(settings.max_content_loss * plan.measured_tokens)):
-        findings.append(f"about {lost} tokens of memory were deleted rather than moved to memory/ (at most {max_loss})")
+    if loss := _content_loss(plan, total):
+        findings.append(loss)
     return total, findings
+
+
+def _content_loss(plan: CurationPlan, curated_tokens: int) -> str | None:
+    """Describe memory content deleted rather than moved beyond the allowance, or return None."""
+    lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + _memory_dir_tokens(plan.root, plan.snapshot))
+    if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
+        return None
+    return f"about {lost} tokens of memory were deleted rather than moved to memory/ (at most {max_loss})"
 
 
 def verify_curation(plan: CurationPlan) -> _CurationResult:
     """Measure the files after the run and describe anything outside the plan's bounds, without writing them."""
     after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
     if all(after_run[path] == payload for path, payload in plan.snapshot.items()):
-        return _CurationResult(tokens_after=plan.measured_tokens, changed=False)
+        # A run can still have deleted memory/ detail without touching the prompt files.
+        loss = _content_loss(plan, plan.measured_tokens)
+        return _CurationResult(tokens_after=plan.measured_tokens, changed=False, findings=(loss,) if loss else ())
     tokens_after, findings = _findings(plan, after_run)
     return _CurationResult(tokens_after=tokens_after, changed=True, findings=tuple(findings))
 
