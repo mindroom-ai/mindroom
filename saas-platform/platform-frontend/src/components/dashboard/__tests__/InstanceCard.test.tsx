@@ -53,6 +53,12 @@ describe('InstanceCard', () => {
     can_run_instances: true,
     trial_days_remaining: 2,
   }
+  const activeSubscription = {
+    ...freeSubscription,
+    id: 'sub-active',
+    tier: 'hobby' as const,
+    can_run_instances: true,
+  }
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -64,7 +70,7 @@ describe('InstanceCard', () => {
 
   describe('No Instance State', () => {
     it('should show provision prompt when no instance exists', () => {
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
 
       expect(screen.getByText(/No instance provisioned yet/)).toBeInTheDocument()
       expect(screen.getByText(/Click below to create your MindRoom instance/)).toBeInTheDocument()
@@ -76,7 +82,7 @@ describe('InstanceCard', () => {
       const mockProvisionResult = { instance_id: 1, status: 'provisioning' }
       ;(provisionInstance as jest.Mock).mockResolvedValueOnce(mockProvisionResult)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -94,7 +100,7 @@ describe('InstanceCard', () => {
       const error = new Error('No subscription found')
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(error)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -113,7 +119,7 @@ describe('InstanceCard', () => {
       const error = new Error('Server error')
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(error)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -130,7 +136,7 @@ describe('InstanceCard', () => {
       abortError.name = 'AbortError'
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(abortError)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -241,7 +247,7 @@ describe('InstanceCard', () => {
           <InstanceCard instance={{ ...mockInstance, status }} />
         )
         expect(screen.getByText(expectedText)).toBeInTheDocument()
-        rerender(<InstanceCard instance={null} />)
+        rerender(<InstanceCard instance={null} subscription={activeSubscription} />)
       })
     })
 
@@ -277,7 +283,7 @@ describe('InstanceCard', () => {
           <InstanceCard instance={{ ...mockInstance, updated_at: updatedAt }} />
         )
         expect(screen.getByText(new RegExp(expected))).toBeInTheDocument()
-        rerender(<InstanceCard instance={null} />)
+        rerender(<InstanceCard instance={null} subscription={activeSubscription} />)
       })
     })
 
@@ -466,7 +472,7 @@ describe('InstanceCard', () => {
         () => new Promise(resolve => setTimeout(resolve, 1000))
       )
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)

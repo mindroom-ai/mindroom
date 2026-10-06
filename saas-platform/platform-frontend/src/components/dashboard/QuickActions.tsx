@@ -9,6 +9,7 @@ import {
 import type { Instance } from '@/hooks/useInstance'
 import type { Subscription } from '@/hooks/useSubscription'
 import { Card, CardHeader } from '@/components/ui/Card'
+import { planState } from '@/lib/plan-state'
 
 interface QuickActionsProps {
   instance: Instance | null
@@ -26,7 +27,13 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
     },
     {
       name: 'Manage Subscription',
-      description: !subscription ? 'Your plan and billing' : subscription.tier === 'free' ? 'Choose a plan to run a hosted instance' : `Current: ${subscription.tier} plan`,
+      description: !subscription
+        ? 'Your plan and billing'
+        : planState(subscription) === 'none'
+          ? 'Choose a plan to run a hosted instance'
+          : planState(subscription) === 'lapsed'
+            ? `Restore billing for your ${subscription.tier} plan`
+            : `Current: ${subscription.tier} plan`,
       href: '/dashboard/billing',
       icon: CreditCard,
       external: false,

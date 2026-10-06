@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from backend.services.provisioner_service import _RESOURCE_PROFILE_HELM_VALUES
 from backend.pricing import (
     PricingConfig,
     get_plan_details,
@@ -147,6 +148,16 @@ class TestPricingConfig:
         # Enterprise plan
         enterprise = model.plans["enterprise"]
         assert enterprise.limits.storage_gb == "unlimited"
+
+    def test_advertised_storage_matches_provisioned_volumes(self) -> None:
+        """Each self-serve plan's storage limit and feature line match the volume its resource profile provisions."""
+        repository_root = Path(__file__).resolve().parents[3]
+        chart_storage = yaml.safe_load((repository_root / "cluster/k8s/instance/values.yaml").read_text())["storage"]
+        for plan_id in ("byok", "hobby", "pro"):
+            plan = load_pricing_config_model().plans[plan_id]
+            provisioned = _RESOURCE_PROFILE_HELM_VALUES.get(plan.resource_profile, {}).get("storage", chart_storage)
+            assert provisioned == f"{plan.limits.storage_gb}Gi", plan_id
+            assert any(f"{plan.limits.storage_gb} GB storage" in feature for feature in plan.features), plan_id
 
     def test_missing_config_file(self) -> None:
         """Test behavior when config file is missing."""

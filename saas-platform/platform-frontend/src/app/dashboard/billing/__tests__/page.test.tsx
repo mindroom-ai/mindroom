@@ -55,6 +55,7 @@ const enterprisePricing = {
 
 const noPlanPricing = {
   ...enterprisePricing,
+  trial: { enabled: true, days: 3, applicable_plans: ['byok', 'hobby', 'pro'] },
   plans: {
     free: {
       name: 'No plan',
@@ -115,6 +116,7 @@ describe('BillingPage', () => {
     expect(screen.queryByText('Active')).not.toBeInTheDocument()
     expect(screen.queryByText('Plan Includes:')).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Choose a plan' })).toHaveAttribute('href', '/dashboard/billing/upgrade')
+    expect(screen.getByText(/Choose a plan to run a hosted MindRoom instance; your first plan starts with a 3-day free trial\./)).toBeInTheDocument()
   })
 
   it('lets a lapsed plan holder choose their old plan again', async () => {

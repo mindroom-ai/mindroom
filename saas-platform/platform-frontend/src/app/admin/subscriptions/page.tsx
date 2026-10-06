@@ -109,14 +109,18 @@ export default function SubscriptionsPage() {
                       </div>
                     </td>
                     <td className="py-3 px-4">
+                      {subscription.tier === 'free' ? (
+                        <span className="text-gray-500 dark:text-gray-400">—</span>
+                      ) : (
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                         subscription.status === 'active' ? 'bg-green-100 dark:bg-green-900/20 text-green-800 dark:text-green-400' :
                         subscription.status === 'canceled' ? 'bg-red-100 dark:bg-red-900/20 text-red-800 dark:text-red-400' :
                         subscription.status === 'past_due' ? 'bg-yellow-100 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-400' :
                         'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400'
                       }`}>
-                        {subscription.tier === 'free' ? '—' : subscription.status}
+                        {subscription.status}
                       </span>
+                      )}
                     </td>
                     <td className="py-3 px-4">
                       {subscription.tier === 'free' ? (

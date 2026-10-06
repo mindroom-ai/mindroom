@@ -185,7 +185,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
               ? "You don't have a MindRoom instance yet. Create it from the dashboard."
               : hasNoPlan
                 ? "You don't have a MindRoom instance yet. Choose a plan to get your own instance; your first plan starts with a free trial."
-                : "You don't have a MindRoom instance yet. Restore billing to run your instance."}
+                : "You don't have a MindRoom instance yet. Add or restore billing to run your instance."}
           </p>
           <button
             onClick={() => router.push(canRunInstances ? '/dashboard' : hasNoPlan ? '/dashboard/billing/upgrade' : '/dashboard/billing')}
@@ -288,7 +288,16 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
             </div>
           )}
 
-          {instance.status === 'stopped' && (
+          {!subscriptionLoading && !canRunInstances && (instance.status === 'stopped' || instance.status === 'deprovisioned') && (
+            <button
+              onClick={() => router.push(hasNoPlan ? '/dashboard/billing/upgrade' : '/dashboard/billing')}
+              className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
+            >
+              {hasNoPlan ? 'Choose a plan' : 'Open billing'}
+            </button>
+          )}
+
+          {canRunInstances && instance.status === 'stopped' && (
             <button
               onClick={() => handleAction('start')}
               disabled={actionLoading !== null}
@@ -303,7 +312,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
             </button>
           )}
 
-          {instance.status === 'deprovisioned' && (
+          {canRunInstances && instance.status === 'deprovisioned' && (
             <button
               onClick={() => handleAction('reprovision')}
               disabled={actionLoading !== null}

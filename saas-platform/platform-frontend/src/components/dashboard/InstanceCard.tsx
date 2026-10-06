@@ -9,17 +9,6 @@ import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
 import { planState } from '@/lib/plan-state'
 
-const INFRASTRUCTURE_TIERS = new Set(['byok', 'hobby', 'pro', 'enterprise'])
-
-function subscriptionCanRunInfrastructure(subscription: Subscription | null | undefined) {
-  if (subscription === undefined) return true
-  if (typeof subscription?.can_run_instances === 'boolean') return subscription.can_run_instances
-  if (!subscription || !INFRASTRUCTURE_TIERS.has(subscription.tier)) return false
-  if (subscription.status === 'active' || subscription.status === 'past_due') return true
-  if (subscription.status !== 'trialing' || !subscription.trial_ends_at) return false
-  return new Date(subscription.trial_ends_at).getTime() > Date.now()
-}
-
 function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
 }
@@ -114,7 +103,7 @@ export function InstanceCard({
 
   // No instance yet - show provision card
   if (!instance) {
-    const canProvision = subscriptionCanRunInfrastructure(subscription)
+    const state = planState(subscription)
     const accessMessage = subscriptionAccessMessage(subscription)
 
     return (
@@ -125,7 +114,7 @@ export function InstanceCard({
           {accessMessage && (
             <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">{accessMessage}</p>
           )}
-          {canProvision ? (
+          {state === 'active' ? (
             <>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
                 No instance provisioned yet. Click below to create your MindRoom instance.
@@ -147,16 +136,18 @@ export function InstanceCard({
             </>
           ) : (
             <>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                {planState(subscription) === 'lapsed'
-                  ? 'Restore billing to run your hosted instance.'
-                  : 'Choose a plan to run a hosted instance; your first plan starts with a free trial.'}
-              </p>
+              {!(state === 'lapsed' && accessMessage) && (
+                <p className="text-gray-600 dark:text-gray-400 mb-6">
+                  {state === 'lapsed'
+                    ? 'Add or restore billing to run your hosted instance.'
+                    : 'Choose a plan to run a hosted instance; your first plan starts with a free trial.'}
+                </p>
+              )}
               <Link
-                href={planState(subscription) === 'lapsed' ? '/dashboard/billing' : '/dashboard/billing/upgrade'}
+                href={state === 'lapsed' ? '/dashboard/billing' : '/dashboard/billing/upgrade'}
                 className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
               >
-                {planState(subscription) === 'lapsed' ? 'Open billing' : 'Choose a plan'}
+                {state === 'lapsed' ? 'Open billing' : 'Choose a plan'}
               </Link>
             </>
           )}

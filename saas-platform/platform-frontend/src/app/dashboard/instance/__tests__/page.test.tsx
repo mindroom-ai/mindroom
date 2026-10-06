@@ -86,8 +86,28 @@ describe('InstancePage', () => {
     render(<InstancePage />)
 
     expect(await screen.findByRole('button', { name: 'Open billing' })).toBeInTheDocument()
-    expect(screen.getByText(/Restore billing to run your instance/)).toBeInTheDocument()
+    expect(screen.getByText(/Add or restore billing to run your instance/)).toBeInTheDocument()
     expect(screen.queryByText(/free trial/)).not.toBeInTheDocument()
+  })
+
+  it('offers billing instead of starting a stopped instance whose plan lapsed', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'cancelled', can_run_instances: false }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [{ ...instanceWithMissingSubdomain, status: 'stopped', tier: 'hobby' }] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: 'Open billing' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Start Instance/ })).not.toBeInTheDocument()
+  })
+
+  it('offers reprovisioning a deprovisioned instance while the plan runs', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'active', can_run_instances: true }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [{ ...instanceWithMissingSubdomain, status: 'deprovisioned', tier: 'hobby' }] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: /Reprovision Instance/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Open billing' })).not.toBeInTheDocument()
   })
 
   it('asks an account without a plan to choose one', async () => {
