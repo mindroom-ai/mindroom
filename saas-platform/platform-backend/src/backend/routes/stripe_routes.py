@@ -9,7 +9,7 @@ from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
 from backend.services import provisioner_service
-from backend.services.instance_lifecycle import PENDING_DELETION_BILLING_DETAIL
+from backend.services.instance_lifecycle import ENDED_STRIPE_STATUSES, PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -31,7 +31,7 @@ def _subscription_history(customer_id: str) -> _CustomerSubscriptions:
         had_trial = had_trial or sub.trial_start is not None
         # A past_due, unpaid, paused, or incomplete subscription can still be paid or resumed, so checkout
         # would start a second one; only canceled and incomplete_expired subscriptions are over.
-        if running_subscription_id is None and sub.status not in ["canceled", "incomplete_expired"]:
+        if running_subscription_id is None and sub.status not in ENDED_STRIPE_STATUSES:
             running_subscription_id = sub.id
     return _CustomerSubscriptions(running_subscription_id, had_trial)
 
