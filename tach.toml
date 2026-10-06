@@ -7485,7 +7485,7 @@ visibility = ["mindroom.agent_storage", "mindroom.history.archive"]
 from = ["mindroom.agno_compat_sqlite"]
 expose = [
     "remove_default_pragmas",
-    "run_table",
+    "owned_table",
     "insert_run_row",
     "upsert_run_at_end",
     "run_deletion_transaction",
