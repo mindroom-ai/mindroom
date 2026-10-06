@@ -1121,7 +1121,6 @@ async def test_an_oversized_send_freezes_the_payload_matrix_receives(tmp_path: P
     under a transaction ID the homeserver had already accepted.
     """
     from mindroom.delivery_gateway import SendTextRequest  # noqa: PLC0415 - a request type only this test builds
-    from mindroom.event_journal import DeliveryStage  # noqa: PLC0415 - ditto
 
     gateway = _delivery_gateway(tmp_path)
 
@@ -1130,7 +1129,6 @@ async def test_an_oversized_send_freezes_the_payload_matrix_receives(tmp_path: P
             target=MessageTarget.resolve("!room:localhost", None, "$src"),
             response_text="",
             delivery_turn_id="$turn",
-            delivery_stage=DeliveryStage.FINAL,
         ),
         "!room:localhost",
         {"body": "x" * 100_000, "msgtype": "m.text"},

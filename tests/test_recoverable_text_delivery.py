@@ -28,7 +28,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mindroom.event_journal import DeliveryStage
 from mindroom.turn_record import TurnRecord
 from mindroom.visible_response_reconciliation import (
     VisibleResponseReconciler,
@@ -121,7 +120,6 @@ class TestAReplyWithATurnBehindItIsDurable:
         assert len(gateway.requests) == 1
         assert gateway.requests[0].delivery_turn_id == handled_turn.anchor_event_id
         assert gateway.requests[0].delivery_turn_id is not None
-        assert gateway.requests[0].delivery_stage is DeliveryStage.FINAL
 
     async def test_an_answer_recovery_already_found_is_never_sent_again(self) -> None:
         """Adoption still wins over the outbox, and must not enqueue anything.
@@ -141,31 +139,3 @@ class TestAReplyWithATurnBehindItIsDurable:
 
         assert adopted == "$already-there"
         assert gateway.requests == []
-
-    async def test_a_placeholder_reply_claims_the_initial_stage(self) -> None:
-        """A send a later answer edits is the turn's placeholder, not its answer.
-
-        The interactive-selection acknowledgement is exactly this: the answer
-        is generated with ``existing_event_is_placeholder=True`` against the
-        event this send produced. Filing it as the answer would claim the
-        turn's ``FINAL`` row, so the real answer's delivery would be refused
-        and its text would never reach the room.
-
-        The stage also decides settlement. Only an answer discharges a turn, so
-        a placeholder must not settle the journal sources -- a crash before the
-        model finished would otherwise leave the acknowledgement in the room
-        with nothing pending to replay.
-        """
-        gateway = _RecordingGateway()
-        handled_turn = TurnRecord.create([SOURCE])
-
-        await _reconciler(gateway).deliver_recoverable_text(
-            handled_turn,
-            target=_target(),  # type: ignore[arg-type]
-            response_text="Processing your response...",
-            recovered_response_event_id=None,
-            as_placeholder=True,
-        )
-
-        assert gateway.requests[0].delivery_turn_id == handled_turn.anchor_event_id
-        assert gateway.requests[0].delivery_stage is DeliveryStage.INITIAL

@@ -1157,34 +1157,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert event_id == "$sent"
         assert outbox.rows == {}
 
-    async def test_a_streaming_placeholder_is_durable_under_its_own_stage(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A streamed answer creates its visible message once, as a placeholder.
-
-        Everything after that is an edit of the same event, so the placeholder
-        is the send a crash could turn into two answers in the room. It needs
-        the same durability the blocking path has, under its own stage, so it
-        does not collide with the final delivery of the same turn.
-        """
-        outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
-        delivered = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "..."})
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            event_id = await gateway.send_text(
-                SendTextRequest(
-                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
-                    response_text="...",
-                    delivery_turn_id="$cause",
-                    delivery_stage=DeliveryStage.INITIAL,
-                ),
-            )
-
-        assert event_id == "$placeholder"
-        assert list(outbox.rows) == [("$cause", "initial")]
-
     async def test_the_final_answer_is_durable_even_when_it_is_an_edit(
         self,
         tmp_path: Path,
@@ -1845,7 +1817,6 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
                 target=MessageTarget.resolve(_ROOM_ID, None, "$cause", room_mode=True),
                 response_text=text,
                 delivery_turn_id="$cause",
-                delivery_stage=DeliveryStage.FINAL,
             ),
         )
 
@@ -1894,40 +1865,6 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
 
         assert outcome.event_id == "$sent"
         bind.assert_not_called()
-
-    async def test_a_placeholder_acknowledgement_carries_no_record(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A placeholder's acknowledgement must not bind the turn's terminal record.
-
-        An INITIAL row is the "Thinking..." message, and calling the turn
-        finished on the strength of it would mark the source handled while the
-        model is still running -- so the real answer, when it arrives, has
-        nowhere to go.
-        """
-        outbox = FakeOutbox()
-        gateway = _gateway(
-            tmp_path,
-            outbox,
-            terminal_turn_for=lambda _turn_id, event_id: TurnRecord.create(
-                ["$cause"],
-                response_event_id=event_id,
-            ),
-        )
-        delivered = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "..."})
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            await gateway.send_text(
-                SendTextRequest(
-                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
-                    response_text="...",
-                    delivery_turn_id="$cause",
-                    delivery_stage=DeliveryStage.INITIAL,
-                ),
-            )
-
-        assert outbox.acknowledged_terminal_turns == [("$cause", None)]
 
     async def test_nothing_is_carried_when_there_is_no_record_to_bind(
         self,

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.event_journal import DeliveryStage
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.model_selection import command_result_content_to_dict
 from mindroom.turn_record import canonicalize_turn_record
@@ -155,8 +154,6 @@ class VisibleResponseReconciler:
         response_text: str,
         recovered_response_event_id: str | None,
         skip_mentions: bool = False,
-        as_placeholder: bool = False,
-        delivery_turn_id: str | None = None,
     ) -> str | None:
         """Send and durably bind one non-model reply unless recovery already found it.
 
@@ -178,22 +175,9 @@ class VisibleResponseReconciler:
         is gone and its answer is not, but it stops being the only thing
         standing between a crash and a lost reply.
 
-        Only callers that send exactly once per ``(turn, stage)`` may use this.
-        The outbox freezes a row at its first attempt, so a second send under
-        the same pair would be refused and its text would never reach the room.
-        A caller that sends a placeholder and then an answer has two stages
-        available and should use them.
-
-        ``as_placeholder`` marks a send that a later answer edits rather than
-        replaces, and it is the caller's own word for what the message is --
-        the delivery stage it maps to is the outbox's business, not theirs.
-        Only an answer settles the journal sources, because only an answer
-        discharges a turn; a placeholder that settled would leave a crash
-        before the model finished with nothing pending to replay and
-        "Thinking..." in the room for good.
-
-        ``delivery_turn_id`` names a distinct admitted event when that event,
-        rather than the handled-turn anchor, authorized the room membership.
+        Only callers that send exactly once per turn may use this. The outbox
+        freezes a row at its first attempt, so a second send for the same turn
+        would be refused and its text would never reach the room.
 
         A send that genuinely is not a turn -- a voice echo, a reconciliation
         notice -- has no identity a restart can resolve and does not belong
@@ -208,8 +192,7 @@ class VisibleResponseReconciler:
                 response_text=response_text,
                 extra_content=command_result_content_to_dict(handled_turn.command_result_extra_content),
                 skip_mentions=skip_mentions,
-                delivery_turn_id=delivery_turn_id or handled_turn.anchor_event_id,
-                delivery_stage=DeliveryStage.INITIAL if as_placeholder else DeliveryStage.FINAL,
+                delivery_turn_id=handled_turn.anchor_event_id,
             ),
         )
         if response_event_id is not None:

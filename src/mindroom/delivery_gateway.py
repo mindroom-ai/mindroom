@@ -517,11 +517,6 @@ class SendTextRequest:  # noqa: D101
     # command confirmation -- and takes the direct path, because a synthetic
     # turn ID would put a row in the outbox that recovery cannot reason about.
     delivery_turn_id: str | None = None
-    # Which of a turn's two durable delivery points this is. A streamed answer
-    # creates its visible message once, as a placeholder, and reaches its final
-    # text by editing that message; the placeholder is therefore the delivery
-    # whose duplication a reader would see, and it is the initial stage.
-    delivery_stage: DeliveryStage = DeliveryStage.FINAL
     defer_source_handoff: bool = False
     delivery_result: dict[str, object] | None = None
     response_attempt: ResponseAttempt | None = None
@@ -1199,7 +1194,7 @@ class DeliveryGateway:
         async def send(claimed: MatrixDelivery) -> str:
             nonlocal requested_delivery
             delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
-            if claimed.stage is request.delivery_stage:
+            if claimed.stage is DeliveryStage.FINAL:
                 requested_delivery = delivered
             return delivered.event_id
 
@@ -1215,7 +1210,7 @@ class DeliveryGateway:
             room_id,
             content,
             turn_id=request.delivery_turn_id,
-            stage=request.delivery_stage,
+            stage=DeliveryStage.FINAL,
             continuation_thread_id=request.target.resolved_thread_id,
             continuation_reply_to_event_id=request.target.reply_to_event_id,
         )
@@ -1232,7 +1227,7 @@ class DeliveryGateway:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
             event_id = await self._response_delivery(send, handoff=handoff).deliver(
                 delivery_id=request.delivery_turn_id,
-                stage=request.delivery_stage,
+                stage=DeliveryStage.FINAL,
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=content,
@@ -1254,7 +1249,7 @@ class DeliveryGateway:
         # callback never ran. That is a turn re-running after its answer
         # reached the room; reporting it as a failed send would make a
         # delivered answer look lost and invite a duplicate.
-        return await self._acknowledged_delivery(request.delivery_turn_id, request.delivery_stage, event_id, content)
+        return await self._acknowledged_delivery(request.delivery_turn_id, DeliveryStage.FINAL, event_id, content)
 
     async def _deliver_reply_write(  # noqa: C901
         self,
@@ -1756,15 +1751,12 @@ class DeliveryGateway:
             return
 
     async def _owed_row_refused(self, span: rl.Span, reply: rl.Reply) -> bool:
-        """Return whether the outbox refuses any row of the span: its room's membership ended or its delivery retired.
+        """Return whether the outbox refuses any row of the span because its room's membership ended.
 
         A note that stays owed for another reason, such as a payload that could
         not be prepared yet, is retried by the next recovery pass.
         """
-        if not await self.deps.outbox.turn_membership_is_current(turn_id=span.delivery_id, room_id=reply.room_id):
-            return True
-        initial = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.INITIAL)
-        return initial is not None and initial.retired
+        return not await self.deps.outbox.turn_membership_is_current(turn_id=span.delivery_id, room_id=reply.room_id)
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
