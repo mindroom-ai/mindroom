@@ -124,11 +124,9 @@ def save_independent_usage(
         {**run, "run_id": usage_id, "user_id": requester_id, "metadata": None, "parent_run_id": None, "team_id": None},
     )
     snapshot["kind"] = kind
-    session_table = (
-        storage._get_table("sessions", create_table_if_not_found=True) if initial_session is not None else None
-    )
+    sessions = agno_compat_sqlite.session_table(storage) if initial_session is not None else None
     with storage.db_engine.begin() as connection:
-        if initial_session is not None and session_table is not None:
+        if initial_session is not None and sessions is not None:
             is_team = isinstance(initial_session, TeamSession)
             values = {
                 "session_id": session_id,
@@ -140,7 +138,7 @@ def save_independent_usage(
                 "updated_at": initial_session.updated_at,
             }
             connection.execute(
-                insert(session_table).values(**values).on_conflict_do_nothing(index_elements=["session_id"]),
+                insert(sessions).values(**values).on_conflict_do_nothing(index_elements=["session_id"]),
             )
         connection.exec_driver_sql(usage_table_sql(storage.session_table_name))
         connection.exec_driver_sql(

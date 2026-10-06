@@ -4,15 +4,12 @@
 
 from __future__ import annotations
 
-import io
 import json
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import docx
-import pptx
 import pytest
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
@@ -20,7 +17,6 @@ from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.tools.function import Function
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
-from pptx.util import Inches
 
 import mindroom.custom_tools.google_drive as google_drive_module
 from mindroom import constants
@@ -1092,105 +1088,21 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
     assert service.files_resource.export_media_kwargs is None
 
 
-def test_google_drive_read_refuses_binary_files_without_downloading(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_valid_credentials(),
-    )
-    service = _FakeDriveService()
-    service.files_resource.file_metadata = {"name": "report.pdf", "mimeType": "application/pdf", "size": "5"}
-    tool.service = service
-
-    result = json.loads(tool.read_file("shared-drive-file-id"))
-
-    assert result["error"] == "Cannot read binary file (application/pdf) as text."
-    assert service.files_resource.get_media_kwargs is None
-
-
-def test_google_drive_read_extracts_office_document_text(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_valid_credentials(),
-    )
-    document = docx.Document()
-    document.add_paragraph("Quarterly numbers")
-    table = document.add_table(rows=2, cols=2)
-    for row, cells in zip(table.rows, (("Region", "Revenue"), ("EMEA", "120")), strict=True):
-        for cell, text in zip(row.cells, cells, strict=True):
-            cell.text = text
-    document.add_paragraph("End of report")
-    buffer = io.BytesIO()
-    document.save(buffer)
-    service = _FakeDriveService()
-    service.files_resource.file_metadata = {
-        "name": "report.docx",
-        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "size": str(len(buffer.getvalue())),
-    }
-    tool.service = service
-    tool._download_bytes = lambda _request: buffer.getvalue()
-
-    result = json.loads(tool.read_file("shared-drive-file-id"))
-
-    assert result["extractedFrom"] == "docx"
-    assert result["content"] == "Quarterly numbers\nRegion\tRevenue\nEMEA\t120\nEnd of report"
-    assert service.files_resource.get_media_kwargs == {
-        "fileId": "shared-drive-file-id",
-        "supportsAllDrives": True,
-    }
-
-
-def test_google_drive_read_extracts_presentation_tables_and_groups(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_valid_credentials(),
-    )
-    presentation = pptx.Presentation()
-    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1)).text_frame.text = "Quarterly\vreview"
-    table = slide.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1)).table
-    for row, cells in zip(table.rows, (("Region", "Revenue"), ("EMEA", "120")), strict=True):
-        for cell, text in zip(row.cells, cells, strict=True):
-            cell.text = text
-    group = slide.shapes.add_group_shape()
-    group.shapes.add_textbox(Inches(1), Inches(4), Inches(2), Inches(1)).text_frame.text = "Grouped note"
-    buffer = io.BytesIO()
-    presentation.save(buffer)
-    service = _FakeDriveService()
-    service.files_resource.file_metadata = {
-        "name": "review.pptx",
-        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "size": str(len(buffer.getvalue())),
-    }
-    tool.service = service
-    tool._download_bytes = lambda _request: buffer.getvalue()
-
-    result = json.loads(tool.read_file("shared-drive-file-id"))
-
-    assert result["extractedFrom"] == "pptx"
-    assert result["content"] == "=== Slide 1 ===\nQuarterly\nreview\nRegion\tRevenue\nEMEA\t120\nGrouped note"
-
-
-def test_google_drive_binary_refusal_names_enabled_download_function(
+def test_google_drive_read_refuses_binary_content_and_names_enabled_download_function(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
-    service.files_resource.file_metadata = {"name": "report.pdf", "mimeType": "application/pdf", "size": "5"}
+    service.files_resource.file_metadata = {"name": "report.pdf", "mimeType": "application/pdf", "size": "8"}
+    tool._download_bytes = lambda _request: b"%PDF-1.7\xe2\x28\xa1"
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
-    assert result["error"] == "Cannot read binary file (application/pdf) as text. Use google_drive_download_file instead."
-    assert service.files_resource.get_media_kwargs is None
+    assert result["error"] == "Cannot read application/pdf as text. Use google_drive_download_file instead."
+    assert "content" not in result
 
 
-def test_google_drive_read_keeps_file_text_that_mentions_the_agno_download_hint(tmp_path: Path) -> None:
+def test_google_drive_read_returns_text_stored_as_octet_stream(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
@@ -1198,14 +1110,13 @@ def test_google_drive_read_keeps_file_text_that_mentions_the_agno_download_hint(
         creds=_valid_credentials(),
     )
     service = _FakeDriveService()
-    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": "text/plain", "size": "40"}
+    service.files_resource.file_metadata = {"name": "config.yaml", "mimeType": "application/octet-stream", "size": "9"}
     tool.service = service
-    text = "Too big to read? Use download_file instead."
-    tool._download_bytes = lambda _request: text.encode()
+    tool._download_bytes = lambda _request: b"name: \xc3\xa9t\xc3\xa9"
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
-    assert result["content"] == text
+    assert result["content"] == "name: été"
 
 
 def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:

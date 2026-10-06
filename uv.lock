@@ -4391,9 +4391,6 @@ google-drive = [
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
-    { name = "openpyxl" },
-    { name = "python-docx" },
-    { name = "python-pptx" },
 ]
 google-maps = [
     { name = "google-maps-places" },
@@ -4741,7 +4738,6 @@ requires-dist = [
     { name = "openai" },
     { name = "openai", marker = "extra == 'openai'" },
     { name = "openbb", marker = "extra == 'openbb'" },
-    { name = "openpyxl", marker = "extra == 'google-drive'", specifier = ">=3.1" },
     { name = "oxylabs", marker = "extra == 'oxylabs'" },
     { name = "packaging", specifier = ">=24" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2" },
@@ -4769,9 +4765,7 @@ requires-dist = [
     { name = "pypdf", marker = "extra == 'arxiv'" },
     { name = "pytelegrambotapi", marker = "extra == 'telegram'", specifier = ">=4.32" },
     { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2" },
-    { name = "python-docx", marker = "extra == 'google-drive'", specifier = ">=1.2" },
     { name = "python-dotenv", specifier = ">=1" },
-    { name = "python-pptx", marker = "extra == 'google-drive'", specifier = ">=1.0" },
     { name = "pytz", marker = "extra == 'cal-com'" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "pyyaml", marker = "extra == 'config-manager'", specifier = ">=6" },
@@ -8017,23 +8011,6 @@ wheels = [
 ]
 
 [[package]]
-name = "python-pptx"
-version = "1.0.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "lxml", version = "5.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-    { name = "lxml", version = "6.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
-    { name = "pillow", version = "10.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
-    { name = "typing-extensions" },
-    { name = "xlsxwriter" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/52/a9/0c0db8d37b2b8a645666f7fd8accea4c6224e013c42b1d5c17c93590cd06/python_pptx-1.0.2.tar.gz", hash = "sha256:479a8af0eaf0f0d76b6f00b0887732874ad2e3188230315290cd1f9dd9cc7095", size = 10109297, upload-time = "2024-08-07T17:33:37.772Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d9/4f/00be2196329ebbff56ce564aa94efb0fbc828d00de250b1980de1a34ab49/python_pptx-1.0.2-py3-none-any.whl", hash = "sha256:160838e0b8565a8b1f67947675886e9fea18aa5e795db7ae531606d68e785cba", size = 472788, upload-time = "2024-08-07T17:33:28.192Z" },
-]
-
-[[package]]
 name = "python-socks"
 version = "2.8.1"
 source = { registry = "https://pypi.org/simple" }
@@ -10437,15 +10414,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/07/5a/377161c2d3538d1990d7af382c79f3b2372e880b65de21b01b1a2b78691e/xlrd-2.0.2.tar.gz", hash = "sha256:08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9", size = 100167, upload-time = "2025-06-14T08:46:39.039Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1a/62/c8d562e7766786ba6587d09c5a8ba9f718ed3fa8af7f4553e8f91c36f302/xlrd-2.0.2-py2.py3-none-any.whl", hash = "sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9", size = 96555, upload-time = "2025-06-14T08:46:37.766Z" },
-]
-
-[[package]]
-name = "xlsxwriter"
-version = "3.2.9"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/46/2c/c06ef49dc36e7954e55b802a8b231770d286a9758b3d936bd1e04ce5ba88/xlsxwriter-3.2.9.tar.gz", hash = "sha256:254b1c37a368c444eac6e2f867405cc9e461b0ed97a3233b2ac1e574efb4140c", size = 215940, upload-time = "2025-09-16T00:16:21.63Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/0c/3662f4a66880196a590b202f0db82d919dd2f89e99a27fadef91c4a33d41/xlsxwriter-3.2.9-py3-none-any.whl", hash = "sha256:9a5db42bc5dff014806c58a20b9eae7322a134abb6fce3c92c181bfb275ec5b3", size = 175315, upload-time = "2025-09-16T00:16:20.108Z" },
 ]
 
 [[package]]

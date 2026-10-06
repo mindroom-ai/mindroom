@@ -45,7 +45,6 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "py-trello": "trello",
     "pygithub": "github",
     "python-docx": "docx",
-    "python-pptx": "pptx",
     "pyyaml": "yaml",
     "tavily-python": "tavily",
     "spider-client": "spider",

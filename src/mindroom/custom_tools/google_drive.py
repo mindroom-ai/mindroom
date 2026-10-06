@@ -20,7 +20,6 @@ from googleapiclient.http import MediaIoBaseUpload
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.bounded_bytes import ByteLimitExceededError
-from mindroom.custom_tools.agno_compat_google_drive import install_office_table_extraction
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
@@ -53,9 +52,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
-
-
-_AGNO_DOWNLOAD_HINT = " Use download_file instead."
 
 _MODEL_FUNCTION_NAME_ALIASES = {
     "list_files": "google_drive_list_files",
@@ -218,7 +214,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             defer_to_original_auth=defer_to_original_auth,
             quota_project_id=quota_project_id,
         )
-        install_office_table_extraction()
         super().__init__(creds=creds, **kwargs)
         # Agno's async variants run Drive calls on the event loop's default executor, which the
         # gateway cannot track; synchronous bodies run on the caller's tool executor instead.
@@ -471,27 +466,65 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    # AGNO_COMPAT: Drive read errors name a download function that may be renamed or disabled.
-    # Reason: Agno 3.0.9 `GoogleDriveTools.read_file` ends some errors with "Use download_file instead.",
-    # but MindRoom exposes that function as `google_drive_download_file` and can disable it, and its
-    # binary-file refusal gives no download hint at all.
-    # Upstream issue: Tracking gap; no matching issue identified, and the hint is a fixed string with no hook.
-    # Upstream PR: None identified.
-    # Remove when: The pinned Agno read errors for an existing file name the registered download
-    # function, or omit the hint without one.
-    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_error_names_enabled_download_function;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_large_file_error_names_exposed_download_function;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_binary_refusal_names_enabled_download_function.
+    @authenticate
     def read_file(self, file_id: str) -> str:
-        """Read a Drive file and return its text content, including files in Shared Drives and Office documents."""
-        result = super().read_file(file_id)
-        payload = json.loads(result)
-        error = payload.get("error")
-        # Every refusal of a file that exists can fall back to a download, including binary files.
-        if not isinstance(error, str) or "file" not in payload:
-            return result
-        payload["error"] = error.removesuffix(_AGNO_DOWNLOAD_HINT) + self._download_guidance()
-        return json.dumps(payload)
+        """Read a Drive file and return its text content, including files in Shared Drives."""
+        try:
+            service = cast("Any", self.service)
+            metadata = self._get_file_metadata(file_id, self.READ_METADATA_FIELDS)
+            mime_type = metadata.get("mimeType", "")
+
+            if mime_type in self.TEXT_EXPORT_TYPES:
+                export_mime = self.TEXT_EXPORT_TYPES[mime_type]
+            elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
+                return json.dumps(
+                    {
+                        "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
+                        "file": metadata,
+                    },
+                )
+            else:
+                export_mime = None
+
+            if export_mime:
+                request = service.files().export_media(fileId=file_id, mimeType=export_mime)
+                content_bytes = self._download_bytes(request)
+            else:
+                file_size = int(metadata.get("size", 0))
+                if file_size > self.max_read_size:
+                    return json.dumps(
+                        {
+                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
+                            f"{self._download_guidance()}",
+                            "file": metadata,
+                        },
+                    )
+                request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                content_bytes = self._download_bytes(request)
+
+            try:
+                content = content_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                # PDFs, images, Office files, and other binary formats would reach the model as garbage.
+                return json.dumps(
+                    {
+                        "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
+                        "file": metadata,
+                    },
+                )
+            return json.dumps(
+                {
+                    "file": metadata,
+                    "content": content,
+                    "contentLength": len(content),
+                    "exportMimeType": export_mime,
+                },
+            )
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            log_error(f"Could not read Google Drive file {file_id}: {exc}")
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     @authenticate
     def download_file(self, file_id: str, export_format: str | None = None) -> str:

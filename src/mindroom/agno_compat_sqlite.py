@@ -43,12 +43,12 @@ def remove_default_pragmas(engine: Engine) -> None:
     event.remove(engine, "connect", listeners[0])
 
 
-# AGNO_COMPAT: Run-table access for owner transactions uses a private lookup.
-# Reason: SqliteDb exposes its runs table only through the private ``_get_table``, while the owner
-# must insert rows in its own transaction (usage snapshots, compaction-archive restores).
+# AGNO_COMPAT: Run- and session-table access for owner transactions uses a private lookup.
+# Reason: SqliteDb exposes its runs and sessions tables only through the private ``_get_table``, while
+# the owner must write rows in its own transaction (usage snapshots, compaction-archive restores).
 # Upstream issue: No matching public table-access issue identified; shares the transaction gap below.
 # Upstream PR: None identified.
-# Remove when: Agno offers a public run-table or caller-owned transaction API; keep owner row semantics.
+# Remove when: Agno offers public table access or a caller-owned transaction API; keep owner row semantics.
 # Coverage: tests/test_usage_storage.py and tests/test_history_archive.py::test_roll_back_restores_earlier_runs_of_the_hit_generation_in_order.
 def run_table(db: SqliteDb) -> Table:
     """Return the runs table, creating it on first use."""
@@ -57,6 +57,15 @@ def run_table(db: SqliteDb) -> Table:
         msg = "Run table unavailable"
         raise RuntimeError(msg)
     return runs
+
+
+def session_table(db: SqliteDb) -> Table:
+    """Return the sessions table, creating it on first use."""
+    sessions = db._get_table(table_type="sessions", create_table_if_not_found=True)
+    if sessions is None:
+        msg = "Session table unavailable"
+        raise RuntimeError(msg)
+    return sessions
 
 
 # AGNO_COMPAT: Run insertion can reorder surviving stored runs.

@@ -8620,10 +8620,7 @@
         "google-api-python-client",
         "google-auth",
         "google-auth-httplib2",
-        "google-auth-oauthlib",
-        "openpyxl",
-        "python-docx",
-        "python-pptx"
+        "google-auth-oauthlib"
       ],
       "description": "Search, read, upload, and organize files in Google Drive",
       "display_name": "Google Drive",

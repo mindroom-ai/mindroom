@@ -102,9 +102,6 @@ if TYPE_CHECKING:
         "google-auth",
         "google-auth-httplib2",
         "google-auth-oauthlib",
-        "openpyxl",
-        "python-docx",
-        "python-pptx",
     ],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_drive",
     function_names=(
