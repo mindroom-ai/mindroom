@@ -62,6 +62,7 @@ if TYPE_CHECKING:
             required=False,
             default=100,
             description="Maximum rows returned by run_sql_query (1 to 1000)",
+            validation={"min": 1, "max": 1000},
         ),
         ConfigField(
             name="list_tables",

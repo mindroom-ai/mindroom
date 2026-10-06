@@ -3995,7 +3995,10 @@
           "placeholder": null,
           "required": false,
           "type": "number",
-          "validation": null
+          "validation": {
+            "max": 1000,
+            "min": 1
+          }
         },
         {
           "authored_override": true,

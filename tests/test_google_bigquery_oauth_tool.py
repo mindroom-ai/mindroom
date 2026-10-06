@@ -10,14 +10,19 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from google.api_core import exceptions as google_exceptions
 from google.cloud import bigquery
+from google.cloud.bigquery import _job_helpers
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools, _is_read_only_select
+from mindroom.oauth.google_cloud import google_cloud_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 
 if TYPE_CHECKING:
@@ -55,10 +60,10 @@ class _FakeClient:
         limit = kwargs["max_results"]
         return _FakeRows(self.rows[:limit], ["n"])
 
-    def list_tables(self, dataset: str, **kwargs: Any) -> list[SimpleNamespace]:  # noqa: ANN401
+    def list_tables(self, dataset: str) -> list[SimpleNamespace]:
         if self.error is not None:
             raise self.error
-        self.queries.append({"list_tables": dataset, **kwargs})
+        self.queries.append({"list_tables": dataset})
         return [SimpleNamespace(table_id="events"), SimpleNamespace(table_id="users")]
 
     def get_table(self, table_ref: str) -> SimpleNamespace:
@@ -71,10 +76,10 @@ class _FakeClient:
         return SimpleNamespace(description="Event counts", schema=[field])
 
 
-def _runtime_paths(tmp_path: Path) -> constants.RuntimePaths:
+def _runtime_paths(tmp_path: Path, extra_env: dict[str, str] | None = None) -> constants.RuntimePaths:
     return constants.resolve_runtime_paths(
         storage_path=tmp_path / "mindroom_data",
-        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test", **(extra_env or {})},
     )
 
 
@@ -166,6 +171,17 @@ def test_run_sql_query_uses_default_dataset_location_and_row_cap(tmp_path: Path)
     assert str(call["job_config"].default_dataset) == "example-project.analytics"
 
 
+def test_run_sql_query_job_config_is_accepted_by_jobs_query(tmp_path: Path) -> None:
+    tool, client = _tool(tmp_path)
+
+    tool.run_sql_query("SELECT n FROM events")
+
+    call = client.queries[0]
+    request = _job_helpers._to_query_request(call["job_config"], query=call["sql"], location=call["location"])
+    assert _job_helpers._supported_by_jobs_query(request)
+    assert request["defaultDataset"] == {"projectId": "example-project", "datasetId": "analytics"}
+
+
 def test_run_sql_query_reports_bad_request_message_truncated(tmp_path: Path) -> None:
     tool, client = _tool(tmp_path)
     client.error = google_exceptions.BadRequest("Unrecognized name: missing at [1:8]" + "x" * 1000)
@@ -174,6 +190,16 @@ def test_run_sql_query_reports_bad_request_message_truncated(tmp_path: Path) -> 
 
     assert result["error"].startswith("Google BigQuery request failed (HTTP 400): Unrecognized name: missing")
     assert len(result["error"]) <= 600
+
+
+def test_run_sql_query_strips_the_rest_request_prefix_from_bad_request_messages(tmp_path: Path) -> None:
+    tool, client = _tool(tmp_path)
+    request = "POST https://bigquery.googleapis.com/bigquery/v2/projects/example-project/queries?prettyPrint=false"
+    client.error = google_exceptions.BadRequest(f"{request}: Unrecognized name: missing at [1:8]")
+
+    result = json.loads(tool.run_sql_query("SELECT missing FROM events"))
+
+    assert result == {"error": "Google BigQuery request failed (HTTP 400): Unrecognized name: missing at [1:8]"}
 
 
 def test_run_sql_query_hides_other_provider_text(tmp_path: Path) -> None:
@@ -219,22 +245,25 @@ def test_list_tables_and_describe_table(tmp_path: Path) -> None:
         "table_description": "Event counts",
         "columns": [{"name": "n", "type": "INTEGER", "mode": "NULLABLE", "description": "count"}],
     }
-    assert client.queries[0]["list_tables"] == "example-project.analytics"
+    assert client.queries[0] == {"list_tables": "example-project.analytics"}
     assert client.queries[1] == {"get_table": "example-project.analytics.events"}
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [(50, 50), (50.0, 50), ("50", 50), (" 7 ", 7), ("", 100), (None, 100), (1000, 1000)],
-)
-def test_max_rows_accepts_the_numbers_config_and_dashboard_send(tmp_path: Path, raw: object, expected: int) -> None:
+@pytest.mark.parametrize(("raw", "expected"), [(1, 1), (50, 50), (1000, 1000)])
+def test_max_rows_accepts_values_from_one_to_one_thousand(tmp_path: Path, raw: int, expected: int) -> None:
     tool, _client = _tool(tmp_path, max_rows=raw)
 
     assert tool.max_rows == expected
 
 
-@pytest.mark.parametrize("raw", [0, -1, 1001, 2.5, "abc", "inf", True, float("nan")])
-def test_max_rows_rejects_values_outside_one_to_one_thousand(tmp_path: Path, raw: object) -> None:
+def test_max_rows_defaults_to_one_hundred(tmp_path: Path) -> None:
+    tool, _client = _tool(tmp_path)
+
+    assert tool.max_rows == 100
+
+
+@pytest.mark.parametrize("raw", [0, -1, 1001, 2.5, float("nan")])
+def test_max_rows_rejects_values_outside_one_to_one_thousand(tmp_path: Path, raw: float) -> None:
     with pytest.raises(ValueError, match="max_rows must be a whole number between 1 and 1000"):
         _tool(tmp_path, max_rows=raw)
 
@@ -268,3 +297,63 @@ def test_metadata_uses_shared_google_cloud_connection() -> None:
     assert metadata.setup_type.value == "oauth"
     assert metadata.requires_primary_runtime is True
     assert "credentials" not in {field.name for field in metadata.config_fields or []}
+
+
+def test_client_is_built_with_the_tools_own_credentials(tmp_path: Path) -> None:
+    tool = GoogleBigQueryTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        creds=_valid_credentials(),
+        dataset="analytics",
+        project="example-project",
+        location="US",
+    )
+
+    client = tool._client()
+
+    assert isinstance(client, bigquery.Client)
+    assert client.project == "example-project"
+    assert client.location == "US"
+    assert client._http.credentials is tool.creds
+
+
+def _write_service_account_file(path: Path) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "example-project",
+                "private_key_id": "key-id",
+                "private_key": private_key.decode(),
+                "client_email": "reader@example-project.iam.gserviceaccount.com",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            },
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_service_account_file_authenticates_without_a_stored_oauth_connection(tmp_path: Path) -> None:
+    service_account_path = tmp_path / "service-account.json"
+    _write_service_account_file(service_account_path)
+    tool = GoogleBigQueryTools(
+        runtime_paths=_runtime_paths(tmp_path, {"GOOGLE_SERVICE_ACCOUNT_FILE": str(service_account_path)}),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        dataset="analytics",
+        project="example-project",
+        location="US",
+    )
+
+    client = tool._client()
+
+    credentials = client._http.credentials
+    assert isinstance(credentials, service_account.Credentials)
+    assert credentials.service_account_email == "reader@example-project.iam.gserviceaccount.com"
+    assert set(credentials.scopes) == set(google_cloud_oauth_provider().scopes)

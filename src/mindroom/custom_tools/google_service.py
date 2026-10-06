@@ -7,6 +7,7 @@ import threading
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from agno.tools import Toolkit
+from google.api_core.exceptions import GoogleAPICallError
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.http import build_http
@@ -17,6 +18,7 @@ from mindroom.oauth.client import ScopedOAuthClientMixin
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from google.api_core.exceptions import GoogleAPIError
     from googleapiclient.errors import HttpError
 
     from mindroom.config.main import Config
@@ -267,11 +269,9 @@ class GoogleCloudToolkit(_GoogleOAuthToolkit):
             clients[name] = factory(credentials)
         return cast("_ClientT", clients[name])
 
-    def _google_cloud_error_result(self, service_name: str, operation: str, exc: Exception) -> str:
+    def _google_cloud_error_result(self, service_name: str, operation: str, exc: GoogleAPIError) -> str:
         """Return a tool error exposing only the HTTP status, and flag a final 401 for reconnect."""
-        status = getattr(exc, "code", None)
-        if isinstance(status, bool) or not isinstance(status, int):
-            status = None
+        status = exc.code if isinstance(exc, GoogleAPICallError) else None
         if status == 401:
             self._mark_google_authorization_rejected()
         logger.warning(

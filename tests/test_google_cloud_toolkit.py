@@ -58,7 +58,7 @@ class _ProbeCloudTools(GoogleCloudToolkit):
     _oauth_provider = google_cloud_oauth_provider()
     _oauth_tool_name = "probe_cloud"
 
-    def __init__(self, *, error: Exception | None = None, **kwargs: Any) -> None:  # noqa: ANN401
+    def __init__(self, *, error: google_exceptions.GoogleAPIError | None = None, **kwargs: Any) -> None:  # noqa: ANN401
         self.built_with: list[object] = []
         self.error = error
         super().__init__(name="probe_cloud", tools=[self.probe_cloud], **kwargs)
@@ -161,6 +161,25 @@ def test_non_auth_errors_report_status_without_provider_text(tmp_path: Path) -> 
     result = tool.probe_cloud()
 
     assert json.loads(result) == {"error": "Probe request failed (HTTP 404)"}
+    assert "provider-controlled" not in result
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        google_exceptions.RetryError("Deadline exceeded", cause=ValueError("provider-controlled-secret")),
+        google_exceptions.GoogleAPICallError("provider-controlled-secret"),
+    ],
+)
+def test_errors_without_an_http_status_report_no_status_or_provider_text(
+    tmp_path: Path,
+    error: google_exceptions.GoogleAPIError,
+) -> None:
+    tool = _tool(tmp_path, creds=_valid_credentials(), error=error)
+
+    result = tool.probe_cloud()
+
+    assert json.loads(result) == {"error": "Probe request failed"}
     assert "provider-controlled" not in result
 
 

@@ -12,7 +12,6 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
-from mindroom.tool_system.metadata import coerce_optional_finite_number
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -23,7 +22,8 @@ _READ_ONLY_ERROR = "Only a single read-only SELECT query is allowed"
 _MAX_ERROR_DETAIL = 500
 _DEFAULT_MAX_ROWS = 100
 _MAX_ROWS_LIMIT = 1000
-_MAX_LISTED_TABLES = 1000
+# api_core prefixes REST errors with the request, as in `POST https://bigquery.googleapis.com/...?prettyPrint=false: `.
+_REST_REQUEST_PREFIX = re.compile(r"[A-Z]+ \S+: ")
 # A query may open with parentheses, as in `(SELECT 1) UNION ALL (SELECT 2)`, but must start with SELECT or WITH.
 _READ_ONLY_START = re.compile(r"[\s(]*(select|with)\b", re.IGNORECASE)
 _MAX_STRING_PREFIX = 2
@@ -104,23 +104,6 @@ def _is_read_only_select(sql: str) -> bool:
     return _READ_ONLY_START.match(body) is not None
 
 
-def _coerce_max_rows(value: object) -> int:
-    """Return max_rows as a whole number in range.
-
-    Config and the dashboard may deliver a whole float or numeric text for a number field, and blank means the default.
-    """
-    msg = f"Google BigQuery max_rows must be a whole number between 1 and {_MAX_ROWS_LIMIT}"
-    try:
-        number = coerce_optional_finite_number(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(msg) from exc
-    if number is None:
-        return _DEFAULT_MAX_ROWS
-    if isinstance(number, float) or not 1 <= number <= _MAX_ROWS_LIMIT:
-        raise ValueError(msg)
-    return number
-
-
 class GoogleBigQueryTools(GoogleCloudToolkit):
     """List tables, describe schemas, and run read-only SQL in one BigQuery dataset."""
 
@@ -141,13 +124,16 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         describe_table: bool = True,
         run_sql_query: bool = True,
         all: bool = False,  # noqa: A002
-        max_rows: float = _DEFAULT_MAX_ROWS,
+        max_rows: int = _DEFAULT_MAX_ROWS,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self.dataset = dataset
         self.project = project
         self.location = location
-        self.max_rows = _coerce_max_rows(max_rows)
+        if not isinstance(max_rows, int) or not 1 <= max_rows <= _MAX_ROWS_LIMIT:
+            msg = f"Google BigQuery max_rows must be a whole number between 1 and {_MAX_ROWS_LIMIT}"
+            raise ValueError(msg)
+        self.max_rows = max_rows
         tools = []
         if all or list_tables:
             tools.append(self.list_tables)
@@ -177,11 +163,11 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         """List table names in the configured dataset.
 
         Returns:
-            JSON with up to 1000 table IDs.
+            JSON with the table IDs in the dataset.
 
         """
         try:
-            tables = self._client().list_tables(f"{self.project}.{self.dataset}", max_results=_MAX_LISTED_TABLES)
+            tables = self._client().list_tables(f"{self.project}.{self.dataset}")
             return json.dumps({"tables": [table.table_id for table in tables]})
         except GoogleAPIError as exc:
             return self._google_cloud_error_result(_SERVICE_NAME, "list_tables", exc)
@@ -237,9 +223,8 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             records = [dict(row) for row in rows]
         except BadRequest as exc:
             # The message describes the requester's own SQL and data, which this tool already returns.
-            detail = str(exc.message)[:_MAX_ERROR_DETAIL]
-            error = self._google_cloud_error_result(_SERVICE_NAME, "run_sql_query", exc)
-            return json.dumps({"error": f"{json.loads(error)['error']}: {detail}"})
+            detail = _REST_REQUEST_PREFIX.sub("", str(exc.message), count=1)[:_MAX_ERROR_DETAIL]
+            return json.dumps({"error": f"{_SERVICE_NAME} request failed (HTTP {exc.code}): {detail}"})
         except GoogleAPIError as exc:
             return self._google_cloud_error_result(_SERVICE_NAME, "run_sql_query", exc)
         truncated = len(records) > self.max_rows
