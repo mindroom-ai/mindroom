@@ -292,8 +292,8 @@ Files: {file_sizes}.
 Delete only true duplicates; move everything else.
 When you finish, MindRoom measures the files again and asks you to re-check if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, or detail was deleted instead of moved.
 Reply with one line saying what you changed."""
-PROMPT_CURATION_RECHECK_TEMPLATE = """⚠️ Prompt maintenance took the files from {measured_tokens} to {tokens_after} tokens, but {findings}.
-Compare your change with the commit you made before it, put back anything that was deleted rather than moved or cut too far, and reply with one line saying what you fixed."""
+PROMPT_CURATION_RECHECK_TEMPLATE = """⚠️ Prompt maintenance needs a re-check: {findings}.
+Compare your change with the commit you made before it, fix what is listed, and reply with one line saying what you fixed."""
 MEMORY_EXISTING_SNIPPETS_TEMPLATE = "Existing memory snippets (avoid duplicates):\n{existing_context}\n"
 MEMORY_NO_EXISTING_SNIPPETS = "Existing memory snippets: (none)\n"
 MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE = """Extract only durable memories from this conversation excerpt.
@@ -664,7 +664,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
                 "protected_line",
             },
         ),
-        "PROMPT_CURATION_RECHECK_TEMPLATE": frozenset({"measured_tokens", "tokens_after", "findings"}),
+        "PROMPT_CURATION_RECHECK_TEMPLATE": frozenset({"findings"}),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
             {"no_reply_token", "existing_block", "excerpt"},
         ),

@@ -1,4 +1,4 @@
-"""The prompt_curation built-in: when it asks, what it asks for, and how verify keeps or restores the files."""
+"""The prompt_curation built-in: when it asks, what it asks for, and what verify reports without writing the files."""
 
 from __future__ import annotations
 
@@ -195,9 +195,21 @@ def test_a_run_that_misses_the_bounds_is_asked_to_recheck_and_left_as_is(
     assert finding in result.findings
     assert _snapshot(root) == after
     notice = curation_notice(config, plan, result)
-    assert notice.startswith("⚠️ Prompt maintenance took the files from 1292 to ")
+    assert notice.startswith("⚠️ Prompt maintenance needs a re-check: ")
     assert finding in notice
     assert "Compare your change with the commit you made before it" in notice
+
+
+@pytest.mark.parametrize("change", [_corrupt, _grow_past_the_read_cap, _replace_with_a_link])
+def test_an_unreadable_file_is_the_only_finding(tmp_path: Path, change: Callable[[Path], None]) -> None:
+    """Without the file's size, verify reports only that it cannot be read, never a false deletion or floor."""
+    plan, _config, root = _plan(tmp_path)
+    change(root)
+
+    result = verify_curation(plan)
+
+    assert len(result.findings) == 1
+    assert result.findings[0].startswith("MEMORY.md ")
 
 
 def test_a_fact_another_conversation_writes_during_the_run_is_kept(tmp_path: Path) -> None:

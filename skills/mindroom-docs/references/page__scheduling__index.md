@@ -309,6 +309,8 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
     - a protected file changed, or a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
+When the prompt files are unchanged, verify only checks that no `memory/` detail was deleted, and otherwise reports that nothing changed.
+A file that cannot be read is the only finding reported, because the totals would count it as deleted.
 Verify never writes the files, because other conversations with the same agent may save memories to them during the run; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
 
 | Field | Default | Description |

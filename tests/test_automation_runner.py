@@ -193,7 +193,7 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
 
     assert len(bot.sent) == 2
     recheck = bot.sent[1]
-    assert recheck["body"].startswith("@mind ⚠️ Prompt maintenance took the files from 1286 to 2 tokens, but ")
+    assert recheck["body"].startswith("@mind ⚠️ Prompt maintenance needs a re-check: MEMORY.md shrank 100%")
     assert recheck["thread_id"] == "$event1"
     assert recheck["trigger_dispatch"] is True
     assert recheck["extra_content"] == {ORIGINAL_SENDER_KEY: "@mindroom_user:example.test"}

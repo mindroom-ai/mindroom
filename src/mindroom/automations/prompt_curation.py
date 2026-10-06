@@ -160,22 +160,26 @@ def _findings(
 ) -> tuple[int, list[str]]:
     """Return the curated files' total after the run and what looks outside the plan's bounds."""
     settings = plan.settings
+    after: dict[str, int] = {}
+    unreadable: list[str] = []
+    for path in plan.curated:
+        payload = after_run[path]
+        if isinstance(payload, Exception):
+            unreadable.append(f"{path} cannot be read ({payload})")
+            continue
+        try:
+            after[path] = _tokens(payload or b"")
+        except UnicodeDecodeError:
+            unreadable.append(f"{path} is no longer valid UTF-8")
+    if unreadable:
+        # Without every file's size, totals and loss would read an unreadable file as deleted.
+        return plan.measured_tokens, unreadable
     findings = [
         f"{path} changed although it is protected"
         for path in settings.protected_files
         if path in plan.snapshot and after_run[path] != plan.snapshot[path]
     ]
-    after: dict[str, int] = {}
     for path, before in plan.curated.items():
-        payload = after_run[path]
-        if isinstance(payload, Exception):
-            findings.append(f"{path} cannot be read ({payload})")
-            continue
-        try:
-            after[path] = _tokens(payload or b"")
-        except UnicodeDecodeError:
-            findings.append(f"{path} is no longer valid UTF-8")
-            continue
         if before and after[path] < before * (1 - settings.max_file_shrink):
             shrink = round(100 * (before - after[path]) / before)
             findings.append(f"{path} shrank {shrink}% (more than {round(100 * settings.max_file_shrink)}%)")
@@ -211,12 +215,7 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
 def curation_notice(config: Config, plan: CurationPlan, result: _CurationResult) -> str:
     """Return the message posted in the prompt's thread once verify ran; findings ask the agent to re-check."""
     if result.findings:
-        return config.render_prompt(
-            "PROMPT_CURATION_RECHECK_TEMPLATE",
-            measured_tokens=plan.measured_tokens,
-            tokens_after=result.tokens_after,
-            findings="; ".join(result.findings),
-        )
+        return config.render_prompt("PROMPT_CURATION_RECHECK_TEMPLATE", findings="; ".join(result.findings))
     if not result.changed:
         return f"Prompt maintenance changed nothing; the files stay at {plan.measured_tokens} tokens."
     return f"✅ Prompt files condensed from {plan.measured_tokens} to {result.tokens_after} tokens."
