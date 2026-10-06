@@ -31,7 +31,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     // Set up the account (with no plan yet) if the user has no subscription row
-    const setupAccount = async () => {
+    const ensureAccount = async () => {
       // Skip if: not logged in, already has subscription, already setting up,
       // or we've already attempted setup once in this session.
       if (
@@ -65,7 +65,7 @@ export default function DashboardPage() {
       }
     }
 
-    setupAccount()
+    ensureAccount()
   }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, setupAttempted, router])
 
   // Only show loading if we're still loading auth AND have no cached data
