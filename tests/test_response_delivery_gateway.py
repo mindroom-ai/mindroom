@@ -40,6 +40,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
     _segment_transaction_id,
+    _take_published,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -55,6 +56,7 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome, TurnHandoff
 from mindroom.message_target import MessageTarget
+from mindroom.reply_presentation import Presentation
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseAttempt, ResponseSources
@@ -4758,3 +4760,15 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         assert stored.redacted_source_event_ids == ("$source",), "the redaction never reached the database"
         assert stored.response_event_id == "$answer", "the delivered answer lost the event it is stored under"
         assert stored.completed, "a delivered turn came back unfinished"
+
+
+def test_a_published_body_is_remembered_until_a_later_one_is_written_ahead() -> None:
+    """However many newer bodies arrive while one edit is formatted, that edit still finds what it shows."""
+    shows = {f"body-{index}": Presentation(placeholder=f"shown-{index}") for index in range(12)}
+    published = dict(shows)
+
+    assert _take_published(published, "body-3") == shows["body-3"]
+    assert list(published) == [f"body-{index}" for index in range(3, 12)]
+    assert _take_published(published, "body-1") is None
+    assert _take_published(published, "body-11") == shows["body-11"]
+    assert list(published) == ["body-11"]

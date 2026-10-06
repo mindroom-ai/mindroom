@@ -181,8 +181,6 @@ _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
     },
 )
 _SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
-# Whole-reply bodies a progress stream remembers, enough to cover its edits in flight.
-_PUBLISHED_BODIES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,13 +292,33 @@ def _reply_body(
     return body, list(trace) or None
 
 
+def _take_published(published: dict[str, Presentation], body: str) -> Presentation | None:
+    """Return what a published whole-reply body shows, forgetting the bodies published before it.
+
+    The streamer only ever sends its latest state, so once this body is
+    written ahead no earlier one will be.
+    """
+    whole = published.get(body)
+    if whole is None:
+        return None
+    for earlier in list(published):
+        if earlier == body:
+            break
+        del published[earlier]
+    return whole
+
+
 @asynccontextmanager
 async def _whole_reply_progress(
     progress: AbstractAsyncContextManager[ProgressPublisher],
     handle: SpanHandle,
     published: dict[str, Presentation],
 ) -> AsyncIterator[ProgressPublisher]:
-    """Publish the whole reply for each of the span's own publications, remembering what each body shows."""
+    """Publish the whole reply for each of the span's own publications, remembering what each body shows.
+
+    A body stays remembered until a later one is written ahead, which is the
+    only state the streamer sends from then on.
+    """
     async with progress as publish:
 
         async def publish_whole(chunk: StructuredStreamChunk) -> None:
@@ -311,8 +329,6 @@ async def _whole_reply_progress(
             )
             body, trace = render_body(shown)
             published[body] = shown
-            while len(published) > _PUBLISHED_BODIES:
-                del published[next(iter(published))]
             await publish(replace(chunk, content=body, tool_trace=list(trace)))
 
         yield publish_whole
@@ -2469,18 +2485,6 @@ class DeliveryGateway:
                     source_event_id=request.identity.response_envelope.source_event_id,
                 ),
             )
-        delivery_result: dict[str, object] | None = None
-        if request.prepared_edit_record is not None:
-            delivery_result = {"prepared_edit_record": TurnRecordCodec._to_ledger_record(request.prepared_edit_record)}
-        if request.defer_source_handoff:
-            metadata = interactive_response.interactive_metadata
-            add_legacy_final_outcome_marker(delivery_extra_content)
-            delivery_result = {
-                **(delivery_result or {}),
-                "body": display_text,
-                "interactive": metadata.to_metadata() if metadata is not None else None,
-            }
-
         handle = self._live_span()
         reply_write = (
             None
@@ -2491,15 +2495,27 @@ class DeliveryGateway:
                 state=ReplyState.COMPLETED,
             )
         )
+        # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
+        shown_text, _shown_trace = _reply_body(
+            display_text,
+            draft.tool_trace,
+            None if reply_write is None else reply_write.shown,
+        )
+        delivery_result: dict[str, object] | None = None
+        if request.prepared_edit_record is not None:
+            delivery_result = {"prepared_edit_record": TurnRecordCodec._to_ledger_record(request.prepared_edit_record)}
+        if request.defer_source_handoff:
+            metadata = interactive_response.interactive_metadata
+            add_legacy_final_outcome_marker(delivery_extra_content)
+            delivery_result = {
+                **(delivery_result or {}),
+                "body": shown_text,
+                "interactive": metadata.to_metadata() if metadata is not None else None,
+            }
+
         if request.existing_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
-            # What the reply shows is what its outcome reports, earlier spans' work included.
-            shown_text, _shown_trace = _reply_body(
-                display_text,
-                draft.tool_trace,
-                None if reply_write is None else reply_write.shown,
-            )
             try:
                 edited = await self.edit_text(
                     EditTextRequest(
@@ -2994,7 +3010,7 @@ class DeliveryGateway:
         response_attempt: ResponseAttempt,
         completed_edit_record: Callable[[], TurnRecord | None] | None,
         *,
-        published: Mapping[str, Presentation] | None = None,
+        published: dict[str, Presentation] | None = None,
     ) -> dict[str, Any]:
         """Return the streamer callbacks that make a span's stream a durable reply.
 
@@ -3005,7 +3021,7 @@ class DeliveryGateway:
         """
 
         def shown(progress: ProgressState) -> Presentation:
-            whole = None if published is None else published.get(progress.text)
+            whole = None if published is None else _take_published(published, progress.text)
             if whole is not None:
                 return whole
             return handle.presentation(

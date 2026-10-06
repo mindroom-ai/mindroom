@@ -14,7 +14,7 @@ from agno.models.response import ToolExecution
 from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.cancellation import request_task_cancel
-from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.reply_presentation import NoteKind, Segment, decode_presentation, encode_presentation, note_segment
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
@@ -405,6 +405,7 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
         async def claim_below_an_earlier_attempt(runtime: object, *args: object, **kwargs: object) -> object:
             nonlocal resuming
             resuming = True
+
             def below_earlier(current: rl.Reply) -> rl.Transition:
                 shown = decode_presentation(current.presentation)
                 prefixed = encode_presentation(
@@ -436,6 +437,11 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
         assert final.endswith("Approved answer.")
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.COMPLETED
+        # What recovery restores for after-response hooks is what the room shows.
+        frozen = await bot.journal_principal().load_matrix_delivery(delivery_id="$event", stage=DeliveryStage.FINAL)
+        assert frozen is not None
+        assert frozen.result is not None
+        assert frozen.result["body"] == final
 
 
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:

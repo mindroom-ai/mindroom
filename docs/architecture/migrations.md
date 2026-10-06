@@ -100,7 +100,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J15 | Isolated | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] recognizes approvals stranded by historical INITIAL retirement; current owners retain consent, failure handling, and settlement. |
 | J16 | Current behavior | [`turn_store.py`][turn-store] does not migrate ledger tombstones that carry no room, so one that v2026.10.30 or earlier wrote for a redaction delivered in another room still marks its event handled and blocks replies in threads that contain it until ledger retention drops it. |
 | J17 | Current behavior | [`handled_turns.py`][handled] ignores the redaction cleanup obligations that v2026.10.145 or earlier stored in turn records; responses derive history cleanup from the ledger tombstones those records still carry. |
-| J18 | Isolated | [`event_journal/legacy_schema.py`][journal-legacy-schema] gives the outbox reply identity and the `edit` stage in one table rebuild on SQLite and one constraint change on Postgres; existing rows keep no reply identity and stay ordinary deliveries, except an owed earlier-release FINAL, which reply adoption makes its reply's first row. |
+| J18 | Isolated | [`event_journal/legacy_schema.py`][journal-legacy-schema] gives the outbox reply identity and the `edit` stage in one table rebuild on SQLite and one constraint change on Postgres; existing rows keep no reply identity and stay ordinary deliveries, except the rows reply adoption takes over: an owed earlier-release FINAL becomes its reply's first row, and an unacknowledged INITIAL its create. |
 
 ## Agent state, history, memory, and knowledge
 
