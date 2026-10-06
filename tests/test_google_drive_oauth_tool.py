@@ -1094,7 +1094,7 @@ def test_google_drive_read_refuses_binary_content_and_names_enabled_download_fun
 ) -> None:
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
     service.files_resource.file_metadata = {"name": "report.pdf", "mimeType": "application/pdf", "size": "8"}
-    tool._download_bytes = lambda _request: b"%PDF-1.7\xe2\x28\xa1"
+    tool._download_bytes = lambda _request: b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\nstream\nx\x9c\x00\x01"
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
@@ -1119,7 +1119,8 @@ def test_google_drive_read_returns_text_stored_as_octet_stream(tmp_path: Path) -
     assert result["content"] == "name: été"
 
 
-def test_google_drive_read_replaces_undecodable_bytes_in_text_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("name", "mime_type"), [("people.csv", "text/csv"), ("people.xml", "application/xml")])
+def test_google_drive_read_replaces_undecodable_bytes_in_text_files(tmp_path: Path, name: str, mime_type: str) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
@@ -1127,7 +1128,7 @@ def test_google_drive_read_replaces_undecodable_bytes_in_text_files(tmp_path: Pa
         creds=_valid_credentials(),
     )
     service = _FakeDriveService()
-    service.files_resource.file_metadata = {"name": "people.csv", "mimeType": "text/csv", "size": "12"}
+    service.files_resource.file_metadata = {"name": name, "mimeType": mime_type, "size": "12"}
     tool.service = service
     tool._download_bytes = lambda _request: "name\nMüller\n".encode("cp1252")
 

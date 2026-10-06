@@ -476,12 +476,12 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
 
     # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
     # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
-    # store that way, extracts Office text without tables, grouped shapes, or line breaks, and ends errors
-    # with "Use download_file instead." although MindRoom exposes `google_drive_download_file` or disables it.
+    # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
+    # `google_drive_download_file` or disables it. This override decides text by content instead.
     # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10501, open, covers only `.docx` tables.
-    # Remove when: Agno's `read_file` decides text by content rather than MIME type, extracts Office text
-    # completely, and lets a toolkit name its download function; keep MindRoom's function aliases.
+    # Upstream PR: None identified.
+    # Remove when: Agno's `read_file` decides text by content rather than MIME type and lets a toolkit
+    # name its download function; keep MindRoom's function aliases.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_stored_as_octet_stream;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_replaces_undecodable_bytes_in_text_files.
@@ -516,14 +516,11 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 content_bytes = self._download_bytes(request)
 
-            if export_mime or mime_type.startswith("text/"):
-                content = content_bytes.decode("utf-8", errors="replace")
-            else:
-                try:
-                    content = content_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    # PDFs, images, Office files, and other binary formats would reach the model as garbage.
-                    return self._text_read_refusal(mime_type, metadata)
+            # Like git, treat content with a NUL byte as binary: PDFs, images, and Office files would reach
+            # the model as garbage, while text in any encoding or MIME type contains none.
+            if b"\x00" in content_bytes:
+                return self._text_read_refusal(mime_type, metadata)
+            content = content_bytes.decode("utf-8", errors="replace")
             return json.dumps(
                 {
                     "file": metadata,
