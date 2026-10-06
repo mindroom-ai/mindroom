@@ -33,6 +33,8 @@ bun install
 bun run dev -- --host 0.0.0.0 --port 3003
 ```
 
+Plain `bun run dev` listens on `FRONTEND_PORT` (default `3003`); when it is set, use that port instead of `3003` in these dev and screenshot commands.
+
 ## Core Frontend Screenshots
 
 Preferred wrapper:

@@ -19,8 +19,9 @@ Focus on things that require judgment:
 
 1. **Accuracy**: Does the documentation match what the code actually does?
 2. **Completeness**: Are there undocumented features, config options, user-visible behaviors, or operator procedures?
-   Internal limits, hardening, and failure or recovery paths are gaps only when a user would plausibly ask about them.
-3. **Relevance**: Does every sentence pass the Documentation Policy, or does it describe implementation mechanics or change history?
+   In user docs, internal limits, hardening, and failure or recovery paths are gaps only when a user would plausibly ask about them; `docs/architecture/` pages keep their inventories complete.
+3. **Relevance**: Does every sentence in user docs pass the Documentation Policy, or does it describe implementation mechanics or change history?
+   `docs/architecture/` pages and pages outside the nav may explain mechanisms.
 4. **Clarity**: Would a MindRoom agent answering a user question find and apply this? Are examples realistic?
 5. **Consistency**: Do different docs contradict each other or repeat the same fact?
 6. **Freshness**: Has the code changed in ways the docs don't reflect?
