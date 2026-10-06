@@ -101,7 +101,7 @@ _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
 # The router restores runners when it starts and cancels them all when it stops, so
 # runners run on its runtime; a runner on another bot's client outlives that client.
-_runner_owners: list[ScheduledTaskRunnerOwner] = []
+_runner_owner: ScheduledTaskRunnerOwner | None = None
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
 _schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
@@ -331,12 +331,15 @@ class ScheduledTaskRunnerOwner:
 
 def set_scheduled_task_runner_owner(owner: ScheduledTaskRunnerOwner) -> None:
     """Run scheduled tasks on a router that has started."""
-    _runner_owners[:] = [owner]
+    global _runner_owner
+    _runner_owner = owner
 
 
 def clear_scheduled_task_runner_owner(client: nio.AsyncClient) -> None:
     """Stop starting runners on a router that is shutting down."""
-    _runner_owners[:] = [owner for owner in _runner_owners if owner.client is not client]
+    global _runner_owner
+    if _runner_owner is not None and _runner_owner.client is client:
+        _runner_owner = None
 
 
 @dataclass
@@ -631,7 +634,7 @@ def _start_scheduled_task(
 
 def _router_missing_from_room(room_id: str) -> bool:
     """Return whether the running router has not joined the room a new schedule is for."""
-    return bool(_runner_owners) and room_id not in _runner_owners[0].client.rooms
+    return _runner_owner is not None and room_id not in _runner_owner.client.rooms
 
 
 def _start_owned_scheduled_task(
@@ -640,21 +643,21 @@ def _start_owned_scheduled_task(
     config: Config,
     runtime_paths: RuntimePaths,
     config_provider: Callable[[], Config | None] | None = None,
-) -> bool:
-    """Start a runner created outside the router on the router's runtime."""
-    if not _runner_owners:
+) -> None:
+    """Start the runner for a newly saved schedule on the router's runtime."""
+    owner = _runner_owner
+    if owner is None:
         # The pending state is already saved, and the router restores it when it starts.
         logger.info("scheduled_task_runner_deferred_to_router_start", task_id=task_id)
-        return False
-    owner = _runner_owners[0]
-    return _start_scheduled_task(
+        return
+    _start_scheduled_task(
         owner.client,
         task_id,
         workflow,
         config,
         runtime_paths,
         owner.conversation_reader,
-        build_hook_matrix_admin(owner.client, runtime_paths),
+        build_hook_matrix_admin(owner.client, runtime_paths, config=config),
         config_provider=config_provider,
     )
 

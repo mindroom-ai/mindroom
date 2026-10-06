@@ -935,7 +935,6 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         assert state["status"] == "cancelled"
         assert scheduling.ScheduledWorkflow.model_validate_json(state["workflow"]).created_by == "@alice:server"
     finally:
-        scheduling.clear_scheduled_task_runner_owner(client)
         if task is not None and not task.done():
             task.cancel()
             with suppress(asyncio.CancelledError):

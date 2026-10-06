@@ -528,21 +528,18 @@ async def test_schedule_created_by_an_agent_runs_on_the_router_runtime(tmp_path:
     router_client = AsyncMock()
     router_reader = _conversation_reader()
     scheduling.set_scheduled_task_runner_owner(scheduling.ScheduledTaskRunnerOwner(router_client, router_reader))
-    try:
-        with (
-            patch.object(scheduling, "_persist_scheduled_task_state", new=AsyncMock(return_value="revision")),
-            patch.object(scheduling, "_start_scheduled_task", return_value=True) as start,
-        ):
-            await scheduling._save_pending_scheduled_task(
-                client=AsyncMock(),
-                room_id="!test:server",
-                task_id="agent_task",
-                workflow=_pending_once_workflow(),
-                config=Config(),
-                runtime_paths=_test_runtime_paths(tmp_path),
-            )
-    finally:
-        scheduling.clear_scheduled_task_runner_owner(router_client)
+    with (
+        patch.object(scheduling, "_persist_scheduled_task_state", new=AsyncMock(return_value="revision")),
+        patch.object(scheduling, "_start_scheduled_task", return_value=True) as start,
+    ):
+        await scheduling._save_pending_scheduled_task(
+            client=AsyncMock(),
+            room_id="!test:server",
+            task_id="agent_task",
+            workflow=_pending_once_workflow(),
+            config=Config(),
+            runtime_paths=_test_runtime_paths(tmp_path),
+        )
 
     start.assert_called_once()
     assert start.call_args.args[0] is router_client
@@ -578,17 +575,14 @@ async def test_new_schedule_is_refused_in_a_room_the_running_router_has_not_join
     scheduling.set_scheduled_task_runner_owner(
         scheduling.ScheduledTaskRunnerOwner(router_client, _conversation_reader()),
     )
-    try:
-        with patch.object(scheduling, "_persist_scheduled_task_state", new=AsyncMock()) as persist:
-            task_id, message = await schedule_task(
-                runtime=_scheduling_runtime(runtime_paths=_test_runtime_paths(tmp_path)),
-                room_id="!test:server",
-                thread_id=None,
-                scheduled_by="@user:server",
-                full_text="in 5 minutes remind me to stretch",
-            )
-    finally:
-        scheduling.clear_scheduled_task_runner_owner(router_client)
+    with patch.object(scheduling, "_persist_scheduled_task_state", new=AsyncMock()) as persist:
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(runtime_paths=_test_runtime_paths(tmp_path)),
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@user:server",
+            full_text="in 5 minutes remind me to stretch",
+        )
 
     assert task_id is None
     assert message == scheduling._ROUTER_MISSING_SCHEDULE_ERROR
@@ -601,12 +595,10 @@ def test_stopping_router_generation_keeps_its_replacement_as_runner_owner() -> N
     retired_client = AsyncMock()
     replacement = scheduling.ScheduledTaskRunnerOwner(AsyncMock(), _conversation_reader())
     scheduling.set_scheduled_task_runner_owner(replacement)
-    try:
-        scheduling.clear_scheduled_task_runner_owner(retired_client)
-        assert scheduling._runner_owners == [replacement]
-    finally:
-        scheduling.clear_scheduled_task_runner_owner(replacement.client)
-    assert scheduling._runner_owners == []
+    scheduling.clear_scheduled_task_runner_owner(retired_client)
+    assert scheduling._runner_owner is replacement
+    scheduling.clear_scheduled_task_runner_owner(replacement.client)
+    assert scheduling._runner_owner is None
 
 
 @pytest.mark.asyncio
@@ -2784,7 +2776,7 @@ async def test_schedule_task_persists_via_admin_when_active_agent_lacks_state_po
         ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch("mindroom.scheduling._start_scheduled_task", return_value=True),
+        patch("mindroom.scheduling._start_owned_scheduled_task"),
         patch("mindroom.scheduling.uuid.uuid4", return_value="task1234"),
     ):
         task_id, message = await schedule_task(
@@ -2854,7 +2846,7 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
         ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch("mindroom.scheduling._start_scheduled_task", return_value=True),
+        patch("mindroom.scheduling._start_owned_scheduled_task"),
         patch("mindroom.scheduling.uuid.uuid4", return_value="task1234"),
     ):
         task_id, message = await schedule_task(
@@ -2924,7 +2916,7 @@ async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) 
         ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch("mindroom.scheduling._start_scheduled_task", return_value=True),
+        patch("mindroom.scheduling._start_owned_scheduled_task"),
         patch("mindroom.scheduling.uuid.uuid4", return_value="task1234"),
     ):
         task_id, message = await schedule_task(
@@ -2998,7 +2990,7 @@ async def test_schedule_task_returns_error_when_state_write_fails_without_admin_
         ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch("mindroom.scheduling._start_scheduled_task", return_value=True) as start_task,
+        patch("mindroom.scheduling._start_owned_scheduled_task") as start_task,
         patch("mindroom.scheduling.uuid.uuid4", return_value="taskfail"),
     ):
         task_id, message = await schedule_task(
@@ -3072,7 +3064,7 @@ async def test_schedule_task_returns_error_when_active_write_returns_unexpected_
         ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch("mindroom.scheduling._start_scheduled_task", return_value=True) as start_task,
+        patch("mindroom.scheduling._start_owned_scheduled_task") as start_task,
         patch("mindroom.scheduling.uuid.uuid4", return_value="taskweird"),
     ):
         task_id, message = await schedule_task(
@@ -3269,7 +3261,7 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
             "mindroom.scheduling._parse_workflow_schedule",
             new=AsyncMock(side_effect=lambda *_args, **_kwargs: workflow.model_copy(deep=True)),
         ),
-        patch("mindroom.scheduling._start_scheduled_task", return_value=True),
+        patch("mindroom.scheduling._start_owned_scheduled_task"),
         patch("mindroom.scheduling.uuid.uuid4", return_value="task1234"),
     ):
         task_id, message = await schedule_task(

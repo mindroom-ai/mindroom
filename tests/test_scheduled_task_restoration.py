@@ -427,7 +427,7 @@ class TestScheduledTaskRestoration:
             await router_bot.stop()
 
         assert drain_task.cancelled()
-        assert scheduling._runner_owners == []
+        assert scheduling._runner_owner is None
         mock_clear.assert_called_once_with()
         mock_cancel.assert_awaited_once()
         router_bot.client.close.assert_awaited_once()

@@ -522,13 +522,11 @@ class TestBotTaskRestoration:
                 mock_restore.return_value = 2  # 2 tasks restored
 
                 await bot.start()
-                try:
-                    # Runners that agents create run on the started router's client.
-                    assert scheduling._runner_owners == [
-                        scheduling.ScheduledTaskRunnerOwner(mock_client, bot._conversation_reader),
-                    ]
-                finally:
-                    scheduling.clear_scheduled_task_runner_owner(mock_client)
+                # Runners that agents create run on the started router's client.
+                assert scheduling._runner_owner == scheduling.ScheduledTaskRunnerOwner(
+                    mock_client,
+                    bot._conversation_reader,
+                )
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 
