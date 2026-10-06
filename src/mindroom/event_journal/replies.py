@@ -526,18 +526,6 @@ class ReplyStore:
 
         return await self._backend.write(write)
 
-    async def record_stop(self, *, event_id: str, receipt_order: int, newer_edit: bool) -> AppliedTransition | None:
-        """Record a Stop on the reply bound to one event."""
-        return await self._backend.write(
-            lambda transaction: record_stop(
-                transaction,
-                self._principal_id,
-                event_id=event_id,
-                receipt_order=receipt_order,
-                newer_edit=newer_edit,
-            ),
-        )
-
     async def with_pending_work(self) -> tuple[Reply, ...]:
         """Return replies owing a redaction or a note not yet enqueued."""
         return await self._backend.read(

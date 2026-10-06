@@ -71,9 +71,10 @@ from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal.backend import Transaction
 
 
 async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent") -> TurnStore:
@@ -200,6 +201,7 @@ async def test_load_turn_waits_for_requested_provisional_write_without_blocking_
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
+        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         if "$event" in index_event_ids:
             write_started.set()
@@ -209,6 +211,7 @@ async def test_load_turn_waits_for_requested_provisional_write_without_blocking_
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
+            also=also,
         )
 
     with (
@@ -274,6 +277,7 @@ async def test_load_turn_imports_recovery_after_requested_provisional_write_fail
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
+        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         nonlocal selected_write
         if selected_write and "$event" in index_event_ids:
@@ -287,6 +291,7 @@ async def test_load_turn_imports_recovery_after_requested_provisional_write_fail
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
+            also=also,
         )
 
     with (
@@ -334,6 +339,7 @@ async def test_cancelling_provisional_load_does_not_cancel_owning_write(
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
+        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         write_started.set()
         await release_write.wait()
@@ -342,6 +348,7 @@ async def test_cancelling_provisional_load_does_not_cancel_owning_write(
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
+            also=also,
         )
 
     with (

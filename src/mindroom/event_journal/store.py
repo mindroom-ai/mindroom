@@ -2597,17 +2597,27 @@ class TurnRecordStore:
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
+        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
-        """Store a record and return its committed state, or reject a changed owner."""
-        return await self._backend.write(
-            lambda transaction: turn_records.write_record(
+        """Store a record and return its committed state, or reject a changed owner.
+
+        ``also`` runs in the same transaction when the write takes effect, for
+        state that must commit with the record or not at all.
+        """
+
+        def write(transaction: Transaction) -> str | None:
+            committed = turn_records.write_record(
                 transaction,
                 self._agent_name,
                 index_event_ids=index_event_ids,
                 anchor_event_id=anchor_event_id,
                 record_json=record_json,
-            ),
-        )
+            )
+            if committed is not None and also is not None:
+                also(transaction)
+            return committed
+
+        return await self._backend.write(write)
 
     async def adopt_missing(
         self,

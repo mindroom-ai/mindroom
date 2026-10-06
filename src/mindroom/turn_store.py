@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.event_journal import RelationView
+    from mindroom.event_journal.backend import Transaction
     from mindroom.event_journal.store import TurnRecordStore
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -543,6 +544,8 @@ class TurnStore:
         self,
         response_event_id: str,
         update: Callable[[TurnRecord], TurnRecord],
+        *,
+        also: Callable[[Transaction, TurnRecord], object] | None = None,
     ) -> TurnRecord | None:
         """Durably update the sole turn that owns one visible response."""
         turn_record = self.turn_record_for_response_event_id(response_event_id)
@@ -563,6 +566,7 @@ class TurnStore:
         return await self._ledger.update_handled_turn(
             turn_record.indexed_event_ids,
             updated_record,
+            also=also,
         )
 
     async def record_user_stopped_response(
@@ -572,6 +576,7 @@ class TurnStore:
         *,
         delivery_settled: bool = False,
         deleted_turn_id: str | None = None,
+        also: Callable[[Transaction, TurnRecord], object] | None = None,
     ) -> TurnRecord | None:
         """Terminate a visible response, or its exact retired INITIAL proven by the delivery owner."""
         if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
@@ -601,7 +606,11 @@ class TurnStore:
                         response_event_id=None,
                     )
 
-                return await self._ledger.update_handled_turn(turn_record.indexed_event_ids, stopped_deleted_record)
+                return await self._ledger.update_handled_turn(
+                    turn_record.indexed_event_ids,
+                    stopped_deleted_record,
+                    also=also,
+                )
         if turn_record is None:
             return None
 
@@ -613,7 +622,7 @@ class TurnStore:
                 delivery_settled=delivery_settled,
             )
 
-        return await self._update_response_turn(response_event_id, stopped_record)
+        return await self._update_response_turn(response_event_id, stopped_record, also=also)
 
     def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether these sources already own an incomplete response attempt."""

@@ -286,6 +286,11 @@ class MatrixDeliveryWorker:
         event_id = await self._finish_flush(enqueued.delivery_id, outcome)
         return ReplyRowDelivery(enqueue=enqueued, event_id=event_id)
 
+    async def send_reply_rows(self, reply_id: str) -> bool:
+        """Send a reply's owed rows in write order; return whether none is left unknown."""
+        async with self._delivery_lock(reply_lock_key(reply_id)):
+            return await self._flush_reply_rows(reply_id)
+
     async def _flush_reply_rows(self, reply_id: str, *, before_sequence: int | None = None) -> bool:
         """Resolve a reply's earlier rows in write order; return whether none is left unknown.
 

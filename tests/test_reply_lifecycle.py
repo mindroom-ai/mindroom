@@ -701,6 +701,40 @@ def test_pause_in_place_keeps_the_span_current_and_resumes_in_place() -> None:
     assert resumed.reply.state is ReplyState.ACTIVE
 
 
+def test_a_resume_that_waited_in_place_stays_stoppable_through_its_approval() -> None:
+    """The resume keeps its approval's hold after an in-place decision, so a Stop fences that approval."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.PAUSED)
+    reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1", event_id="$reply")
+    resume = rl.claim(_request("span-2", approval_id="approval-1", approval_generation=1), _context(reply, span))
+    assert resume.reply is not None
+    assert resume.claimed is not None
+    waiting = rl.pause(
+        resume.reply,
+        resume.claimed,
+        rl.PauseWrite(shown="again", prepared_revision=resume.reply.revision, stage=WriteStage.EDIT),
+        approval_id="approval-1",
+        in_place=True,
+        now_ns=NOW,
+    )
+    assert waiting.reply is not None
+    resumed = rl.resumed_in_place(waiting.reply, resume.claimed, approval_id="approval-1", now_ns=NOW)
+    assert resumed.reply is not None
+    assert resumed.reply.state is ReplyState.ACTIVE
+    assert resumed.reply.approval_id == "approval-1"
+    stop = rl.stop(
+        resumed.reply,
+        resume.claimed,
+        StopFacts(receipt_order=9, newer_edit=False, span_live=True),
+        now_ns=NOW,
+    )
+    assert stop.effects == (
+        FenceApproval("approval-1", "cancelled_by_user"),
+        CancelSpan(resume.claimed.span_id),
+        WakeApproval("approval-1"),
+    )
+
+
 def test_pause_with_an_unapplied_stop_defers_to_the_stop_path() -> None:
     """A Stop recorded before the pause wins."""
     reply, span = _turn()

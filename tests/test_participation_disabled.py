@@ -6,6 +6,7 @@ import asyncio
 import json
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -17,10 +18,11 @@ from openai import AsyncOpenAI
 
 from mindroom import agno_compat_session_persistence as persistence
 from mindroom.agent_storage import get_agent_session
-from mindroom.cancellation import request_task_cancel
 from mindroom.openai_models import MindRoomOpenAIChat
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.turn_policy import ResponseAction
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.bot_helpers import (
     AgentBotTestBase,
     _make_matrix_client_mock,
@@ -247,11 +249,21 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
         try:
             async with asyncio.timeout(5):
                 await entered.wait()
+                stop = None
                 if scenario == "cancel":
-                    # The Stop reconciler records a Stop on the reply before the stop manager cancels its task.
-                    assert await bot._delivery_gateway.record_reply_stop("$response", 1, newer_edit=False)
-                    request_task_cancel(task, cancel_source="user_stop")
+                    # A Stop reaction on the visible reply: the turn and the reply record it together.
+                    turn = bot._turn_store.attach_response_context(
+                        TurnRecord.create(["$event"], requester_id="@user:localhost"),
+                        history_scope=bot._turn_store.response_history_scope(ResponseAction(kind="individual")),
+                        conversation_target=envelope.target,
+                    )
+                    await bot._turn_store.record_pending_turn(
+                        canonicalize_turn_record(turn, response_event_id="$response"),
+                    )
+                    stop = asyncio.create_task(bot._user_stop_reconciler.finalize("$response", 1, AsyncMock()))
                 assert await task == "$response"
+                if stop is not None:
+                    assert await stop
         finally:
             if not task.done():
                 task.cancel()

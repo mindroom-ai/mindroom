@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.bot import AgentBot
+    from mindroom.delivery_gateway import ReplyStop
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -2792,6 +2793,7 @@ class TestAgentBot(AgentBotTestBase):
             *,
             delivery_settled: bool = False,
             deleted_turn_id: str | None = None,
+            reply_stop: ReplyStop | None = None,
         ) -> TurnRecord:
             nonlocal alias_claimed
             if not alias_claimed:
@@ -2808,6 +2810,7 @@ class TestAgentBot(AgentBotTestBase):
                 stop_receipt_order,
                 delivery_settled=delivery_settled,
                 deleted_turn_id=deleted_turn_id,
+                reply_stop=reply_stop,
             )
 
         on_current_stop_finalized = AsyncMock()

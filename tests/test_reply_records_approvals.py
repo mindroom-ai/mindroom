@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -16,7 +17,15 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, Response
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _noop_typing, _plain_request, _target
-from tests.test_reply_records_turns import _regeneration, _reply, _sent_bodies, _streaming_bot
+from tests.test_reply_records_turns import (
+    _FlakyHomeserver,
+    _regeneration,
+    _reply,
+    _sent_bodies,
+    _stop,
+    _streaming_bot,
+    _turn_with_response,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -129,17 +138,11 @@ async def test_a_pause_waiting_for_a_human_leaves_the_reply_paused(tmp_path: Pat
 
 
 async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: Path) -> None:
-    """A Stop fences the approval in its own transaction; the settlement shows the note and ends the reply."""
+    """A Stop fences the approval with the turn's durable Stop; the settlement shows the note and ends the reply."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
-        assert await bot._delivery_gateway.record_reply_stop("$sent1", 5, newer_edit=False)
-        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
-        assert continuation is not None
-        assert continuation.state == "failing"
-        assert continuation.failure_reason == "cancelled_by_user"
-
-        runner = unwrap_extracted_collaborator(bot._response_runner)
-        assert await runner._approval_responses.settle_failure(continuation, "cancelled_by_user")
+        stop = await _stop(bot, "$sent1", 5)
+        assert await asyncio.wait_for(stop, timeout=5)
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED
@@ -276,3 +279,49 @@ async def test_a_regeneration_of_a_paused_reply_may_pause_again(tmp_path: Path) 
             (rl.SpanKind.REGENERATION, rl.SpanOutcome.PAUSED),
         ]
         assert _sent_bodies(bot)[-1] == "Rereading"
+
+
+async def test_a_failure_note_that_could_not_be_sent_is_resent_not_written_again(tmp_path: Path) -> None:
+    """Settlement retries resend the one note row it recorded, then finish the reply."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        await _respond(bot)
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
+        assert continuation is not None
+        failing = await runner._approval_responses.request_failure(continuation, "Card publication failed")
+        assert failing is not None
+        before = (await _reply(bot)).reply_sequence
+
+        flaky = _FlakyHomeserver(failures=2)
+        with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
+            assert not await runner._approval_responses.settle_failure(failing, "Card publication failed")
+            assert not await runner._approval_responses.settle_failure(failing, "Card publication failed")
+            assert await runner._approval_responses.settle_failure(failing, "Card publication failed")
+
+        reply = await _reply(bot)
+        assert reply.state is rl.ReplyState.FAILED
+        assert reply.reply_sequence == before + 1
+        assert reply.confirmed_seq == reply.reply_sequence
+        assert _sent_bodies(bot)[-1] == "Card publication failed"
+
+
+async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path) -> None:
+    """A Stop that lands while a failed approval settles makes its note the cancellation, as its state is."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        await _respond(bot)
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
+        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
+        assert continuation is not None
+        failing = await runner._approval_responses.request_failure(continuation, "Card publication failed")
+        assert failing is not None
+        # The Stop commits with the turn record, before this settlement writes its note.
+        await _turn_with_response(bot, "$sent1")
+        stop = gateway.reply_stop("$sent1", 5)
+        assert await bot._turn_store.record_user_stopped_response("$sent1", 5, also=stop) is not None
+
+        assert await runner._approval_responses.settle_failure(failing, "Card publication failed")
+
+        reply = await _reply(bot)
+        assert reply.state is rl.ReplyState.CANCELLED
+        assert _sent_bodies(bot)[-1] == "**[Response cancelled by user]**"

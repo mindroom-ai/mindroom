@@ -16,7 +16,8 @@ from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliver
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_policy import ResponseAction
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target
@@ -66,6 +67,30 @@ async def _reply(bot: AgentBot) -> rl.Reply:
 
 async def _span_outcomes(bot: AgentBot, reply: rl.Reply) -> list[rl.SpanOutcome | None]:
     return [span.outcome for span in await bot._reply_runtime.store.replies.spans(reply.reply_id)]
+
+
+async def _turn_with_response(bot: AgentBot, event_id: str) -> None:
+    """Record the turn that the reply showing ``event_id`` answers, as ingress and its placeholder do."""
+    turn = bot._turn_store.attach_response_context(
+        TurnRecord.create(["$event"], requester_id="@user:localhost"),
+        history_scope=bot._turn_store.response_history_scope(ResponseAction(kind="individual")),
+        conversation_target=_target(),
+    )
+    await bot._turn_store.record_pending_turn(canonicalize_turn_record(turn, response_event_id=event_id))
+
+
+async def _stop(bot: AgentBot, event_id: str, receipt_order: int) -> asyncio.Task[bool]:
+    """Start a Stop on the reply showing ``event_id``, as a Stop reaction does: through the turn's durable Stop."""
+    await _turn_with_response(bot, event_id)
+    stop = asyncio.create_task(bot._user_stop_reconciler.finalize(event_id, receipt_order, AsyncMock()))
+
+    async def recorded() -> None:
+        # The reply's record is the only observable the Stop commits before it waits for the lock.
+        while (await _reply(bot)).stop_receipt_order != receipt_order:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(recorded(), timeout=5)
+    return stop
 
 
 def _sent_bodies(bot: AgentBot) -> list[str]:
@@ -152,8 +177,9 @@ async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: 
         await asyncio.wait_for(streaming.wait(), timeout=5)
         reply = await _reply(bot)
         assert reply.event_id is not None
-        assert await bot._delivery_gateway.record_reply_stop(reply.event_id, 7, newer_edit=False)
+        stop = await _stop(bot, reply.event_id, 7)
         await asyncio.wait_for(response, timeout=5)
+        assert await asyncio.wait_for(stop, timeout=5)
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.CANCELLED
@@ -488,9 +514,10 @@ async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_
     ):
         response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
         await asyncio.wait_for(preparing.wait(), timeout=5)
-        assert await bot._delivery_gateway.record_reply_stop("$sent1", 7, newer_edit=False)
+        stop = await _stop(bot, "$sent1", 7)
         release.set()
         await asyncio.wait_for(response, timeout=5)
+        assert await asyncio.wait_for(stop, timeout=5)
 
     model.assert_not_awaited()
     reply = await _reply(bot)

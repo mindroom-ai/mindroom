@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.delivery_gateway import DeliveryGateway, ReplyStop
     from mindroom.handled_turns import TurnRecord
     from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
@@ -42,12 +42,14 @@ class UserStopReconciler:
         *,
         delivery_settled: bool = False,
         deleted_turn_id: str | None = None,
+        reply_stop: ReplyStop | None = None,
     ) -> TurnRecord:
         stopped = await self.deps.turn_store.record_user_stopped_response(
             response_event_id,
             stop_receipt_order,
             delivery_settled=delivery_settled,
             deleted_turn_id=deleted_turn_id,
+            also=reply_stop,
         )
         if (
             stopped is None
@@ -116,15 +118,18 @@ class UserStopReconciler:
         owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
         if owner is not None and owner.conversation_target is None:
             return False
+        # The reply's records learn the Stop in the transaction that records it on
+        # the turn, so no terminal row can slip between the two, and before its
+        # span is cancelled, so the span's exit renders the cancellation.
+        reply_stop = self.deps.delivery_gateway.reply_stop(response_event_id, stop_receipt_order)
         async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
-            stopped_turn = await self._record(response_event_id, stop_receipt_order, deleted_turn_id=deleted_turn_id)
-        # The reply's records learn the Stop before its span is cancelled, so the
-        # span's exit renders the cancellation rather than an error.
-        reply_owned = await self.deps.delivery_gateway.record_reply_stop(
-            response_event_id,
-            stop_receipt_order,
-            newer_edit=(stopped_turn.latest_edit_receipt_order or 0) > stop_receipt_order,
-        )
+            stopped_turn = await self._record(
+                response_event_id,
+                stop_receipt_order,
+                deleted_turn_id=deleted_turn_id,
+                reply_stop=reply_stop,
+            )
+        reply_owned = await self.deps.delivery_gateway.finish_reply_stop(reply_stop)
         target = stopped_turn.conversation_target
         if target is None:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"

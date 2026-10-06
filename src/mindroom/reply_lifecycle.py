@@ -1241,9 +1241,11 @@ def resumed_in_place(reply: Reply, span: Span, *, approval_id: str, now_ns: int)
         return stale
     if reply.state is not ReplyState.PAUSED or reply.approval_id != approval_id:
         return _unchanged(Outcome.STALE, reply)
+    # A resume that waited in place still runs for its approval, which a Stop must fence.
+    hold = approval_id if span.kind is SpanKind.APPROVAL_RESUME else None
     return Transition(
         outcome=Outcome.APPLIED,
-        reply=_set_state(reply, ReplyState.ACTIVE, now_ns, approval_id=None),
+        reply=_set_state(reply, ReplyState.ACTIVE, now_ns, approval_id=hold),
     )
 
 

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal.backend import Transaction
 
 
 def _ledger(
@@ -1055,9 +1056,10 @@ class _FailingWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
+        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         """Hold the write open, then fail it, leaving the database untouched."""
-        _ = (index_event_ids, anchor_event_id, record_json)
+        _ = (index_event_ids, anchor_event_id, record_json, also)
         self.started.set()
         await self.released.wait()
         msg = "the journal refused the record"
@@ -1112,6 +1114,7 @@ class _CommittingWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
+        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         """Hold the write open, then let it land exactly as the real one would."""
         self.started.set()
@@ -1121,6 +1124,7 @@ class _CommittingWriteStore(TurnRecordStore):
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
+            also=also,
         )
 
 
@@ -1138,6 +1142,7 @@ class _DelayedFirstWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
+        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         """Let the test decide the first selected write's definite outcome."""
         if "$slow" in index_event_ids and not self.started.is_set():
@@ -1151,6 +1156,7 @@ class _DelayedFirstWriteStore(TurnRecordStore):
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
+            also=also,
         )
 
 

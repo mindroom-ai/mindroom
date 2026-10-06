@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from collections import ChainMap
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
@@ -31,7 +31,14 @@ from mindroom.event_journal import (
     thread_root,
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY, UnreadableMatrixDelivery
-from mindroom.event_journal.replies import ReplyRowEnqueue, ReplyRowRequest, edit_delivery_id, row_new_text
+from mindroom.event_journal.replies import (
+    AppliedTransition,
+    ReplyRowEnqueue,
+    ReplyRowRequest,
+    edit_delivery_id,
+    row_new_text,
+)
+from mindroom.event_journal.replies import record_stop as record_reply_stop_in
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
@@ -145,6 +152,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.event_journal.backend import Transaction
     from mindroom.event_journal.replies import Decide
     from mindroom.history.types import (
         CompactionLifecycleFailure,
@@ -218,6 +226,27 @@ def _refused_reply_outcome(
         tool_trace=tuple(draft.tool_trace or ()),
         extra_content=draft.extra_content,
     )
+
+
+@dataclass
+class ReplyStop:
+    """A Stop on the reply bound to one event, applied inside the turn record's Stop transaction."""
+
+    principal_id: str
+    event_id: str
+    receipt_order: int
+    # Set when a reply owns the event and the transaction committed.
+    applied: AppliedTransition | None = None
+
+    def __call__(self, transaction: Transaction, record: TurnRecord) -> None:
+        """Record the Stop on the reply, a Duplicate when a newer edit superseded it."""
+        self.applied = record_reply_stop_in(
+            transaction,
+            self.principal_id,
+            event_id=self.event_id,
+            receipt_order=self.receipt_order,
+            newer_edit=(record.latest_edit_receipt_order or 0) > self.receipt_order,
+        )
 
 
 # What a failed approval's note says (DESIGN.md §10).
@@ -1787,11 +1816,24 @@ class DeliveryGateway:
             span = await self.deps.outbox.replies.span(reply.last_span_id)
             assert span is not None, "a reply's last span exists"
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
+            if final is not None:
+                # An earlier settlement recorded the note; a retry resends it rather than writing another.
+                if final.acknowledged_event_id is None and not final.permanently_failed:
+                    with suppress(_DeliveryRefusedError):
+                        await self._recovery_worker().send_reply_rows(reply.reply_id)
+                    final = await self.deps.outbox.load_matrix_delivery(
+                        delivery_id=span.delivery_id,
+                        stage=DeliveryStage.FINAL,
+                    )
+                return final is not None and (final.acknowledged_event_id is not None or final.permanently_failed)
+            if reply.unapplied_stop:
+                # A Stop recorded meanwhile decides the note, as the finish decides the state.
+                reason, note = "cancelled", note_segment(NoteKind.CANCELLED)
             shown_before = _shown_before(reply, None)
             if reason in {"cancelled", "error"}:
                 shown_before = replace(shown_before, segments=())
             shown = with_trailing_note(shown_before, note)
-            write = approval_note_write(reply, span, shown, approval_id=approval_id, span_has_final=final is not None)
+            write = approval_note_write(reply, span, shown, approval_id=approval_id, span_has_final=False)
             state = ReplyState.CANCELLED.value if reason == "cancelled" else ReplyState.FAILED.value
             rendered = render(shown, WriteKind.TERMINAL, state=state)
             try:
@@ -1831,21 +1873,16 @@ class DeliveryGateway:
         await self.settle_reply_debt(reply.reply_id)
         return True
 
-    async def record_reply_stop(self, event_id: str, receipt_order: int, *, newer_edit: bool) -> bool:
-        """Record a Stop on the reply bound to one event; return whether a reply owns that event.
+    def reply_stop(self, event_id: str, receipt_order: int) -> ReplyStop:
+        """Return the Stop on a reply that commits with the turn record's Stop (PR-1.md §4.3)."""
+        return ReplyStop(principal_id=self.deps.outbox.principal_id, event_id=event_id, receipt_order=receipt_order)
 
-        A live span is cancelled after the commit and writes its own cancelled
-        row; a reply with no running span is cancelled here and gets its note.
-        """
-        applied = await self.deps.outbox.replies.record_stop(
-            event_id=event_id,
-            receipt_order=receipt_order,
-            newer_edit=newer_edit,
-        )
-        if applied is None:
+    async def finish_reply_stop(self, stop: ReplyStop) -> bool:
+        """Run what a committed Stop left, cancelling the span or owing the note; return whether a reply owns it."""
+        if stop.applied is None:
             return False
-        await self._run_reply_effects(applied.post_commit)
-        reply = applied.transition.reply
+        await self._run_reply_effects(stop.applied.post_commit)
+        reply = stop.applied.transition.reply
         if reply is not None:
             await self.settle_reply_debt(reply.reply_id)
         return True

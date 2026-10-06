@@ -59,6 +59,7 @@ if typing.TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
     from pathlib import Path
 
+    from mindroom.event_journal.backend import Transaction
     from mindroom.event_journal.store import TurnRecordStore
 
 logger = get_logger(__name__)
@@ -576,6 +577,8 @@ class HandledTurnLedger:
         self,
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord | None],
+        *,
+        also: Callable[[Transaction, TurnRecord], object] | None = None,
     ) -> TurnRecord | None:
         """Persist an update, serializing mutations of related identities.
 
@@ -633,6 +636,7 @@ class HandledTurnLedger:
                     index_event_ids=persisted_record.indexed_event_ids,
                     anchor_event_id=persisted_record.anchor_event_id,
                     record_json=json.dumps(TurnRecordCodec._to_ledger_record(persisted_record)),
+                    also=None if also is None else _bound_to(also, persisted_record),
                 ),
             )
             try:
@@ -1123,3 +1127,11 @@ def _response_groups(responses: dict[str, TurnRecord]) -> list[_ResponseGroup]:
         ),
         key=lambda group: group.timestamp,
     )
+
+
+def _bound_to(
+    also: Callable[[Transaction, TurnRecord], object],
+    record: TurnRecord,
+) -> Callable[[Transaction], object]:
+    """Return a record write's companion step, told which record it commits with."""
+    return lambda transaction: also(transaction, record)
