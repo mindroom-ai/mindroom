@@ -6,7 +6,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from google.api_core.exceptions import BadRequest, GoogleAPICallError
+from google.api_core.exceptions import BadRequest, GoogleAPIError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
@@ -24,7 +24,8 @@ _MAX_ERROR_DETAIL = 500
 _DEFAULT_MAX_ROWS = 100
 _MAX_ROWS_LIMIT = 1000
 _MAX_LISTED_TABLES = 1000
-_READ_ONLY_KEYWORDS = frozenset({"select", "with"})
+# A query may open with parentheses, as in `(SELECT 1) UNION ALL (SELECT 2)`, but must start with SELECT or WITH.
+_READ_ONLY_START = re.compile(r"[\s(]*(select|with)\b", re.IGNORECASE)
 _MAX_STRING_PREFIX = 2
 # The SQL lexer ends a single-line comment at either kind of line break.
 _LINE_END = re.compile(r"[\r\n]")
@@ -91,7 +92,7 @@ def _statement_text(sql: str) -> str | None:
 
 
 def _is_read_only_select(sql: str) -> bool:
-    """Return whether sql is exactly one statement starting with SELECT or WITH."""
+    """Return whether sql is exactly one statement starting with SELECT or WITH, optionally inside parentheses."""
     text = _statement_text(sql)
     if text is None:
         return False
@@ -100,8 +101,7 @@ def _is_read_only_select(sql: str) -> bool:
         body = body[:-1].rstrip()
     if not body or ";" in body:
         return False
-    first_word = body.split(None, 1)[0].lower()
-    return first_word in _READ_ONLY_KEYWORDS
+    return _READ_ONLY_START.match(body) is not None
 
 
 def _coerce_max_rows(value: object) -> int:
@@ -183,7 +183,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         try:
             tables = self._client().list_tables(f"{self.project}.{self.dataset}", max_results=_MAX_LISTED_TABLES)
             return json.dumps({"tables": [table.table_id for table in tables]})
-        except GoogleAPICallError as exc:
+        except GoogleAPIError as exc:
             return self._google_cloud_error_result(_SERVICE_NAME, "list_tables", exc)
 
     def describe_table(self, table_id: str) -> str:
@@ -196,9 +196,14 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             JSON with the table description and each column's name, type, mode and description.
 
         """
+        client = self._client()
         try:
-            table = self._client().get_table(f"{self.project}.{self.dataset}.{table_id}")
-        except GoogleAPICallError as exc:
+            table = client.get_table(f"{self.project}.{self.dataset}.{table_id}")
+        except ValueError:
+            # The client library rejects a table ID that does not parse as a single table name.
+            return json.dumps({"error": "Invalid table_id"})
+        except GoogleAPIError as exc:
+            # GoogleAPIError also covers RetryError, whose text can carry provider messages.
             return self._google_cloud_error_result(_SERVICE_NAME, "describe_table", exc)
         columns = [
             {"name": field.name, "type": field.field_type, "mode": field.mode, "description": field.description}
@@ -235,7 +240,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             detail = str(exc.message)[:_MAX_ERROR_DETAIL]
             error = self._google_cloud_error_result(_SERVICE_NAME, "run_sql_query", exc)
             return json.dumps({"error": f"{json.loads(error)['error']}: {detail}"})
-        except GoogleAPICallError as exc:
+        except GoogleAPIError as exc:
             return self._google_cloud_error_result(_SERVICE_NAME, "run_sql_query", exc)
         truncated = len(records) > self.max_rows
         return json.dumps(

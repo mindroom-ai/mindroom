@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from google.api_core import exceptions as google_exceptions
+from google.cloud import bigquery
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
@@ -55,10 +56,16 @@ class _FakeClient:
         return _FakeRows(self.rows[:limit], ["n"])
 
     def list_tables(self, dataset: str, **kwargs: Any) -> list[SimpleNamespace]:  # noqa: ANN401
+        if self.error is not None:
+            raise self.error
         self.queries.append({"list_tables": dataset, **kwargs})
         return [SimpleNamespace(table_id="events"), SimpleNamespace(table_id="users")]
 
     def get_table(self, table_ref: str) -> SimpleNamespace:
+        if self.error is not None:
+            raise self.error
+        # The real client parses the ID first and raises ValueError for a malformed one.
+        bigquery.TableReference.from_string(table_ref)
         self.queries.append({"get_table": table_ref})
         field = SimpleNamespace(name="n", field_type="INTEGER", mode="NULLABLE", description="count")
         return SimpleNamespace(description="Event counts", schema=[field])
@@ -98,6 +105,10 @@ def _tool(tmp_path: Path, **kwargs: Any) -> tuple[GoogleBigQueryTools, _FakeClie
         "SELECT r'C:\\path;x' AS s",
         "SELECT 'it\\'s; fine' AS s",
         "SELECT '''a\\'''; DELETE FROM t; ''' AS s",
+        "SELECT(1)",
+        "SELECT*FROM t",
+        "(SELECT 1) UNION ALL (SELECT 2)",
+        "( WITH a AS (SELECT 1) SELECT * FROM a )",
     ],
 )
 def test_read_only_guard_accepts_single_select_statements(sql: str) -> None:
@@ -124,6 +135,9 @@ def test_read_only_guard_accepts_single_select_statements(sql: str) -> None:
         "SELECT r'\\' , '; DELETE FROM t; --'",
         "SELECT `a\\` , `; DELETE FROM t; --`",
         "SELECT 1 -- note\r; DELETE FROM t",
+        "(DELETE FROM t WHERE true)",
+        "SELECTX 1",
+        "(SELECT 1); DELETE FROM t WHERE true",
     ],
 )
 def test_read_only_guard_rejects_everything_else(sql: str) -> None:
@@ -169,6 +183,32 @@ def test_run_sql_query_hides_other_provider_text(tmp_path: Path) -> None:
     result = tool.run_sql_query("SELECT 1")
 
     assert json.loads(result) == {"error": "Google BigQuery request failed (HTTP 403)"}
+
+
+@pytest.mark.parametrize("operation", ["list_tables", "describe_table", "run_sql_query"])
+def test_retry_error_reports_status_only_without_provider_text(tmp_path: Path, operation: str) -> None:
+    tool, client = _tool(tmp_path)
+    client.error = google_exceptions.RetryError("Deadline exceeded", cause=ValueError("provider-controlled-secret"))
+    calls = {
+        "list_tables": lambda: tool.list_tables(),
+        "describe_table": lambda: tool.describe_table("events"),
+        "run_sql_query": lambda: tool.run_sql_query("SELECT 1"),
+    }
+
+    result = calls[operation]()
+
+    assert json.loads(result) == {"error": "Google BigQuery request failed"}
+    assert "provider-controlled" not in result
+
+
+@pytest.mark.parametrize("table_id", ["events.other", "a.b.c"])
+def test_describe_table_reports_malformed_table_id(tmp_path: Path, table_id: str) -> None:
+    tool, client = _tool(tmp_path)
+
+    result = json.loads(tool.describe_table(table_id))
+
+    assert result == {"error": "Invalid table_id"}
+    assert client.queries == []
 
 
 def test_list_tables_and_describe_table(tmp_path: Path) -> None:
