@@ -119,6 +119,7 @@ It provides:
 
 `upload_file()` follows the agent's [`file_access`](../architecture/security-posture.md#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
 `download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
+`run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
 Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused, and agents without a workspace cannot download.
 
 | Option | Type | Default | Notes |
