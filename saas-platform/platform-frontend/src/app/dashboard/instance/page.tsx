@@ -22,7 +22,7 @@ export default function InstancePage() {
 
 function InstanceDetails({ userId, authLoading }: { userId: string | null; authLoading: boolean }) {
   const router = useRouter()
-  const { subscription } = useSubscription()
+  const { subscription, loading: subscriptionLoading } = useSubscription()
   const canRunInstances = subscription?.can_run_instances === true
   const cachedInstance = getCachedInstance(userId)
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
@@ -163,7 +163,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
     }
   }
 
-  if (loading) {
+  if (loading || (!instance && subscriptionLoading)) {
     return (
       <div className="flex items-center justify-center h-96">
         <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
@@ -180,7 +180,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           <p className="text-gray-600 dark:text-gray-400 mb-8 text-lg">
             {canRunInstances
               ? "You don't have a MindRoom instance yet. Start it from the dashboard."
-              : "You don't have a MindRoom instance yet. Choose a plan to get your own instance; your first plan starts with a 3-day free trial."}
+              : "You don't have a MindRoom instance yet. Choose a plan to get your own instance; your first plan starts with a free trial."}
           </p>
           <button
             onClick={() => router.push(canRunInstances ? '/dashboard' : '/dashboard/billing/upgrade')}

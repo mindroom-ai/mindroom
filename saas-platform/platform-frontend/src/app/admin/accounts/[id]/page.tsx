@@ -171,7 +171,9 @@ export default function AccountDetailsPage() {
                 <label className="text-sm font-medium text-gray-500 dark:text-gray-400">Subscription</label>
                 <div className="mt-1">
                   <span className="text-gray-900 dark:text-gray-100">
-                    {account.subscription.tier} - ${(account.subscription.price / 100).toFixed(2)}/{account.subscription.billing_period}
+                    {account.subscription.tier === 'free'
+                      ? 'No plan'
+                      : `${account.subscription.tier} - $${(account.subscription.price / 100).toFixed(2)}/${account.subscription.billing_period}`}
                   </span>
                 </div>
               </div>

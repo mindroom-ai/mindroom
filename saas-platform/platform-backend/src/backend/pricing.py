@@ -31,16 +31,6 @@ class PlanLimits(BaseModel):
     max_agents: int | Literal["unlimited"]
     max_messages_per_day: int | Literal["unlimited"]
     storage_gb: int | Literal["unlimited"]
-    support: str
-    integrations: str
-    workflows: bool
-    analytics: str
-    sla: bool
-    training: bool
-    sso: bool
-    custom_development: bool
-    on_premise: bool
-    dedicated_infrastructure: bool
 
 
 class Plan(BaseModel):

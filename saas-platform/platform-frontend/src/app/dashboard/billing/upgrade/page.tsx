@@ -97,7 +97,7 @@ export default function UpgradePage() {
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back to Billing
         </button>
-        <h1 className="text-3xl font-bold dark:text-white">Upgrade Your Plan</h1>
+        <h1 className="text-3xl font-bold dark:text-white">{currentTier === 'free' ? 'Choose a plan' : 'Upgrade Your Plan'}</h1>
         {process.env.NODE_ENV === 'development' || process.env.NEXT_PUBLIC_STRIPE_MODE === 'test' ? (
           <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-600 rounded-lg p-3 mt-4">
             <p className="text-sm text-yellow-800 dark:text-yellow-200 font-semibold">Test Mode Active</p>

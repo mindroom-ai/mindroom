@@ -131,7 +131,6 @@ class TestPricingConfig:
         assert byok.limits.max_agents == 100
         assert byok.limits.max_messages_per_day == "unlimited"
         assert byok.limits.storage_gb == 10
-        assert byok.limits.workflows is True
 
         # Hobby plan
         hobby = model.plans["hobby"]
@@ -144,13 +143,10 @@ class TestPricingConfig:
         assert "$150 of AI credit every month" in pro.features
         assert pro.limits.max_agents == "unlimited"
         assert pro.limits.storage_gb == 25
-        assert pro.limits.sla is True
 
         # Enterprise plan
         enterprise = model.plans["enterprise"]
-        assert enterprise.limits.custom_development is True
-        assert enterprise.limits.on_premise is True
-        assert enterprise.limits.dedicated_infrastructure is True
+        assert enterprise.limits.storage_gb == "unlimited"
 
     def test_missing_config_file(self) -> None:
         """Test behavior when config file is missing."""

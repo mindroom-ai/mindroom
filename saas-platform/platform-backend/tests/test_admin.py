@@ -63,6 +63,7 @@ class TestAdminEndpoints:
         subscriptions_mock = MagicMock()
         subscriptions_mock.select.return_value = subscriptions_mock
         subscriptions_mock.eq.return_value = subscriptions_mock
+        subscriptions_mock.neq.return_value = subscriptions_mock
         subscriptions_mock.execute.return_value = Mock(data=[{}, {}, {}, {}, {}, {}, {}, {}])  # 8 active
 
         instances_mock = MagicMock()
@@ -98,6 +99,7 @@ class TestAdminEndpoints:
         data = response.json()
         assert data["accounts"] == 10
         assert data["active_subscriptions"] == 8
+        subscriptions_mock.neq.assert_called_with("tier", "free")
         assert data["running_instances"] == 7
 
     def test_admin_stats_unauthorized(self, client: TestClient):
@@ -521,6 +523,7 @@ class TestAdminEndpoints:
         active_subs_mock = MagicMock()
         active_subs_mock.select = MagicMock(return_value=active_subs_mock)
         active_subs_mock.eq.return_value = active_subs_mock
+        active_subs_mock.neq.return_value = active_subs_mock
         active_subs_result = Mock()
         active_subs_result.count = 70
         active_subs_mock.execute.return_value = active_subs_result
@@ -537,6 +540,7 @@ class TestAdminEndpoints:
         subs_data_mock = MagicMock()
         subs_data_mock.select.return_value = subs_data_mock
         subs_data_mock.eq.return_value = subs_data_mock
+        subs_data_mock.neq.return_value = subs_data_mock
         subs_data_mock.execute.return_value = Mock(data=[{"tier": "byok"}, {"tier": "pro"}])
 
         # Mock usage metrics for messages
@@ -616,6 +620,8 @@ class TestAdminEndpoints:
         assert "total_instances" in data
         assert "subscription_revenue" in data
         assert data["total_accounts"] == 100
+        active_subs_mock.neq.assert_called_with("tier", "free")
+        subs_data_mock.neq.assert_called_with("tier", "free")
         assert data["active_subscriptions"] == 70
         assert data["total_instances"] == 2  # We have 2 instances total in the mock
         assert data["subscription_revenue"] == 128.0

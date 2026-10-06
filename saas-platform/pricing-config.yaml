@@ -4,7 +4,7 @@ product:
   metadata:
     platform: mindroom
 plans:
-  # Accounts without a paid subscription; not offered as a plan and cannot run a hosted instance.
+  # Accounts that never subscribed to a plan; not offered as a plan and cannot run a hosted instance.
   free:
     name: No plan
     price_monthly: 0
@@ -18,16 +18,6 @@ plans:
       max_agents: 0
       max_messages_per_day: 0
       storage_gb: 0
-      support: Community
-      integrations: None
-      workflows: false
-      analytics: basic
-      sla: false
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
   byok:
     name: Bring Your Own Keys
     price_monthly: 1000
@@ -49,16 +39,6 @@ plans:
       max_agents: 100
       max_messages_per_day: unlimited
       storage_gb: 10
-      support: Email
-      integrations: All integrations
-      workflows: true
-      analytics: advanced
-      sla: false
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
   hobby:
     name: Hobby
     price_monthly: 2000
@@ -79,16 +59,6 @@ plans:
       max_agents: 100
       max_messages_per_day: unlimited
       storage_gb: 10
-      support: Email
-      integrations: All integrations
-      workflows: true
-      analytics: advanced
-      sla: false
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
     stripe_price_id_monthly_live: price_1TZRzu3GVsrZHuzXUXJEQ6Ng
     stripe_price_id_yearly_live: price_1TZRzu3GVsrZHuzX77678390
   pro:
@@ -110,16 +80,6 @@ plans:
       max_agents: unlimited
       max_messages_per_day: unlimited
       storage_gb: 25
-      support: Priority support
-      integrations: All integrations + custom
-      workflows: true
-      analytics: advanced
-      sla: true
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
     stripe_price_id_monthly_live: price_1TZRzv3GVsrZHuzXFRd9cUgz
     stripe_price_id_yearly_live: price_1TZRzv3GVsrZHuzXrXOhvBy0
   enterprise:
@@ -139,16 +99,6 @@ plans:
       max_agents: unlimited
       max_messages_per_day: unlimited
       storage_gb: unlimited
-      support: White-glove
-      integrations: Custom development
-      workflows: true
-      analytics: custom
-      sla: true
-      training: true
-      sso: true
-      custom_development: true
-      on_premise: true
-      dedicated_infrastructure: true
 trial:
   enabled: true
   days: 3

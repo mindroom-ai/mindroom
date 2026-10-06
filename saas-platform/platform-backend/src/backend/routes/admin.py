@@ -75,7 +75,9 @@ async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verif
 
     try:
         accounts = sb.table("accounts").select("*", count="exact").execute()
-        subscriptions = sb.table("subscriptions").select("*", count="exact").eq("status", "active").execute()
+        subscriptions = (
+            sb.table("subscriptions").select("*", count="exact").eq("status", "active").neq("tier", "free").execute()
+        )
         instances = sb.table("instances").select("*", count="exact").eq("status", "running").execute()
 
         # Get recent activity for dashboard
@@ -361,10 +363,16 @@ async def get_dashboard_metrics(
 
     try:
         accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
-        active_subs = sb.table("subscriptions").select("*", count="exact", head=True).eq("status", "active").execute()
+        active_subs = (
+            sb.table("subscriptions")
+            .select("*", count="exact", head=True)
+            .eq("status", "active")
+            .neq("tier", "free")
+            .execute()
+        )
         _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
 
-        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
+        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").neq("tier", "free").execute()
         tier_prices = _monthly_plan_prices_usd()
         mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
 

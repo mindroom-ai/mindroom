@@ -89,8 +89,8 @@ const installOptions: InstallOption[] = [
     command: 'brew install --cask mindroom-ai/tap/mindroom',
     note: 'Needs an Apple silicon Mac with macOS 14 or later.',
     steps: [
-      ['Open the MindRoom app', 'It installs MindRoom and runs your agents on your Mac in the background, with one-click local models.'],
-      ['Connect your chat account', 'Approve the pairing link without leaving the app.'],
+      ['Open the MindRoom app', 'It installs MindRoom, with one-click local models.'],
+      ['Connect your chat account', 'Approve the pairing link without leaving the app, and your agents start in the background.'],
     ],
     guide: { href: macAppUrl, label: 'Read the macOS app guide' },
   },

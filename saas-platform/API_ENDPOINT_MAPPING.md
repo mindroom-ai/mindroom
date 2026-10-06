@@ -9,8 +9,8 @@ Backend filenames below are relative to `platform-backend/src/backend/routes/`; 
 ## Summary
 
 - **OpenAPI operations**: 53, counting each HTTP method and path template once.
-- **OpenAPI operations called by platform frontend code**: 32, including browser requests and server authentication checks.
-- **OpenAPI operations without a direct platform frontend caller**: 21, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and eight other routes.
+- **OpenAPI operations called by platform frontend code**: 31, including browser requests and server authentication checks.
+- **OpenAPI operations without a direct platform frontend caller**: 22, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and nine other routes.
 
 Ordinary browser requests go directly to the configured platform API through `src/lib/api.ts`.
 The frontend also makes server-side authentication checks in `src/lib/auth/admin.ts` and `src/app/auth/callback/route.ts`.
@@ -27,7 +27,7 @@ An operation without a platform frontend caller can still serve an external inte
 | GET | `/my/subscription` | `subscriptions.py` | `src/hooks/useSubscription.ts`: subscription details |
 | POST | `/my/subscription/cancel` | `subscriptions.py` | No current frontend caller; cancel a subscription |
 | POST | `/my/subscription/reactivate` | `subscriptions.py` | No current frontend caller; reactivate a subscription |
-| GET | `/my/usage` | `usage.py` | `src/hooks/useUsage.ts`: usage metrics with a days parameter |
+| GET | `/my/usage` | `usage.py` | No current frontend caller; usage metrics with a days parameter |
 
 ## Customer Instances
 

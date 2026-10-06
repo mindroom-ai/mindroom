@@ -73,7 +73,7 @@ Send a voice message from your phone ([Voice Messages](voice.md)), or call an ag
 - Sending or changing something can wait for your one-tap approval, which shows exactly what will be sent and to whom ([Tool Approval](tool-approval.md)).
 - Code can run in isolated workers ([Workers & Sandboxing](deployment/sandbox-proxy.md)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](deployment/approved-egress.md)).
 - Each agent answers only the people and rooms you allow ([Access Control](authorization.md)).
-- It all runs on [Matrix](matrix.md), an open, end-to-end encrypted messaging standard that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
+- It all runs on [Matrix](matrix.md), an open messaging standard with optional end-to-end encryption that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
 
 The [Security Model](architecture/security-posture.md) documents exactly which boundary protects what.
 

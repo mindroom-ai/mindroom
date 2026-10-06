@@ -1535,32 +1535,12 @@ export interface components {
          * @description Plan limits and capabilities.
          */
         PlanLimits: {
-            /** Analytics */
-            analytics: string;
-            /** Custom Development */
-            custom_development: boolean;
-            /** Dedicated Infrastructure */
-            dedicated_infrastructure: boolean;
-            /** Integrations */
-            integrations: string;
             /** Max Agents */
             max_agents: number | "unlimited";
             /** Max Messages Per Day */
             max_messages_per_day: number | "unlimited";
-            /** On Premise */
-            on_premise: boolean;
-            /** Sla */
-            sla: boolean;
-            /** Sso */
-            sso: boolean;
             /** Storage Gb */
             storage_gb: number | "unlimited";
-            /** Support */
-            support: string;
-            /** Training */
-            training: boolean;
-            /** Workflows */
-            workflows: boolean;
         };
         /**
          * PricingConfigResponse

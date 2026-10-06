@@ -1265,22 +1265,6 @@
       "PlanLimits": {
         "description": "Plan limits and capabilities.",
         "properties": {
-          "analytics": {
-            "title": "Analytics",
-            "type": "string"
-          },
-          "custom_development": {
-            "title": "Custom Development",
-            "type": "boolean"
-          },
-          "dedicated_infrastructure": {
-            "title": "Dedicated Infrastructure",
-            "type": "boolean"
-          },
-          "integrations": {
-            "title": "Integrations",
-            "type": "string"
-          },
           "max_agents": {
             "anyOf": [
               {
@@ -1305,18 +1289,6 @@
             ],
             "title": "Max Messages Per Day"
           },
-          "on_premise": {
-            "title": "On Premise",
-            "type": "boolean"
-          },
-          "sla": {
-            "title": "Sla",
-            "type": "boolean"
-          },
-          "sso": {
-            "title": "Sso",
-            "type": "boolean"
-          },
           "storage_gb": {
             "anyOf": [
               {
@@ -1328,34 +1300,12 @@
               }
             ],
             "title": "Storage Gb"
-          },
-          "support": {
-            "title": "Support",
-            "type": "string"
-          },
-          "training": {
-            "title": "Training",
-            "type": "boolean"
-          },
-          "workflows": {
-            "title": "Workflows",
-            "type": "boolean"
           }
         },
         "required": [
           "max_agents",
           "max_messages_per_day",
-          "storage_gb",
-          "support",
-          "integrations",
-          "workflows",
-          "analytics",
-          "sla",
-          "training",
-          "sso",
-          "custom_development",
-          "on_premise",
-          "dedicated_infrastructure"
+          "storage_gb"
         ],
         "title": "PlanLimits",
         "type": "object"

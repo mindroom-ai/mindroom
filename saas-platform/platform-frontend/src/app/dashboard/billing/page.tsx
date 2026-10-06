@@ -163,7 +163,7 @@ export default function BillingPage() {
 
             {!hasPlan && (
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Choose a plan to run a hosted MindRoom instance; your first plan starts with a 3-day free trial.{' '}
+                Choose a plan to run a hosted MindRoom instance; your first plan starts with a {pricingConfig.trial.days}-day free trial.{' '}
                 <Link href="/dashboard/billing/upgrade" className="font-semibold text-orange-600 hover:underline dark:text-orange-400">
                   Choose a plan
                 </Link>
@@ -278,13 +278,13 @@ export default function BillingPage() {
         ) : (
           <>
             <p className="text-gray-600 mb-4">
-              No payment method on file. Upgrade your plan to add a payment method.
+              No payment method on file. {hasPlan ? 'Upgrade your plan' : 'Choose a plan'} to add a payment method.
             </p>
             <button
               onClick={() => window.location.href = '/dashboard/billing/upgrade'}
               className="text-orange-600 hover:text-orange-700 font-medium"
             >
-              Upgrade Plan →
+              {hasPlan ? 'Upgrade Plan →' : 'Choose a plan →'}
             </button>
           </>
         )}
