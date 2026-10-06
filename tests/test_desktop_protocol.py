@@ -37,7 +37,14 @@ def test_native_setup_descriptor_preserves_exact_pairing_scope() -> None:
     )
     content = descriptor.to_content()
     assert DesktopSetupDescriptor.from_content(content) == descriptor
-    for change in ({"v": True}, {"kind": "another_setup"}, {"unknown": "value"}, {"cloudflare_access": "false"}):
+    for change in (
+        {"v": True},
+        {"kind": "another_setup"},
+        {"unknown": "value"},
+        {"cloudflare_access": "false"},
+        {"homeserver": "https://matrix.example.org@evil.example"},
+        {"homeserver": "https://m\u0430trix.example.org"},  # Cyrillic a
+    ):
         with pytest.raises(DesktopProtocolError):
             DesktopSetupDescriptor.from_content({**content, **change})
 
