@@ -1828,7 +1828,7 @@ def _entity_edit_config(change: Callable[[dict[str, Any]], object] | None = None
         },
         "teams": {"crew": {"display_name": "Crew", "role": "Coordinate", "agents": ["helper"]}},
         "models": {
-            "default": {"provider": "openai", "id": "gpt-6-sol"},
+            "default": {"provider": "openai", "id": "gpt-6.1-sol"},
             "fast": {"provider": "openai", "id": "gpt-6-luna"},
         },
         "mcp_servers": {"docs": {"transport": "stdio", "command": "npx"}},
@@ -2087,7 +2087,7 @@ def test_config_update_plan_drains_responses_only_for_restarts_or_reply_authoriz
     base = {
         "agents": {"general": {"display_name": "General"}},
         "models": {
-            "default": {"provider": "openai", "id": "gpt-6-sol"},
+            "default": {"provider": "openai", "id": "gpt-6.1-sol"},
             "fast": {"provider": "openai", "id": "gpt-6-luna"},
         },
     }

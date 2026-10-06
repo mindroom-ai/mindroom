@@ -328,7 +328,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
         memory_backend="file",
         delegate_to=["helper"],
     )
-    config.models["lead"] = ModelConfig(provider="openai", id="gpt-6-sol")
+    config.models["lead"] = ModelConfig(provider="openai", id="gpt-6.1-sol")
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
     identity = _identity()
@@ -363,7 +363,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
 
     models = {
         "lead": DelegationModel(
-            id="gpt-6-sol",
+            id="gpt-6.1-sol",
             responses=[
                 ModelResponse(tool_calls=[_call("bash", "lead-bash", command="mindroom-agent tools call ...")]),
                 ModelResponse(content="Leader done"),
