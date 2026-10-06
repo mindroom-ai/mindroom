@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.cancellation import TaskCancelSource
     from mindroom.event_journal import PrincipalStore
+    from mindroom.matrix_delivery import ReplyRowEnqueuer
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -402,6 +403,8 @@ class ReplyWrite:
     # The running span that renders this write, which learns what it committed.
     handle: SpanHandle | None = None
     create: ReplyCreation | None = None
+    # Records the row coupled to another durable step instead of on its own.
+    enqueue: ReplyRowEnqueuer | None = None
 
     @property
     def shown_json(self) -> str:
@@ -422,6 +425,51 @@ def _acknowledgement_write(claim: rl.ClaimRequest, shown: Presentation) -> Reply
         decide=None,
         placeholder_only=True,
         create=ReplyCreation(claim=claim, shown=encoded),
+    )
+
+
+def pause_decision(
+    handle: SpanHandle,
+    shown: Presentation,
+    *,
+    approval_id: str,
+    in_place: bool,
+    stage: rl.WriteStage | None,
+) -> Decide:
+    """Return the rule that pauses a span's reply for approval (DESIGN.md §6.4 ``pause``)."""
+    write = rl.PauseWrite(
+        shown=encode_presentation(shown),
+        prepared_revision=handle.reply.revision,
+        stage=stage,
+        confirms=handle.unconfirmed_progress,
+    )
+    return lambda reply, span: rl.pause(
+        reply,
+        span,
+        write,
+        approval_id=approval_id,
+        in_place=in_place,
+        now_ns=time.time_ns(),
+    )
+
+
+def pause_write(
+    handle: SpanHandle,
+    shown: Presentation,
+    *,
+    approval_id: str,
+    in_place: bool,
+    enqueue: ReplyRowEnqueuer,
+) -> ReplyWrite:
+    """Return a reply's pause row, recorded with the continuation that holds the paused run."""
+    return ReplyWrite(
+        reply_id=handle.reply_id,
+        span=handle.span,
+        handle=handle,
+        stage=rl.WriteStage.EDIT,
+        shown=shown,
+        decide=pause_decision(handle, shown, approval_id=approval_id, in_place=in_place, stage=rl.WriteStage.EDIT),
+        enqueue=enqueue,
     )
 
 

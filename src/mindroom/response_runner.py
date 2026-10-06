@@ -102,7 +102,15 @@ from mindroom.reply_presentation import (
     format_error_note,
     note_segment,
 )
-from mindroom.reply_scope import SpanHandle, SpanSlot, current_slot, current_span, initial_write
+from mindroom.reply_scope import (
+    SpanHandle,
+    SpanSlot,
+    current_slot,
+    current_span,
+    initial_write,
+    pause_decision,
+    pause_write,
+)
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_shutdown_diagnostics import (
     ResponseShutdownPhase,
@@ -788,6 +796,20 @@ class PostLockRequestPreparationError(RuntimeError):
         self.reply_owned = reply_owned
 
 
+@dataclass(frozen=True)
+class _ShownPause:
+    """Where a pause shows before its continuation exists."""
+
+    response_event_id: str | None
+    delivery_kind: Literal["sent", "edited"] | None
+    final_visible_body: str | None
+    # With reply records: the span, its paused presentation, and the stage of
+    # the row that shows it with the continuation (``None`` when already shown).
+    handle: SpanHandle | None = None
+    reply_pause: Presentation | None = None
+    reply_stage: rl.WriteStage | None = None
+
+
 @dataclass
 class _EarlyPlaceholderState:
     """Track an early placeholder until normal response settlement takes ownership."""
@@ -1450,7 +1472,6 @@ class ResponseRunner:
                 requester_id=requester_id,
                 toolkit_owners=paused.toolkit_owners,
             )
-            response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
             snapshot_text = paused.response_text
@@ -1460,34 +1481,17 @@ class ResponseRunner:
                 else snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
             )
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-            delivery_kind: Literal["sent", "edited"] | None = None
-            final_visible_body: str | None = None
-            if response_event_id is None:
-                response_event_id = await self.deps.delivery_gateway.send_text(
-                    SendTextRequest(
-                        target=target,
-                        response_text=visible_text,
-                        extra_content={STREAM_STATUS_KEY: stream_status},
-                        tool_trace=list(visible_tool_trace) or None,
-                        delivery_turn_id=request.response_envelope.source_event_id,
-                        delivery_stage=DeliveryStage.INITIAL,
-                    ),
-                )
-                delivery_kind = "sent"
-                final_visible_body = visible_text
-            elif (approval_pending or bool(snapshot_text)) and not await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=response_event_id,
-                    new_text=visible_text,
-                    extra_content={STREAM_STATUS_KEY: stream_status},
-                    tool_trace=list(visible_tool_trace) or None,
-                ),
-            ):
-                response_event_id = None
-            elif approval_pending or bool(snapshot_text):
-                delivery_kind = "edited"
-                final_visible_body = visible_text
+            shown = await self._show_pause(
+                paused,
+                waiting_text=plan.waiting_text,
+                request=request,
+                target=target,
+                progress=progress,
+                visible_text=visible_text,
+                stream_status=stream_status,
+                visible_tool_trace=visible_tool_trace,
+            )
+            response_event_id = shown.response_event_id
             if response_event_id is None:
                 msg = "Could not publish the suspended approval response"
                 raise RuntimeError(msg)  # noqa: TRY301
@@ -1496,65 +1500,76 @@ class ResponseRunner:
             continuation_state: Literal["waiting", "ready"] = (
                 "ready" if all(call.decision is not None for call in plan.calls) else "waiting"
             )
-            continuation = await self._approval_responses.create(
-                ApprovalContinuation(
-                    approval_id=approval_id,
-                    cli_call=deepcopy(paused.cli_call),
-                    run_id=paused.run_id,
-                    session_id=paused.session_id,
-                    entity_kind=entity_kind,
-                    entity_name=self.deps.agent_name,
-                    room_id=target.room_id,
-                    thread_id=target.resolved_thread_id,
-                    requester_id=requester_id,
-                    response_event_id=response_event_id,
-                    sources=request.sources,
-                    prepared_edit_record=request.prepared_edit_record,
-                    calls=plan.calls,
-                    state=continuation_state,
-                    response_text=snapshot_text,
-                    response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
-                    response_presentation_state=paused.response_presentation_state,
-                    delegation_storage_bindings=paused.delegation_storage_bindings,
-                    show_tool_calls=show_tool_calls,
-                    execution_identity=serialize_tool_execution_identity(execution_identity),
-                    runtime_model_name=paused.runtime_model_name,
-                    continuation_count=paused.continuation_count,
-                    team_member_names=team_member_names,
-                    team_member_model_names=paused.team_member_model_names,
-                    team_mode=team_mode,
-                    request_body=request.response_envelope.body,
-                    transport_sender_id=request.response_envelope.sender_id,
-                    source_kind=request.response_envelope.source_kind,
-                    attachment_ids=tuple(request.attachment_ids or ()),
-                    mentioned_agents=request.response_envelope.mentioned_agents,
-                    hook_source=request.response_envelope.hook_source,
-                    message_received_depth=request.response_envelope.message_received_depth,
-                    dispatch_policy_source_kind=request.response_envelope.dispatch_policy_source_kind,
-                    correlation_id=request.correlation_id,
-                    history_scope=history_scope,
-                    origin=request.response_envelope.origin,
-                    memory_prompt=request.prompt,
-                    memory_thread_history=tuple(
-                        ApprovalMemoryTurn(sender=message.sender, body=message.body)
-                        for message in request.thread_history
-                    ),
-                    thread_summary_message_count_hint=thread_summary_message_count_hint(
-                        request.thread_history,
-                        trusted_sender_ids=current_internal_sender_ids(
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                        ),
-                    ),
-                    runtime_generation=(
-                        self.deps.approval_runtime_generation if continuation_state == "waiting" else None
+            draft = ApprovalContinuation(
+                approval_id=approval_id,
+                cli_call=deepcopy(paused.cli_call),
+                run_id=paused.run_id,
+                session_id=paused.session_id,
+                entity_kind=entity_kind,
+                entity_name=self.deps.agent_name,
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                requester_id=requester_id,
+                response_event_id=response_event_id,
+                sources=request.sources,
+                prepared_edit_record=request.prepared_edit_record,
+                calls=plan.calls,
+                state=continuation_state,
+                response_text=snapshot_text,
+                response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
+                response_presentation_state=paused.response_presentation_state,
+                delegation_storage_bindings=paused.delegation_storage_bindings,
+                show_tool_calls=show_tool_calls,
+                execution_identity=serialize_tool_execution_identity(execution_identity),
+                runtime_model_name=paused.runtime_model_name,
+                continuation_count=paused.continuation_count,
+                team_member_names=team_member_names,
+                team_member_model_names=paused.team_member_model_names,
+                team_mode=team_mode,
+                request_body=request.response_envelope.body,
+                transport_sender_id=request.response_envelope.sender_id,
+                source_kind=request.response_envelope.source_kind,
+                attachment_ids=tuple(request.attachment_ids or ()),
+                mentioned_agents=request.response_envelope.mentioned_agents,
+                hook_source=request.response_envelope.hook_source,
+                message_received_depth=request.response_envelope.message_received_depth,
+                dispatch_policy_source_kind=request.response_envelope.dispatch_policy_source_kind,
+                correlation_id=request.correlation_id,
+                history_scope=history_scope,
+                origin=request.response_envelope.origin,
+                memory_prompt=request.prompt,
+                memory_thread_history=tuple(
+                    ApprovalMemoryTurn(sender=message.sender, body=message.body) for message in request.thread_history
+                ),
+                thread_summary_message_count_hint=thread_summary_message_count_hint(
+                    request.thread_history,
+                    trusted_sender_ids=current_internal_sender_ids(
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
                     ),
                 ),
+                runtime_generation=(self.deps.approval_runtime_generation if continuation_state == "waiting" else None),
             )
+            if shown.handle is None or shown.reply_pause is None:
+                continuation = await self._approval_responses.create(draft)
+            else:
+                if not await self._pause_reply(
+                    shown.handle,
+                    draft,
+                    shown=shown.reply_pause,
+                    stage=shown.reply_stage,
+                    target=target,
+                    text=visible_text,
+                    stream_status=stream_status,
+                    tool_trace=visible_tool_trace,
+                ):
+                    msg = "Could not publish the suspended approval response"
+                    raise RuntimeError(msg)  # noqa: TRY301
+                continuation = await self.deps.approval_store.approval_continuation(approval_id)
             if continuation is None or continuation.state != continuation_state:
                 msg = "Approval continuation lost its journal source ownership"
                 raise RuntimeError(msg)  # noqa: TRY301
-            if delivery_kind == "sent" and request.on_visible_response is not None:
+            if shown.delivery_kind == "sent" and request.on_visible_response is not None:
                 await request.on_visible_response(response_event_id)
 
             await self._approval_responses.publish_generation(
@@ -1567,8 +1582,8 @@ class ResponseRunner:
                 terminal_status="suspended",
                 event_id=response_event_id,
                 is_visible_response=True,
-                final_visible_body=final_visible_body,
-                delivery_kind=delivery_kind,
+                final_visible_body=shown.final_visible_body,
+                delivery_kind=shown.delivery_kind,
                 tool_trace=visible_tool_trace,
                 extra_content={STREAM_STATUS_KEY: stream_status},
             )
@@ -1580,6 +1595,113 @@ class ResponseRunner:
             if handoff is not None:
                 return handoff
             raise
+
+    async def _show_pause(
+        self,
+        paused: PausedAttempt,
+        *,
+        waiting_text: str | None,
+        request: ResponseRequest,
+        target: MessageTarget,
+        progress: _DeliveryProgress,
+        visible_text: str,
+        stream_status: str,
+        visible_tool_trace: tuple[ToolTraceEntry, ...],
+    ) -> _ShownPause:
+        """Show a pause before its continuation exists, as main does, or prepare the reply row that shows it."""
+        shows_text = waiting_text is not None or bool(paused.response_text)
+        initial = SendTextRequest(
+            target=target,
+            response_text=visible_text,
+            extra_content={STREAM_STATUS_KEY: stream_status},
+            tool_trace=list(visible_tool_trace) or None,
+            delivery_turn_id=request.response_envelope.source_event_id,
+            delivery_stage=DeliveryStage.INITIAL,
+        )
+        handle = current_span()
+        if handle is not None and not handle.exited:
+            # The reply's records show the pause; its row is written with the continuation.
+            reply_pause = handle.presentation(
+                paused.response_text or "",
+                tuple(paused.tool_trace),
+                team_state=paused.response_presentation_state or None,
+                trailing_note=None if waiting_text is None else note_segment(NoteKind.APPROVAL_WAIT, waiting_text),
+            )
+            reply = await handle.runtime.store.replies.load(handle.reply_id)
+            assert reply is not None, "a span's reply exists while it pauses"
+            if reply.event_id is None:
+                # The pause is the reply's first visible message, so its create shows it.
+                created = await self.deps.delivery_gateway.send_text(
+                    replace(initial, reply_write=initial_write(handle, reply_pause, placeholder_only=False)),
+                )
+                return _ShownPause(created, "sent", visible_text, handle=handle, reply_pause=reply_pause)
+            if not shows_text:
+                return _ShownPause(reply.event_id, None, None, handle=handle, reply_pause=reply_pause)
+            return _ShownPause(
+                reply.event_id,
+                "edited",
+                visible_text,
+                handle=handle,
+                reply_pause=reply_pause,
+                reply_stage=rl.WriteStage.EDIT,
+            )
+        response_event_id = progress.tracked_event_id
+        if response_event_id is None:
+            return _ShownPause(await self.deps.delivery_gateway.send_text(initial), "sent", visible_text)
+        if not shows_text:
+            return _ShownPause(response_event_id, None, None)
+        edited = await self.deps.delivery_gateway.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id=response_event_id,
+                new_text=visible_text,
+                extra_content={STREAM_STATUS_KEY: stream_status},
+                tool_trace=list(visible_tool_trace) or None,
+            ),
+        )
+        return _ShownPause(response_event_id if edited else None, "edited", visible_text)
+
+    async def _pause_reply(
+        self,
+        handle: SpanHandle,
+        continuation: ApprovalContinuation,
+        *,
+        shown: Presentation,
+        stage: rl.WriteStage | None,
+        target: MessageTarget,
+        text: str,
+        stream_status: str,
+        tool_trace: tuple[ToolTraceEntry, ...],
+    ) -> bool:
+        """Pause the span's reply and create the continuation that holds its run, in one transaction.
+
+        Returns whether the pause was published; a rule that refuses it (a Stop
+        committed while it was prepared) raises ``ReplyWriteRefusedError``.
+        """
+        enqueue = partial(self.deps.approval_store.pause_for_approval, continuation)
+        if stage is None:
+            return await self.deps.delivery_gateway.pause_shown_reply(
+                handle,
+                pause_decision(handle, shown, approval_id=continuation.approval_id, in_place=False, stage=None),
+                enqueue=enqueue,
+                target=target,
+            )
+        return await self.deps.delivery_gateway.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id=continuation.response_event_id,
+                new_text=text,
+                extra_content={STREAM_STATUS_KEY: stream_status},
+                tool_trace=list(tool_trace) or None,
+                reply_write=pause_write(
+                    handle,
+                    shown,
+                    approval_id=continuation.approval_id,
+                    in_place=False,
+                    enqueue=enqueue,
+                ),
+            ),
+        )
 
     @asynccontextmanager
     async def _cli_approval_scope(
@@ -4269,6 +4391,17 @@ class ResponseRunner:
         failure_reason: str,
     ) -> FinalDeliveryOutcome:
         """Replace an unowned pause with durable failure, even after streaming began."""
+        handle = current_span()
+        if handle is not None and not handle.exited:
+            # The pause never took: the span ends failed with the note instead of its answer.
+            noted = await self.deps.delivery_gateway.end_reply_span_with_note(
+                handle,
+                target,
+                state=rl.ReplyState.FAILED,
+                note=note_segment(NoteKind.APPROVAL_FAILED),
+            )
+            # A Stop recorded meanwhile ends it cancelled instead.
+            return noted if noted.terminal_status == "cancelled" else replace(noted, failure_reason=failure_reason)
         event_id = progress.tracked_event_id or request.existing_event_id
         text = APPROVAL_START_FAILED_NOTE
         extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}

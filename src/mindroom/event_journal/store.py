@@ -1562,6 +1562,46 @@ class PrincipalStore:
             ),
         )
 
+    async def pause_for_approval(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        request: ReplyRowRequest,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
+        response_attempt: ResponseAttempt | None = None,
+        event_type: str = "m.room.message",
+        permanent_failure_reason: str | None = None,
+    ) -> ReplyRowEnqueue | None:
+        """Create a paused run's owner and pause its reply with the pause row, in one transaction.
+
+        ``None`` means the continuation could not take its sources or the outbox
+        refused the row; a pause the reply's rule refuses (a Stop committed
+        meanwhile) comes back unapplied. Either way nothing is written.
+        """
+        try:
+            return await self._backend.write(
+                lambda transaction: _pause_for_approval(
+                    transaction,
+                    self._principal_id,
+                    continuation,
+                    request=request,
+                    event_type=event_type,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    payload=payload,
+                    result=result,
+                    response_attempt=response_attempt,
+                    permanent_failure_reason=permanent_failure_reason,
+                ),
+            )
+        except _ReplyRowRefusedError:
+            return None
+        except _PauseRefusedError as refused:
+            return refused.enqueue
+
     async def approval_continuation_for_source(
         self,
         event_id: str,
@@ -1932,6 +1972,48 @@ def _enqueue_matrix_delivery(
 
 class _ReplyRowRefusedError(Exception):
     """The outbox refused a reply row the lifecycle had already decided; roll both back."""
+
+
+class _PauseRefusedError(Exception):
+    """The reply's rule refused a pause; the continuation created with it rolls back."""
+
+    def __init__(self, enqueue: ReplyRowEnqueue) -> None:
+        super().__init__("The reply's rule refused the pause")
+        self.enqueue = enqueue
+
+
+def _pause_for_approval(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+    *,
+    request: ReplyRowRequest,
+    event_type: str,
+    room_id: str,
+    thread_id: str | None,
+    payload: Mapping[str, object],
+    result: Mapping[str, object] | None,
+    response_attempt: ResponseAttempt | None,
+    permanent_failure_reason: str | None,
+) -> ReplyRowEnqueue:
+    """Create the continuation, then pause its reply, so neither exists without the other (DESIGN.md §6.4)."""
+    if approval_continuations.create(transaction, principal_id, continuation) is None:
+        raise _ReplyRowRefusedError
+    enqueued = _enqueue_reply_row(
+        transaction,
+        principal_id,
+        request=request,
+        event_type=event_type,
+        room_id=room_id,
+        thread_id=thread_id,
+        payload=payload,
+        result=result,
+        response_attempt=response_attempt,
+        permanent_failure_reason=permanent_failure_reason,
+    )
+    if not enqueued.transition.applied:
+        raise _PauseRefusedError(enqueued)
+    return enqueued
 
 
 def _enqueue_reply_row(

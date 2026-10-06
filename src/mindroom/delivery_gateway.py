@@ -80,6 +80,7 @@ from mindroom.matrix_delivery import (
     PermanentDeliveryError,
     PreparedReplyRow,
     RecoveryOutcome,
+    ReplyRowEnqueuer,
     SendDelivery,
     TurnHandoff,
 )
@@ -219,6 +220,14 @@ def _refused_reply_outcome(
         tool_trace=tuple(draft.tool_trace or ()),
         extra_content=draft.extra_content,
     )
+
+
+def _with_note(shown: Presentation, note: Segment) -> Presentation:
+    """Return what a reply shows with one note: below its content, or instead of it."""
+    if note.note in {NoteKind.DELIVERY_FAILED, NoteKind.APPROVAL_FAILED}:
+        # These notes replace the reply's body, as main writes them.
+        return with_trailing_note(replace(shown, segments=()), note)
+    return with_trailing_note(shown, note)
 
 
 def _shown_before(reply: rl.Reply, handle: SpanHandle | None) -> Presentation:
@@ -1561,6 +1570,7 @@ class DeliveryGateway:
                 thread_id=target.resolved_thread_id,
                 prepare=prepare,
                 response_attempt=response_attempt,
+                enqueue=write.enqueue,
             )
         except _DeliveryRefusedError:
             return None
@@ -1610,7 +1620,7 @@ class DeliveryGateway:
             if reply.unapplied_stop and handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
                 # A Stop committed before this span ended; its note is the cancellation.
                 state, note = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)
-            shown = with_trailing_note(_shown_before(reply, handle), note)
+            shown = _with_note(_shown_before(reply, handle), note)
             if state is ReplyState.ACTIVE:
                 write = resumed_note_write(handle, shown)
                 rendered = render(shown, WriteKind.TERMINAL, state=ReplyState.FAILED.value)
@@ -1702,6 +1712,29 @@ class DeliveryGateway:
         await self.settle_reply_debt(reply.reply_id)
         return True
 
+    async def pause_shown_reply(
+        self,
+        handle: SpanHandle,
+        decide: Decide,
+        *,
+        enqueue: ReplyRowEnqueuer,
+        target: MessageTarget,
+    ) -> bool:
+        """Pause a reply whose create already showed the pause, with the continuation; return whether it paused."""
+        enqueued = await enqueue(
+            request=ReplyRowRequest(reply_id=handle.reply_id, span_id=handle.span_id, decide=decide),
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            payload={},
+        )
+        if enqueued is None:
+            return False
+        handle.note(enqueued.applied)
+        await self._run_reply_effects(enqueued.applied.post_commit)
+        if not enqueued.transition.applied:
+            raise ReplyWriteRefusedError(enqueued.transition)
+        return True
+
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Show a dispatch failure on the reply bound to one event before a span ran it.
 
@@ -1774,12 +1807,7 @@ class DeliveryGateway:
             owed = reply.owed_write
             span = await self.deps.outbox.replies.span(owed.span_id)
             assert span is not None, "an owed write names a span of its reply"
-            note = note_segment(NoteKind(owed.note), owed.text)
-            if note.note in {NoteKind.DELIVERY_FAILED, NoteKind.APPROVAL_FAILED}:
-                # These notes replace the reply's body, as main writes them.
-                shown = with_trailing_note(Presentation(), note)
-            else:
-                shown = with_trailing_note(_shown_before(reply, None), note)
+            shown = _with_note(_shown_before(reply, None), note_segment(NoteKind(owed.note), owed.text))
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
             rendered = render(shown, WriteKind.TERMINAL, state=reply.state.value)

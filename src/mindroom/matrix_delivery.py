@@ -37,6 +37,8 @@ class PermanentDeliveryError(RuntimeError):
 
 
 type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
+# Decides and records one reply row: the store's own enqueue, or one coupled to another durable step.
+type ReplyRowEnqueuer = Callable[..., Awaitable["ReplyRowEnqueue | None"]]
 type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
 # Finding the Matrix event a previous attempt already produced, when the frozen
@@ -235,6 +237,7 @@ class MatrixDeliveryWorker:
         thread_id: str | None,
         prepare: Callable[[], Awaitable[PreparedReplyRow]],
         response_attempt: ResponseAttempt | None = None,
+        enqueue: ReplyRowEnqueuer | None = None,
     ) -> ReplyRowDelivery:
         """Decide, record, and send one row of a reply, after every earlier row of that reply.
 
@@ -248,7 +251,8 @@ class MatrixDeliveryWorker:
         async with self._delivery_lock(reply_lock_key(request.reply_id)):
             await self._flush_reply_rows(request.reply_id)
             prepared = await prepare()
-            enqueue = await self.store.enqueue_reply_row(
+            enqueue_row = self.store.enqueue_reply_row if enqueue is None else enqueue
+            enqueued = await enqueue_row(
                 request=request,
                 room_id=room_id,
                 thread_id=thread_id,
@@ -258,15 +262,15 @@ class MatrixDeliveryWorker:
                 event_type=self.event_type,
                 permanent_failure_reason=prepared.permanent_failure_reason,
             )
-            if enqueue is None or enqueue.delivery_id is None or enqueue.stage is None:
-                return ReplyRowDelivery(enqueue=enqueue)
-            if self.handoff is not None and enqueue.settled_event_ids:
-                self.handoff.released(enqueue.settled_event_ids)
+            if enqueued is None or enqueued.delivery_id is None or enqueued.stage is None:
+                return ReplyRowDelivery(enqueue=enqueued)
+            if self.handoff is not None and enqueued.settled_event_ids:
+                self.handoff.released(enqueued.settled_event_ids)
             outcome = await run_coroutine_until_complete(
-                self._flush(delivery_id=enqueue.delivery_id, stage=DeliveryStage(enqueue.stage.value)),
+                self._flush(delivery_id=enqueued.delivery_id, stage=DeliveryStage(enqueued.stage.value)),
             )
-        event_id = await self._finish_flush(enqueue.delivery_id, outcome)
-        return ReplyRowDelivery(enqueue=enqueue, event_id=event_id, reply_effects=outcome.reply_effects)
+        event_id = await self._finish_flush(enqueued.delivery_id, outcome)
+        return ReplyRowDelivery(enqueue=enqueued, event_id=event_id, reply_effects=outcome.reply_effects)
 
     async def _flush_reply_rows(self, reply_id: str, *, before_sequence: int | None = None) -> bool:
         """Resolve a reply's earlier rows in write order; return whether none is left unknown.

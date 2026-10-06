@@ -313,7 +313,13 @@ async def _paused_case(  # noqa: PLR0915
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    runner.deps = replace(runner.deps, delivery_gateway=gateway, approval_store=principal)
+    assert runner.deps.replies is not None
+    runner.deps = replace(
+        runner.deps,
+        delivery_gateway=gateway,
+        approval_store=principal,
+        replies=replace(runner.deps.replies, store=principal),
+    )
     runner._approval_responses.store = principal
     runner._approval_responses.delivery_gateway = gateway
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
@@ -814,7 +820,13 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: 
             terminal_turn_committed=store.publish_committed_response,
         ),
     )
-    runner.deps = replace(runner.deps, approval_store=principal, delivery_gateway=gateway)
+    assert runner.deps.replies is not None
+    runner.deps = replace(
+        runner.deps,
+        approval_store=principal,
+        delivery_gateway=gateway,
+        replies=replace(runner.deps.replies, store=principal),
+    )
     request = replace(
         _plain_request(_target(), source_event_id="$edit"),
         existing_event_id="$waiting",
