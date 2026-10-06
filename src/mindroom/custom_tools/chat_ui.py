@@ -88,6 +88,10 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "something in; their answer comes back as their next message. For a quick choice between a few "
         "options, just ask in your reply."
     ),
+    "read_canvas_state": (
+        "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
+        "share_state=True, such as a checklist, without them sending anything."
+    ),
     "open_settings": (
         "open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting."
     ),
