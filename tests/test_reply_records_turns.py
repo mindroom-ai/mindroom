@@ -421,10 +421,25 @@ async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_
 async def test_a_redaction_of_an_event_already_gone_is_done(tmp_path: Path) -> None:
     """An event the homeserver no longer has needs no redaction, so the reply stops owing one."""
     bot = await _streaming_bot(tmp_path)
-    bot.client.room_redact = AsyncMock(return_value=nio.RoomRedactError("Event not found", status_code="M_NOT_FOUND"))
-    assert await bot._redact_message_event(room_id=_target().room_id, event_id="$gone", reason="Reply removed")
-    bot.client.room_redact = AsyncMock(return_value=nio.RoomRedactError("Forbidden", status_code="M_FORBIDDEN"))
-    assert not await bot._redact_message_event(room_id=_target().room_id, event_id="$kept", reason="Reply removed")
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    await bot._reply_runtime.store.replies.update(
+        answered.reply_id,
+        lambda reply: rl.Transition(
+            outcome=rl.Outcome.APPLIED,
+            reply=replace(reply, redaction_pending=("$gone", "$kept")),
+        ),
+    )
+
+    async def redact(_room_id: str, event_id: str, *_args: object, **_kwargs: object) -> nio.RoomRedactError:
+        if event_id == "$gone":
+            return nio.RoomRedactError("Event not found", status_code="M_NOT_FOUND")
+        return nio.RoomRedactError("Forbidden", status_code="M_FORBIDDEN")
+
+    bot.client.room_redact = AsyncMock(side_effect=redact)
+    await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+
+    assert (await _reply(bot)).redaction_pending == ("$kept",)
 
 
 async def test_a_note_that_could_not_be_prepared_yet_stays_owed(tmp_path: Path) -> None:
@@ -438,9 +453,10 @@ async def test_a_note_that_could_not_be_prepared_yet_stays_owed(tmp_path: Path) 
         lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
     )
     gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
-    with patch.object(type(gateway), "_deliver_rendered_reply_write", new=AsyncMock(return_value=None)):
+    with patch.object(type(gateway), "_deliver_rendered_reply_write", new=AsyncMock(return_value=None)) as deliver:
         await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
 
+    deliver.assert_awaited_once()
     assert (await _reply(bot)).owed_write == owed
 
 
@@ -466,20 +482,45 @@ async def test_regeneration_replaces_the_answer_of_the_same_reply(tmp_path: Path
     assert _sent_bodies(bot) == ["Thinking...", "First answer.", "Second answer."]
 
 
-async def test_regeneration_failing_before_its_first_write_restores_the_old_answer(tmp_path: Path) -> None:
-    """A regeneration that never wrote leaves the old answer and its records as they were."""
+async def _admit_edit(bot: AgentBot) -> None:
+    """Record the edit ingress admitted, which the regeneration takes as its source."""
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={},
+        ),
+    )
+
+
+async def test_regeneration_failing_before_its_first_write_is_retried(tmp_path: Path) -> None:
+    """A model error before the regeneration shows anything keeps the old answer and the edit, which a retry answers."""
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
     before = await _reply(bot)
+    await _admit_edit(bot)
 
     with pytest.raises(RuntimeError, match="model down"):
         await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(side_effect=RuntimeError("model down")))
 
     reply = await _reply(bot)
-    assert reply.state is rl.ReplyState.COMPLETED
     assert reply.presentation == before.presentation
-    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.RESTORED]
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.RELEASED]
+    assert await bot._reply_runtime.store.is_pending("$edit")
     assert _sent_bodies(bot) == ["Thinking...", "First answer."]
+
+    assert await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(return_value="Second answer.")) == (
+        "$sent1"
+    )
+    answered = await _reply(bot)
+    assert answered.state is rl.ReplyState.COMPLETED
+    assert render_body(decode_presentation(answered.presentation))[0] == "Second answer."
+    assert not await bot._reply_runtime.store.is_pending("$edit")
 
 
 async def test_regenerating_an_answer_older_than_the_records_adopts_it(tmp_path: Path) -> None:
@@ -1025,18 +1066,7 @@ async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt
     """A regeneration a restart stopped after it showed new text is retried, never rolled back by its re-run."""
     old = await _streaming_bot(tmp_path)
     await _answer(old, _plain_request(_target()), AsyncMock(return_value="First answer."))
-    await old.journal_principal().admit(
-        InboundEvent(
-            event_id="$edit",
-            room_id="!room:localhost",
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=2,
-            source={},
-        ),
-    )
+    await _admit_edit(old)
     response, _streaming = await _blocked_stream(old, "New partial", _regeneration(answer_event_id="$sent1"))
 
     async def shown() -> None:

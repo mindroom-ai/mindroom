@@ -830,7 +830,7 @@ class AgentBot:
         )
         self._legacy_reply_reads = LegacyReplyReads(
             store=self._journal_store.principal(self._journal_principal_id),
-            client=self._delivery_gateway._client,
+            client=self._delivery_gateway.ready_client,
             response_sender=lambda: runtime_matrix_id.full_id,
             trusted_sender_ids=lambda: current_internal_sender_ids(self.config, self.runtime_paths),
             logger=self.logger,

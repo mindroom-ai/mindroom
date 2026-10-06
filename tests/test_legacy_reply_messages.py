@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,6 +12,7 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import INTERRUPTED_FAILURE_REASON, ApprovalContinuation, DeliveryStage
+from mindroom.event_journal.replies import ReplyCreation, ReplyRowRequest
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS, LegacyReplyReads
@@ -36,6 +38,7 @@ async def _turn(
     journal_store: EventJournalStore,
     source: str,
     *,
+    coalesced: tuple[str, ...] = (),
     completed: bool = False,
     response_event_id: str | None = None,
     stop_order: int | None = None,
@@ -43,7 +46,7 @@ async def _turn(
 ) -> TurnRecord:
     """Store a main-era turn record of this agent, as main's ledger wrote it."""
     record = TurnRecord.create(
-        [source],
+        [source, *coalesced],
         requester_id="@user:example.org",
         completed=completed,
         response_event_id=response_event_id,
@@ -573,3 +576,120 @@ async def test_a_superseded_replay_removes_an_adopted_event_only_when_it_showed_
     else:
         assert superseded.reply.state is rl.ReplyState.FAILED
         assert superseded.reply.redaction_pending == ()
+
+
+async def test_a_selection_an_earlier_release_acknowledged_resolves_its_retried_acknowledgement(
+    journal_store: EventJournalStore,
+) -> None:
+    """The replayed selection finds the acknowledgement that release sent, instead of failing to write another."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    ack = "You selected: 1 Yes\n\nProcessing your response..."
+    await _row(principal, "$source", DeliveryStage.INITIAL, ack, status="pending", acknowledged="$ack")
+    (adopted,) = await _adopt(principal)
+    claim = rl.ClaimRequest(
+        span_id="span-retry",
+        delivery_id="$source",
+        sources=rl.SpanSources(pending=("$source",), logical=("$source",)),
+        bot_generation="gen-new",
+        now_ns=NOW,
+        new_reply_id="reply-retry",
+        entity_name=ENTITY,
+        room_id=ROOM,
+        thread_id=None,
+        membership_epoch=await principal.membership_epoch(ROOM),
+        empty_presentation=encode_presentation(Presentation()),
+    )
+
+    resolved = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id="reply-retry",
+            span_id="span-retry",
+            decide=None,
+            create=ReplyCreation(claim=claim, shown=encode_presentation(Presentation(placeholder=ack))),
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"msgtype": "m.text", "body": ack},
+    )
+
+    assert resolved is not None
+    assert resolved.applied.transition.outcome is rl.Outcome.DUPLICATE
+    assert resolved.applied.transition.reply is not None
+    assert resolved.applied.transition.reply.reply_id == adopted.reply_id
+    assert resolved.sequence == 1
+    reply = await _only_reply(principal)
+    assert reply.event_id == "$ack"
+    assert reply.confirmed
+
+
+async def test_a_coalesced_turn_in_flight_is_adopted_once(journal_store: EventJournalStore) -> None:
+    """A batch of two messages, whose rows that release keyed by the later one, becomes one reply."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$first")
+    await admit(principal, "$second")
+    await _turn(journal_store, "$first", coalesced=("$second",))
+    await _row(principal, "$second", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+
+    adopted = await _adopt(principal)
+
+    assert len(adopted) == 1
+    assert adopted[0].event_id == "$reply"
+    assert adopted[0].legacy_pending is rl.LegacyPending.PRESENTATION_READ
+
+
+async def test_a_read_that_gave_up_never_marks_the_event_as_only_a_placeholder(
+    journal_store: EventJournalStore,
+) -> None:
+    """Nothing known about what the event shows, a later removal keeps it instead of redacting it."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    (adopted,) = await _adopt(principal)
+    assert adopted.placeholder_only
+
+    await principal.finish_legacy_reply_read(adopted.reply_id, rl.LegacyRead(), now_ns=NOW)
+
+    read = await _only_reply(principal)
+    assert read.legacy_pending is None
+    assert read.event_id == "$reply"
+    assert not read.placeholder_only
+
+
+@pytest.mark.parametrize("recent", [True, False])
+async def test_a_settled_stream_gets_the_restart_note_only_within_the_stale_stream_window(
+    journal_store: EventJournalStore,
+    recent: bool,
+) -> None:
+    """That release's cleanup noted a stream it stopped within six hours; an older one keeps what it shows."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.settle_many(("$source",))
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    (adopted,) = await _adopt(principal)
+    reads = LegacyReplyReads(
+        store=principal,
+        client=MagicMock,
+        response_sender=lambda: "@agent:example.org",
+        trusted_sender_ids=tuple,
+        logger=MagicMock(),
+        resolved=lambda _reply_id: None,
+    )
+    edited_ms = int(time.time() * 1000) - (60_000 if recent else 7 * 60 * 60 * 1000)
+    message = MagicMock(
+        body="Partial answer",
+        content={"body": "Partial answer", "io.mindroom.stream_status": "streaming"},
+        stream_status="streaming",
+        timestamp=edited_ms,
+        edited_timestamp=None,
+    )
+    with patch("mindroom.legacy_reply_messages.fetch_latest_visible_message", new=AsyncMock(return_value=message)):
+        await reads.run()
+
+    ended = await _only_reply(principal)
+    assert ended.reply_id == adopted.reply_id
+    assert ended.state is rl.ReplyState.FAILED
+    assert (ended.owed_write is not None) is recent

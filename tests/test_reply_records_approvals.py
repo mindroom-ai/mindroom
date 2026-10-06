@@ -10,13 +10,22 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.models.response import ToolExecution
+from agno.run.requirement import RunRequirement
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal.replies import ReplyStore
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
-from mindroom.reply_presentation import NoteKind, Segment, decode_presentation, encode_presentation, note_segment
+from mindroom.reply_presentation import (
+    NoteKind,
+    Segment,
+    decode_presentation,
+    encode_presentation,
+    note_segment,
+    render_body,
+)
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
@@ -278,6 +287,50 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
         assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
 
 
+@pytest.mark.parametrize("answers", [True, False])
+async def test_a_turn_approved_in_place_settles_through_its_approval(tmp_path: Path, answers: bool) -> None:
+    """A run whose CLI call was approved while it waited ends its reply once, with the answer or the error note."""
+    async with _approval_bot(tmp_path, requires_human=False) as bot:
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+
+        async def approved_in_place(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.cli_approval_handler is not None
+            cli_call = {"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"}
+            paused = _paused()
+            requirement = RunRequirement(tool_execution=paused.tools[0])
+            await context.cli_approval_handler(replace(paused, cli_call=cli_call, requirements=(requirement,)))
+            if not answers:
+                msg = "model down"
+                raise RuntimeError(msg)
+            return "Done reading."
+
+        with patch_response_runner_module(
+            ai_response=AsyncMock(side_effect=approved_in_place),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            if answers:
+                await runner.generate_response(_plain_request(_target()))
+            else:
+                with pytest.raises(RuntimeError, match="model down"):
+                    await runner.generate_response(_plain_request(_target()))
+        if await bot.journal_principal().approval_continuation_for_source("$event") is not None:
+            # A failure settles from the source worker the fence woke.
+            await _run_approval_wakes(bot, [("$event",)])
+
+        reply = await _reply(bot)
+        assert reply.state is (rl.ReplyState.COMPLETED if answers else rl.ReplyState.FAILED)
+        assert reply.approval_id is None
+        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert not await bot._reply_runtime.store.is_pending("$event")
+        if answers:
+            assert _sent_bodies(bot)[-1] == "Done reading."
+        else:
+            assert "model down" in _sent_bodies(bot)[-1]
+
+
 async def test_stop_during_an_approval_resume_cancels_it_through_its_approval(tmp_path: Path) -> None:
     """A Stop on a resuming reply cancels the resume span; the approval's settlement shows the note."""
     async with _approval_bot(tmp_path, requires_human=False) as bot:
@@ -419,6 +472,13 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
             await bot._reply_runtime.store.replies.update((await _reply(bot)).reply_id, below_earlier)
             return await claim(runtime, *args, **kwargs)  # type: ignore[arg-type]
 
+        recorded: list[str] = []
+        write_ahead = ReplyStore.write_ahead
+
+        async def record_write_ahead(store: ReplyStore, **kwargs: object) -> object:
+            recorded.append(str(kwargs["shown"]))
+            return await write_ahead(store, **kwargs)  # type: ignore[arg-type]
+
         with (
             patch.object(runtime_type, "claim_approval_resume", claim_below_an_earlier_attempt),
             patch_response_runner_module(
@@ -427,12 +487,16 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
                 typing_indicator=_noop_typing,
             ),
             patch.object(type(runner), "_continue_entity_call", AsyncMock(side_effect=resume_with_progress)),
+            patch.object(ReplyStore, "write_ahead", record_write_ahead),
         ):
             await runner.generate_response(_plain_request(_target()))
 
         progress, final = _sent_bodies(bot)[-2:]
         assert progress.startswith("Earlier partial")
         assert "Reading document, then more" in progress
+        # What each progress edit records holds the earlier work once, as Matrix shows it.
+        assert recorded
+        assert all(render_body(decode_presentation(shown))[0].count("Earlier partial") == 1 for shown in recorded)
         assert final.startswith("Earlier partial")
         assert final.endswith("Approved answer.")
         reply = await _reply(bot)
@@ -533,10 +597,27 @@ async def test_an_edit_supersedes_the_approval_of_the_reply_it_regenerates(
         assert _sent_bodies(bot)[-1] == "A fresh answer."
 
 
-async def test_a_regeneration_of_a_paused_reply_that_fails_ends_it_interrupted(tmp_path: Path) -> None:
-    """Rolling back a superseded pause never restores consent: the reply fails with the interruption note."""
+async def _admit_edit(bot: AgentBot) -> None:
+    """Record the edit ingress admitted, which the regeneration takes as its source."""
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={},
+        ),
+    )
+
+
+async def test_a_regeneration_of_a_paused_reply_that_fails_is_retried_without_its_old_consent(tmp_path: Path) -> None:
+    """A model error before the regeneration shows anything keeps the edit for a retry; the old approval stays superseded."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
+        await _admit_edit(bot)
         runner = unwrap_extracted_collaborator(bot._response_runner)
         with (
             patch_response_runner_module(
@@ -549,12 +630,28 @@ async def test_a_regeneration_of_a_paused_reply_that_fails_ends_it_interrupted(t
             await runner.generate_response(_regeneration(answer_event_id="$sent1"))
 
         reply = await _reply(bot)
-        assert reply.state is rl.ReplyState.FAILED
+        assert reply.state is rl.ReplyState.ACTIVE
         assert reply.approval_id is None
-        assert reply.owed_write is None
-        assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response interrupted]**"
+        assert await bot._reply_runtime.store.is_pending("$edit")
         # The superseded approval's cleanup finished it.
         await _superseded_cleanup(bot)
+
+        with patch_response_runner_module(
+            ai_response=AsyncMock(return_value="The edited answer."),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await runner.generate_response(_regeneration(answer_event_id="$sent1"))
+
+        answered = await _reply(bot)
+        assert answered.state is rl.ReplyState.COMPLETED
+        assert await _span_kinds(bot) == [
+            (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
+            (rl.SpanKind.REGENERATION, rl.SpanOutcome.RELEASED),
+            (rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED),
+        ]
+        assert _sent_bodies(bot)[-1] == "The edited answer."
+        assert not await bot._reply_runtime.store.is_pending("$edit")
 
 
 async def test_a_regeneration_of_a_paused_reply_may_pause_again(tmp_path: Path) -> None:
@@ -562,18 +659,7 @@ async def test_a_regeneration_of_a_paused_reply_may_pause_again(tmp_path: Path) 
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
         # Ingress admitted the edit; the new continuation takes it as its source.
-        await bot.journal_principal().admit(
-            InboundEvent(
-                event_id="$edit",
-                room_id="!room:localhost",
-                thread_id=None,
-                kind=EventKind.MESSAGE,
-                event_class=EventClass.ACTIONABLE,
-                sender="@user:localhost",
-                origin_server_ts=2,
-                source={},
-            ),
-        )
+        await _admit_edit(bot)
         runner = unwrap_extracted_collaborator(bot._response_runner)
         with patch_response_runner_module(
             ai_response=AsyncMock(side_effect=ResponsePausedForApproval(_paused(run_id="run-edit", text="Rereading"))),

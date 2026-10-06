@@ -274,7 +274,7 @@ async def test_an_end_before_the_continuation_streams_keeps_the_stopped_reply(
     terminal_note: str,
     stream_status: str,
 ) -> None:
-    """A run that fails or is stopped before it streams ends the stopped attempt's text with its note instead of redacting it."""
+    """A run that fails before it streams ends the stopped attempt's text with its note instead of redacting it."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     await _read_after_sync(bot, _streamed())

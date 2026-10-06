@@ -72,7 +72,7 @@ The Stop button belongs to the reply: it is recorded when sent and redacted when
 A pause, the continuation it creates or advances, and the pause row commit together.
 A resume claims the continuation and an `approval_resume` span of the paused reply together, and continues the paused answer segment.
 A failure or Stop fences the continuation; its settlement writes the note and finishes the reply in the continuation's finish.
-A response-local CLI approval waits in place: its span stays current through the wait.
+A response-local CLI approval waits in place: its span stays current through the wait, and once approved it runs for that approval as a resume does, so the continuation's finish or failure settles the sources and ends the reply.
 
 ## Lifetime
 
@@ -89,11 +89,11 @@ The handled-turn retention pass deletes finished replies that owe nothing, with 
 
 - I1. At most one current span; only span-authored events from it change the canonical answer.
 - I2. Durable writes of a reply are sent in sequence by its one sending owner; an attempted write is resolved before a later one is sent.
-- I3. A terminal reply changes only by a regeneration claim, a failed terminal write, a completed redaction, or a late create bound for redaction.
+- I3. A terminal reply's state and answer change only by a regeneration claim, a failed terminal write, a completed redaction, a late create bound for redaction, or the note it owes.
 - I4. A recorded Stop with no newer edit is eventually applied, unless a terminal row was enqueued before it.
 - I5. Every non-terminal reply has a durable path to progress: pending span sources, an approval continuation, or `owner_lost`.
 - I6. A span's sources settle with its terminal transition, except spans that hand them to a continuation, a retry, or a replay.
 - I7. Every reply write is recorded before it is sent.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place.
 
-`tests/test_reply_lifecycle_fuzz.py` checks these over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approvals, deletions, departures, supersessions, and dropped replays.
+`tests/test_reply_lifecycle_fuzz.py` checks that at most one span is current and I4 through I8 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approvals, deletions, departures, supersessions, and dropped replays, from the spans that run; the unit tests cover stale and retired spans and the remaining rules.

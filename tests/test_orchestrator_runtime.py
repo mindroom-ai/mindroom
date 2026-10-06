@@ -92,7 +92,7 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
-from mindroom.startup_errors import PermanentStartupError
+from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -429,11 +429,13 @@ async def test_a_runtime_that_loses_its_journal_stops() -> None:
     orchestrator = MagicMock()
     orchestrator.event_journal_still_held = AsyncMock(side_effect=[True, False])
     shutdown_requested = asyncio.Event()
+    hold_lost = asyncio.Event()
 
     with patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0):
-        await asyncio.wait_for(_watch_event_journal_hold(orchestrator, shutdown_requested), timeout=5)
+        await asyncio.wait_for(_watch_event_journal_hold(orchestrator, shutdown_requested, hold_lost), timeout=5)
 
     assert shutdown_requested.is_set()
+    assert hold_lost.is_set()
     assert orchestrator.event_journal_still_held.await_count == 2
 
 
@@ -494,6 +496,35 @@ def _bind_orderly_shutdown(bot: MagicMock) -> None:
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_fails_after_losing_its_event_journal(self, tmp_path: Path) -> None:
+        """A runtime that stopped because it lost its journal exits with a failure, so a supervisor restarts it."""
+        reset_runtime_state()
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.start = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.running = False
+        mock_orchestrator.event_journal_still_held = AsyncMock(return_value=False)
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0),
+            pytest.raises(EventJournalHoldLostError),
+        ):
+            await asyncio.wait_for(
+                main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False),
+                timeout=10,
+            )
+
+        mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_reraises_permanent_startup_error(self, tmp_path: Path) -> None:

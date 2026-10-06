@@ -204,14 +204,26 @@ def approval_released(
     principal_id: str,
     continuation: approval_continuations.ApprovalContinuation,
 ) -> AppliedTransition | None:
-    """End the resume span of a continuation handed back to replay, keeping its sources pending."""
+    """End the span running for a continuation handed back to replay, keeping its sources pending.
+
+    That is its resume span, or a span it was approved in place in; a reply
+    whose span a restart already ended only loses the approval's hold.
+    """
     found = reply_messages.for_event(transaction, principal_id, continuation.response_event_id)
-    if found is None or found.current_span_id is None:
+    if found is None:
         return None
     reply = reply_messages.lock(transaction, principal_id, found.reply_id)
     assert reply is not None
-    span = reply_spans.load(transaction, principal_id, found.current_span_id)
-    if span is None or span.kind is not rl.SpanKind.APPROVAL_RESUME or span.approval_id != continuation.approval_id:
+    holds = reply.approval_id == continuation.approval_id
+    if reply.current_span_id is None:
+        if not holds:
+            return None
+        return apply(transaction, principal_id, rl.approval_released(reply, None, now_ns=time.time_ns()))
+    span = reply_spans.load(transaction, principal_id, reply.current_span_id)
+    resumes = (
+        span is not None and span.kind is rl.SpanKind.APPROVAL_RESUME and span.approval_id == continuation.approval_id
+    )
+    if span is None or not (resumes or holds):
         return None
     return apply(transaction, principal_id, rl.approval_released(reply, span, now_ns=time.time_ns()))
 

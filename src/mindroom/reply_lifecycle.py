@@ -90,6 +90,13 @@ class WriteStage(StrEnum):
     EDIT = "edit"
 
 
+# LEGACY_COMPAT: Replies adopted from an earlier release whose event only Matrix can read.
+# Legacy format: a reply adoption created for an earlier release's in-flight work, marked with this pending read.
+# Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record every write ahead of
+# sending it, so no reply is adopted with a pending read.
+# Handling: claims and owed notes defer while it is set (``claim``, ``flush_owed_write``), replays wait for it
+# (``replay_dropped``), and ``legacy_read_done`` applies the read once.
+# Coverage: tests/test_legacy_reply_messages.py.
 class LegacyPending(StrEnum):
     """A one-time Matrix read a reply adopted from an earlier release still needs."""
 
@@ -1114,7 +1121,7 @@ def fail(  # noqa: C901, PLR0911
             reply=_touch(updated, now_ns),
             spans=(_end(span, SpanOutcome.FAILED, now_ns),),
         )
-    if _keeps_earlier_answer(reply, span, from_span=True):
+    if phase == "delivery" and _keeps_earlier_answer(reply, span, from_span=True):
         return Transition(
             outcome=Outcome.APPLIED,
             reply=_restore(reply, span, now_ns),
@@ -1122,7 +1129,9 @@ def fail(  # noqa: C901, PLR0911
             effects=_settle_sources(reply, span),
         )
     if phase == "pre_delivery":
-        # The sources return for a retry, which streams into the kept placeholder.
+        # The sources return for a retry, which streams into the kept
+        # placeholder; a regeneration's retry runs it again with its rollback,
+        # and whatever drops the retry instead puts the earlier answer back.
         updated = _touch(_clear_current(reply, span.span_id), now_ns)
         ended = _end(span, SpanOutcome.RELEASED, now_ns)
         if write is None:
@@ -1164,7 +1173,9 @@ def suppress(
     if stale is not None:
         return stale
     outcome = SpanOutcome.SUPPRESSED if reason == "suppressed" else SpanOutcome.FAILED
-    if reply.unapplied_stop and span.kind is not SpanKind.APPROVAL_RESUME:
+    # A span that runs for its approval, a resume or one approved in place, leaves the reply to that approval.
+    for_approval = span.kind is SpanKind.APPROVAL_RESUME or reply.approval_id is not None
+    if reply.unapplied_stop and not for_approval:
         outcome = SpanOutcome.CANCELLED
     updated = _clear_current(reply, span.span_id)
     effects = _settle_sources(reply, span)
@@ -1185,7 +1196,7 @@ def suppress(
             spans=(_end(span, SpanOutcome.RESTORED, now_ns),),
             effects=effects,
         )
-    if span.kind is SpanKind.APPROVAL_RESUME:
+    if for_approval:
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=(_end(span, outcome, now_ns),))
     state = ReplyState.CANCELLED if reason == "suppressed" or outcome is SpanOutcome.CANCELLED else ReplyState.FAILED
     if outcome is SpanOutcome.CANCELLED:
@@ -1291,12 +1302,9 @@ def resumed_in_place(reply: Reply, span: Span, *, approval_id: str, now_ns: int)
         return stale
     if reply.state is not ReplyState.PAUSED or reply.approval_id != approval_id:
         return _unchanged(Outcome.STALE, reply)
-    # A resume that waited in place still runs for its approval, which a Stop must fence.
-    hold = approval_id if span.kind is SpanKind.APPROVAL_RESUME else None
-    return Transition(
-        outcome=Outcome.APPLIED,
-        reply=_set_state(reply, ReplyState.ACTIVE, now_ns, approval_id=hold),
-    )
+    # The span still runs for its approval, which a Stop must fence and whose
+    # finish settles the sources and ends the reply, as for a resume.
+    return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.ACTIVE, now_ns))
 
 
 _ApprovalResult = Literal["failed", "finished"]
@@ -1354,7 +1362,14 @@ def _approval_failed(
         and reply.current_span_id == resume.span_id
     )
     resumed = resume is not None and resume.ended
-    if not (reply.state is ReplyState.PAUSED or (reply.state is ReplyState.ACTIVE and (resumed or orphaned))):
+    # A span approved in place still holds the reply once it ended without its answer.
+    approved_in_place = (
+        reply.approval_id == approval_id and last_span is not None and last_span.ended and resume is None
+    )
+    if not (
+        reply.state is ReplyState.PAUSED
+        or (reply.state is ReplyState.ACTIVE and (resumed or orphaned or approved_in_place))
+    ):
         return _unchanged(Outcome.STALE, reply)
     stopped_by_user = disposition == "cancelled_by_user" or reply.unapplied_stop
     state = ReplyState.CANCELLED if stopped_by_user else ReplyState.FAILED
@@ -1431,10 +1446,13 @@ def _state_for_span_outcome(outcome: SpanOutcome | None) -> ReplyState | None:
     return None
 
 
-def approval_released(reply: Reply, span: Span, *, now_ns: int) -> Transition:
-    """A continuation released to replay ends its resume span with sources pending."""
-    if span.ended or reply.terminal:
+def approval_released(reply: Reply, span: Span | None, *, now_ns: int) -> Transition:
+    """A continuation released to replay ends the span running for it, if any, keeping sources pending."""
+    if reply.terminal or (span is None and reply.approval_id is None) or (span is not None and span.ended):
         return _unchanged(Outcome.DUPLICATE, reply)
+    if span is None:
+        # A span approved in place that a restart already ended: the replay answers without the approval.
+        return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, approval_id=None))
     updated = _set_state(_clear_current(reply, span.span_id), ReplyState.ACTIVE, now_ns, approval_id=None)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=(_end(span, SpanOutcome.RELEASED, now_ns),))
 
@@ -1810,20 +1828,25 @@ def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pend
     """
     if reply.legacy_pending is None:
         return _unchanged(Outcome.DUPLICATE, reply)
-    updated = replace(reply, legacy_pending=None)
-    if read.event_id is not None:
-        updated = replace(updated, event_id=updated.event_id or read.event_id, placeholder_only=read.placeholder_only)
+    # What the event shows decides whether a later removal may redact it; a
+    # read that found or knew nothing never claims it showed only the placeholder.
+    updated = replace(
+        reply,
+        legacy_pending=None,
+        event_id=reply.event_id or read.event_id,
+        placeholder_only=read.placeholder_only,
+    )
     if read.shown is not None:
         updated = replace(updated, presentation=read.shown, possibly_shown=read.shown)
     updated = _bump(updated, now_ns)
-    stream_main_stopped = (
+    stopped_after_settling = (
         reply.state is ReplyState.ACTIVE
         and reply.current_span_id is None
         and reply.approval_id is None
         and last.outcome is SpanOutcome.LOST
         and not sources_pending
     )
-    if not stream_main_stopped:
+    if not stopped_after_settling:
         return Transition(outcome=Outcome.APPLIED, reply=updated)
     if read.ended_as is not None:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, read.ended_as, now_ns))

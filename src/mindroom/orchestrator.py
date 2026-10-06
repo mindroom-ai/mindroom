@@ -103,7 +103,7 @@ from mindroom.runtime_state import (
 )
 from mindroom.scheduling_executor import set_scheduling_hook_registry
 from mindroom.skill_learning.runner import SkillReviewRunner
-from mindroom.startup_errors import PermanentStartupError
+from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
@@ -1797,8 +1797,9 @@ class _MultiAgentOrchestrator:
             if bot is not None:
                 await bot.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
                 self.agent_bots.pop(entity_name, None)
-        # No bot remains to finish their replies.
-        await self._shared_journal_store().end_entity_replies(removed_entities.__contains__, now_ns=time.time_ns())
+        if removed_entities:
+            # No bot remains to finish their replies.
+            await self._shared_journal_store().end_entity_replies(removed_entities.__contains__, now_ns=time.time_ns())
 
     async def _stop_entities_before_mcp_sync(
         self,
@@ -2987,12 +2988,17 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
-async def _watch_event_journal_hold(orchestrator: _MultiAgentOrchestrator, shutdown_requested: asyncio.Event) -> None:
+async def _watch_event_journal_hold(
+    orchestrator: _MultiAgentOrchestrator,
+    shutdown_requested: asyncio.Event,
+    hold_lost: asyncio.Event,
+) -> None:
     """Stop the runtime once it no longer holds its event journal, before another runtime can take it over."""
     while not shutdown_requested.is_set():
         await asyncio.sleep(_EVENT_JOURNAL_HOLD_CHECK_SECONDS)
         if not await orchestrator.event_journal_still_held():
             logger.error("event_journal_hold_lost")
+            hold_lost.set()
             shutdown_requested.set()
             return
 
@@ -3001,6 +3007,7 @@ def _start_auxiliary_tasks(
     orchestrator: _MultiAgentOrchestrator,
     runtime_paths: RuntimePaths,
     shutdown_requested: asyncio.Event,
+    journal_hold_lost: asyncio.Event,
 ) -> list[asyncio.Task]:
     """Start the non-critical background tasks that run beside the orchestrator."""
     # First, so an invalid probe interval fails before any task exists that shutdown could not cancel.
@@ -3027,7 +3034,7 @@ def _start_auxiliary_tasks(
     ]
     tasks.append(
         create_background_task(
-            _watch_event_journal_hold(orchestrator, shutdown_requested),
+            _watch_event_journal_hold(orchestrator, shutdown_requested, journal_hold_lost),
             name="event_journal_hold_watch",
         ),
     )
@@ -3079,6 +3086,7 @@ async def _run_runtime(  # noqa: PLR0915
     orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
+    journal_hold_lost = asyncio.Event()
     api_server = _EmbeddedApiServerContext(host=api_host, port=api_port)
     orchestrator_task: asyncio.Task[None] | None = None
     shutdown_wait_task: asyncio.Task[bool] | None = None
@@ -3102,7 +3110,9 @@ async def _run_runtime(  # noqa: PLR0915
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
         set_runtime_starting()
-        auxiliary_tasks.extend(_start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested))
+        auxiliary_tasks.extend(
+            _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_hold_lost),
+        )
 
         if api:
             api_task = asyncio.create_task(
@@ -3170,3 +3180,7 @@ async def _run_runtime(  # noqa: PLR0915
             cleanup_task,
             shutdown_was_requested=shutdown_was_requested,
         )
+    if journal_hold_lost.is_set():
+        # Exiting with a failure lets a supervisor that restarts only on failure bring the runtime back.
+        msg = "MindRoom stopped because it no longer holds its event journal"
+        raise EventJournalHoldLostError(msg)

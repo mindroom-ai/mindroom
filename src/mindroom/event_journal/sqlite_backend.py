@@ -458,10 +458,7 @@ class SqliteBackend:
         return self._hold is not None
 
     async def _finish_close(self) -> None:
-        """Finish the teardown every close waiter shares."""
-        hold, self._hold = self._hold, None
-        if hold is not None:
-            release_file_lock(hold)
+        """Finish the teardown every close waiter shares; the hold goes last, once nothing can write."""
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:
@@ -485,6 +482,9 @@ class SqliteBackend:
         finally:
             self._offload.shutdown()
             self._recovery_offload.shutdown()
+            hold, self._hold = self._hold, None
+            if hold is not None:
+                release_file_lock(hold)
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:

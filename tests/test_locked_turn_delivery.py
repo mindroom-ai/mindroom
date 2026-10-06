@@ -271,13 +271,14 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
     ):
         await coordinator.generate_response(regen_request)
 
-    # The regeneration ended before its first write, so the reply restores its
-    # old answer: nothing is redacted or edited.
+    # The regeneration ended before its first write, so the edit waits for a
+    # retry with the old answer still shown: nothing is redacted or edited.
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
     reply = await bot._reply_runtime.store.replies.for_event("$prior_answer")
     assert reply is not None
-    assert reply.state is ReplyState.COMPLETED
+    assert reply.state is ReplyState.ACTIVE
+    assert reply.current_span_id is None
     bot.client.room_redact.assert_not_awaited()
     assert not [
         call

@@ -390,7 +390,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert span is not None
         if self.model.reply is not None and self.model.reply.state is ReplyState.PAUSED:
             return
-        self._apply(rl.finish(self.model.reply, span, self._terminal_write(ReplyState.COMPLETED), now_ns=self._now()))  # type: ignore[arg-type]
+        transition = self._apply(
+            rl.finish(self.model.reply, span, self._terminal_write(ReplyState.COMPLETED), now_ns=self._now()),  # type: ignore[arg-type]
+        )
+        self._approval_resume_ended(span, transition)
 
     @precondition(lambda self: self._live() is not None)
     @rule()
@@ -499,19 +502,24 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self._approval_resume_ended(span, transition)
 
     def _approval_resume_ended(self, span: Span, transition: rl.Transition) -> None:
-        """An approval resume that ended without a terminal row fails its continuation."""
-        if span.kind is not SpanKind.APPROVAL_RESUME or self.model.approval is None:
+        """A span that ran for its approval, a resume or one approved in place, finishes or fails the continuation."""
+        runs_for_approval = span.kind is SpanKind.APPROVAL_RESUME or span.span_id in self.model.held
+        if not runs_for_approval or self.model.approval is None:
             return
         ended = self.model.spans[span.span_id]
-        if (
-            ended.outcome in {SpanOutcome.CANCELLED, SpanOutcome.FAILED, SpanOutcome.SUPPRESSED}
-            and transition.row is None
-        ):
+        final = transition.row is not None and transition.row.stage is WriteStage.FINAL
+        if not final and ended.outcome in {
+            SpanOutcome.CANCELLED,
+            SpanOutcome.FAILED,
+            SpanOutcome.SUPPRESSED,
+            SpanOutcome.RELEASED,
+        }:
+            # Without its answer the continuation fails, and its settlement ends the reply.
             self.model.approval.state = "failing"
             self.model.approval.disposition = (
                 "cancelled_by_user" if ended.outcome is SpanOutcome.CANCELLED else "failed"
             )
-        elif transition.row is not None:
+        elif final:
             finished = rl.approval_settled(
                 self.model.reply,  # type: ignore[arg-type]
                 ended,
@@ -572,7 +580,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self._apply(
                 rl.resumed_in_place(self.model.reply, current, approval_id=approval.approval_id, now_ns=self._now()),
             )  # type: ignore[arg-type]
-            self.model.approval = None
+            # The waiting span claimed the continuation; it still holds the reply until it finishes.
+            approval.state = "claimed"
             return
         transition = self._claim(approval_id=approval.approval_id)
         if transition.claimed is not None:
@@ -777,6 +786,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             or (reply.state is ReplyState.PAUSED and reply.approval_id is not None)
             or (last.outcome in rl._SOURCES_PENDING_OUTCOMES and last.span_id not in self.model.settled)
             or (last.kind is SpanKind.APPROVAL_RESUME and self.model.approval is not None)
+            or (reply.approval_id is not None and self.model.approval is not None)
             or reply.owed_write is not None
         )
         assert owned, (reply, last)

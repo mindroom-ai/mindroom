@@ -765,7 +765,7 @@ class DeliveryGateway:
         compare=False,
     )
 
-    def _client(self) -> nio.AsyncClient:
+    def ready_client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for delivery."""
         client = self.deps.runtime.client
         if client is None:
@@ -785,7 +785,7 @@ class DeliveryGateway:
         """Best-effort acknowledgement of a deliberate judgment, stable across replays."""
         if not await self._visible_notice_is_current(identity, room_id):
             return
-        client = self._client()
+        client = self.ready_client()
         # Exclude the emoji so a config reload cannot duplicate a replayed reaction.
         transaction_id = str(
             uuid5(NAMESPACE_URL, json.dumps([f"mindroom-{kind.replace('_', '-')}", client.user_id, room_id, event_id])),
@@ -1180,7 +1180,7 @@ class DeliveryGateway:
     ) -> DeliveredMatrixEvent:
         """Send one frozen event of a claimed delivery, mapping refusals to exceptions."""
         outcome = await send_message_outcome(
-            self._client(),
+            self.ready_client(),
             claimed.room_id,
             content,
             operation=operation,
@@ -1203,7 +1203,7 @@ class DeliveryGateway:
         event_id: str,
     ) -> ProjectedEvent | None:
         """Read one event's authoritative ordering metadata from Matrix."""
-        client = self._client()
+        client = self.ready_client()
         response = await client.room_get_event(room_id, event_id)
         if not isinstance(response, nio.RoomGetEventResponse):
             msg = f"Matrix could not read delivered event {event_id!r} in {room_id!r}"
@@ -1393,7 +1393,7 @@ class DeliveryGateway:
 
     async def _delivered_under_a_previous_device(self, claimed: MatrixDelivery) -> str | None:
         """Return the exact marker-bearing event an earlier device delivered."""
-        client = self._client()
+        client = self.ready_client()
         response_sender = client.user_id
         if not response_sender:
             return None
@@ -1427,7 +1427,7 @@ class DeliveryGateway:
         continuations = _continuation_payloads(claimed.result)
         if not continuations:
             return
-        client = self._client()
+        client = self.ready_client()
         response_sender = client.user_id
         assert response_sender, "continuation reconciliation requires a logged-in client"
         missing_indices = await missing_outbox_delivery_copy_indices_via_room_messages(
@@ -1509,7 +1509,7 @@ class DeliveryGateway:
         that survives a restart, so there is nothing for recovery to key on and
         a durable row would only be a row nobody can resolve.
         """
-        client = self._client()
+        client = self.ready_client()
         if request.reply_write is not None:
             return await self._deliver_reply_write(
                 request.reply_write,
@@ -1983,7 +1983,7 @@ class DeliveryGateway:
         if handle.reply.stop_button_event_id is not None:
             # An earlier span of the reply already shows one.
             return
-        button_event_id = await send_stop_button(self._client(), handle.reply.room_id, event_id)
+        button_event_id = await send_stop_button(self.ready_client(), handle.reply.room_id, event_id)
         if button_event_id is None:
             return
         applied = await self.deps.outbox.replies.update(
@@ -2177,7 +2177,7 @@ class DeliveryGateway:
         and a durable row per streamed revision would put a claim-before-send
         round trip inside the streaming loop.
         """
-        client = self._client()
+        client = self.ready_client()
         if request.reply_write is not None:
             return await self._deliver_reply_write(
                 request.reply_write,
@@ -2819,7 +2819,7 @@ class DeliveryGateway:
                 SKIP_MENTIONS_KEY: True,
             },
         )
-        outcome = await send_message_outcome(self._client(), target.room_id, content)
+        outcome = await send_message_outcome(self.ready_client(), target.room_id, content)
         delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
         if delivered is not None:
             self.deps.logger.info("Sent compaction lifecycle notice", event_id=delivered.event_id, **target.log_context)
@@ -2909,7 +2909,7 @@ class DeliveryGateway:
             },
         )
         outcome = await edit_message_outcome(
-            self._client(),
+            self.ready_client(),
             target.room_id,
             event_id,
             content,
@@ -2941,7 +2941,7 @@ class DeliveryGateway:
         request: StreamingDeliveryRequest,
     ) -> StreamTransportOutcome:
         """Send one streaming Matrix response."""
-        client = self._client()
+        client = self.ready_client()
         config = self.deps.runtime.config
         # The turn this stream answers. Its terminal edit is the delivery that
         # makes the answer visible, so that one becomes durable; every earlier
@@ -3240,7 +3240,7 @@ class DeliveryGateway:
             )
         )
         progress = stream_progress_edits(
-            self._client(),
+            self.ready_client(),
             target,
             self.deps.runtime.config,
             self.deps.runtime_paths,
@@ -3309,7 +3309,7 @@ class DeliveryGateway:
                 # as the turn's final delivery would settle it with a
                 # placeholder and leave `deliver_final` nothing to do.
                 return await send_message_result(
-                    self._client(),
+                    self.ready_client(),
                     target.room_id,
                     content,
                     retry_sync_recovery=retry_sync_recovery,
@@ -3358,7 +3358,7 @@ class DeliveryGateway:
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
             return _PreparedWirePayload(content=content)
-        client = self._client()
+        client = self.ready_client()
         encryption_outcome = await resolve_room_encryption_outcome(
             client,
             room_id,
@@ -3465,7 +3465,7 @@ class DeliveryGateway:
                 # delivers the answer in exactly this case -- would then find
                 # its own delivery already acknowledged and send nothing.
                 return await edit_message_result(
-                    self._client(),
+                    self.ready_client(),
                     target.room_id,
                     event_id,
                     content,

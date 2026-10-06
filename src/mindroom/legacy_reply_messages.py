@@ -58,9 +58,11 @@ if TYPE_CHECKING:
 # Handling: after the reply's room syncs, its event is read once per recovery pass, up to three passes, and the read
 # becomes its presentation; a stream that ended without a terminal status within that release's six-hour stale-stream
 # window gets the restart note its startup cleanup gave, and claims and notes wait for the read; only an event showing
-# nothing but the placeholder may later be redacted as one.
+# nothing but the placeholder may later be redacted as one. That release's own Stop reaction on such a stream, which
+# its cleanup redacted, stays.
 # Coverage: tests/test_legacy_reply_messages.py::test_reads_after_sync_record_what_the_event_showed,
-# tests/test_legacy_reply_messages.py::test_a_superseded_replay_removes_an_adopted_event_only_when_it_showed_the_placeholder.
+# tests/test_legacy_reply_messages.py::test_a_superseded_replay_removes_an_adopted_event_only_when_it_showed_the_placeholder,
+# tests/test_legacy_reply_messages.py::test_a_settled_stream_gets_the_restart_note_only_within_the_stale_stream_window.
 _STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 # Passes a read is retried in before its reply proceeds with what it showed unknown.
 _READ_ATTEMPTS = 3

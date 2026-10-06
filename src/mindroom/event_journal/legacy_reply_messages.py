@@ -127,8 +127,9 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # reply per newest continuation (older ones are superseded), the state a frozen unacknowledged FINAL implies, a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; an
-# unsettled Stop is applied to the reply it names. What only Matrix knows is marked legacy_pending and read after the
-# room syncs.
+# unsettled Stop is applied to the reply it names. A coalesced turn is adopted once, under whichever source keyed its
+# rows, and an adopted INITIAL, owed or acknowledged, becomes the reply's first row. What only Matrix knows is marked
+# legacy_pending and read after the room syncs.
 # Coverage: tests/test_legacy_reply_messages.py.
 def classify(
     transaction: Transaction,
@@ -143,6 +144,8 @@ def classify(
         return ()
     adoptions: list[_Adoption] = []
     adopted: set[str] = set()
+    # A coalesced turn's rows are keyed by its last source; every source it answers is taken.
+    adopted_sources: set[str] = set()
     # One Matrix event is one reply: an edit's newer approval pauses the
     # event its original turn's rows created, and that event is adopted once.
     adopted_events: set[str] = set()
@@ -150,6 +153,7 @@ def classify(
         adoption = _paused_reply(transaction, principal_id, continuation, entity_name, presentations, now_ns)
         adoptions.append(adoption)
         adopted.update(span.delivery_id for span in adoption.spans)
+        adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
         adopted_events.add(continuation.response_event_id)
     for delivery_id in _unowned_row_delivery_ids(transaction, principal_id):
         if delivery_id in adopted:
@@ -159,12 +163,13 @@ def classify(
             continue
         adoptions.append(adoption)
         adopted.add(delivery_id)
+        adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
         if adoption.reply.event_id is not None:
             adopted_events.add(adoption.reply.event_id)
     adoptions.extend(
         _stream_created_reply(transaction, principal_id, record, entity_name, presentations, now_ns)
         for record in _pending_turns(transaction, principal_id, entity_name)
-        if record.source_event_ids[0] not in adopted
+        if adopted_sources.isdisjoint(record.source_event_ids)
     )
     applied = [_write(transaction, principal_id, adoption) for adoption in adoptions]
     applied.extend(_unsettled_stops(transaction, principal_id, entity_name, now_ns))
@@ -504,6 +509,9 @@ def _reply_of_rows(
     )
     acknowledged = initial.acknowledged_event_id
     owed = acknowledged is None and initial.permanent_failure_reason is None
+    # The reply owns its create, owed or shown, so a retried selection
+    # acknowledgement resolves to that row instead of writing another.
+    owns_create = owed or acknowledged is not None
     reply = _reply(
         transaction,
         principal_id,
@@ -513,13 +521,14 @@ def _reply_of_rows(
         membership_epoch=initial.membership_epoch,
         event_id=acknowledged,
         placeholder_only=acknowledged is not None,
-        reply_sequence=1 if owed else 0,
+        reply_sequence=1 if owns_create else 0,
+        confirmed_seq=1 if acknowledged is not None else None,
         # Whether a replay continues below a shown attempt, or a stream that
         # settled needs the restart note, only the event says.
         legacy_pending=rl.LegacyPending.PRESENTATION_READ if acknowledged is not None else None,
         **base,  # type: ignore[arg-type]
     )
-    return _Adoption(reply=reply, spans=(span,), row=initial if owed else None, row_placeholder_only=True)
+    return _Adoption(reply=reply, spans=(span,), row=initial if owns_create else None, row_placeholder_only=True)
 
 
 def _pending_turns(transaction: Transaction, principal_id: str, entity_name: str) -> tuple[TurnRecord, ...]:
@@ -536,12 +545,14 @@ def _pending_turns(transaction: Transaction, principal_id: str, entity_name: str
             or record.anchor_event_id in turns
         ):
             continue
-        turn_id = record.source_event_ids[0]
         if not _any_pending(transaction, principal_id, record.source_event_ids):
             continue
-        if outbox.load(transaction, principal_id, delivery_id=turn_id, stage=DeliveryStage.INITIAL) is not None:
-            continue
-        if outbox.load(transaction, principal_id, delivery_id=turn_id, stage=DeliveryStage.FINAL) is not None:
+        # A coalesced turn keyed its rows by any one of its sources.
+        if any(
+            outbox.load(transaction, principal_id, delivery_id=source, stage=stage) is not None
+            for source in record.source_event_ids
+            for stage in (DeliveryStage.INITIAL, DeliveryStage.FINAL)
+        ):
             continue
         if reply_spans.reply_ids_for_sources(transaction, principal_id, record.source_event_ids):
             continue

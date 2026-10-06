@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -9,9 +10,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom import reply_scope
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventKind, replies, reply_messages, reply_spans
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyRowRequest
-from mindroom.handled_turns import TurnRecordCodec
+from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
     ClaimContext,
     ClaimRequest,
@@ -1159,3 +1161,9 @@ async def test_owner_lost_leaves_a_reply_waiting_for_its_legacy_read(journal_sto
     span = await principal.replies.span("span-1")
     assert span is not None
     assert span.outcome is None
+
+
+def test_finished_replies_are_kept_as_long_as_the_ledger_keeps_their_turns() -> None:
+    """Nothing reaches a finished reply after its turn is forgotten, so both retentions agree."""
+    ledger_default = inspect.signature(HandledTurnLedger._cleanup_old_events).parameters["max_age_days"].default
+    assert ledger_default * 24 * 60 * 60 * 1_000_000_000 == reply_scope._FINISHED_REPLY_RETENTION_NS

@@ -1778,17 +1778,41 @@ def test_superseded_span_whose_sources_settle_ends_the_reply() -> None:
 def test_restoring_an_active_reply_returns_it_to_its_waiting_span() -> None:
     """A regeneration of a reply waiting for a retry, rolled back, leaves that retry claimable."""
     reply, span = _turn()
-    reply, span = _ended(reply, span, SpanOutcome.RELEASED)
+    reply, span = _ended(replace(reply, event_id="$reply"), span, SpanOutcome.RELEASED)
+    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regen.reply is not None
+    assert regen.claimed is not None
+    suppressed = rl.suppress(regen.reply, regen.claimed, reason="suppressed", now_ns=NOW)
+    assert suppressed.reply is not None
+    assert suppressed.reply.state is ReplyState.ACTIVE
+    assert suppressed.reply.last_span_id == span.span_id
+    retry = rl.claim(_request("span-3"), _context(suppressed.reply, span))
+    assert retry.claimed is not None
+    assert retry.claimed.kind is SpanKind.REPLAY
+
+
+def test_a_regeneration_whose_model_fails_before_it_shows_anything_is_retried() -> None:
+    """An error before delivery returns the edit for a retry, which regenerates with the same rollback."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    reply = replace(reply, state=ReplyState.COMPLETED, presentation="answer", event_id="$reply")
     regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
     assert regen.reply is not None
     assert regen.claimed is not None
     failed = rl.fail(regen.reply, regen.claimed, None, phase="pre_delivery", now_ns=NOW)
     assert failed.reply is not None
-    assert failed.reply.state is ReplyState.ACTIVE
-    assert failed.reply.last_span_id == span.span_id
-    retry = rl.claim(_request("span-3"), _context(failed.reply, span))
+    assert failed.effects == ()
+    released = _span_after(failed, "span-2")
+    assert released.outcome is SpanOutcome.RELEASED
+    retry = rl.claim(_request("span-3", delivery_id="$edit", driving_edit_id="$edit"), _context(failed.reply, released))
     assert retry.claimed is not None
-    assert retry.claimed.kind is SpanKind.REPLAY
+    assert retry.claimed.kind is SpanKind.REGENERATION
+    assert retry.claimed.rollback == regen.claimed.rollback
+    # A retry that never comes puts the earlier answer back.
+    dropped = rl.replay_dropped(failed.reply, released, sources_pending=False, now_ns=NOW)
+    assert dropped.reply is not None
+    assert dropped.reply.state is ReplyState.COMPLETED
+    assert dropped.reply.presentation == "answer"
 
 
 def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
