@@ -563,9 +563,10 @@ def _run_has_prompt_messages(run: object, prompt_roles: frozenset[str]) -> bool:
     )
 
 
-# AGNO_COMPAT: Stored runs persist their system and prompt messages with no opt-out.
-# Reason: Agno 3.0.9 saves every run's prompt-role messages, and only history messages have a
-# `store_history_messages` switch; MindRoom rebuilds prompts from config, so the stored copies are stale.
+# AGNO_COMPAT: Stored runs persist their system and developer messages with no opt-out.
+# Reason: Agno 3.0.9 saves every run's system and developer messages; its `store_history_messages`,
+# `store_tool_messages`, and `store_media` switches cover history, tool, and media content but not
+# these prompt roles. MindRoom rebuilds them from config, so the stored copies are stale.
 # Upstream issue: Tracking gap; no matching issue identified.
 # Upstream PR: None identified.
 # Remove when: Agno can skip every configured prompt role, including a custom `system_message_role`,
