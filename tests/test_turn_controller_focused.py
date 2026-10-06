@@ -3451,7 +3451,7 @@ async def test_user_message_cannot_spoof_scheduled_history_limit(
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]
     assert request.scheduled_history_budget is None
-    assert request.response_envelope.origin.intent is not TurnIntent.SCHEDULED_FIRE
+    assert request.response_envelope.origin.intent is TurnIntent.USER_MESSAGE
     assert request.scheduled_model is None
 
 

@@ -1872,15 +1872,14 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_agent_automations(self) -> Config:
         """Reject automations an agent lists but cannot run, or that name an unknown model."""
-        for agent_name, agent in self.agents.items():
-            if agent.automations and (reason := self._automation_block_reason(agent_name)) is not None:
-                msg = f"Agent {agent_name!r} {reason}"
-                raise ValueError(msg)
         for automation in self.defaults.automations:
             if automation.model is not None and automation.model not in self.models:
                 msg = f"defaults.automations {automation.name!r} uses unknown model {automation.model!r}"
                 raise ValueError(msg)
         for agent_name, agent in self.agents.items():
+            if agent.automations and (reason := self._automation_block_reason(agent_name)) is not None:
+                msg = f"Agent {agent_name!r} {reason}"
+                raise ValueError(msg)
             for automation in agent.automations or []:
                 if automation.model is not None and automation.model not in self.models:
                     msg = f"Agent {agent_name!r} automation {automation.name!r} uses unknown model {automation.model!r}"
