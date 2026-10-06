@@ -3120,13 +3120,13 @@ class ResponseRunner:
             lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
         )
 
-    def _claims_reply_records(self, request: ResponseRequest, history_scope: HistoryScope) -> bool:
+    def _claims_reply_records(self, request: ResponseRequest) -> bool:
         """Return whether this response path writes its reply through durable records.
 
         Paths move to records as every write on them is ported; the rest keep
         main's behavior with no span claimed.
         """
-        return self.deps.replies is not None and history_scope.kind == "agent" and request.prepared_edit_record is None
+        return self.deps.replies is not None and request.prepared_edit_record is None
 
     async def _claim_reply_span(
         self,
@@ -3141,7 +3141,7 @@ class ResponseRunner:
         """
         replies = self.deps.replies
         slot = current_slot()
-        if replies is None or slot is None or not self._claims_reply_records(request, history_scope):
+        if replies is None or slot is None or not self._claims_reply_records(request):
             return request
         legacy_initial = await self.deps.approval_store.load_matrix_delivery(
             delivery_id=request.response_envelope.source_event_id,

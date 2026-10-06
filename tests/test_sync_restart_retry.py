@@ -143,8 +143,8 @@ async def test_locked_retry_guard_precedes_payload_and_fails_closed(
 
     assert events == (["history", "lock", "history", "prepare"] if history_case == "current" else ["history"])
     if history_case == "current":
-        # The placeholder went out; an agent reply's records also edit the dispatch error into it.
-        assert bot.client.room_send.await_count == (1 if is_team else 2)
+        # The placeholder went out, and the reply's records edit the dispatch error into it.
+        assert bot.client.room_send.await_count == 2
     else:
         bot.client.room_send.assert_not_awaited()
 

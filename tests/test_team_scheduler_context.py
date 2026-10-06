@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,7 +16,6 @@ from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
-from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
@@ -25,7 +24,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -163,32 +162,14 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path) -> None:
     """Generic team interruptions should replace the thinking placeholder with an interruption note."""
     bot = _make_bot(tmp_path)
+    unique_room_send_responses(bot.client)
     team_agents = _team_agents(bot)
-
-    async def fake_run_cancellable_response(**kwargs: object) -> None:
-        response_function = kwargs["response_function"]
-        with suppress(asyncio.CancelledError):
-            await response_function("$thinking")
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError
 
     with (
-        patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
-        patch(
-            "mindroom.delivery_gateway.edit_message_outcome",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$thinking",
-                    content_sent={"body": _INTERRUPTED_RESPONSE_NOTE},
-                ),
-            ),
-        ) as mock_edit,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
@@ -210,41 +191,25 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             team_mode="coordinate",
         )
 
-    assert mock_edit.await_args.args[2] == "$thinking"
-    assert mock_edit.await_args.args[4] == _INTERRUPTED_RESPONSE_NOTE
-    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    # The team reply's placeholder is edited into the interruption note.
+    edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$sent1"}
+    assert edit["m.new_content"]["body"] == _INTERRUPTED_RESPONSE_NOTE
+    assert edit["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
 @pytest.mark.asyncio
 async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_note(tmp_path: Path) -> None:
     """Sync restarts should mark team placeholders as interrupted, not user-cancelled."""
     bot = _make_bot(tmp_path)
+    unique_room_send_responses(bot.client)
     team_agents = _team_agents(bot)
-
-    async def fake_run_cancellable_response(**kwargs: object) -> None:
-        response_function = kwargs["response_function"]
-        with suppress(asyncio.CancelledError):
-            await response_function("$thinking")
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
     with (
-        patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
-        patch(
-            "mindroom.delivery_gateway.edit_message_outcome",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$thinking",
-                    content_sent={"body": build_restart_interrupted_body("")},
-                ),
-            ),
-        ) as mock_edit,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
@@ -266,9 +231,11 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
             team_mode="coordinate",
         )
 
-    assert mock_edit.await_args.args[2] == "$thinking"
-    assert mock_edit.await_args.args[4] == build_restart_interrupted_body("")
-    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    # The team reply's placeholder is edited into the interruption note.
+    edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$sent1"}
+    assert edit["m.new_content"]["body"] == build_restart_interrupted_body("")
+    assert edit["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
 @pytest.mark.asyncio

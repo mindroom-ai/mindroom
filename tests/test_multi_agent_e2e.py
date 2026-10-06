@@ -457,9 +457,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 thread_id=thread_root_id,
                 messages=thread_history,
             )
+            # A homeserver never reuses an event ID, and each reply is bound to the one it created.
             bot.client.room_send.side_effect = [
-                nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
-                nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
+                nio.RoomSendResponse.from_dict({"event_id": "$placeholder-team"}, test_room_id),
+                nio.RoomSendResponse.from_dict({"event_id": "$edit-team"}, test_room_id),
             ]
 
             mock_ai = AsyncMock()
@@ -481,7 +482,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert placeholder_content[STREAM_STATUS_KEY] == "pending"
             assert placeholder_content["body"].startswith("🤝 Team Response: Thinking...")
             assert final_content["m.relates_to"]["rel_type"] == "m.replace"
-            assert final_content["m.relates_to"]["event_id"] == "$placeholder"
+            assert final_content["m.relates_to"]["event_id"] == "$placeholder-team"
             assert final_content["m.new_content"]["body"] != placeholder_content["body"]
             bot.client.room_send.side_effect = None
 
