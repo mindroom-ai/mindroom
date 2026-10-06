@@ -1736,6 +1736,22 @@ class DeliveryGateway:
         )
         return event_id if edited else None
 
+    async def supersede_replay(self, source_event_ids: tuple[str, ...]) -> bool | None:
+        """Settle a superseded replay's sources with the reply they left (DESIGN.md §6.4).
+
+        Returns ``None`` when no reply has those sources, and ``False`` when
+        the reply still owes Matrix a write, which only its replay resolves.
+        """
+        applied = await self.deps.outbox.replies.supersede_replay(source_event_ids, now_ns=time.time_ns())
+        if applied is None:
+            return None
+        if applied.transition.outcome is ReplyOutcome.DEFERRED:
+            return False
+        await self._run_reply_effects(applied.post_commit)
+        if applied.transition.reply is not None:
+            await self.settle_reply_debt(applied.transition.reply.reply_id)
+        return True
+
     async def settle_unclaimed_reply(self, source_event_ids: tuple[str, ...], *, source_deleted: bool) -> bool:
         """End the reply an earlier attempt left for sources that became terminal before a claim.
 

@@ -684,6 +684,26 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.settled.add(last.span_id)
         self._apply(rl.sources_settled_without_reply(reply, last, now_ns=self._now()))
 
+    @precondition(
+        lambda self: (
+            self.model.reply is not None
+            and self.model.reply.last_span_id not in self.model.settled
+            and self.model.spans[self.model.reply.last_span_id].outcome is not None
+        ),
+    )
+    @rule()
+    def supersede_replay(self) -> None:
+        """A newer message supersedes the replay of the reply's sources."""
+        reply = self.model.reply
+        assert reply is not None
+        last = self.model.spans[reply.last_span_id]
+        transition = self._apply(
+            rl.replay_superseded(reply, last, durable_write_debt=bool(self.model.rows), now_ns=self._now()),
+        )
+        if transition.outcome is rl.Outcome.DUPLICATE:
+            # A terminal reply keeps its answer; the replay's sources settle as ignored.
+            self.model.settled.add(last.span_id)
+
     @precondition(lambda self: self.model.reply is not None and self.model.reply.state is ReplyState.ACTIVE)
     @rule()
     def dispatch_failure(self) -> None:

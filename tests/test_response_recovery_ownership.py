@@ -180,13 +180,13 @@ def _runner_on(bot: AgentBot, gateway: DeliveryGateway, principal: PrincipalStor
 
 
 @pytest.mark.parametrize("debt", ["recovered", "adopted", "unattempted", "lost_ack"])
-async def test_recovered_initial_survives_same_requester_supersession(  # noqa: PLR0915
+async def test_a_newer_requester_message_supersedes_the_recovered_reply(  # noqa: PLR0915
     journal_store: EventJournalStore,
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     debt: str,
 ) -> None:
-    """Plain-reply replay finishes its recovered INITIAL despite a newer requester source."""
+    """Once its owed rows are sent, a replay a newer message superseded removes its placeholder and runs nothing."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store, agent_name="general")
     bot = _bot(tmp_path)
@@ -374,20 +374,20 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
         await controller.handle_text_event(room, event)
         await harness.gate.drain_all()
         await runner.wait_for_source_owned_inbox_responses()
-    response_record = store.get_turn_record(source_id)
-    final = await principal.load_matrix_delivery(delivery_id=source_id, stage=DeliveryStage.FINAL)
-    assert response_record.completed
-    assert response_record.response_event_id == original_initial_id
-    assert final is not None
-    # The answer is the reply's last row, aimed at the event its recovered INITIAL created.
-    answered = await principal.replies.for_event(original_initial_id)
-    assert answered is not None
-    assert answered.state is ReplyState.COMPLETED
+    assert model_requests == []
     assert not await principal.is_pending(source_id)
-    assert len(model_requests) == 1
-    assert visible == {INITIAL: "Original request finished with a substantive answer."}
+    assert await principal.load_matrix_delivery(delivery_id=source_id, stage=DeliveryStage.FINAL) is None
+    # The reply showed only its placeholder, which goes with it.
+    superseded = await principal.replies.for_sources((source_id,))
+    assert superseded is not None
+    assert superseded.state is ReplyState.GONE
+    assert superseded.redaction_pending == ()
+    gateway.deps.redact_message_event.assert_awaited_once_with(
+        room_id=room.room_id,
+        event_id=original_initial_id,
+        reason="Reply removed",
+    )
     assert len([content for content in sends if "m.new_content" not in content]) == 1
-    assert response_record.conversation_target.resolved_thread_id == thread_id
 
 
 @pytest.mark.parametrize(

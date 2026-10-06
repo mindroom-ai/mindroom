@@ -286,6 +286,10 @@ class _RecordingDeliveryGateway:
     edited: list[EditTextRequest] = field(default_factory=list)
     edit_succeeds: bool = True
 
+    async def supersede_replay(self, _source_event_ids: tuple[str, ...]) -> bool | None:
+        """No reply has the sources in this recording-only delivery fixture."""
+        return None
+
     @asynccontextmanager
     async def supersession_scope(self, _turn_id: str, _room_id: str) -> AsyncIterator[bool]:
         """No durable INITIAL exists in this recording-only delivery fixture."""

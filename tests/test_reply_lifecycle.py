@@ -906,6 +906,37 @@ def test_a_wait_in_place_keeps_its_stop_button_until_its_span_ends() -> None:
     assert ended.reply.redaction_pending == ("$button",)
 
 
+def test_a_wait_in_place_an_older_instance_ran_ends_as_a_pause_at_start() -> None:
+    """After a restart the reply waits for its decision as any pause does, and its Stop button goes."""
+    reply, span = _turn()
+    shown = rl.record_stop_button(replace(reply, event_id="$reply"), event_id="$button", now_ns=NOW)
+    assert shown.reply is not None
+    waiting = rl.pause(
+        shown.reply,
+        span,
+        rl.PauseWrite(shown="paused", prepared_revision=shown.reply.revision, stage=WriteStage.EDIT),
+        approval_id="approval-1",
+        in_place=True,
+        now_ns=NOW,
+    )
+    assert waiting.reply is not None
+    restarted = rl.owner_lost(
+        waiting.reply,
+        span,
+        rl.OwnerLostFacts(active_generation="gen-3", sources_pending=True),
+        now_ns=NOW,
+    )
+    assert restarted.outcome is Outcome.APPLIED
+    assert restarted.reply is not None
+    assert restarted.reply.state is ReplyState.PAUSED
+    assert restarted.reply.approval_id == "approval-1"
+    assert restarted.reply.current_span_id is None
+    assert restarted.reply.stop_button_event_id is None
+    assert restarted.reply.redaction_pending == ("$button",)
+    assert _span_after(restarted, span.span_id).outcome is SpanOutcome.PAUSED
+    assert restarted.effects == ()
+
+
 def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> None:
     """The note is the reply's terminal write: a Stop after it is satisfied, and the finish changes nothing."""
     reply, span, transition = _paused()
@@ -1149,6 +1180,51 @@ def test_sources_settled_without_reply() -> None:
     failed = rl.sources_settled_without_reply(replace(reply, event_id="$reply"), span, now_ns=NOW)
     assert failed.reply is not None
     assert failed.reply.state is ReplyState.FAILED
+    # The in-progress status it shows ends with the interrupted note.
+    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl.NOTE_INTERRUPTED)
+
+
+def _interrupted() -> tuple[Reply, Span]:
+    """Return a reply whose span a restart lost while its sources stayed pending."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.LOST)
+    return replace(reply, event_id="$reply"), span
+
+
+def test_a_superseded_replay_ends_the_interrupted_reply_and_settles_its_sources() -> None:
+    """The replay a newer message superseded settles its sources with the reply, in one transition."""
+    reply, span = _interrupted()
+    superseded = rl.replay_superseded(reply, span, durable_write_debt=False, now_ns=NOW)
+    assert superseded.outcome is Outcome.APPLIED
+    assert superseded.reply is not None
+    assert superseded.reply.state is ReplyState.FAILED
+    assert superseded.effects == (SettleSources(span.span_id),)
+    placeholder = rl.replay_superseded(
+        replace(reply, placeholder_only=True), span, durable_write_debt=False, now_ns=NOW,
+    )
+    assert placeholder.reply is not None
+    assert placeholder.reply.state is ReplyState.GONE
+    assert placeholder.effects == (SettleSources(span.span_id),)
+
+
+def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
+    """The replay resolves what the reply owes Matrix, so a newer message does not supersede it."""
+    reply, span = _interrupted()
+    for owing in (
+        rl.replay_superseded(reply, span, durable_write_debt=True, now_ns=NOW),
+        rl.replay_superseded(
+            replace(reply, owed_write=rl.OwedWrite(span.span_id, rl.NOTE_RESTART)),
+            span,
+            durable_write_debt=False,
+            now_ns=NOW,
+        ),
+    ):
+        assert owing.outcome is Outcome.DEFERRED
+        assert owing.effects == ()
+    answered = rl.replay_superseded(
+        replace(reply, state=ReplyState.COMPLETED), span, durable_write_debt=False, now_ns=NOW,
+    )
+    assert answered.outcome is Outcome.DUPLICATE
 
 
 def test_owner_lost_marks_pending_work_for_replay() -> None:

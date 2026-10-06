@@ -335,7 +335,11 @@ def _end(span: Span, outcome: SpanOutcome, now_ns: int) -> Span:
 
 
 def _clear_current(reply: Reply, span_id: str) -> Reply:
-    return replace(reply, current_span_id=None) if reply.current_span_id == span_id else reply
+    if reply.current_span_id != span_id:
+        return reply
+    cleared = replace(reply, current_span_id=None)
+    # A reply that waited in place keeps its Stop button only while its span runs (I8).
+    return cleared if cleared.state is ReplyState.ACTIVE else _leaves_active(cleared, cleared.state)
 
 
 def _bump(reply: Reply, now_ns: int, **changes: object) -> Reply:
@@ -1547,7 +1551,37 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     if reply.event_id is None or reply.placeholder_only:
         gone = _with_redactions(_set_state(updated, ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans)
-    return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.FAILED, now_ns), spans=spans)
+    # What the reply showed stays, ended by the interrupted note; nothing else
+    # would replace the in-progress status it shows.
+    owed = OwedWrite(span.span_id, NOTE_INTERRUPTED)
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed),
+        spans=spans,
+    )
+
+
+def replay_superseded(reply: Reply, last: Span, *, durable_write_debt: bool, now_ns: int) -> Transition:
+    """A newer message superseded the replay of the reply's sources; they settle in this transaction (§6.4).
+
+    A reply that still owes Matrix a write is never superseded, because its
+    replay is what resolves that write; neither is one a span runs, a pending
+    legacy read, or an approval owns.
+    """
+    if reply.terminal:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    if (
+        durable_write_debt
+        or reply.owed_write is not None
+        or reply.legacy_pending is not None
+        or reply.current_span_id is not None
+        or reply.approval_id is not None
+    ):
+        return _unchanged(Outcome.DEFERRED, reply)
+    settled = sources_settled_without_reply(reply, last, now_ns=now_ns)
+    if not settled.applied:
+        return settled
+    return replace(settled, effects=(*settled.effects, SettleSources(last.span_id)))
 
 
 def sources_deleted(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
@@ -1608,6 +1642,19 @@ class OwnerLostFacts:
 
 def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) -> Transition:  # noqa: PLR0911
     """Settle a reply whose span an older bot instance left behind (DESIGN.md §6.4 ``owner_lost``)."""
+    if (
+        reply.state is ReplyState.PAUSED
+        and last.outcome is None
+        and last.span_id == reply.current_span_id
+        and last.bot_generation != facts.active_generation
+    ):
+        # An in-place approval wait an older instance ran ends as any pause
+        # does: the reply waits for its decision, without the span's Stop button.
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_touch(_clear_current(reply, last.span_id), now_ns),
+            spans=(_end(last, SpanOutcome.PAUSED, now_ns),),
+        )
     if reply.state is not ReplyState.ACTIVE:
         return _unchanged(Outcome.DUPLICATE, reply)
     orphaned = (last.outcome is None and last.bot_generation != facts.active_generation) or (

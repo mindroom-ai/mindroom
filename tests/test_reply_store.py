@@ -527,6 +527,55 @@ async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: Eve
     await _assert_the_turn_learned_the_stop(journal_store)
 
 
+async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_store: EventJournalStore) -> None:
+    """While the placeholder's send is unresolved the replay keeps its sources; once sent, both settle together."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, span: rl.enqueue_initial(
+                reply,
+                span,
+                shown="ph",
+                placeholder_only=True,
+                prepared_revision=reply.revision,
+                now_ns=60,
+            ),
+            placeholder_only=True,
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "Thinking..."},
+    )
+    # A restart lost the span; its source waits for the replay.
+    await principal.replies.write_generation("gen-2", now_ns=70)
+    assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
+
+    kept = await principal.replies.supersede_replay(("$source",), now_ns=90)
+    assert kept is not None
+    assert kept.transition.outcome is rl.Outcome.DEFERRED
+    assert await principal.is_pending("$source")
+
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.INITIAL,
+        event_id="$reply",
+        delivered_projections=(),
+    )
+    superseded = await principal.replies.supersede_replay(("$source",), now_ns=100)
+    assert superseded is not None
+    assert superseded.transition.outcome is rl.Outcome.APPLIED
+    gone = await principal.replies.load("reply-1")
+    assert gone is not None
+    assert gone.state is ReplyState.GONE
+    assert gone.redaction_pending == ("$reply",)
+    assert not await principal.is_pending("$source")
+    assert await principal.replies.supersede_replay(("$elsewhere",), now_ns=110) is None
+
+
 async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:
     """Locking returns the stored reply; state queries return only the asked states."""
     transition = _first_claim()

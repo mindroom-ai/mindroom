@@ -133,7 +133,12 @@ class VisibleResponseReconciler:
         await self.deps.settle_ignored_sources(handled_turn.source_event_ids)
 
     async def settle_superseded_turn(self, handled_turn: TurnRecord, *, room_id: str) -> bool:
-        """Discard untouched replay only while exact visible delivery ownership allows it."""
+        """Discard a superseded replay unless what it would answer still owes Matrix a write."""
+        superseded = await self.deps.delivery_gateway.supersede_replay(handled_turn.source_event_ids)
+        if superseded is not None:
+            if superseded:
+                await self.settle_source_events_ignored(handled_turn)
+            return superseded
         assert handled_turn.anchor_event_id is not None
         async with self.deps.delivery_gateway.supersession_scope(handled_turn.anchor_event_id, room_id) as allowed:
             if not allowed:

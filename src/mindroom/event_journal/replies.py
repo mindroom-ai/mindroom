@@ -288,6 +288,33 @@ def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: 
     )
 
 
+def supersede_replay(
+    transaction: Transaction,
+    principal_id: str,
+    source_event_ids: tuple[str, ...],
+    *,
+    now_ns: int,
+) -> AppliedTransition | None:
+    """Settle a superseded replay's sources with the reply they left; ``None`` when no reply has them."""
+    found = reply_messages.for_sources(transaction, principal_id, source_event_ids)
+    if found is None:
+        return None
+    reply = reply_messages.lock(transaction, principal_id, found.reply_id)
+    last = reply_spans.load(transaction, principal_id, found.last_span_id)
+    assert reply is not None
+    assert last is not None
+    return apply(
+        transaction,
+        principal_id,
+        rl.replay_superseded(
+            reply,
+            last,
+            durable_write_debt=has_unresolved_rows(transaction, principal_id, reply.reply_id),
+            now_ns=now_ns,
+        ),
+    )
+
+
 def owner_lost(
     transaction: Transaction,
     principal_id: str,
@@ -301,7 +328,7 @@ def owner_lost(
     before journal replay: records and rows only, nothing is sent here.
     """
     applied: list[AppliedTransition] = []
-    for found in reply_messages.in_states(transaction, principal_id, (rl.ReplyState.ACTIVE,)):
+    for found in reply_messages.in_states(transaction, principal_id, (rl.ReplyState.ACTIVE, rl.ReplyState.PAUSED)):
         if found.legacy_pending is not None:
             # Its legacy read decides what it showed first.
             continue
@@ -628,6 +655,12 @@ class ReplyStore:
                 active_generation=active_generation,
                 now_ns=now_ns,
             ),
+        )
+
+    async def supersede_replay(self, source_event_ids: tuple[str, ...], *, now_ns: int) -> AppliedTransition | None:
+        """Settle a superseded replay's sources with the reply they left; see ``supersede_replay``."""
+        return await self._backend.write(
+            lambda transaction: supersede_replay(transaction, self._principal_id, source_event_ids, now_ns=now_ns),
         )
 
     async def accepts_stop(self, event_id: str, room_id: str) -> bool:
