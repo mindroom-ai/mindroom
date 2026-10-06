@@ -39,6 +39,12 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 #: it. Deliberately *not* applied when redacting diagnostics: nothing on that
 #: path decodes, and bounding reads only costs error messages.
 MAX_REDACTABLE_TOKEN_LENGTH = 2048
+#: Most distinct decoded ``Authorization: Basic`` values one text may carry. Each
+#: is scrubbed with its own pass over the text, and a remote chooses how many its
+#: Git output carries, so a text decoding to more is withheld whole. Real Git
+#: output decodes to one or two credentials, each giving ``user:password`` and
+#: the password.
+_MAX_DECODED_BASIC_VALUES = 16
 __all__ = [
     "MAX_REDACTABLE_TOKEN_LENGTH",
     "credential_free_repo_url",
@@ -153,14 +159,12 @@ def redact_credentials_in_text(value: str) -> str:
         return f"Authorization: {scheme} ***"
 
     redacted: str = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_authorization_header, value)
-    if decoded_basic_values:
-        # One pass over the text however many distinct secrets the headers decode to;
-        # a ``str.replace`` per secret rescans the whole text each time. Longest
-        # first, so a secret that contains another is redacted whole.
-        decoded_values_pattern = "|".join(
-            re.escape(decoded_value) for decoded_value in sorted(set(decoded_basic_values), key=len, reverse=True)
-        )
-        redacted = re.sub(decoded_values_pattern, "***", redacted)
+    unique_decoded_values = list(set(decoded_basic_values))
+    if len(unique_decoded_values) > _MAX_DECODED_BASIC_VALUES:
+        return "***"
+    unique_decoded_values.sort(key=len, reverse=True)
+    for decoded_value in unique_decoded_values:
+        redacted = redacted.replace(decoded_value, "***")
     return _URL_PATTERN.sub(lambda match: redact_url_credentials(match.group(0)), redacted)
 
 

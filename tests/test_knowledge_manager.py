@@ -93,6 +93,7 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
     _Client,
     _Collection,
@@ -9953,33 +9954,50 @@ def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
     assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
 
 
-def test_redacting_basic_secrets_removes_every_decoded_value_from_the_text() -> None:
-    """Decoded Basic credentials are scrubbed wherever else they appear, including regex metacharacters."""
-    entries = [("alice", "p.ss*w|rd"), ("bob", "p.ss*w|rd+extra"), ("carol", "plain")]
-    headers = [
-        f"Authorization: Basic {base64.b64encode(f'{user}:{password}'.encode()).decode()}" for user, password in entries
-    ]
+def _basic_authorization_header(credential: str) -> str:
+    return f"Authorization: Basic {base64.b64encode(credential.encode()).decode()}"
+
+
+def test_redacting_basic_secrets_scrubs_a_secret_that_contains_another_whole() -> None:
+    """Decoded Basic credentials are scrubbed wherever else they appear, the longest first."""
+    entries = [("alice", "hunter2"), ("bob", "hunter2-extra"), ("carol", "plain")]
     text = "\n".join(
-        [*headers, "echo p.ss*w|rd+extra and p.ss*w|rd and alice:plain and carol:plain"],
+        [
+            *(_basic_authorization_header(f"{user}:{password}") for user, password in entries),
+            "echo hunter2-extra and hunter2 and alice:plain and carol:plain",
+        ],
     )
 
-    redacted = redact_credentials_in_text(text)
-
-    for _user, password in entries:
-        assert password not in redacted
-    assert "echo *** and *** and alice:*** and ***" in redacted
-    assert redacted.count("Authorization: Basic ***") == len(entries)
+    assert redact_credentials_in_text(text).splitlines() == [
+        *["Authorization: Basic ***"] * len(entries),
+        "echo *** and *** and alice:*** and ***",
+    ]
 
 
-def test_redacting_many_distinct_basic_secrets_scrubs_all_of_them() -> None:
-    """A text carrying many distinct Basic headers is redacted in full."""
-    secrets = [f"user{i}:secret{i}" for i in range(500)]
-    headers = [f"Authorization: Basic {base64.b64encode(secret.encode()).decode()}" for secret in secrets]
-    text = "\n".join([*headers, *[f"leaked {secret.split(':')[1]}" for secret in secrets]])
+def test_redacting_basic_secrets_up_to_the_limit_keeps_the_diagnostic() -> None:
+    """Sixteen distinct decoded values, from eight credentials, are each scrubbed in place."""
+    credentials = [f"user{i}:secret{i}" for i in range(8)]
+    text = "\n".join([*map(_basic_authorization_header, credentials), "fatal: secret0 rejected for user7:secret7"])
 
-    redacted = redact_credentials_in_text(text)
+    assert redact_credentials_in_text(text).splitlines()[-1] == "fatal: *** rejected for ***"
 
-    assert not any(secret.split(":")[1] in redacted for secret in secrets)
+
+def test_redacting_more_basic_secrets_than_the_limit_replaces_the_text_within_a_cpu_budget() -> None:
+    """Hostile Git output carrying many distinct Basic credentials must not stall the event loop.
+
+    Each scrubbed value costs a pass over the text, so a text decoding to more values
+    than the limit is replaced whole rather than scrubbed or returned with one left in.
+    Near-misses that share a long prefix are the worst case for matching every value
+    in a single regex pass; the ``B`` credential keeps that prefix from being factored out.
+    """
+    shared_prefix = "A" * 40
+    headers = [_basic_authorization_header(f"{shared_prefix}{i:05d}") for i in range(1_000)]
+    text = "\n".join([*headers, _basic_authorization_header("B"), *[shared_prefix * 2] * 2_500])
+
+    with cpu_budget(0.5):
+        redacted = redact_credentials_in_text(text)
+
+    assert redacted == "***"
 
 
 @pytest.mark.asyncio
