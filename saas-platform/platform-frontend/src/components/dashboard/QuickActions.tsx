@@ -14,6 +14,7 @@ interface QuickActionsProps {
 }
 
 export function QuickActions({ subscription }: QuickActionsProps) {
+  const state = subscription ? planState(subscription) : null
   const actions = [
     {
       name: 'Documentation',
@@ -24,11 +25,11 @@ export function QuickActions({ subscription }: QuickActionsProps) {
     },
     {
       name: 'Manage Subscription',
-      description: !subscription
+      description: state === null
         ? 'Your plan and billing'
-        : planState(subscription) === 'none'
+        : state === 'none'
           ? 'Choose a plan to run a hosted instance'
-          : planState(subscription) === 'lapsed'
+          : state === 'lapsed'
             ? 'Restore billing to run your instance'
             : 'Your plan and billing',
       href: '/dashboard/billing',

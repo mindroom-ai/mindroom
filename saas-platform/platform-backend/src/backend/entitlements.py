@@ -102,7 +102,7 @@ def _entitlement_failure_detail(subscription: dict[str, Any], action: str) -> st
         return f"Choose a plan before you {action} a hosted MindRoom instance."
 
     if status == "trialing":
-        return "Your MindRoom trial has expired. Add billing or choose a paid plan to continue using the instance."
+        return "Your MindRoom trial has expired. Add billing or choose a plan to continue using the instance."
 
     if status == "unpaid":
         return "Payment failed. Update billing before you run the MindRoom instance."

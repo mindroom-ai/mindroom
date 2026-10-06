@@ -5,8 +5,8 @@ import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 import Link from 'next/link'
-import { type PlanId } from '@/lib/pricing-config'
-import { planState } from '@/lib/plan-state'
+import { PLAN_ORDER, type PlanId } from '@/lib/pricing-config'
+import { lapsedPlanEnded, planState } from '@/lib/plan-state'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
 
@@ -70,8 +70,9 @@ export default function BillingPage() {
   const currentTier = (subscription?.tier || 'free') as PlanId
   const state = planState(subscription)
   const hasPlan = state !== 'none'
-  // Only a plan that runs is current in the plan list; a lapsed plan may be chosen again.
-  const activePlanTier = state === 'active' ? currentTier : null
+  // A plan Stripe has ended may be chosen again; a running plan, or one with a payment problem fixed in the portal, stays current.
+  const planEnded = state === 'lapsed' && subscription !== null && lapsedPlanEnded(subscription)
+  const activePlanTier = hasPlan && !planEnded ? currentTier : null
   const currentPlan = pricingConfig.plans[currentTier]
   const features = currentPlan?.features || []
   const tierInfo = {
@@ -171,6 +172,14 @@ export default function BillingPage() {
                 <Link href="/dashboard/billing/upgrade" className="font-semibold text-orange-600 hover:underline dark:text-orange-400">
                   Choose a plan
                 </Link>
+              </p>
+            )}
+
+            {state === 'lapsed' && (
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                {planEnded
+                  ? 'Your plan ended. Choose a plan to start your hosted instance again.'
+                  : 'Your hosted instance is stopped until billing is fixed. Update your payment method in the billing portal.'}
               </p>
             )}
 
@@ -302,9 +311,8 @@ export default function BillingPage() {
             .filter(([key]) => key !== 'free' && key !== 'enterprise')
             .map(([key, plan]) => {
               const isCurrentPlan = key === activePlanTier
-              const tierOrder: PlanId[] = ['free', 'byok', 'hobby', 'pro', 'enterprise']
-              const currentTierRank = activePlanTier ? tierOrder.indexOf(activePlanTier) : -1
-              const candidateTierRank = tierOrder.indexOf(key as PlanId)
+              const currentTierRank = activePlanTier ? PLAN_ORDER.indexOf(activePlanTier) : -1
+              const candidateTierRank = PLAN_ORDER.indexOf(key as PlanId)
               const isDowngrade =
                 currentTierRank !== -1 && candidateTierRank !== -1 && candidateTierRank < currentTierRank
 

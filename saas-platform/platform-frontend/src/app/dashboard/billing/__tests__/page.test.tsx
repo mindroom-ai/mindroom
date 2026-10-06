@@ -139,4 +139,25 @@ describe('BillingPage', () => {
     expect(screen.getByRole('button', { name: 'Choose Your own keys' })).toBeInTheDocument()
     expect(screen.queryByText('Contact support to downgrade')).not.toBeInTheDocument()
   })
+
+  it('keeps an unpaid plan current and points to fixing billing instead of a new checkout', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: { tier: 'hobby', status: 'unpaid', can_run_instances: false, stripe_subscription_id: 'sub_123' },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue({
+      ...enterprisePricing,
+      plans: {
+        byok: { ...enterprisePricing.plans.enterprise, name: 'Your own keys', price_monthly: '$10', price_yearly: '$96', features: [] },
+        hobby: { ...enterprisePricing.plans.enterprise, name: 'Hobby', price_monthly: '$20', price_yearly: '$192', features: [] },
+      },
+    })
+
+    render(<BillingPage />)
+
+    expect(await screen.findByText(/stopped until billing is fixed/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Choose Hobby' })).not.toBeInTheDocument()
+    expect(screen.getByText('Contact support to downgrade')).toBeInTheDocument()
+  })
 })

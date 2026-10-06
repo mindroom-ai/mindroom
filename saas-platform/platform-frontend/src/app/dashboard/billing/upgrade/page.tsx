@@ -4,11 +4,10 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft, Sparkles } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { planState } from '@/lib/plan-state'
+import { lapsedPlanEnded, planState } from '@/lib/plan-state'
+import { PLAN_ORDER } from '@/lib/pricing-config'
 import { createCheckoutSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
-
-const PLAN_ORDER = ['byok', 'hobby', 'pro', 'enterprise']
 
 export default function UpgradePage() {
   const router = useRouter()
@@ -32,16 +31,19 @@ export default function UpgradePage() {
     // named in `?plan=`; otherwise take that plan, then a lapsed account's own plan, then the recommended one.
     if (loading || !pricingConfig) return
     const state = planState(subscription)
+    const ended = state === 'lapsed' && subscription !== null && lapsedPlanEnded(subscription)
     const requestedPlan = new URLSearchParams(window.location.search).get('plan')
+    const isPlan = (plan: string | null | undefined): plan is string =>
+      !!plan && plan !== 'free' && Object.hasOwn(pricingConfig.plans, plan)
     let initialPlan: string | undefined
-    if (state === 'active') {
-      const isUpgrade = requestedPlan !== null && PLAN_ORDER.indexOf(requestedPlan) > PLAN_ORDER.indexOf(subscription?.tier ?? 'free')
-      initialPlan = isUpgrade && requestedPlan in pricingConfig.plans ? requestedPlan : undefined
+    if (state === 'active' || (state === 'lapsed' && !ended)) {
+      const isUpgrade = isPlan(requestedPlan)
+        && PLAN_ORDER.indexOf(requestedPlan as typeof PLAN_ORDER[number]) > PLAN_ORDER.indexOf(subscription?.tier as typeof PLAN_ORDER[number])
+      initialPlan = isUpgrade ? requestedPlan : undefined
     } else {
-      const lapsedPlan = state === 'lapsed' ? subscription?.tier : null
+      const endedPlan = ended ? subscription?.tier : null
       const recommendedPlan = Object.entries(pricingConfig.plans).find(([_, plan]) => plan.recommended)?.[0]
-      initialPlan = [requestedPlan, lapsedPlan, recommendedPlan]
-        .find((plan): plan is string => !!plan && plan !== 'free' && plan in pricingConfig.plans)
+      initialPlan = [requestedPlan, endedPlan, recommendedPlan].find(isPlan)
     }
     if (initialPlan) {
       setSelectedPlan(current => current ?? initialPlan)
@@ -88,15 +90,17 @@ export default function UpgradePage() {
   }
 
   const currentTier = subscription?.tier || 'free'
-  // Only a plan that runs is current; an account without one, or with a lapsed one, may choose any plan.
-  const activeTier = planState(subscription) === 'active' ? currentTier : null
+  // A plan Stripe has ended may be chosen again; a running plan, or one with a payment problem fixed in the portal, stays current.
+  const state = planState(subscription)
+  const planEnded = state === 'lapsed' && subscription !== null && lapsedPlanEnded(subscription)
+  const activeTier = state !== 'none' && !planEnded ? currentTier : null
   const discountPercentage = pricingConfig.discounts?.annual_percentage || 20
 
   // Filter out free plan and sort plans
   const plans = Object.entries(pricingConfig.plans)
     .filter(([key]) => key !== 'free')
     .map(([key, plan]) => ({ ...plan, id: key }))
-    .sort((a, b) => PLAN_ORDER.indexOf(a.id) - PLAN_ORDER.indexOf(b.id))
+    .sort((a, b) => PLAN_ORDER.indexOf(a.id as typeof PLAN_ORDER[number]) - PLAN_ORDER.indexOf(b.id as typeof PLAN_ORDER[number]))
 
   return (
     <div className="max-w-6xl mx-auto p-6">
@@ -161,7 +165,7 @@ export default function UpgradePage() {
       <div className="grid md:grid-cols-3 gap-6 mb-8">
         {plans.map((plan) => {
           const isCurrentPlan = plan.id === activeTier
-          const isDowngrade = activeTier !== null && plans.findIndex(p => p.id === plan.id) < plans.findIndex(p => p.id === activeTier)
+          const isDowngrade = activeTier !== null && PLAN_ORDER.indexOf(plan.id as typeof PLAN_ORDER[number]) < PLAN_ORDER.indexOf(activeTier as typeof PLAN_ORDER[number])
 
           // Parse prices and calculate display values ('custom' is the backend literal)
           const monthlyPrice = plan.price_monthly === 'custom' ? 'Custom' : plan.price_monthly

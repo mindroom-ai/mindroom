@@ -30,8 +30,8 @@ export default function DashboardPage() {
   }, [])
 
   useEffect(() => {
-    // Auto-setup free tier if user has no subscription
-    const setupFreeTier = async () => {
+    // Set up the account (with no plan yet) if the user has no subscription row
+    const setupAccount = async () => {
       // Skip if: not logged in, already has subscription, already setting up,
       // or we've already attempted setup once in this session.
       if (
@@ -48,24 +48,24 @@ export default function DashboardPage() {
         return
       }
 
-      logger.log('Setting up free tier account...')
+      logger.log('Setting up account...')
       setSetupAttempted(true)
       setIsSettingUp(true)
       try {
         const result = await setupAccount()
-        logger.log('Free tier setup result:', result)
+        logger.log('Account setup result:', result)
         // Trigger a refresh; hooks poll and will pick up the new subscription
         router.refresh()
         // Force reload after a short delay to ensure data is updated
         setTimeout(() => window.location.reload(), 2000)
       } catch (error) {
-        logger.error('Error setting up free tier:', error)
+        logger.error('Error setting up account:', error)
       } finally {
         setIsSettingUp(false)
       }
     }
 
-    setupFreeTier()
+    setupAccount()
   }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, setupAttempted, router])
 
   // Only show loading if we're still loading auth AND have no cached data
