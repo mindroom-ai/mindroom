@@ -292,9 +292,9 @@ agents:
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
+- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
 - An automation does not post again while its previous prompt awaits verify.
-- Nothing is persisted: the schedule is the cooldown, and a restart skips the occurrence it missed.
+- A restart skips an occurrence it missed.
 
 For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](hooks.md#event-notes), which can suppress a fire or rewrite its message.
 
@@ -314,7 +314,7 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
 When the prompt files are unchanged, verify only checks that no `memory/` detail was deleted, and otherwise reports that nothing changed.
-Verify never writes the files, because other conversations with the same agent may save memories to them during the run; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
+Verify only reports and never changes the files; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
 
 | Field | Default | Description |
 |---|---|---|
