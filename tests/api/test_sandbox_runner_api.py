@@ -2721,15 +2721,27 @@ def test_worker_subprocess_env_tmpdir_holds_unix_sockets_for_a_long_worker_root(
     assert (paths.tmp_dir / "org.chromium.Chromium.Ab12Cd" / "SingletonSocket").is_socket()
 
 
-def test_worker_subprocess_env_keeps_the_worker_tmpdir_when_its_link_points_elsewhere(tmp_path: Path) -> None:
-    """A link that no longer leads to the worker's temp directory is never handed to subprocesses."""
+@pytest.mark.parametrize("squatter", ["link_elsewhere", "directory", "other_owner"])
+def test_worker_subprocess_env_keeps_the_worker_tmpdir_when_its_link_name_is_not_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    squatter: str,
+) -> None:
+    """A link name that another user owns, or that leads anywhere else, is never handed to subprocesses."""
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
     paths.tmp_dir.mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
     link = Path(sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"])
-    link.unlink()
-    link.symlink_to(elsewhere, target_is_directory=True)
+    assert link.is_symlink()
+    if squatter == "other_owner":
+        owner = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    else:
+        link.unlink()
+        if squatter == "directory":
+            link.mkdir()
+        else:
+            (tmp_path / "elsewhere").mkdir()
+            link.symlink_to(tmp_path / "elsewhere")
 
     assert sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"] == str(paths.tmp_dir)
 

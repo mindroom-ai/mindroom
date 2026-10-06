@@ -304,12 +304,11 @@ def worker_tmp_dir(paths: LocalWorkerStatePaths) -> Path:
     digest = hashlib.sha256(os.fsencode(paths.tmp_dir)).hexdigest()[:16]
     link = _TMPDIR_LINK_ROOT / f"mindroom-{digest}"
     with suppress(OSError):
-        link.symlink_to(paths.tmp_dir, target_is_directory=True)
-    try:
-        owned = link.lstat().st_uid == os.geteuid() and link.readlink() == paths.tmp_dir
-    except OSError:
-        owned = False
-    return link if owned else paths.tmp_dir
+        link.symlink_to(paths.tmp_dir)
+    with suppress(OSError):
+        if link.lstat().st_uid == os.geteuid() and link.readlink() == paths.tmp_dir:
+            return link
+    return paths.tmp_dir
 
 
 def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:

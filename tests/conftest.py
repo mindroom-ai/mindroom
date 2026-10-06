@@ -2946,7 +2946,7 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(scope="session")
 def _worker_tmpdir_link_root() -> Generator[Path, None, None]:
     """Hold this session's worker TMPDIR links in one short directory removed at the end."""
-    path = Path(tempfile.mkdtemp(prefix="mr-", dir="/tmp"))
+    path = Path(tempfile.mkdtemp(prefix="mr-links-", dir="/tmp"))
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
