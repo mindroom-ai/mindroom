@@ -225,7 +225,8 @@ Use the actual alias created by the active config.
 ## Read and Send Messages with Matty
 
 Matty accepts per-command credentials with `-u` and `-p`.
-Without `-u` and `-p`, Matty uses `MATRIX_USERNAME` and `MATRIX_PASSWORD` from the environment, then credentials saved with `matty auth`; it also loads the first `.env` above its install location, which is the repository root's `.env` when Matty is installed in the repository's `.venv`.
+Matty restores a token session first, from `MATRIX_ACCESS_TOKEN`, `MATRIX_USER_ID`, and `MATRIX_DEVICE_ID` or from the token `matty auth` saved in `~/.config/matty/config.json`, and that session wins over `-u` and `-p`; make sure neither exists before testing with a disposable account.
+Otherwise it logs in with `-u` and `-p`, then `MATRIX_USERNAME` and `MATRIX_PASSWORD` from the environment, then the saved username and password; it also loads the first `.env` above its install location, which is the repository root's `.env` when Matty is installed in the repository's `.venv`.
 Matty refers to messages by handles `m1`, `m2`, … and to threads by `t1`, `t2`, …; thread handles persist across sessions.
 `matty messages` takes `--limit` (default 20), `matty thread-start "$room_id" m2 "text"` starts a thread from a message, and most commands have a short alias (`r`, `m`, `t`, `th`, `ts`, `tr`, …; see `matty --help`).
 Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b`).
