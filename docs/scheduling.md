@@ -322,7 +322,7 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 | `cron` | `0 4 * * *` | When to check |
 | `room` | first configured room | Where to post the prompt |
 | `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
-| `min_reduction` | `0.10` | Smallest cut the prompt asks for |
+| `min_reduction` | `0.10` (at most `0.25`) | Smallest cut the prompt asks for; no file may shrink more than 25%, so no pass can be asked for more |
 | `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
 | `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
 | `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
