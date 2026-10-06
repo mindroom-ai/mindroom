@@ -481,7 +481,7 @@ class GatewayServer:
                 await self._handle_http_request(scope, receive, private_send)
             finally:
                 principal = scope.get(_PRINCIPAL_SCOPE_KEY)
-                version_probe = scope.get(_VERSION_PROBE_SCOPE_KEY, False)
+                version_probe = scope.get(_VERSION_PROBE_SCOPE_KEY)
                 failed = status_code is None or status_code >= 400
                 log = logger.warning if failed and not version_probe else logger.info
                 log(

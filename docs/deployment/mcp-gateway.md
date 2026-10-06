@@ -328,7 +328,7 @@ Cancellation cannot forcibly stop synchronous tool work, so a stuck provider cal
 
 These log events describe inbound `/mcp` traffic, separately from outbound MCP integration logs, and omit credentials, arguments, queries, and results.
 
-- `mcp_gateway_http_completed` records the HTTP status, elapsed milliseconds, and authenticated `requester_id` when available. A 400 with `unsupported_protocol_version=true` means the client asked for an MCP revision the gateway does not support. It is logged at info because compatible clients send this as a probe and then fall back to a supported handshake; if no successful request from the same requester follows, that client cannot connect.
+- `mcp_gateway_http_completed` records the HTTP status, elapsed milliseconds, and authenticated `requester_id` when available.
 - `mcp_gateway_call_completed` records the operation, elapsed milliseconds, outcome, and error code; an HTTP 200 can still carry a tool error.
 - `mcp_gateway_call_failed` records unexpected failures with the exception type.
 - `mcp_gateway_agent_selection` records whether the requested agent is eligible, saved, selected, or matches an eligible name ignoring case, plus eligible and selected agent counts.
@@ -336,3 +336,5 @@ These log events describe inbound `/mcp` traffic, separately from outbound MCP i
 Join these events by the server-generated `request_id`, which differs from the client's JSON-RPC ID.
 In `mcp_gateway_agent_selection`, `agent_eligible=false` with `agent_case_match=true` means a case mismatch, and `agent_eligible=true` with `agent_selected=false` means the user has not selected that agent.
 A zero `selected_agent_count` explains empty discovery.
+A 400 in `mcp_gateway_http_completed` with `unsupported_protocol_version=true` means the client asked for an MCP revision the gateway does not support.
+It is logged at info because compatible clients send this as a probe and then fall back to a supported handshake; if no successful request from the same requester follows, that client cannot connect.
