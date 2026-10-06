@@ -515,7 +515,9 @@ def _token_client_transport(endpoints: OAuthRuntimeEndpoints) -> dict[str, Any]:
     }
 
 
-def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError | ServerFetchUrlError) -> OAuthProviderError:
+def _oauth_refresh_error(
+    exc: AuthlibBaseError | HTTPError | ServerFetchUrlError | json.JSONDecodeError,
+) -> OAuthProviderError:
     """Build a safe refresh failure with provider OAuth reason fields when available."""
     error_code: str | None = None
     error_description: str | None = None
@@ -904,7 +906,7 @@ class OAuthProvider:
                     token_url,
                     **fetch_kwargs,
                 )
-            except (AuthlibBaseError, HTTPError, ServerFetchUrlError) as exc:
+            except (AuthlibBaseError, HTTPError, ServerFetchUrlError, json.JSONDecodeError) as exc:
                 msg = "OAuth token exchange failed"
                 raise OAuthProviderError(msg) from exc
         if not isinstance(token_response, Mapping):
@@ -966,7 +968,7 @@ class OAuthProvider:
                     # short grace period, so repeat the grant right away to recover the rotated token it returns.
                     logger.info("oauth_refresh_retrying_after_lost_response", provider_id=self.id)
                     token_response = await request_refresh()
-            except (AuthlibBaseError, HTTPError, ServerFetchUrlError) as exc:
+            except (AuthlibBaseError, HTTPError, ServerFetchUrlError, json.JSONDecodeError) as exc:
                 raise _oauth_refresh_error(exc) from exc
         if not isinstance(token_response, Mapping):
             msg = "OAuth token refresh failed"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import multiprocessing
 import shutil
 import sqlite3
@@ -1364,6 +1365,11 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
             requests_exceptions.ReadTimeout("secret-transport-detail"),
             {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
             id="google-requests-timeout",
+        ),
+        pytest.param(
+            json.JSONDecodeError("secret-transport-detail", "secret-response-body", 0),
+            {"transport_error_category": "invalid_response", "transport_error_type": "JSONDecodeError"},
+            id="non-json-response",
         ),
     ],
 )

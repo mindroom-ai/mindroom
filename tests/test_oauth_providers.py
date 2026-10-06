@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
@@ -286,6 +287,11 @@ async def test_refresh_repeats_grant_once_when_its_response_is_lost(
             1,
             id="connect-error-never-reached-provider",
         ),
+        pytest.param(
+            [httpx.Response(429, text="Rate exceeded."), _rotated_token_response()],
+            1,
+            id="non-json-error-response",
+        ),
     ],
 )
 async def test_refresh_failures_stay_retryable_without_repeating_answered_grants(
@@ -303,3 +309,18 @@ async def test_refresh_failures_stay_retryable_without_repeating_answered_grants
 
     assert type(exc_info.value) is OAuthProviderError
     assert presented == ["stored-refresh-token"] * expected_requests
+
+
+@pytest.mark.asyncio
+async def test_code_exchange_reports_non_json_error_response_as_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A token endpoint answering with a non-JSON error body fails the exchange instead of escaping as a decode error."""
+    provider, runtime_paths, _token_data = _refreshable_provider(tmp_path)
+    _serve_token_endpoint(monkeypatch, [httpx.Response(429, text="Rate exceeded.")])
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        await provider.exchange_code("authorization-code", runtime_paths, token_url=provider.token_url)
+
+    assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
