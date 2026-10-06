@@ -4,7 +4,7 @@ icon: simple/google
 
 # Google Services OAuth For Local Installs
 
-This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation, and Google Cloud once the provisioned client includes its scope.
+This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation.
 Paired installations use MindRoom's Google OAuth client, so you do not need a Google Cloud project, callback URLs, or a client secret.
 Pair first with `mindroom connect`, or let `mindroom run` pair automatically on first run (see [Hosted Matrix](hosted-matrix.md)).
 The provisioned client works only when MindRoom is opened on a loopback address (`localhost`, `127.0.0.1`, or `::1`).

@@ -13335,7 +13335,7 @@ Installation-level connections that are not assigned to an agent scope must be r
 
 # Google Services OAuth For Local Installs
 
-This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation, and Google Cloud once the provisioned client includes its scope.
+This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation.
 Paired installations use MindRoom's Google OAuth client, so you do not need a Google Cloud project, callback URLs, or a client secret.
 Pair first with `mindroom connect`, or let `mindroom run` pair automatically on first run (see [Hosted Matrix](https://docs.mindroom.chat/deployment/hosted-matrix/)).
 The provisioned client works only when MindRoom is opened on a loopback address (`localhost`, `127.0.0.1`, or `::1`).
@@ -14360,7 +14360,7 @@ class CloudStorageBrowserTools(GoogleCloudToolkit):
 
     def list_buckets(self) -> str:
         """List the Cloud Storage buckets in the configured project."""
-        from google.api_core.exceptions import GoogleAPICallError
+        from google.api_core.exceptions import GoogleAPIError
         from google.cloud import storage
 
         try:
@@ -14369,7 +14369,7 @@ class CloudStorageBrowserTools(GoogleCloudToolkit):
                 lambda creds: storage.Client(project=self.project, credentials=creds),
             )
             return json.dumps({"buckets": [bucket.name for bucket in client.list_buckets()]})
-        except GoogleAPICallError as exc:
+        except GoogleAPIError as exc:
             return self._google_cloud_error_result("Cloud Storage", "list_buckets", exc)
 ```
 

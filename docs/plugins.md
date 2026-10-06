@@ -639,7 +639,7 @@ class CloudStorageBrowserTools(GoogleCloudToolkit):
 
     def list_buckets(self) -> str:
         """List the Cloud Storage buckets in the configured project."""
-        from google.api_core.exceptions import GoogleAPICallError
+        from google.api_core.exceptions import GoogleAPIError
         from google.cloud import storage
 
         try:
@@ -648,7 +648,7 @@ class CloudStorageBrowserTools(GoogleCloudToolkit):
                 lambda creds: storage.Client(project=self.project, credentials=creds),
             )
             return json.dumps({"buckets": [bucket.name for bucket in client.list_buckets()]})
-        except GoogleAPICallError as exc:
+        except GoogleAPIError as exc:
             return self._google_cloud_error_result("Cloud Storage", "list_buckets", exc)
 ```
 
