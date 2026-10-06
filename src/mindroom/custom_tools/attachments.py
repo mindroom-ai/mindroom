@@ -59,6 +59,10 @@ if TYPE_CHECKING:
 
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = AttachmentRecord | RuntimeEncryptedMediaAttachment
+_WORKER_ATTACHMENT_USAGE = (
+    "Not in your workspace. Copy it there with get_attachment(attachment_id, mindroom_output_path=...) "
+    "before file, coding, python, or shell tools use it."
+)
 
 
 def _attachment_tool_payload(status: str, **kwargs: object) -> str:
@@ -82,9 +86,21 @@ def _infer_local_attachment_metadata(local_path: Path) -> tuple[_LocalAttachment
     return "file", local_path.name, mime_type
 
 
+def _attachment_record_payload(record: AttachmentRecord, *, tools_use_worker: bool) -> dict[str, object]:
+    """Render one retained attachment, replacing the runtime path with copy instructions for worker tools."""
+    payload = attachments_for_tool_payload([record])[0]
+    if tools_use_worker:
+        # The path names the primary runtime's storage, which worker tools cannot open.
+        del payload["local_path"]
+        payload["usage"] = _WORKER_ATTACHMENT_USAGE
+    return payload
+
+
 def _get_attachment_listing(
     context: ToolRuntimeContext,
     target: str | None,
+    *,
+    tools_use_worker: bool,
 ) -> tuple[list[str], list[dict[str, object]], list[str], str | None]:
     """List requested context attachments and report missing metadata records."""
     requested_attachment_ids = list_tool_runtime_attachment_ids(context)
@@ -106,7 +122,7 @@ def _get_attachment_listing(
             continue
         attachment_record = load_attachment(context.storage_path, attachment_id)
         if attachment_record is not None:
-            attachments.extend(attachments_for_tool_payload([attachment_record]))
+            attachments.append(_attachment_record_payload(attachment_record, tools_use_worker=tools_use_worker))
             resolved_attachment_ids.append(attachment_id)
     missing_attachment_ids = [
         attachment_id for attachment_id in requested_attachment_ids if attachment_id not in resolved_attachment_ids
@@ -498,10 +514,17 @@ class AttachmentTools(Toolkit):
         assert isinstance(finalized, ToolResult)
         return finalized
 
+    def _tools_use_worker(self, context: ToolRuntimeContext) -> bool:
+        """Return whether this agent's workspace tools run in a worker, away from runtime attachment storage."""
+        return attachment_save_uses_worker(
+            runtime_paths=self._runtime_paths or context.runtime_paths,
+            worker_tools_override=self._worker_tools_override,
+        )
+
     async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolResult:
         runtime_paths = self._runtime_paths or context.runtime_paths
         metadata: dict[str, object] = {"tool": "view_file", "path": path}
-        if attachment_save_uses_worker(runtime_paths=runtime_paths, worker_tools_override=self._worker_tools_override):
+        if self._tools_use_worker(context):
             try:
                 result = await asyncio.to_thread(
                     view_file_from_worker,
@@ -544,7 +567,11 @@ class AttachmentTools(Toolkit):
                 message="Tool runtime context is unavailable in this runtime path.",
             )
 
-        requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(context, target)
+        requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
+            context,
+            target,
+            tools_use_worker=self._tools_use_worker(context),
+        )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
 
@@ -593,6 +620,7 @@ class AttachmentTools(Toolkit):
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
+            tools_use_worker=self._tools_use_worker(context),
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
@@ -659,16 +687,12 @@ class AttachmentTools(Toolkit):
     ) -> tuple[bool, ToolOutputFilePolicy | None]:
         """Resolve whether this save lands on a worker and the local validation policy."""
         runtime_paths = self._runtime_paths or context.runtime_paths
-        use_worker = attachment_save_uses_worker(
-            runtime_paths=runtime_paths,
-            worker_tools_override=self._worker_tools_override,
-        )
         local_policy = (
             ToolOutputFilePolicy.from_runtime(self._tool_output_workspace_root, runtime_paths)
             if self._tool_output_workspace_root is not None
             else None
         )
-        return use_worker, local_policy
+        return self._tools_use_worker(context), local_policy
 
     def _validate_output_path_before_save(
         self,
@@ -828,5 +852,5 @@ class AttachmentTools(Toolkit):
         return _attachment_tool_payload(
             "ok",
             attachment_id=attachment_record.attachment_id,
-            attachment=attachments_for_tool_payload([attachment_record])[0],
+            attachment=_attachment_record_payload(attachment_record, tools_use_worker=self._tools_use_worker(context)),
         )

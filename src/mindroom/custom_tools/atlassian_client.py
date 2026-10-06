@@ -469,11 +469,12 @@ async def download(
     path: str,
     *,
     max_bytes: int,
-    max_bytes_setting: str,
+    max_bytes_setting: str | None,
 ) -> _AtlassianDownload:
     """Download one binary gateway path, following at most a few Atlassian-controlled redirects.
 
-    A body over max_bytes fails with a message naming max_bytes_setting, the setting that raises it.
+    A body over max_bytes fails with a message naming max_bytes_setting, the setting that raises it,
+    or, when it is None, reporting max_bytes as MindRoom's fixed attachment limit.
 
     The bearer goes only to this product and site's gateway path, never to a media host.
     No hop receives another hop's cookies, and content-coded bodies are rejected before decoding.
@@ -518,7 +519,13 @@ async def download(
     raise AtlassianError(code="redirect_rejected", message="Atlassian redirected the download too many times.")
 
 
-def _too_large(max_bytes: int, max_bytes_setting: str) -> AtlassianError:
+def _too_large(max_bytes: int, max_bytes_setting: str | None) -> AtlassianError:
+    if max_bytes_setting is None:
+        return AtlassianError(
+            code="attachment_too_large",
+            message=f"The attachment exceeds MindRoom's {max_bytes}-byte attachment limit.",
+            max_bytes=max_bytes,
+        )
     return AtlassianError(
         code="attachment_too_large",
         message=f"The attachment is larger than the {max_bytes}-byte download limit. "
@@ -528,7 +535,11 @@ def _too_large(max_bytes: int, max_bytes_setting: str) -> AtlassianError:
     )
 
 
-async def _bounded_download(response: httpx.Response, max_bytes: int, max_bytes_setting: str) -> _AtlassianDownload:
+async def _bounded_download(
+    response: httpx.Response,
+    max_bytes: int,
+    max_bytes_setting: str | None,
+) -> _AtlassianDownload:
     """Read the raw body, rejecting content coding and stopping as soon as it passes max_bytes."""
     encoding = response.headers.get("content-encoding", "").strip().lower()
     if encoding not in {"", "identity"}:
