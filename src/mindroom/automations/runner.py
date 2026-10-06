@@ -23,6 +23,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
+from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -219,9 +220,26 @@ class AutomationRunner:
         notice = curation_notice(config, plan, result)
         if not result.findings:
             await bot._hook_send_message(pending.room_id, notice, pending.thread_id, _SOURCE_HOOK)
+            if result.changed:
+                await self._resolve_thread(bot, pending)
             return
         # A re-check asks the agent once, like the prompt itself; its answer is not verified again.
         await self._post_mention(config, bot, pending.room_id, plan.agent_name, notice, pending.thread_id)
+
+    async def _resolve_thread(self, bot: AgentBot | TeamBot, pending: _PendingVerify) -> None:
+        """Mark the thread of a run that stayed within the bounds as resolved; a re-check thread stays open."""
+        if bot.client is None:
+            return
+        try:
+            await set_thread_tag(
+                bot.client,
+                pending.room_id,
+                pending.thread_id,
+                RESOLVED_THREAD_TAG,
+                set_by=bot.client.user_id,
+            )
+        except ThreadTagsError as exc:
+            logger.warning("Automation could not resolve its thread", agent=pending.plan.agent_name, error=str(exc))
 
     async def _post_mention(
         self,

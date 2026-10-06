@@ -7978,6 +7978,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.state",
+    "mindroom.thread_tags",
 ]
 visibility = ["mindroom.orchestrator"]
 

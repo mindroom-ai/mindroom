@@ -4230,7 +4230,7 @@ agents:
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
+- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread; when the run changed the files within the bounds, the thread is also marked resolved.
 - An automation does not post again while its previous prompt awaits verify.
 - A restart skips an occurrence it missed, and prompts posted before the restart get no verify notice.
 
