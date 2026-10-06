@@ -13,13 +13,14 @@ import time
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
 import idna
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
-from httpx import HTTPError, HTTPStatusError
+from httpx import HTTPError, HTTPStatusError, ReadError, ReadTimeout, RemoteProtocolError
 
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
@@ -30,6 +31,7 @@ from mindroom.credential_policy import (
     is_oauth_token_service,
 )
 from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
+from mindroom.logging_config import get_logger
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 # Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
@@ -42,10 +44,14 @@ warnings.filterwarnings(
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
+logger = get_logger(__name__)
+
 _PKCECodeChallengeMethod = Literal["S256"]
 _TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
 _DEFAULT_REFRESH_SKEW_SECONDS = 60.0
+# The request was sent, so the provider may have redeemed the refresh token even though its response was lost.
+_REFRESH_RESPONSE_LOST_ERRORS = (ReadTimeout, ReadError, RemoteProtocolError)
 _DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "client_secret_post"  # noqa: S105
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "none"  # noqa: S105
 _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
@@ -946,12 +952,20 @@ class OAuthProvider:
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
             **_token_client_transport(endpoints),
         ) as client:
+            request_refresh = partial(
+                client.refresh_token,
+                endpoints.token_url,
+                refresh_token=refresh_token,
+                **self.extra_token_params,
+            )
             try:
-                token_response = await client.refresh_token(
-                    endpoints.token_url,
-                    refresh_token=refresh_token,
-                    **self.extra_token_params,
-                )
+                try:
+                    token_response = await request_refresh()
+                except _REFRESH_RESPONSE_LOST_ERRORS:
+                    # Providers that rotate refresh tokens, such as Slack, honor a just-redeemed token only for a
+                    # short grace period, so repeat the grant right away to recover the rotated token it returns.
+                    logger.info("oauth_refresh_retrying_after_lost_response", provider_id=self.id)
+                    token_response = await request_refresh()
             except (AuthlibBaseError, HTTPError, ServerFetchUrlError) as exc:
                 raise _oauth_refresh_error(exc) from exc
         if not isinstance(token_response, Mapping):
