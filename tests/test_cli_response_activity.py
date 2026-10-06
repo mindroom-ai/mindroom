@@ -405,13 +405,18 @@ class _FakeClock:
         self.now += seconds
 
 
-def _serve(monkeypatch: pytest.MonkeyPatch, responses: list[httpx.Response]) -> list[httpx.Response]:
-    """Serve one queued response per poll, repeating the last one."""
-    served: list[httpx.Response] = []
+def _serve(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[httpx.Response | httpx.TimeoutException],
+) -> list[httpx.Response | httpx.TimeoutException]:
+    """Serve or raise one queued result per poll, repeating the last one."""
+    served: list[httpx.Response | httpx.TimeoutException] = []
 
     def get(*_args: object, **_kwargs: object) -> httpx.Response:
         response = responses[min(len(served), len(responses) - 1)]
         served.append(response)
+        if isinstance(response, httpx.TimeoutException):
+            raise response
         return response
 
     monkeypatch.setattr(httpx, "get", get)
@@ -443,6 +448,35 @@ def test_cli_wait_reports_busy_at_the_deadline(monkeypatch: pytest.MonkeyPatch, 
     )
     assert result.exit_code == 1, result.output
     assert json.loads(result.stdout)["status"] == "busy"
+    assert clock.sleeps == [5.0, 5.0, 2.0]
+    assert len(served) == 4
+
+
+@pytest.mark.parametrize(
+    ("final", "exit_code", "status"),
+    [
+        (httpx.Response(200, json=_snapshot()), 0, "idle"),
+        (httpx.ReadTimeout("stalled"), 2, "unavailable"),
+    ],
+)
+def test_cli_wait_retries_request_timeouts_until_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    final: httpx.Response | httpx.TimeoutException,
+    exit_code: int,
+    status: str,
+) -> None:
+    """Timed-out polls keep waiting, and only a timeout at the deadline reports unavailable."""
+    clock = _FakeClock(monkeypatch)
+    busy = httpx.Response(200, json=_snapshot(status="busy", active_matrix_operations=1))
+    stalled = httpx.ReadTimeout("stalled")
+    served = _serve(monkeypatch, [busy, stalled, stalled, final])
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--wait", "12", "--json"],
+    )
+    assert result.exit_code == exit_code, result.output
+    assert json.loads(result.stdout)["status"] == status
     assert clock.sleeps == [5.0, 5.0, 2.0]
     assert len(served) == 4
 
