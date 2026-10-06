@@ -52,6 +52,14 @@ _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
 _DEFAULT_REFRESH_SKEW_SECONDS = 60.0
 # The request was sent, so the provider may have redeemed the refresh token even though its response was lost.
 _REFRESH_RESPONSE_LOST_ERRORS = (ReadTimeout, ReadError, RemoteProtocolError)
+# Wall-clock budget for every refresh grant attempt together. The grant runs inside the credential store's write
+# transaction, so it must end well before a waiting same-credential writer gives up on the lock
+# (`credential_store._LOCK_WAIT_TIMEOUT_SECONDS`); tests pin that relationship.
+_REFRESH_GRANT_DEADLINE_SECONDS = 25.0
+# Skip the repeat after a lost response when less than this much of the budget remains.
+_REFRESH_REPEAT_MIN_SECONDS = 2.0
+# A token endpoint answered with a body that is not JSON text.
+_TOKEN_RESPONSE_DECODE_ERRORS = (json.JSONDecodeError, UnicodeDecodeError)
 _DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "client_secret_post"  # noqa: S105
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "none"  # noqa: S105
 _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
@@ -516,7 +524,7 @@ def _token_client_transport(endpoints: OAuthRuntimeEndpoints) -> dict[str, Any]:
 
 
 def _oauth_refresh_error(
-    exc: AuthlibBaseError | HTTPError | ServerFetchUrlError | json.JSONDecodeError,
+    exc: AuthlibBaseError | HTTPError | TimeoutError | ValueError,
 ) -> OAuthProviderError:
     """Build a safe refresh failure with provider OAuth reason fields when available."""
     error_code: str | None = None
@@ -906,7 +914,7 @@ class OAuthProvider:
                     token_url,
                     **fetch_kwargs,
                 )
-            except (AuthlibBaseError, HTTPError, ServerFetchUrlError, json.JSONDecodeError) as exc:
+            except (AuthlibBaseError, HTTPError, ServerFetchUrlError, *_TOKEN_RESPONSE_DECODE_ERRORS) as exc:
                 msg = "OAuth token exchange failed"
                 raise OAuthProviderError(msg) from exc
         if not isinstance(token_response, Mapping):
@@ -921,6 +929,39 @@ class OAuthProvider:
             client_id=client_config.client_id,
             token_url=token_url,
         )
+
+    async def _request_refresh_grant(self, request_refresh: Callable[[], Awaitable[object]]) -> object:
+        """Send one refresh grant, repeating it once within a shared deadline when its response is lost."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _REFRESH_GRANT_DEADLINE_SECONDS
+        try:
+            async with asyncio.timeout_at(deadline):
+                try:
+                    return await request_refresh()
+                except _REFRESH_RESPONSE_LOST_ERRORS as exc:
+                    if deadline - loop.time() < _REFRESH_REPEAT_MIN_SECONDS:
+                        raise
+                    # Providers that rotate refresh tokens, such as Slack, honor a just-redeemed token only for a
+                    # short grace period, so repeat the grant right away to recover the rotated token it returns.
+                    logger.info(
+                        "oauth_refresh_retrying_after_lost_response",
+                        provider_id=self.id,
+                        credential_service=self.credential_service,
+                        error_type=next(
+                            error_type.__name__
+                            for error_type in _REFRESH_RESPONSE_LOST_ERRORS
+                            if isinstance(exc, error_type)
+                        ),
+                    )
+                    return await request_refresh()
+        except (
+            AuthlibBaseError,
+            HTTPError,
+            ServerFetchUrlError,
+            TimeoutError,
+            *_TOKEN_RESPONSE_DECODE_ERRORS,
+        ) as exc:
+            raise _oauth_refresh_error(exc) from exc
 
     async def refresh_token_data(
         self,
@@ -960,16 +1001,7 @@ class OAuthProvider:
                 refresh_token=refresh_token,
                 **self.extra_token_params,
             )
-            try:
-                try:
-                    token_response = await request_refresh()
-                except _REFRESH_RESPONSE_LOST_ERRORS:
-                    # Providers that rotate refresh tokens, such as Slack, honor a just-redeemed token only for a
-                    # short grace period, so repeat the grant right away to recover the rotated token it returns.
-                    logger.info("oauth_refresh_retrying_after_lost_response", provider_id=self.id)
-                    token_response = await request_refresh()
-            except (AuthlibBaseError, HTTPError, ServerFetchUrlError, json.JSONDecodeError) as exc:
-                raise _oauth_refresh_error(exc) from exc
+            token_response = await self._request_refresh_grant(request_refresh)
         if not isinstance(token_response, Mapping):
             msg = "OAuth token refresh failed"
             raise OAuthProviderError(msg)
