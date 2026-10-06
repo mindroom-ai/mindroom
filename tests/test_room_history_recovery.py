@@ -15,6 +15,7 @@ from mindroom.event_journal import (
     DepartureSource,
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
+    HydrationPolicy,
     ProjectedEvent,
     RoomHistoryRecovery,
 )
@@ -216,6 +217,7 @@ class RecordingRecoveryStore:
         recovery: RoomHistoryRecovery,
         *,
         exhausted_server: bool,
+        unreadable: bool,
         attempted_policy_rank: int,
         expected_membership_epoch: int,
     ) -> HistoryRecoveryOutcome:
@@ -224,6 +226,7 @@ class RecordingRecoveryStore:
         return await self.principal.settle_room_history_recovery(
             recovery,
             exhausted_server=exhausted_server,
+            unreadable=unreadable,
             attempted_policy_rank=attempted_policy_rank,
             expected_membership_epoch=expected_membership_epoch,
         )
@@ -253,6 +256,9 @@ class CountingProjectedEvent(ProjectedEvent):
 def hydrator(
     principal: PrincipalStore,
     client: PagedClient,
+    *,
+    require_complete: bool = False,
+    policy: HydrationPolicy = HydrationPolicy.PROMPT,
     **bounds: int,
 ) -> ConversationHydrator:
     """Build a hydrator over the real store and explicit fake server."""
@@ -260,8 +266,25 @@ def hydrator(
         store=principal,
         runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
         self_sender=BOT,
+        require_complete=require_complete,
+        policy=policy,
         **bounds,
     )
+
+
+UNDECRYPTABLE = {
+    "event_id": "$encrypted",
+    "sender": ALICE,
+    "origin_server_ts": 1_000,
+    "type": "m.room.encrypted",
+    "content": {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "ciphertext",
+        "sender_key": "sender-key",
+        "session_id": "session",
+        "device_id": "DEVICE",
+    },
+}
 
 
 async def stored_recovery_row(principal: PrincipalStore) -> dict[str, Any] | None:
@@ -538,36 +561,48 @@ async def test_reader_holding_a_settled_recovery_does_not_walk_again(
     assert await bodies(principal) == ["one"]
 
 
-async def test_unreadable_server_exhaustion_fails_without_installing(principal: PrincipalStore) -> None:
-    """Exhaustion proves nothing when the walk could not read every fetched event."""
-    encrypted = {
-        "event_id": "$encrypted",
-        "sender": ALICE,
-        "origin_server_ts": 1_000,
-        "type": "m.room.encrypted",
-        "content": {
-            "algorithm": "m.megolm.v1.aes-sha2",
-            "ciphertext": "ciphertext",
-            "sender_key": "sender-key",
-            "session_id": "session",
-            "device_id": "DEVICE",
-        },
-    }
-    client = PagedClient(pages=[([encrypted], "older"), ([encrypted], None)])
-    recovery = await principal.record_room_history_recovery(ROOM)
-
-    with pytest.raises(_HydrationError, match="unreadable") as failure:
-        await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
-
-    assert "encrypted_events=2" in str(failure.value)
-    assert "encrypted_sessions=1" in str(failure.value)
-    assert ROOM in str(failure.value)
-    assert await principal.room_history_recovery(ROOM) == recovery
-    assert await bodies(principal) == []
-    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+def caller_hydrator(principal: PrincipalStore, client: PagedClient, *, require_complete: bool) -> ConversationHydrator:
+    """Build a prompt hydrator, or an export one when it requires complete history."""
+    policy = HydrationPolicy.EXPORT if require_complete else HydrationPolicy.PROMPT
+    return hydrator(principal, client, require_complete=require_complete, policy=policy)
 
 
-async def test_bad_event_at_server_exhaustion_stays_repairable(principal: PrincipalStore) -> None:
+@pytest.mark.parametrize("require_complete", [False, True])
+async def test_unreadable_server_exhaustion_settles_the_repair(
+    principal: PrincipalStore,
+    *,
+    require_complete: bool,
+) -> None:
+    """A missing room key leaves the room readable but no longer complete, for every caller.
+
+    Reaching the start of the room fetched everything the gap skipped. The
+    event nobody could read is missing from the room conversation, and refusing
+    over it would fail every read in the room for as long as the key stays
+    missing. An export refuses in each thread's own walk instead, for the
+    threads that hold such an event.
+    """
+    client = PagedClient(pages=[([raw("$readable", "readable", ts=2_000), UNDECRYPTABLE], "older"), ([], None)])
+    await principal.record_room_history_recovery(ROOM)
+
+    await caller_hydrator(principal, client, require_complete=require_complete).ensure_hydrated(
+        room_id=ROOM,
+        thread_id=None,
+    )
+
+    assert client.calls == 2
+    assert await principal.room_history_recovery(ROOM) is None
+    assert await bodies(principal) == ["readable"]
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
+    assert await principal.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
+
+
+@pytest.mark.parametrize("require_complete", [False, True])
+async def test_bad_event_at_server_exhaustion_settles_without_completeness(
+    principal: PrincipalStore,
+    *,
+    require_complete: bool,
+) -> None:
     """A malformed event is unreadable evidence, not proof that the room is whole."""
     malformed = nio.Event.parse_event({"event_id": "$bad", "type": "m.room.message"})
     assert not isinstance(malformed, nio.Event)
@@ -585,16 +620,16 @@ async def test_bad_event_at_server_exhaustion_stays_repairable(principal: Princi
             self.calls += 1
             return nio.RoomMessagesResponse(ROOM, [malformed], "start", None)  # type: ignore[list-item]
 
-    recovery = await principal.record_room_history_recovery(ROOM)
+    await principal.record_room_history_recovery(ROOM)
 
-    with pytest.raises(_HydrationError, match="unreadable") as failure:
-        await hydrator(principal, BadEventClient(pages=[])).ensure_hydrated(room_id=ROOM, thread_id=None)
+    await caller_hydrator(principal, BadEventClient(pages=[]), require_complete=require_complete).ensure_hydrated(
+        room_id=ROOM,
+        thread_id=None,
+    )
 
-    assert "invalid_events=1" in str(failure.value)
-    assert "encrypted_events=0" in str(failure.value)
-    assert "historical encryption keys" not in str(failure.value)
-    assert await principal.room_history_recovery(ROOM) == recovery
-    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert await principal.room_history_recovery(ROOM) is None
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
 @pytest.mark.parametrize("old_event_type", ["encrypted_file", "cleared_avatar"])
@@ -818,6 +853,7 @@ async def test_recording_retracts_completeness_for_the_room_and_all_threads(
     outcome = await principal.settle_room_history_recovery(
         recovery,
         exhausted_server=False,
+        unreadable=False,
         attempted_policy_rank=3,
         expected_membership_epoch=await principal.membership_epoch(ROOM),
     )
@@ -846,6 +882,7 @@ async def test_truncated_obligation_leaves_bounded_context_readable_but_incomple
     outcome = await principal.settle_room_history_recovery(
         recovery,
         exhausted_server=False,
+        unreadable=False,
         attempted_policy_rank=3,
         expected_membership_epoch=await principal.membership_epoch(ROOM),
     )
@@ -872,6 +909,7 @@ async def test_a_new_abandonment_resets_truncated_to_repairable(principal: Princ
         await principal.settle_room_history_recovery(
             recovery,
             exhausted_server=False,
+            unreadable=False,
             attempted_policy_rank=1,
             expected_membership_epoch=await principal.membership_epoch(ROOM),
         )
@@ -900,6 +938,7 @@ async def test_settlement_publishes_only_after_paginated_events_and_repairs_obli
     outcome = await principal.settle_room_history_recovery(
         recovery,
         exhausted_server=True,
+        unreadable=False,
         attempted_policy_rank=4,
         expected_membership_epoch=await principal.membership_epoch(ROOM),
     )
@@ -940,6 +979,7 @@ async def test_successful_room_repair_restores_existing_thread_completeness(
     outcome = await principal.settle_room_history_recovery(
         recovery,
         exhausted_server=True,
+        unreadable=False,
         attempted_policy_rank=4,
         expected_membership_epoch=await principal.membership_epoch(ROOM),
     )
@@ -951,6 +991,49 @@ async def test_successful_room_repair_restores_existing_thread_completeness(
     assert coverage is not None
     assert coverage.reached_its_end
     assert coverage.attempted_policy_rank == 2
+
+
+async def test_unreadable_room_repair_revokes_every_marker_in_the_room(principal: PrincipalStore) -> None:
+    """A repair that could not read everything it fetched certifies no conversation in the room."""
+    thread_id = "$thread"
+    await mark_complete(principal, None)
+    await mark_complete(principal, thread_id)
+    recovery = await principal.record_room_history_recovery(ROOM)
+    assert recovery is not None
+
+    outcome = await principal.settle_room_history_recovery(
+        recovery,
+        exhausted_server=True,
+        unreadable=True,
+        attempted_policy_rank=1,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
+
+    assert outcome is HistoryRecoveryOutcome.REPAIRED
+    assert await principal.room_history_recovery(ROOM) is None
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
+    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+
+
+async def test_truncated_settlement_keeps_markers_despite_unreadable_events(principal: PrincipalStore) -> None:
+    """A truncated obligation already withholds completeness, so its bounded context stays readable."""
+    thread_id = "$thread"
+    await mark_complete(principal, thread_id)
+    recovery = await principal.record_room_history_recovery(ROOM)
+    assert recovery is not None
+
+    outcome = await principal.settle_room_history_recovery(
+        recovery,
+        exhausted_server=False,
+        unreadable=True,
+        attempted_policy_rank=1,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
+
+    assert outcome is HistoryRecoveryOutcome.TRUNCATED
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+    assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=thread_id)
 
 
 async def test_exact_object_mismatch_publishes_nothing(principal: PrincipalStore) -> None:
@@ -966,6 +1049,7 @@ async def test_exact_object_mismatch_publishes_nothing(principal: PrincipalStore
     outcome = await principal.settle_room_history_recovery(
         stale,
         exhausted_server=True,
+        unreadable=False,
         attempted_policy_rank=4,
         expected_membership_epoch=await principal.membership_epoch(ROOM),
     )
@@ -991,6 +1075,7 @@ async def test_repeated_recovery_supersedes_an_in_flight_settlement(
     outcome = await principal.settle_room_history_recovery(
         old,
         exhausted_server=True,
+        unreadable=False,
         attempted_policy_rank=4,
         expected_membership_epoch=await principal.membership_epoch(ROOM),
     )
@@ -1015,6 +1100,7 @@ async def test_repaired_revision_is_not_reused_by_a_later_gap(principal: Princip
         await principal.settle_room_history_recovery(
             first,
             exhausted_server=True,
+            unreadable=False,
             attempted_policy_rank=4,
             expected_membership_epoch=await principal.membership_epoch(ROOM),
         )
@@ -1031,6 +1117,7 @@ async def test_repaired_revision_is_not_reused_by_a_later_gap(principal: Princip
     stale_outcome = await principal.settle_room_history_recovery(
         first,
         exhausted_server=True,
+        unreadable=False,
         attempted_policy_rank=4,
         expected_membership_epoch=await principal.membership_epoch(ROOM),
     )
@@ -1056,6 +1143,7 @@ async def test_expected_membership_mismatch_installs_neither_events_nor_settleme
     outcome = await principal.settle_room_history_recovery(
         recovery,
         exhausted_server=True,
+        unreadable=False,
         attempted_policy_rank=4,
         expected_membership_epoch=1,
     )

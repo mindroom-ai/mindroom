@@ -738,8 +738,8 @@ class ConversationHydrator:
 
         The prompt window is the wrong bound for this job: a busy room can fill
         it entirely with post-gap tail while the missing interval remains on
-        the next page. The proof walk therefore continues to readable server
-        exhaustion, while the raw-event and request ceilings still bound cost.
+        the next page. The proof walk therefore continues to server exhaustion,
+        while the raw-event and request ceilings still bound cost.
 
         Each fetched page is projected and installed before the next request.
         That write claims this exact recovery and membership epoch, so a retry
@@ -749,6 +749,23 @@ class ConversationHydrator:
         obligation stays repairable, and the next read tries again -- which is the
         same contract every other hydration failure follows, and the reason
         there is no retry state to leak.
+
+        An event the walk fetched but could not read is not such a failure.
+        Reaching the start of the room still proves the gap was fetched, and a
+        missing key may never arrive, so refusing there would fail every read
+        in the room for as long as the key stays missing -- an export of every
+        thread included, not only the thread the event belongs to. A new
+        encrypted room routinely holds such an event: the router encrypts its
+        welcome before it has seen the agent's device. Live sync admits an
+        undecryptable event without failing any read either.
+
+        What the walk cannot always say is which thread the event belonged to:
+        an unreadable edit names only its target and a malformed event names
+        nothing. So the settlement records the room conversation as incomplete
+        and revokes every thread's marker, and each thread's own next walk
+        decides whether it is complete. That walk is also where a caller that
+        needs completeness refuses, for exactly the threads that hold an event
+        it could not read.
         """
         if await self.store.room_history_recovery(recovery.room_id) != recovery:
             # Another reader already settled this. `_shared` only joins readers
@@ -782,15 +799,10 @@ class ConversationHydrator:
                 walk_complete=False,
             )
             return HistoryRecoveryOutcome.SUPERSEDED
-        if walk.exhausted_server and walk.unreadable:
-            msg = (
-                f"Could not prove complete readable history for {recovery.room_id!r}: "
-                f"unreadable events remain ({walk.unreadable.describe()})"
-            )
-            raise _HydrationError(msg)
         outcome = await self.store.settle_room_history_recovery(
             recovery,
             exhausted_server=walk.exhausted_server,
+            unreadable=bool(walk.unreadable),
             attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
         )
@@ -806,6 +818,8 @@ class ConversationHydrator:
             recovery_state=recovery.state.value,
             exhausted_server=walk.exhausted_server,
             unreadable=bool(walk.unreadable),
+            # Why threads in this room may come back short of full history.
+            unreadable_history=walk.unreadable.describe() if walk.unreadable else None,
             walk_complete=walk.exhausted_server and not walk.unreadable,
         )
         return outcome

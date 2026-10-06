@@ -675,16 +675,26 @@ class PrincipalStore:
         recovery: RoomHistoryRecovery,
         *,
         exhausted_server: bool,
+        unreadable: bool,
         attempted_policy_rank: int,
         expected_membership_epoch: int,
     ) -> HistoryRecoveryOutcome:
-        """Publish an installed recovery and settle its exact obligation once."""
+        """Publish an installed recovery and settle its exact obligation once.
+
+        ``exhausted_server`` alone decides the obligation, because a walk that
+        reached the start of the room fetched everything the gap skipped.
+        ``unreadable`` says some of it could not be read, which no marker in
+        the room can vouch for, so a repaired settlement records the room
+        conversation as incomplete and revokes every thread's marker for that
+        thread's own walk to settle again.
+        """
         return await self._backend.write(
             lambda transaction: _settle_history_recovery(
                 transaction,
                 self._principal_id,
                 recovery,
                 exhausted_server=exhausted_server,
+                unreadable=unreadable,
                 attempted_policy_rank=attempted_policy_rank,
                 expected_membership_epoch=expected_membership_epoch,
             ),
@@ -1843,6 +1853,7 @@ def _settle_history_recovery(
     recovery: RoomHistoryRecovery,
     *,
     exhausted_server: bool,
+    unreadable: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> HistoryRecoveryOutcome:
@@ -1856,12 +1867,18 @@ def _settle_history_recovery(
         return HistoryRecoveryOutcome.SUPERSEDED
     if not journal.claim_room_history_recovery(transaction, principal_id, recovery):
         return HistoryRecoveryOutcome.SUPERSEDED
+    if exhausted_server and unreadable:
+        # Repairing unmasks every marker the gap retracted, and one from before
+        # the gap cannot vouch for an event this walk could not read: it may be
+        # a reply in that very thread. A truncated obligation already withholds
+        # their completeness.
+        reads.revoke_room_hydration(transaction, principal_id, room_id=recovery.room_id)
     reads.publish_conversation_hydration(
         transaction,
         principal_id,
         room_id=recovery.room_id,
         thread_id=None,
-        complete=exhausted_server,
+        complete=exhausted_server and not unreadable,
         attempted_policy_rank=attempted_policy_rank,
         membership_epoch=expected_membership_epoch,
     )
