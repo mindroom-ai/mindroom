@@ -23,7 +23,7 @@ const plan = (name: string, recommended: boolean) => ({
 
 const pricing = {
   product: { name: 'MindRoom', description: 'Hosted MindRoom', metadata: { platform: 'saas' } },
-  plans: { hobby: plan('Hobby', true), pro: plan('Pro', false) },
+  plans: { byok: plan('Your own keys', false), hobby: plan('Hobby', true), pro: plan('Pro', false) },
   trial: { enabled: true, days: 3, applicable_plans: ['hobby', 'pro'] },
   discounts: { annual_percentage: 20 },
 }
@@ -33,6 +33,7 @@ const lapsedHobby = () => ({ tier: 'hobby', status: 'cancelled', can_run_instanc
 describe('UpgradePage', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    window.history.pushState({}, '', '/dashboard/billing/upgrade')
     ;(getPricingConfig as jest.Mock).mockResolvedValue(pricing)
     ;(useSubscription as jest.Mock).mockReturnValue({ subscription: lapsedHobby(), loading: false })
   })
@@ -48,6 +49,22 @@ describe('UpgradePage', () => {
     rerender(<UpgradePage />)
 
     expect(screen.getByText(/Selected:/)).toHaveTextContent('Selected: Pro')
+  })
+
+  it("preselects a lapsed customer's own plan rather than the recommended one", async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'byok', status: 'cancelled', can_run_instances: false }, loading: false })
+
+    render(<UpgradePage />)
+
+    expect(await screen.findByText(/Selected:/)).toHaveTextContent('Selected: Your own keys')
+  })
+
+  it('preselects the plan named in the link', async () => {
+    window.history.pushState({}, '', '/dashboard/billing/upgrade?plan=pro')
+
+    render(<UpgradePage />)
+
+    expect(await screen.findByText(/Selected:/)).toHaveTextContent('Selected: Pro')
   })
 
   it('does not promise a trial to a returning customer', async () => {

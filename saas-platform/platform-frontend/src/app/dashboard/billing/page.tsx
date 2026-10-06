@@ -334,7 +334,7 @@ export default function BillingPage() {
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">{plan.description}</p>
                   {!isCurrentPlan && !isDowngrade && (
                     <button
-                      onClick={() => window.location.href = '/dashboard/billing/upgrade'}
+                      onClick={() => window.location.href = `/dashboard/billing/upgrade?plan=${key}`}
                       className="w-full px-3 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 transition-colors"
                     >
                       {activePlanTier ? 'Upgrade to' : 'Choose'} {plan.name}

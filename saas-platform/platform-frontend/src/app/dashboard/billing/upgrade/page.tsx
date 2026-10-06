@@ -26,12 +26,17 @@ export default function UpgradePage() {
   }, [])
 
   useEffect(() => {
-    // Pre-select the recommended plan for an account without a running plan, keeping any plan already chosen
+    // Pre-select a plan for an account without a running plan, keeping any plan already chosen:
+    // the plan named in `?plan=`, then a lapsed account's own plan, then the recommended plan.
     if (!loading && planState(subscription) !== 'active' && pricingConfig) {
+      const requestedPlan = new URLSearchParams(window.location.search).get('plan')
+      const lapsedPlan = planState(subscription) === 'lapsed' ? subscription?.tier : null
       const recommendedPlan = Object.entries(pricingConfig.plans)
         .find(([_, plan]) => plan.recommended)?.[0]
-      if (recommendedPlan) {
-        setSelectedPlan(current => current ?? recommendedPlan)
+      const initialPlan = [requestedPlan, lapsedPlan, recommendedPlan]
+        .find((plan) => plan && plan !== 'free' && plan in pricingConfig.plans)
+      if (initialPlan) {
+        setSelectedPlan(current => current ?? initialPlan)
       }
     }
   }, [subscription, loading, pricingConfig])

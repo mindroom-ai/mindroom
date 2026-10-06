@@ -154,17 +154,17 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
       case 'restarting':
         return 'Restarting your instance... This will take a moment.'
       case 'stopped':
-        return canRunInstances
-          ? 'Instance is stopped. Start it to access your MindRoom.'
-          : 'Instance is stopped. Add or restore billing to start it again.'
+        if (subscriptionLoading) return 'Instance is stopped.'
+        if (canRunInstances) return 'Instance is stopped. Start it to access your MindRoom.'
+        return hasNoPlan ? 'Instance is stopped. Choose a plan to start it again.' : 'Instance is stopped. Add or restore billing to start it again.'
       case 'failed':
         return 'Instance provisioning failed. Please contact support.'
       case 'error':
         return 'Instance not found in cluster. It may have been removed during maintenance. Please contact support to reprovision your instance.'
       case 'deprovisioned':
-        return canRunInstances
-          ? 'Instance has been removed. Click "Reprovision Instance" to set it up again.'
-          : 'Instance has been removed. Add or restore billing to set it up again.'
+        if (subscriptionLoading) return 'Instance has been removed.'
+        if (canRunInstances) return 'Instance has been removed. Click "Reprovision Instance" to set it up again.'
+        return hasNoPlan ? 'Instance has been removed. Choose a plan to set it up again.' : 'Instance has been removed. Add or restore billing to set it up again.'
       default:
         return 'Unknown status'
     }
