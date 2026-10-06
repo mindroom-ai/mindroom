@@ -311,7 +311,7 @@ def roll_back_to(
     """
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
-    runs = agno_compat_sqlite.run_table(db)
+    runs = agno_compat_sqlite.owned_table(db, "runs")
     with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table, sessions_table):
         connection = transaction.connection()
         _ensure_tables(connection, db)

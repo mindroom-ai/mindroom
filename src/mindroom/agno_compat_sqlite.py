@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.db.utils import build_single_run_row
 from sqlalchemy import event, func, select
@@ -49,23 +49,15 @@ def remove_default_pragmas(engine: Engine) -> None:
 # Upstream issue: No matching public table-access issue identified; shares the transaction gap below.
 # Upstream PR: None identified.
 # Remove when: Agno offers public table access or a caller-owned transaction API; keep owner row semantics.
-# Coverage: tests/test_usage_storage.py and tests/test_history_archive.py::test_roll_back_restores_earlier_runs_of_the_hit_generation_in_order.
-def run_table(db: SqliteDb) -> Table:
-    """Return the runs table, creating it on first use."""
-    runs = db._get_table(table_type="runs", create_table_if_not_found=True)
-    if runs is None:
-        msg = "Run table unavailable"
+# Coverage: tests/test_usage_storage.py, tests/test_history_archive.py::test_roll_back_restores_earlier_runs_of_the_hit_generation_in_order,
+# and tests/test_helper_usage.py::test_scope_reset_and_first_turn_write_preserve_concurrent_session.
+def owned_table(db: SqliteDb, table_type: Literal["runs", "sessions"]) -> Table:
+    """Return the runs or sessions table, creating it on first use."""
+    table = db._get_table(table_type=table_type, create_table_if_not_found=True)
+    if table is None:
+        msg = f"SQLite {table_type} table unavailable"
         raise RuntimeError(msg)
-    return runs
-
-
-def session_table(db: SqliteDb) -> Table:
-    """Return the sessions table, creating it on first use."""
-    sessions = db._get_table(table_type="sessions", create_table_if_not_found=True)
-    if sessions is None:
-        msg = "Session table unavailable"
-        raise RuntimeError(msg)
-    return sessions
+    return table
 
 
 # AGNO_COMPAT: Run insertion can reorder surviving stored runs.
@@ -123,7 +115,7 @@ def upsert_run_at_end(
     record_usage: bool = True,
 ) -> None:
     """Save the run and optional usage in one transaction, preserving Agno's row/index semantics."""
-    runs = run_table(db)
+    runs = owned_table(db, "runs")
     with db.Session() as transaction, transaction.begin():
         stored = insert_run_row(transaction, runs, run, session_id=session_id, user_id=user_id)
         if record_usage:

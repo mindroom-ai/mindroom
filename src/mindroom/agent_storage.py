@@ -124,7 +124,7 @@ def save_independent_usage(
         {**run, "run_id": usage_id, "user_id": requester_id, "metadata": None, "parent_run_id": None, "team_id": None},
     )
     snapshot["kind"] = kind
-    sessions = agno_compat_sqlite.session_table(storage) if initial_session is not None else None
+    sessions = agno_compat_sqlite.owned_table(storage, "sessions") if initial_session is not None else None
     with storage.db_engine.begin() as connection:
         if initial_session is not None and sessions is not None:
             is_team = isinstance(initial_session, TeamSession)

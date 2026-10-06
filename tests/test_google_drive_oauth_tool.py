@@ -1119,6 +1119,23 @@ def test_google_drive_read_returns_text_stored_as_octet_stream(tmp_path: Path) -
     assert result["content"] == "name: été"
 
 
+def test_google_drive_read_replaces_undecodable_bytes_in_text_files(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {"name": "people.csv", "mimeType": "text/csv", "size": "12"}
+    tool.service = service
+    tool._download_bytes = lambda _request: "name\nMüller\n".encode("cp1252")
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["content"] == "name\nM\ufffdller\n"
+
+
 def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = GoogleDriveTools(
