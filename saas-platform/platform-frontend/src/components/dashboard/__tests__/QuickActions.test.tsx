@@ -37,13 +37,13 @@ describe('QuickActions', () => {
   it('asks a lapsed plan holder to restore billing', () => {
     render(<QuickActions subscription={{ ...subscription('hobby'), status: 'cancelled', can_run_instances: false }} />)
 
-    expect(screen.getByText('Restore billing for your hobby plan')).toBeInTheDocument()
+    expect(screen.getByText('Restore billing to run your instance')).toBeInTheDocument()
   })
 
-  it('names the current paid plan', () => {
+  it('points a running plan at plan and billing management', () => {
     render(<QuickActions subscription={subscription('hobby')} />)
 
-    expect(screen.getByText('Current: hobby plan')).toBeInTheDocument()
+    expect(screen.getByText('Your plan and billing')).toBeInTheDocument()
   })
 
   it('links the documentation to the docs site', () => {

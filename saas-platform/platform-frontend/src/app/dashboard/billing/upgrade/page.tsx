@@ -8,6 +8,8 @@ import { planState } from '@/lib/plan-state'
 import { createCheckoutSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 
+const PLAN_ORDER = ['byok', 'hobby', 'pro', 'enterprise']
+
 export default function UpgradePage() {
   const router = useRouter()
   const { subscription, loading } = useSubscription()
@@ -26,18 +28,23 @@ export default function UpgradePage() {
   }, [])
 
   useEffect(() => {
-    // Pre-select a plan for an account without a running plan, keeping any plan already chosen:
-    // the plan named in `?plan=`, then a lapsed account's own plan, then the recommended plan.
-    if (!loading && planState(subscription) !== 'active' && pricingConfig) {
-      const requestedPlan = new URLSearchParams(window.location.search).get('plan')
-      const lapsedPlan = planState(subscription) === 'lapsed' ? subscription?.tier : null
-      const recommendedPlan = Object.entries(pricingConfig.plans)
-        .find(([_, plan]) => plan.recommended)?.[0]
-      const initialPlan = [requestedPlan, lapsedPlan, recommendedPlan]
-        .find((plan) => plan && plan !== 'free' && plan in pricingConfig.plans)
-      if (initialPlan) {
-        setSelectedPlan(current => current ?? initialPlan)
-      }
+    // Pre-select a plan, keeping any plan already chosen. A running plan accepts only an upgrade
+    // named in `?plan=`; otherwise take that plan, then a lapsed account's own plan, then the recommended one.
+    if (loading || !pricingConfig) return
+    const state = planState(subscription)
+    const requestedPlan = new URLSearchParams(window.location.search).get('plan')
+    let initialPlan: string | undefined
+    if (state === 'active') {
+      const isUpgrade = requestedPlan !== null && PLAN_ORDER.indexOf(requestedPlan) > PLAN_ORDER.indexOf(subscription?.tier ?? 'free')
+      initialPlan = isUpgrade && requestedPlan in pricingConfig.plans ? requestedPlan : undefined
+    } else {
+      const lapsedPlan = state === 'lapsed' ? subscription?.tier : null
+      const recommendedPlan = Object.entries(pricingConfig.plans).find(([_, plan]) => plan.recommended)?.[0]
+      initialPlan = [requestedPlan, lapsedPlan, recommendedPlan]
+        .find((plan): plan is string => !!plan && plan !== 'free' && plan in pricingConfig.plans)
+    }
+    if (initialPlan) {
+      setSelectedPlan(current => current ?? initialPlan)
     }
   }, [subscription, loading, pricingConfig])
 
@@ -89,10 +96,7 @@ export default function UpgradePage() {
   const plans = Object.entries(pricingConfig.plans)
     .filter(([key]) => key !== 'free')
     .map(([key, plan]) => ({ ...plan, id: key }))
-    .sort((a, b) => {
-      const order = ['byok', 'hobby', 'pro', 'enterprise']
-      return order.indexOf(a.id) - order.indexOf(b.id)
-    })
+    .sort((a, b) => PLAN_ORDER.indexOf(a.id) - PLAN_ORDER.indexOf(b.id))
 
   return (
     <div className="max-w-6xl mx-auto p-6">

@@ -67,6 +67,15 @@ describe('UpgradePage', () => {
     expect(await screen.findByText(/Selected:/)).toHaveTextContent('Selected: Pro')
   })
 
+  it('preselects an upgrade named in the link for a running plan', async () => {
+    window.history.pushState({}, '', '/dashboard/billing/upgrade?plan=pro')
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'active', can_run_instances: true }, loading: false })
+
+    render(<UpgradePage />)
+
+    expect(await screen.findByText(/Selected:/)).toHaveTextContent('Selected: Pro')
+  })
+
   it('does not promise a trial to a returning customer', async () => {
     render(<UpgradePage />)
 

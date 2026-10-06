@@ -29,8 +29,8 @@ export function QuickActions({ subscription }: QuickActionsProps) {
         : planState(subscription) === 'none'
           ? 'Choose a plan to run a hosted instance'
           : planState(subscription) === 'lapsed'
-            ? `Restore billing for your ${subscription.tier} plan`
-            : `Current: ${subscription.tier} plan`,
+            ? 'Restore billing to run your instance'
+            : 'Your plan and billing',
       href: '/dashboard/billing',
       icon: CreditCard,
       external: false,
