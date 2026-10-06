@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import mimetypes
 from contextlib import contextmanager
@@ -10,7 +9,6 @@ from functools import wraps
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, cast
 
-import agno.tools.google.drive as agno_google_drive
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
 from agno.utils.log import log_error
@@ -22,6 +20,7 @@ from googleapiclient.http import MediaIoBaseUpload
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.bounded_bytes import ByteLimitExceededError
+from mindroom.custom_tools.agno_compat_google_drive import install_office_table_extraction
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
@@ -44,10 +43,8 @@ from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Iterator
     from typing import BinaryIO
-
-    from pptx.shapes.base import BaseShape
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
@@ -56,70 +53,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
-
-
-def _extract_docx_text_with_tables(content_bytes: bytes) -> str:
-    import docx  # noqa: PLC0415
-    from docx.table import Table  # noqa: PLC0415
-
-    lines: list[str] = []
-    for block in docx.Document(io.BytesIO(content_bytes)).iter_inner_content():
-        if isinstance(block, Table):
-            for row in block.rows:
-                cells = [cell.text for cell in row.cells]
-                if any(cells):
-                    lines.append("\t".join(cells))
-        else:
-            lines.append(block.text)
-    return "\n".join(lines)
-
-
-def _pptx_shape_lines(shapes: Iterable[BaseShape]) -> Iterator[str]:
-    from pptx.shapes.graphfrm import GraphicFrame  # noqa: PLC0415
-    from pptx.shapes.group import GroupShape  # noqa: PLC0415
-
-    for shape in shapes:
-        if isinstance(shape, GroupShape):
-            yield from _pptx_shape_lines(shape.shapes)
-        elif isinstance(shape, GraphicFrame) and shape.has_table:
-            for row in shape.table.rows:
-                cells = [cell.text for cell in row.cells]
-                if any(cells):
-                    yield "\t".join(cells)
-        elif shape.has_text_frame:
-            for paragraph in shape.text_frame.paragraphs:
-                text = "".join(run.text for run in paragraph.runs)
-                if text.strip():
-                    yield text
-
-
-def _extract_pptx_text_with_tables(content_bytes: bytes) -> str:
-    from pptx import Presentation  # noqa: PLC0415
-
-    lines: list[str] = []
-    for number, slide in enumerate(Presentation(io.BytesIO(content_bytes)).slides, 1):
-        lines.append(f"=== Slide {number} ===")
-        lines.extend(_pptx_shape_lines(slide.shapes))
-    return "\n".join(lines)
-
-
-def _install_office_table_extraction() -> None:
-    # AGNO_COMPAT: Drive .docx text extraction drops tables.
-    # Reason: Agno 3.0.9 `_extract_docx_text` reads only `document.paragraphs`, which excludes tables,
-    # so `read_file` returns a document's text without any of its table cells.
-    # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10501, open.
-    # Remove when: The pinned Agno `_extract_docx_text` returns table rows in document order.
-    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_extracts_office_document_text.
-    agno_google_drive._extract_docx_text = _extract_docx_text_with_tables  # ty: ignore[invalid-assignment]
-    # AGNO_COMPAT: Drive .pptx text extraction drops tables and grouped shapes.
-    # Reason: Agno 3.0.9 `_extract_pptx_text` reads only top-level shapes with a text frame, so a
-    # slide's tables and the text inside grouped shapes are missing from `read_file`.
-    # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: None identified.
-    # Remove when: The pinned Agno `_extract_pptx_text` returns table rows and grouped shape text.
-    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_extracts_presentation_tables_and_groups.
-    agno_google_drive._extract_pptx_text = _extract_pptx_text_with_tables  # ty: ignore[invalid-assignment]
 
 
 _AGNO_DOWNLOAD_HINT = " Use download_file instead."
@@ -285,7 +218,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             defer_to_original_auth=defer_to_original_auth,
             quota_project_id=quota_project_id,
         )
-        _install_office_table_extraction()
+        install_office_table_extraction()
         super().__init__(creds=creds, **kwargs)
         # Agno's async variants run Drive calls on the event loop's default executor, which the
         # gateway cannot track; synchronous bodies run on the caller's tool executor instead.

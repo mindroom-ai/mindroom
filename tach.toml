@@ -7587,6 +7587,15 @@ from = ["mindroom.custom_tools.agno_compat_agentql"]
 expose = ["MindRoomAgentQLTools"]
 
 [[modules]]
+path = "mindroom.custom_tools.agno_compat_google_drive"
+depends_on = []
+visibility = ["mindroom.custom_tools.google_drive"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_google_drive"]
+expose = ["install_office_table_extraction"]
+
+[[modules]]
 path = "mindroom.custom_tools.agno_compat_website_reader"
 depends_on = []
 visibility = ["mindroom.custom_tools.website"]

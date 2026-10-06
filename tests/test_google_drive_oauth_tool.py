@@ -1153,7 +1153,7 @@ def test_google_drive_read_extracts_presentation_tables_and_groups(tmp_path: Pat
     )
     presentation = pptx.Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1)).text_frame.text = "Quarterly review"
+    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1)).text_frame.text = "Quarterly\vreview"
     table = slide.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1)).table
     for row, cells in zip(table.rows, (("Region", "Revenue"), ("EMEA", "120")), strict=True):
         for cell, text in zip(row.cells, cells, strict=True):
@@ -1174,7 +1174,7 @@ def test_google_drive_read_extracts_presentation_tables_and_groups(tmp_path: Pat
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
     assert result["extractedFrom"] == "pptx"
-    assert result["content"] == "=== Slide 1 ===\nQuarterly review\nRegion\tRevenue\nEMEA\t120\nGrouped note"
+    assert result["content"] == "=== Slide 1 ===\nQuarterly\nreview\nRegion\tRevenue\nEMEA\t120\nGrouped note"
 
 
 def test_google_drive_binary_refusal_names_enabled_download_function(

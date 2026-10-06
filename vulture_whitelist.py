@@ -16,7 +16,8 @@ desktop_native_app  # Typer dispatches the native desktop helper command (src/mi
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 _.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)
 _._save_file_to_disk  # FileGenerationTools save step overridden to write inside the workspace (src/mindroom/tools/agno_compat_file_generation.py)
-_._extract_docx_text  # Agno Drive .docx extractor replaced to keep tables (src/mindroom/custom_tools/google_drive.py)
+_._extract_docx_text  # Agno Drive .docx extractor replaced to keep tables (src/mindroom/custom_tools/agno_compat_google_drive.py)
+_._extract_pptx_text  # Agno Drive .pptx extractor replaced to keep tables (src/mindroom/custom_tools/agno_compat_google_drive.py)
 _._run_context  # Agno reads the run context bound on a prepared Function (src/mindroom/agno_compat_prepared_tools.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py
