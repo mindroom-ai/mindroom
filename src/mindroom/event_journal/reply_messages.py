@@ -15,6 +15,7 @@ from mindroom.reply_lifecycle import (
     Reply,
     ReplyState,
     VisibilityPolicy,
+    departed,
 )
 
 from . import reply_spans
@@ -193,6 +194,50 @@ def event_ids_of_spans(
         (principal_id, room_id, *span_ids),
     )
     return frozenset(str(row["event_id"]) for row in rows)
+
+
+def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, now_ns: int) -> None:
+    """End the room's replies as its membership ends, without touching Matrix (DESIGN.md §6.4 ``departed``).
+
+    Running replies end gone with their spans released, and what finished
+    replies still owed the room is dropped. The departing bot cancels the span
+    tasks it runs after this commits.
+    """
+    rows = transaction.fetchall(
+        f"""
+        SELECT {_REPLY_COLUMNS} FROM reply_messages
+        WHERE principal_id = ? AND room_id = ?
+          AND (state IN ('active', 'paused') OR redaction_pending_json IS NOT NULL OR owed_write_json IS NOT NULL)
+        ORDER BY created_at_ns, reply_id
+        """,  # noqa: S608 - a fixed column list
+        (principal_id, room_id),
+    )
+    for reply in (_reply(row) for row in rows):
+        current = (
+            None
+            if reply.current_span_id is None
+            else reply_spans.load(transaction, principal_id, reply.current_span_id)
+        )
+        persist(transaction, principal_id, departed(reply, current, now_ns=now_ns))
+
+
+def spans_in_room(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    span_ids: tuple[str, ...],
+) -> frozenset[str]:
+    """Return which of these spans belong to the room's replies."""
+    placeholders = ", ".join("?" for _ in span_ids)
+    rows = transaction.fetchall(
+        f"""
+        SELECT span.span_id FROM reply_spans AS span
+        JOIN reply_messages AS reply ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id
+        WHERE span.principal_id = ? AND reply.room_id = ? AND span.span_id IN ({placeholders})
+        """,  # noqa: S608 - fixed placeholders
+        (principal_id, room_id, *span_ids),
+    )
+    return frozenset(str(row["span_id"]) for row in rows)
 
 
 def with_pending_work(transaction: Transaction, principal_id: str) -> tuple[Reply, ...]:

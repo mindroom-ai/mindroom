@@ -709,6 +709,19 @@ class ReplyStore:
             ),
         )
 
+    async def spans_in_room(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:
+        """Return which of these spans belong to the room's replies."""
+        if not span_ids:
+            return frozenset()
+        return await self._backend.read(
+            lambda transaction: reply_messages.spans_in_room(
+                transaction,
+                self._principal_id,
+                room_id,
+                tuple(sorted(span_ids)),
+            ),
+        )
+
     async def with_pending_work(self) -> tuple[Reply, ...]:
         """Return replies owing a redaction or a note not yet enqueued."""
         return await self._backend.read(

@@ -220,6 +220,11 @@ class ReplyRuntime:
         """Return the events of a room's replies whose span runs in this bot instance (DESIGN.md §8)."""
         return await self.store.replies.event_ids_of_spans(room_id, self.spans.live_span_ids())
 
+    async def departed(self, room_id: str) -> None:
+        """Cancel the spans this instance runs in a room the bot left; the departure ended their replies."""
+        for span_id in await self.store.replies.spans_in_room(room_id, self.spans.live_span_ids()):
+            self.spans.cancel(span_id, cancel_source=None)
+
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 

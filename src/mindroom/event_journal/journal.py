@@ -13,6 +13,7 @@ noticed.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
@@ -25,7 +26,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approvals, membership_hooks
+from . import approvals, membership_hooks, reply_messages
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -665,6 +666,7 @@ def _advance_membership_epoch(
         room_id=room_id,
         reason="Approval transport left the room.",
     )
+    reply_messages.depart_room(transaction, principal_id, room_id, now_ns=time.time_ns())
     transaction.execute(
         """
         UPDATE matrix_delivery_outbox AS delivery SET retired = 1

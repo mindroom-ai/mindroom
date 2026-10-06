@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.hooks import FinalResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
@@ -21,6 +21,7 @@ from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.journal_membership_helpers import admit_room_membership
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
@@ -837,6 +838,32 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
         response.cancel()
         with suppress(asyncio.CancelledError):
             await response
+
+
+async def test_leaving_the_room_mid_stream_ends_the_reply_without_writing_to_it(tmp_path: Path) -> None:
+    """The departure ends the reply gone and releases its span; the cancelled stream writes nothing more."""
+    bot = await _streaming_bot(tmp_path)
+    response, _streaming = await _blocked_stream(bot)
+
+    async def partial_shown() -> None:
+        while "Partial" not in _sent_bodies(bot):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(partial_shown(), timeout=5)
+    reply = await _reply(bot)
+    assert reply.event_id is not None
+    sends = len(bot.client.room_send.await_args_list)
+
+    await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
+    await bot._reply_runtime.departed(_target().room_id)
+    with suppress(asyncio.CancelledError):
+        await asyncio.wait_for(response, timeout=5)
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.GONE
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.RELEASED]
+    assert len(bot.client.room_send.await_args_list) == sends
+    assert bot._reply_runtime.spans.live_span_ids() == frozenset()
 
 
 async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tmp_path: Path) -> None:

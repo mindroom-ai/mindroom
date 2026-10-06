@@ -419,20 +419,29 @@ async def test_permanent_failure_of_a_terminal_row_applies_its_rule(journal_stor
     assert span_after.outcome is SpanOutcome.COMPLETED
 
 
-async def test_rows_for_a_departed_membership_are_refused_whole(journal_store: EventJournalStore) -> None:
-    """A row the outbox refuses leaves the reply exactly as it was."""
+async def test_a_departure_ends_the_rooms_replies_and_refuses_their_rows(journal_store: EventJournalStore) -> None:
+    """Leaving a room ends its running replies gone with their spans released; a later row changes nothing."""
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+    departed = await principal.replies.load("reply-1")
+    assert departed is not None
+    assert departed.state is ReplyState.GONE
+    assert departed.current_span_id is None
+    released = await principal.replies.span(span.span_id)
+    assert released is not None
+    assert released.outcome is SpanOutcome.RELEASED
     enqueued = await principal.enqueue_reply_row(
         request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
         room_id=ROOM,
         thread_id=None,
         payload={"body": "answer"},
     )
-    assert enqueued is None
-    stored = await principal.replies.load("reply-1")
-    assert stored == reply
+    # The released span's write is stale, so no row is recorded.
+    assert enqueued is not None
+    assert enqueued.applied.transition.outcome is rl.Outcome.STALE
+    assert enqueued.delivery_id is None
+    assert await principal.replies.load("reply-1") == departed
 
 
 async def _stop_waiting_for_the_create(journal_store: EventJournalStore) -> PrincipalStore:
