@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         ProjectedEvent,
         TerminalTurnWrite,
     )
+    from mindroom.event_journal.replies import ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_sources import ResponseAttempt
 
@@ -96,9 +97,50 @@ class _WatchedOutbox:
         """Return the wrapped delivery principal."""
         return self.inner.principal_id
 
+    @property
+    def replies(self) -> ReplyStore:
+        """Return the wrapped principal's reply records."""
+        return self.inner.replies
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current room membership without timeline noise."""
         return await self.inner.membership_epoch(room_id)
+
+    async def enqueue_reply_row(
+        self,
+        *,
+        request: ReplyRowRequest,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
+        response_attempt: ResponseAttempt | None = None,
+        event_type: str = "m.room.message",
+        permanent_failure_reason: str | None = None,
+    ) -> ReplyRowEnqueue | None:
+        """Record one reply write, noting the stage its rule chose on the timeline."""
+        enqueued = await self.inner.enqueue_reply_row(
+            request=request,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            result=result,
+            response_attempt=response_attempt,
+            event_type=event_type,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+        if enqueued is not None and enqueued.stage is not None:
+            self.timeline.append(f"enqueue:{enqueued.stage.value}")
+        return enqueued
+
+    async def unresolved_reply_rows(
+        self,
+        reply_id: str,
+        *,
+        before_sequence: int | None = None,
+    ) -> tuple[tuple[str, DeliveryStage, int], ...]:
+        """Return a reply's rows whose Matrix outcome is unknown, in write order."""
+        return await self.inner.unresolved_reply_rows(reply_id, before_sequence=before_sequence)
 
     async def enqueue_matrix_delivery(
         self,

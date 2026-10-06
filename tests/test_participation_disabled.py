@@ -163,6 +163,7 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
         enable_streaming=streaming,
     )
     install_direct_response_admission(bot)
+    await bot._reply_runtime.start()
     bot.client = _make_matrix_client_mock()
     bot.client.room_send.return_value = _room_send_response("$response")
     bot.client.get_presence.return_value.presence = "online"
@@ -247,6 +248,8 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
             async with asyncio.timeout(5):
                 await entered.wait()
                 if scenario == "cancel":
+                    # The Stop reconciler records a Stop on the reply before the stop manager cancels its task.
+                    assert await bot._delivery_gateway.record_reply_stop("$response", 1, newer_edit=False)
                     request_task_cancel(task, cancel_source="user_stop")
                 assert await task == "$response"
         finally:

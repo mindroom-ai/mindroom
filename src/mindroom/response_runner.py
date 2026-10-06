@@ -2910,7 +2910,12 @@ class ResponseRunner:
             self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
             await self.deps.delivery_gateway.end_reply_span(
                 handle,
-                lambda reply, span: rl.release(reply, span, now_ns=time.time_ns(), confirms=handle.unconfirmed_progress),
+                lambda reply, span: rl.release(
+                    reply,
+                    span,
+                    now_ns=time.time_ns(),
+                    confirms=handle.unconfirmed_progress,
+                ),
             )
         return result
 
@@ -3095,7 +3100,11 @@ class ResponseRunner:
             return
         if isinstance(error, PostLockRequestPreparationError):
             cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
-            error_text = get_user_friendly_error_message(cause, self.deps.agent_name, runtime_paths=self.deps.runtime_paths)
+            error_text = get_user_friendly_error_message(
+                cause,
+                self.deps.agent_name,
+                runtime_paths=self.deps.runtime_paths,
+            )
             await gateway.end_reply_span(
                 handle,
                 lambda reply, span: rl.dispatch_failed(
@@ -4451,7 +4460,7 @@ class ResponseRunner:
             raise deferred_error
         return final_outcome.final_visible_event_id if source_handled else None
 
-    async def _end_span_after_outcome(
+    async def _end_span_after_outcome(  # noqa: PLR0911
         self,
         handle: SpanHandle,
         outcome: FinalDeliveryOutcome,

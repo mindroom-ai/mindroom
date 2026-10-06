@@ -85,6 +85,7 @@ from tests.bot_helpers import (
     make_mock_agent_user,
     make_test_agent_bot,
     make_test_team_bot,
+    unique_room_send_responses,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -2802,7 +2803,8 @@ class TestAgentBot(AgentBotTestBase):
         """Dispatch setup failures should replace and track the early placeholder."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client)
         tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
@@ -2834,14 +2836,6 @@ class TestAgentBot(AgentBotTestBase):
 
         failure_message = "setup failed"
 
-        mock_edit = AsyncMock(return_value=True)
-        install_edit_message_mock(bot, mock_edit)
-        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
-        _replace_turn_policy_deps(
-            bot,
-            delivery_gateway=bot._delivery_gateway,
-        )
-
         with patch(
             "mindroom.response_runner.prepare_memory_and_model_context",
             side_effect=RuntimeError(failure_message),
@@ -2857,12 +2851,16 @@ class TestAgentBot(AgentBotTestBase):
                 handled_turn=TurnRecord.create([event.event_id]),
             )
 
-        mock_edit.assert_awaited_once()
-        bot._delivery_gateway.send_text.assert_awaited_once()
+        # The reply's placeholder is edited into the dispatch error.
+        sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
+        assert [content.get("m.new_content", content)["body"] for content in sent] == [
+            "Thinking...",
+            "[calculator] ⚠️ Error: setup failed",
+        ]
         tracker.record_handled_turn.assert_called_once_with(
             TurnRecord.create(
                 ["$event"],
-                response_event_id="$error",
+                response_event_id="$sent1",
             ),
         )
 

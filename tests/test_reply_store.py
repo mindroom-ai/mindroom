@@ -486,4 +486,6 @@ async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:
     assert await journal_store.backend.write(lambda tx: reply_messages.lock(tx, PRINCIPAL, "missing")) is None
     active = await journal_store.backend.read(lambda tx: reply_messages.in_states(tx, PRINCIPAL, (ReplyState.ACTIVE,)))
     assert [reply.reply_id for reply in active] == ["reply-1"]
-    assert await journal_store.backend.read(lambda tx: reply_messages.in_states(tx, PRINCIPAL, (ReplyState.GONE,))) == ()
+    assert (
+        await journal_store.backend.read(lambda tx: reply_messages.in_states(tx, PRINCIPAL, (ReplyState.GONE,))) == ()
+    )

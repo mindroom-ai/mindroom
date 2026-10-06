@@ -1601,16 +1601,28 @@ class DeliveryGateway:
         note: Segment,
     ) -> FinalDeliveryOutcome:
         """End a span with its terminal row: what the reply may show, plus one note."""
-        reply = await self.deps.outbox.replies.load(handle.reply_id)
-        assert reply is not None, "a span's reply exists while the span ends"
-        shown = with_trailing_note(_shown_before(reply, handle), note)
-        if state is ReplyState.ACTIVE:
-            write = resumed_note_write(handle, shown)
-            rendered = render(shown, WriteKind.TERMINAL, state=ReplyState.FAILED.value)
-        else:
-            write = terminal_write(handle, shown, state=state)
-            rendered = render(shown, WriteKind.TERMINAL, state=state.value)
-        delivered = await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
+        while True:
+            reply = await self.deps.outbox.replies.load(handle.reply_id)
+            assert reply is not None, "a span's reply exists while the span ends"
+            handle.reply = reply
+            if reply.unapplied_stop and handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
+                # A Stop committed before this span ended; its note is the cancellation.
+                state, note = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)
+            shown = with_trailing_note(_shown_before(reply, handle), note)
+            if state is ReplyState.ACTIVE:
+                write = resumed_note_write(handle, shown)
+                rendered = render(shown, WriteKind.TERMINAL, state=ReplyState.FAILED.value)
+            else:
+                write = terminal_write(handle, shown, state=state)
+                rendered = render(shown, WriteKind.TERMINAL, state=state.value)
+            try:
+                delivered = await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
+            except ReplyWriteRefusedError as refused:
+                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
+                    # The reply changed after this note was rendered; render it again.
+                    continue
+                delivered = None
+            break
         return FinalDeliveryOutcome(
             terminal_status=_terminal_status_for_reply_state(state),
             event_id=reply.event_id or delivered,
@@ -1629,36 +1641,36 @@ class DeliveryGateway:
         *,
         event_id: str | None,
     ) -> str | None:
-        """Send one rendered reply row as an edit of the reply's event, or as its create."""
+        """Send one rendered reply row as an edit of the reply's event, or as its create.
+
+        Raises ``ReplyWriteRefusedError`` when the reply's rule refuses the row.
+        """
         extra_content: dict[str, Any] = {}
         if rendered.stream_status is not None:
             extra_content[constants.STREAM_STATUS_KEY] = rendered.stream_status
         tool_trace = list(rendered.tool_trace) or None
-        try:
-            if event_id is None:
-                return await self.send_text(
-                    SendTextRequest(
-                        target=target,
-                        response_text=rendered.body,
-                        tool_trace=tool_trace,
-                        extra_content=extra_content,
-                        retry_sync_recovery=True,
-                        reply_write=write,
-                    ),
-                )
-            edited = await self.edit_text(
-                EditTextRequest(
+        if event_id is None:
+            return await self.send_text(
+                SendTextRequest(
                     target=target,
-                    event_id=event_id,
-                    new_text=rendered.body,
+                    response_text=rendered.body,
                     tool_trace=tool_trace,
                     extra_content=extra_content,
                     retry_sync_recovery=True,
                     reply_write=write,
                 ),
             )
-        except ReplyWriteRefusedError:
-            return None
+        edited = await self.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id=event_id,
+                new_text=rendered.body,
+                tool_trace=tool_trace,
+                extra_content=extra_content,
+                retry_sync_recovery=True,
+                reply_write=write,
+            ),
+        )
         return event_id if edited else None
 
     async def record_reply_stop(self, event_id: str, receipt_order: int, *, newer_edit: bool) -> bool:
@@ -1689,7 +1701,11 @@ class DeliveryGateway:
             done = [
                 event_id
                 for event_id in reply.redaction_pending
-                if await self.deps.redact_message_event(room_id=reply.room_id, event_id=event_id, reason="Reply removed")
+                if await self.deps.redact_message_event(
+                    room_id=reply.room_id,
+                    event_id=event_id,
+                    reason="Reply removed",
+                )
             ]
             if done:
                 await self.deps.outbox.replies.update(
@@ -1697,25 +1713,31 @@ class DeliveryGateway:
                     lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
                 )
         if reply.owed_write is not None:
-            await self._flush_owed_write(reply)
+            await self._flush_owed_write(reply_id)
 
-    async def _flush_owed_write(self, reply: rl.Reply) -> None:
+    async def _flush_owed_write(self, reply_id: str) -> None:
         """Render and send the note a reply-authored transition owed."""
-        owed = reply.owed_write
-        assert owed is not None
-        span = await self.deps.outbox.replies.span(owed.span_id)
-        assert span is not None, "an owed write names a span of its reply"
-        note = note_segment(NoteKind(owed.note), owed.text)
-        if note.note in {NoteKind.DELIVERY_FAILED, NoteKind.APPROVAL_FAILED}:
-            # These notes replace the reply's body, as main writes them.
-            shown = with_trailing_note(Presentation(), note)
-        else:
-            shown = with_trailing_note(_shown_before(reply, None), note)
-        final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
-        write = owed_note_write(reply, span, shown, span_has_final=final is not None)
-        rendered = render(shown, WriteKind.TERMINAL, state=reply.state.value)
-        target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
-        await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
+        while (reply := await self.deps.outbox.replies.load(reply_id)) is not None and reply.owed_write is not None:
+            owed = reply.owed_write
+            span = await self.deps.outbox.replies.span(owed.span_id)
+            assert span is not None, "an owed write names a span of its reply"
+            note = note_segment(NoteKind(owed.note), owed.text)
+            if note.note in {NoteKind.DELIVERY_FAILED, NoteKind.APPROVAL_FAILED}:
+                # These notes replace the reply's body, as main writes them.
+                shown = with_trailing_note(Presentation(), note)
+            else:
+                shown = with_trailing_note(_shown_before(reply, None), note)
+            final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
+            write = owed_note_write(reply, span, shown, span_has_final=final is not None)
+            rendered = render(shown, WriteKind.TERMINAL, state=reply.state.value)
+            target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
+            try:
+                await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
+            except ReplyWriteRefusedError as refused:
+                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
+                    # The reply changed after this note was rendered; render what it owes now.
+                    continue
+            return
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -2635,7 +2657,7 @@ class DeliveryGateway:
             )
 
         async def deliver(
-            write: ReplyWrite,
+            build: Callable[[], ReplyWrite],
             *,
             content: dict[str, Any],
             display_text: str,
@@ -2643,39 +2665,68 @@ class DeliveryGateway:
             retry_sync_recovery: bool,
         ) -> DeliveredMatrixEvent | None:
             try:
-                if event_id is None:
-                    outcome = await self._send_content(
-                        SendTextRequest(
-                            target=target,
-                            response_text="",
-                            delivery_result=self._prepared_edit_result(completed_edit_record, content),
-                            retry_sync_recovery=retry_sync_recovery,
-                            response_attempt=response_attempt,
-                            reply_write=write,
-                        ),
-                        target.room_id,
-                        content,
-                    )
-                else:
-                    outcome = await self._edit_content(
-                        EditTextRequest(
-                            target=target,
-                            event_id=event_id,
-                            new_text=display_text,
-                            delivery_result=self._prepared_edit_result(completed_edit_record, content),
-                            retry_sync_recovery=retry_sync_recovery,
-                            response_attempt=response_attempt,
-                            reply_write=write,
-                        ),
-                        target.room_id,
-                        content,
-                    )
+                return await deliver_once(
+                    build(),
+                    content=content,
+                    display_text=display_text,
+                    event_id=event_id,
+                    retry_sync_recovery=retry_sync_recovery,
+                )
             except ReplyWriteRefusedError as refused:
-                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
+                if refused.transition.outcome is not ReplyOutcome.RECOMPUTE:
+                    return None
+                if content.get(constants.STREAM_STATUS_KEY) != constants.STREAM_STATUS_CANCELLED:
                     # A Stop committed after this update was rendered; the
                     # span's Stop path writes the reply from here.
                     raise asyncio.CancelledError(USER_STOP_CANCEL_MSG) from refused
+            # This is the Stop path's own cancelled row, rendered before the
+            # handle saw the Stop's revision; the refusal refreshed the handle.
+            try:
+                return await deliver_once(
+                    build(),
+                    content=content,
+                    display_text=display_text,
+                    event_id=event_id,
+                    retry_sync_recovery=retry_sync_recovery,
+                )
+            except ReplyWriteRefusedError:
                 return None
+
+        async def deliver_once(
+            write: ReplyWrite,
+            *,
+            content: dict[str, Any],
+            display_text: str,
+            event_id: str | None,
+            retry_sync_recovery: bool,
+        ) -> DeliveredMatrixEvent | None:
+            if event_id is None:
+                outcome = await self._send_content(
+                    SendTextRequest(
+                        target=target,
+                        response_text="",
+                        delivery_result=self._prepared_edit_result(completed_edit_record, content),
+                        retry_sync_recovery=retry_sync_recovery,
+                        response_attempt=response_attempt,
+                        reply_write=write,
+                    ),
+                    target.room_id,
+                    content,
+                )
+            else:
+                outcome = await self._edit_content(
+                    EditTextRequest(
+                        target=target,
+                        event_id=event_id,
+                        new_text=display_text,
+                        delivery_result=self._prepared_edit_result(completed_edit_record, content),
+                        retry_sync_recovery=retry_sync_recovery,
+                        response_attempt=response_attempt,
+                        reply_write=write,
+                    ),
+                    target.room_id,
+                    content,
+                )
             return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
         async def initial_send(
@@ -2688,21 +2739,22 @@ class DeliveryGateway:
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             del client, room_id
-            write = initial_write(handle, shown(progress), placeholder_only=progress.placeholder_only)
             return await deliver(
-                write,
+                lambda: initial_write(handle, shown(progress), placeholder_only=progress.placeholder_only),
                 content=content,
                 display_text=display_text,
                 event_id=None,
                 retry_sync_recovery=retry_sync_recovery,
             )
 
-        def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite | None:
+        def answered_nothing(state_content: dict[str, Any], progress: ProgressState) -> bool:
+            # A stream that completed showing only its placeholder answered
+            # nothing; the span's exit removes the placeholder.
             status = state_content.get(constants.STREAM_STATUS_KEY)
-            if status == constants.STREAM_STATUS_COMPLETED and progress.placeholder_only:
-                # A stream that completed showing only its placeholder answered
-                # nothing; the span's exit removes the placeholder.
-                return None
+            return status == constants.STREAM_STATUS_COMPLETED and progress.placeholder_only
+
+        def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite:
+            status = state_content.get(constants.STREAM_STATUS_KEY)
             return terminal_write(handle, shown(progress), state=_reply_state_for_stream_status(status))
 
         async def terminal_send(
@@ -2715,11 +2767,10 @@ class DeliveryGateway:
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             del client, room_id
-            write = terminal(content, progress)
-            if write is None:
+            if answered_nothing(content, progress):
                 return None
             return await deliver(
-                write,
+                lambda: terminal(content, progress),
                 content=content,
                 display_text=display_text,
                 event_id=None,
@@ -2737,11 +2788,10 @@ class DeliveryGateway:
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             del client, room_id
-            write = terminal(content, progress)
-            if write is None:
+            if answered_nothing(content, progress):
                 return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
             return await deliver(
-                write,
+                lambda: terminal(content, progress),
                 content=content,
                 display_text=display_text,
                 event_id=event_id,
@@ -3117,7 +3167,10 @@ class DeliveryGateway:
         """End a resumed reply's continuation that stopped before streaming anything below it."""
         stream_outcome = request.stream_transport_outcome
         failure_reason = stream_outcome.failure_reason or "interrupted"
-        if stream_outcome.terminal_status == "cancelled" and cancel_source_from_failure_reason(failure_reason) == "user_stop":
+        if (
+            stream_outcome.terminal_status == "cancelled"
+            and cancel_source_from_failure_reason(failure_reason) == "user_stop"
+        ):
             outcome = await self.end_reply_span_with_note(
                 handle,
                 request.target,

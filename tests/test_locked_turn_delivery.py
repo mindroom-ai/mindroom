@@ -17,6 +17,7 @@ from mindroom.matrix.client_delivery import (
     MatrixSendOutcome,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.reply_lifecycle import ReplyState
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -27,6 +28,7 @@ from tests.ai_user_id_helpers import (
     _set_gateway_method,
     _team_orchestrator,
 )
+from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import bind_runtime_paths, patch_response_runner_module, unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -178,11 +180,12 @@ def test_delivery_progress_transitions() -> None:
 async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path) -> None:
     """A failure after delivery started settles a terminal error instead of asserting.
 
-    The tracked event must not be touched: with an adopted thinking-message
-    stream it can already carry the full streamed reply, and the
-    placeholder-only cleanup in finalize would redact it.
+    The reply ends failed with its error note below what it recorded, rather
+    than the streamer's finalize, whose placeholder-only cleanup could redact
+    an adopted thinking message that already carries the full streamed reply.
     """
     bot = _bot(tmp_path)
+    unique_room_send_responses(bot.client)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     effect_outcomes: list[object] = []
     effect_response_outcomes: list[object] = []
@@ -200,7 +203,6 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
         raise RuntimeError(msg)
 
     with (
-        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock()) as mock_finalize,
         patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
         patch_response_runner_module(
@@ -212,7 +214,12 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
         result = await coordinator.generate_response(_plain_request(_target()))
 
     # Previously this path tripped `assert final_delivery_outcome is not None`.
-    assert result is None
+    reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+    assert reply is not None
+    assert reply.state is ReplyState.FAILED
+    assert result == reply.event_id == "$sent1"
+    final = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]["body"]
+    assert final == "**[Response interrupted by an error: delivery pipe burst]**"
     mock_finalize.assert_not_awaited()
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"

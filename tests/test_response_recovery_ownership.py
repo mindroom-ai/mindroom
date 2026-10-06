@@ -64,8 +64,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import EventJournalStore, MatrixDelivery
+    from mindroom.event_journal import EventJournalStore, MatrixDelivery, PrincipalStore
     from mindroom.turn_store import TurnStore
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.ledger_loads_from_disk]
@@ -164,6 +165,20 @@ async def test_fallback_edit_keeps_cleanup_behind_delivery_lock(
     assert outcome.is_visible_response
     assert visible == {}
     assert store.get_turn_record(SOURCE).response_event_id is None
+
+
+def _runner_on(bot: AgentBot, gateway: DeliveryGateway, principal: PrincipalStore) -> ResponseRunner:
+    """Return the bot's response runner, with its replies and deliveries on one test principal."""
+    deps = unwrap_extracted_collaborator(bot._response_runner).deps
+    assert deps.replies is not None
+    return ResponseRunner(
+        replace(
+            deps,
+            delivery_gateway=gateway,
+            approval_store=principal,
+            replies=replace(deps.replies, store=principal),
+        ),
+    )
 
 
 @pytest.mark.parametrize("debt", ["recovered", "adopted", "unattempted", "lost_ack"])
@@ -280,12 +295,7 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
     assert store.get_turn_record(source_id).response_event_id is None
     if debt == "adopted":
         await store.record_pending_turn(replace(original, response_event_id=original_initial_id))
-    runner = ResponseRunner(
-        replace(
-            unwrap_extracted_collaborator(bot._response_runner).deps,
-            delivery_gateway=gateway,
-        ),
-    )
+    runner = _runner_on(bot, gateway, principal)
     runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=history)
 
     async def settle_ignored(sources: tuple[str, ...]) -> None:
@@ -947,7 +957,7 @@ async def test_source_redaction_at_second_preparation_gate_suppresses_visible_in
             ),
         ),
     )
-    runner = ResponseRunner(replace(unwrap_extracted_collaborator(bot._response_runner).deps, delivery_gateway=gateway))
+    runner = _runner_on(bot, gateway, principal)
     target = MessageTarget.resolve(ROOM_ID, "$thread", SOURCE)
     await store.record_pending_turn(
         TurnRecord.create([SOURCE], completed=False, response_event_id=INITIAL, conversation_target=target),
@@ -1068,7 +1078,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             ),
         ),
     )
-    runner = ResponseRunner(replace(unwrap_extracted_collaborator(bot._response_runner).deps, delivery_gateway=gateway))
+    runner = _runner_on(bot, gateway, principal)
     controller = unwrap_extracted_collaborator(bot._turn_controller)
     gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
 
