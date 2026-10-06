@@ -1972,7 +1972,7 @@ class ResponseRunner:
                         tool_trace=visible_tool_trace if show_tool_calls else None,
                         extra_content=_merge_response_extra_content(result.metadata_content, claimed.attachment_ids),
                         defer_source_handoff=True,
-                        prepared_edit_record=claimed.prepared_edit_record,
+                        consumes_edit=claimed.prepared_edit_record is not None,
                     ),
                 ),
                 current,
@@ -2718,7 +2718,7 @@ class ResponseRunner:
                     target=delivery_target,
                     stream_transport_outcome=transport_outcome,
                     initial_delivery_kind=delivery_kind,
-                    prepared_edit_record=request.prepared_edit_record if run_completed else None,
+                    consumes_edit=request.prepared_edit_record is not None and run_completed,
                     identity=response_identity,
                     tool_trace=tool_trace,
                     extra_content=extra_content,
@@ -4913,8 +4913,9 @@ class ResponseRunner:
                         transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                             StreamingDeliveryRequest(
                                 target=delivery_target,
-                                completed_edit_record=lambda: (
-                                    request.prepared_edit_record if team_turn_recorder.outcome == "completed" else None
+                                consumes_edit=lambda: (
+                                    request.prepared_edit_record is not None
+                                    and team_turn_recorder.outcome == "completed"
                                 ),
                                 identity=response_identity,
                                 response_stream=response_stream,
@@ -5057,9 +5058,8 @@ class ResponseRunner:
                     delivery = await self.deps.delivery_gateway.deliver_final(
                         FinalDeliveryRequest(
                             target=delivery_target,
-                            prepared_edit_record=request.prepared_edit_record
-                            if team_turn_recorder.outcome == "completed"
-                            else None,
+                            consumes_edit=request.prepared_edit_record is not None
+                            and team_turn_recorder.outcome == "completed",
                             existing_event_id=message_id,
                             existing_event_is_placeholder=_replaceable_placeholder(delivery_request),
                             response_text=response_text,
@@ -5476,8 +5476,8 @@ class ResponseRunner:
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
                         target=runtime.resolved_target,
-                        completed_edit_record=lambda: (
-                            request.prepared_edit_record if turn_recorder.outcome == "completed" else None
+                        consumes_edit=lambda: (
+                            request.prepared_edit_record is not None and turn_recorder.outcome == "completed"
                         ),
                         identity=identity,
                         response_stream=wrapped_response_stream,
@@ -5642,7 +5642,7 @@ class ResponseRunner:
             delivery = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
                     target=runtime.resolved_target,
-                    prepared_edit_record=request.prepared_edit_record if turn_recorder.outcome == "completed" else None,
+                    consumes_edit=request.prepared_edit_record is not None and turn_recorder.outcome == "completed",
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=_replaceable_placeholder(request),
                     response_text=generation.response_text,

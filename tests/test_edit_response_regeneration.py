@@ -2125,8 +2125,8 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
                 ),
                 tool_trace=None,
                 extra_content=None,
-                prepared_edit_record=request.prepared_edit_record,
             ),
+            prepared_edit=request.prepared_edit_record,
         )
         # The failed edit stays owed to recovery instead of ending the reply.
         assert outcome.terminal_status == "suspended"

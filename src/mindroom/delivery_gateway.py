@@ -560,7 +560,8 @@ class FinalDeliveryRequest:  # noqa: D101
     existing_event_is_placeholder: bool = False
     skip_mentions: bool = False
     defer_source_handoff: bool = False
-    prepared_edit_record: TurnRecord | None = None
+    # Set when this answer completes a regeneration, which consumes the edit its span selected.
+    consumes_edit: bool = False
 
 
 @dataclass(frozen=True)
@@ -636,7 +637,8 @@ class StreamingDeliveryRequest:
     visible_event_id_callback: Callable[[str], None] | None = None
     visible_progress_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
-    completed_edit_record: Callable[[], TurnRecord | None] | None = None
+    # Whether the stream's answer completes a regeneration, known only once the run ends.
+    consumes_edit: Callable[[], bool] | None = None
     allow_new_terminal_message: Callable[[], bool] | None = None
 
 
@@ -708,7 +710,7 @@ class FinalizeStreamedResponseRequest:
     extra_content: dict[str, Any] | None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
-    prepared_edit_record: TurnRecord | None = None
+    consumes_edit: bool = False
     # What a stopped attempt at ``existing_event_id`` showed, for a continuation
     # that may end before streaming anything below it.
     resumed: UnfinishedStreamedReply | None = None
@@ -1087,6 +1089,13 @@ class DeliveryGateway:
         """
         if delivery.reply_id is not None:
             return None
+        # LEGACY_COMPAT: Regeneration answers queued before reply records, carrying their selected edit.
+        # Legacy format: a FINAL row with no reply_id whose result_json holds the regeneration's prepared_edit_record;
+        # an edit's answer row is keyed by the edit event, so reply classification leaves it unowned.
+        # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages keep the selected edit
+        # on the regeneration span and commit it when the answer settles its sources.
+        # Handling: the acknowledgement commits that edit with the answer, as the earlier release did.
+        # Coverage: tests/test_edit_delivery_settlement.py::test_an_edit_answer_an_earlier_release_queued_consumes_its_edit_when_delivered.
         prepared = (delivery.result or {}).get("prepared_edit_record")
         if prepared is not None:
             assert isinstance(prepared, dict), "Corrupt prepared edit record"
@@ -2108,18 +2117,15 @@ class DeliveryGateway:
             handle,
             handle.presentation(display_text, tuple(draft.tool_trace or ())),
             state=ReplyState.COMPLETED,
-            consumes_edit=request.prepared_edit_record is not None,
+            consumes_edit=request.consumes_edit,
         )
         # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
         shown_text, _shown_trace = _reply_body(display_text, draft.tool_trace, reply_write.shown)
         delivery_result: dict[str, object] | None = None
-        if request.prepared_edit_record is not None:
-            delivery_result = {"prepared_edit_record": TurnRecordCodec._to_ledger_record(request.prepared_edit_record)}
         if request.defer_source_handoff:
             metadata = interactive_response.interactive_metadata
             add_legacy_final_outcome_marker(delivery_extra_content)
             delivery_result = {
-                **(delivery_result or {}),
                 "body": shown_text,
                 "interactive": metadata.to_metadata() if metadata is not None else None,
             }
@@ -2449,7 +2455,7 @@ class DeliveryGateway:
             handle,
             request.target,
             ResponseAttempt(self.deps.agent_name, request.identity.sources),
-            request.completed_edit_record,
+            request.consumes_edit,
         )
         return await send_streaming_response(
             client,
@@ -2489,7 +2495,7 @@ class DeliveryGateway:
         handle: SpanHandle,
         target: MessageTarget,
         response_attempt: ResponseAttempt,
-        completed_edit_record: Callable[[], TurnRecord | None] | None,
+        consumes_edit: Callable[[], bool] | None,
         *,
         published: dict[str, Presentation] | None = None,
     ) -> dict[str, Any]:
@@ -2560,7 +2566,6 @@ class DeliveryGateway:
                     SendTextRequest(
                         target=target,
                         response_text="",
-                        delivery_result=self._prepared_edit_result(completed_edit_record, content),
                         retry_sync_recovery=retry_sync_recovery,
                         response_attempt=response_attempt,
                         reply_write=write,
@@ -2574,7 +2579,6 @@ class DeliveryGateway:
                         target=target,
                         event_id=event_id,
                         new_text=display_text,
-                        delivery_result=self._prepared_edit_result(completed_edit_record, content),
                         retry_sync_recovery=retry_sync_recovery,
                         response_attempt=response_attempt,
                         reply_write=write,
@@ -2611,9 +2615,9 @@ class DeliveryGateway:
         def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite:
             status = state_content.get(constants.STREAM_STATUS_KEY)
             state = _reply_state_for_stream_status(status)
-            consumes_edit = completed_edit_record is not None and completed_edit_record() is not None
+            consumed = consumes_edit is not None and consumes_edit()
             if progress.untransformed_text is None:
-                return terminal_write(handle, shown(progress), state=state, consumes_edit=consumes_edit)
+                return terminal_write(handle, shown(progress), state=state, consumes_edit=consumed)
             # The final transform reshaped the whole reply: that is what it
             # shows from now on, and the span's own answer stays canonical.
             whole = Presentation(
@@ -2624,7 +2628,7 @@ class DeliveryGateway:
                 show_tool_calls=handle.base.show_tool_calls,
             )
             canonical = shown(replace(progress, text=progress.untransformed_text))
-            return terminal_write(handle, canonical, state=state, frozen_display=whole, consumes_edit=consumes_edit)
+            return terminal_write(handle, canonical, state=state, frozen_display=whole, consumes_edit=consumed)
 
         async def terminal_send(
             client: nio.AsyncClient,
@@ -2837,19 +2841,6 @@ class DeliveryGateway:
             return draft.response_text
 
         return transform
-
-    @staticmethod
-    def _prepared_edit_result(
-        completed_record: Callable[[], TurnRecord | None] | None,
-        content: dict[str, Any],
-    ) -> dict[str, object] | None:
-        """Only a completed stream may attach its selected edit snapshot."""
-        if completed_record is None or content.get(constants.STREAM_STATUS_KEY) != constants.STREAM_STATUS_COMPLETED:
-            return None
-        record = completed_record()
-        if record is None:
-            return None
-        return {"prepared_edit_record": TurnRecordCodec._to_ledger_record(record)}
 
     async def _finalize_placeholder_only_stream_error(
         self,
@@ -3098,7 +3089,7 @@ class DeliveryGateway:
                         existing_event_id=existing_event_id,
                         existing_event_is_placeholder=existing_event_is_placeholder,
                         response_text=stream_outcome.canonical_final_body_candidate,
-                        prepared_edit_record=request.prepared_edit_record,
+                        consumes_edit=request.consumes_edit,
                         identity=request.identity,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,

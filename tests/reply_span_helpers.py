@@ -134,19 +134,21 @@ async def final_in_span(
     principal: PrincipalStore,
     request: FinalDeliveryRequest,
     *,
+    prepared_edit: TurnRecord | None = None,
     complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> FinalDeliveryOutcome:
     """Deliver one final answer from inside the reply span its request names, as a locked response turn does.
 
-    An edit regeneration regenerates the answer it names; any other request
-    with an existing event shows that event as its placeholder.
+    A regeneration of the edit ``prepared_edit`` selected regenerates the
+    answer the request names, and its completed answer consumes that edit; any
+    other request with an existing event shows that event as its placeholder.
     ``complete_turn`` sees each turn the reply records answered, as the bot's
     gateway runs its reply runtime's effects.
     """
     runtime = _runtime(principal, complete_turn=complete_turn)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     sources = request.identity.sources
-    regenerated = request.existing_event_id if request.prepared_edit_record is not None else None
+    regenerated = request.existing_event_id if prepared_edit is not None else None
     async with reply_span(
         principal,
         source_event_id=request.identity.response_envelope.source_event_id,
@@ -156,10 +158,10 @@ async def final_in_span(
         placeholder_event_id=None if regenerated is not None else request.existing_event_id,
         regenerated_event_id=regenerated,
         edit_receipt_order=sources.edit_receipt_order,
-        prepared_edit=request.prepared_edit_record,
+        prepared_edit=prepared_edit,
         runtime=runtime,
     ):
-        return await gateway.deliver_final(request)
+        return await gateway.deliver_final(replace(request, consumes_edit=prepared_edit is not None))
 
 
 def response_span(
