@@ -1,4 +1,4 @@
-"""What one agent or team reply shows, and how each write of it renders.
+"""What one agent or team reply shows, and how its terminal writes render.
 
 A reply is one Matrix event that several execution spans write over time: the
 turn that starts it, a restart's replay, an approval resume, an edit
@@ -8,25 +8,22 @@ placed between them, and the tool markers of every segment can be numbered
 across the whole reply.
 
 Rendering is pure. It decides the body text, the visible tool trace, and the
-``io.mindroom.stream_status`` value for one write; the delivery layer turns
-that into Matrix content with the same formatting helpers every other message
-uses.
+terminal ``io.mindroom.stream_status`` value for one write; the delivery layer
+turns that into Matrix content with the same formatting helpers every other
+message uses.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import (
-    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
 )
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -64,22 +61,6 @@ class NoteKind(StrEnum):
     DELIVERY_FAILED = "delivery_failed"
     APPROVAL_WAIT = "approval_wait"
     APPROVAL_FAILED = "approval_failed"
-
-
-class WriteKind(StrEnum):
-    """Which write of a reply is being rendered; it decides the wire status."""
-
-    # A placeholder sent before the model runs: ``pending``, as a plain message.
-    PLACEHOLDER = "placeholder"
-    # A stream's first send when no placeholder exists: ``pending``, as a notice.
-    CREATE = "create"
-    STREAM_TERMINAL_CREATE = "stream_terminal_create"
-    HOOK_FAILURE_NOTICE = "hook_failure_notice"
-    INTERACTIVE_ACKNOWLEDGEMENT = "interactive_acknowledgement"
-    PROGRESS = "progress"
-    PAUSE = "pause"
-    TERMINAL = "terminal"
-    BLOCKING_SEND = "blocking_send"
 
 
 def format_error_note(error: object) -> str:
@@ -133,7 +114,6 @@ class Presentation:
     trailing_note: Segment | None = None
     placeholder: str = AGENT_PLACEHOLDER
     show_tool_calls: bool = True
-    extra_content: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Keep the trailing note a note."""
@@ -144,12 +124,11 @@ class Presentation:
 
 @dataclass(frozen=True, slots=True)
 class RenderedReply:
-    """The body, trace, and status one write of a reply carries."""
+    """The body, trace, and terminal status one write of a reply carries."""
 
     body: str
     tool_trace: tuple[ToolTraceEntry, ...]
-    stream_status: str | None
-    placeholder_only: bool
+    stream_status: str
 
 
 def _combined(segments: Sequence[Segment], placeholder: str) -> tuple[str, tuple[ToolTraceEntry, ...]]:
@@ -196,44 +175,13 @@ def _terminal_status(state: str) -> str:
     raise ValueError(msg)
 
 
-def _stream_status_for(write: WriteKind, *, state: str, needs_human_decision: bool = False) -> str | None:
-    """Return the wire status one write carries, following the rules earlier releases used."""
-    match write:
-        case WriteKind.PLACEHOLDER | WriteKind.CREATE:
-            return STREAM_STATUS_PENDING
-        case WriteKind.PROGRESS:
-            return STREAM_STATUS_STREAMING
-        case WriteKind.PAUSE:
-            return STREAM_STATUS_APPROVAL_PENDING if needs_human_decision else STREAM_STATUS_PENDING
-        case WriteKind.STREAM_TERMINAL_CREATE | WriteKind.TERMINAL:
-            return _terminal_status(state)
-        case WriteKind.HOOK_FAILURE_NOTICE:
-            return STREAM_STATUS_ERROR
-        case WriteKind.INTERACTIVE_ACKNOWLEDGEMENT | WriteKind.BLOCKING_SEND:
-            return None
-
-
-def render(
-    presentation: Presentation,
-    write: WriteKind,
-    *,
-    state: str,
-    frozen_display: Presentation | None = None,
-    needs_human_decision: bool = False,
-) -> RenderedReply:
-    """Render one write of a reply; a frozen display, when present, is what the reply shows."""
-    shown = presentation
-    if frozen_display is not None:
-        shown = replace(frozen_display, trailing_note=presentation.trailing_note)
-    body, trace = render_body(shown)
-    status = _stream_status_for(write, state=state, needs_human_decision=needs_human_decision)
+def render(presentation: Presentation, *, state: str) -> RenderedReply:
+    """Render a terminal write of a reply, or a note it owes, for the reply's state."""
+    body, trace = render_body(presentation)
     return RenderedReply(
         body=body,
-        tool_trace=trace if shown.show_tool_calls else (),
-        stream_status=status,
-        # Only the stream's own sends and edits are notices; a placeholder or a
-        # pause is a plain message, so push rules still apply to it.
-        placeholder_only=body == shown.placeholder,
+        tool_trace=trace if presentation.show_tool_calls else (),
+        stream_status=_terminal_status(state),
     )
 
 
@@ -375,8 +323,6 @@ def encode_presentation(presentation: Presentation) -> str:
     }
     if presentation.trailing_note is not None:
         encoded["trailing_note"] = _encode_segment(presentation.trailing_note)
-    if presentation.extra_content:
-        encoded["extra_content"] = dict(presentation.extra_content)
     return json.dumps(encoded, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
@@ -393,14 +339,8 @@ def decode_presentation(stored: str) -> Presentation:
     segments = data.get("segments")
     placeholder = data.get("placeholder")
     show_tool_calls = data.get("show_tool_calls")
-    extra_content = data.get("extra_content", {})
     trailing = data.get("trailing_note")
-    if (
-        not isinstance(segments, list)
-        or not isinstance(placeholder, str)
-        or not isinstance(show_tool_calls, bool)
-        or not isinstance(extra_content, dict)
-    ):
+    if not isinstance(segments, list) or not isinstance(placeholder, str) or not isinstance(show_tool_calls, bool):
         msg = "Stored reply presentation is malformed"
         raise TypeError(msg)
     return Presentation(
@@ -408,5 +348,4 @@ def decode_presentation(stored: str) -> Presentation:
         trailing_note=_decode_segment(trailing) if trailing is not None else None,
         placeholder=placeholder,
         show_tool_calls=show_tool_calls,
-        extra_content=cast("dict[str, object]", extra_content),
     )

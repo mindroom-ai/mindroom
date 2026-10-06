@@ -428,6 +428,29 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         transition = self._apply(rl.fail(reply, span, write, phase=phase, now_ns=self._now()))
         self._approval_resume_ended(span, transition)
 
+    @precondition(
+        lambda self: (
+            self._live() is not None
+            and self._live().kind is not SpanKind.APPROVAL_RESUME
+            and self.model.reply is not None
+            and self.model.reply.unapplied_stop
+        ),
+    )
+    @rule(phase=st.sampled_from(["pre_delivery", "delivery"]))
+    def fail_rendered_before_the_span_saw_its_stop(self, phase: rl._FailurePhase) -> None:
+        """A failure note rendered at the Stop's revision, before the span saw the Stop, renders again."""
+        span = self._live()
+        reply = self.model.reply
+        assert span is not None
+        assert reply is not None
+        if reply.state is ReplyState.PAUSED:
+            return
+        requested = ReplyState.FAILED if phase == "delivery" else ReplyState.ACTIVE
+        write = TerminalWrite(shown=f"shown-{reply.revision}", prepared_revision=reply.revision, state=requested)
+        transition = rl.fail(reply, span, write, phase=phase, now_ns=self._now())
+        assert transition.outcome is Outcome.RECOMPUTE
+        assert transition.reply == reply
+
     @precondition(lambda self: self._live() is not None)
     @rule(reason=st.sampled_from(["suppressed", "hook_failed"]))
     def suppress(self, reason: rl._SuppressReason) -> None:

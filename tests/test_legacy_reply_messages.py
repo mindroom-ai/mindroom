@@ -519,3 +519,57 @@ async def test_reads_after_sync_record_what_the_event_showed(journal_store: Even
     read = await _only_reply(principal)
     assert read.legacy_pending is None
     assert _text(read.presentation) == "Partial answer"
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "placeholder_only"),
+    [
+        ("Thinking...", "pending", True),
+        ("Partial\n\n**[Response interrupted]**", "error", False),
+    ],
+)
+async def test_a_superseded_replay_removes_an_adopted_event_only_when_it_showed_the_placeholder(
+    journal_store: EventJournalStore,
+    body: str,
+    status: str,
+    placeholder_only: bool,
+) -> None:
+    """An event an earlier release ended with a note keeps that content when a newer message supersedes its replay."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    await _adopt(principal)
+    reads = LegacyReplyReads(
+        store=principal,
+        client=MagicMock,
+        response_sender=lambda: "@agent:example.org",
+        trusted_sender_ids=tuple,
+        logger=MagicMock(),
+        resolved=lambda _reply_id: None,
+    )
+    message = MagicMock(
+        body=body,
+        content={"body": body, "io.mindroom.stream_status": status},
+        stream_status=status,
+        timestamp=0,
+        edited_timestamp=None,
+    )
+    with patch("mindroom.legacy_reply_messages.fetch_latest_visible_message", new=AsyncMock(return_value=message)):
+        await reads.run()
+    read = await _only_reply(principal)
+    assert read.legacy_pending is None
+    assert read.placeholder_only is placeholder_only
+    assert read.last_span_id is not None
+    last = await principal.replies.span(read.last_span_id)
+    assert last is not None
+
+    superseded = rl.replay_superseded(read, last, durable_write_debt=False, now_ns=NOW)
+
+    assert superseded.reply is not None
+    if placeholder_only:
+        assert superseded.reply.state is rl.ReplyState.GONE
+        assert superseded.reply.redaction_pending == ("$reply",)
+    else:
+        assert superseded.reply.state is rl.ReplyState.FAILED
+        assert superseded.reply.redaction_pending == ()

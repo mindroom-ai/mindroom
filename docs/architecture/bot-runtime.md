@@ -316,7 +316,7 @@ Physical source IDs are exclusive turn claims, while discovery aliases are advis
 An interrupted turn stays pending, and replay continues its reply in place.
 An interrupted edit regeneration also stays pending but starts over, because a newer edit may have replaced the prompt its stopped attempt answered.
 Each bot instance ends what an earlier instance left running from the reply records at startup (see [Reply messages](reply-messages.md#lifetime)); a reply whose sources still replay waits for its replay.
-Same-requester supersession preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
+Same-requester supersession of a replay follows its reply's records (see [Reply messages](reply-messages.md#lifetime)); for a turn without a reply record, it preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
 When every current source is deleted, the reply records end a reply that has not answered and owe the redaction of what it showed; once the reply has ended, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
 Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.
 Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.

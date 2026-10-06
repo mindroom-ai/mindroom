@@ -13,8 +13,9 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.config.participation import ParticipationConfig
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
-from mindroom.hooks import FinalResponseDraft
+from mindroom.hooks import FinalResponseDraft, ResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
@@ -23,7 +24,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import unique_room_send_responses
-from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import message_origin, patch_response_runner_module, unwrap_extracted_collaborator
 from tests.journal_membership_helpers import admit_room_membership
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target
 
@@ -74,10 +75,10 @@ async def _span_outcomes(bot: AgentBot, reply: rl.Reply) -> list[rl.SpanOutcome 
     return [span.outcome for span in await bot._reply_runtime.store.replies.spans(reply.reply_id)]
 
 
-async def _pending_turn(bot: AgentBot) -> None:
-    """Record the turn ingress persisted for ``$event``; it names no reply event until it finishes."""
+async def _pending_turn(bot: AgentBot, source: str = "$event") -> None:
+    """Record the turn ingress persisted for ``source``; it names no reply event until it finishes."""
     turn = bot._turn_store.attach_response_context(
-        TurnRecord.create(["$event"], requester_id="@user:localhost"),
+        TurnRecord.create([source], requester_id="@user:localhost"),
         history_scope=bot._turn_store.response_history_scope(ResponseAction(kind="individual")),
         conversation_target=_target(),
     )
@@ -618,6 +619,28 @@ async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_
     assert _sent_bodies(bot) == ["Thinking..."]
 
 
+async def test_a_selection_whose_source_ended_before_its_claim_removes_the_acknowledgement(tmp_path: Path) -> None:
+    """A selection the first gate rejects never leaves its acknowledgement saying it is still processing."""
+    bot = await _streaming_bot(tmp_path)
+    ack_event_id, span_id = await _acknowledge_selection(bot)
+    selection = replace(
+        _plain_request(_target()),
+        existing_event_id=ack_event_id,
+        existing_event_is_placeholder=True,
+        interactive_span_id=span_id,
+        prepare_source_turn=AsyncMock(return_value=True),
+    )
+    assert await _answer(bot, selection, AsyncMock(return_value="Never.")) is None
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.GONE
+    assert reply.redaction_pending == ()
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.SUPPRESSED]
+    bot.client.room_redact.assert_awaited_once()
+    assert ack_event_id in (*bot.client.room_redact.await_args.args, *bot.client.room_redact.await_args.kwargs.values())
+    assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response..."]
+
+
 async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: Path) -> None:
     """The transformed whole reply is its frozen display; the span's own answer stays canonical."""
     bot = await _streaming_bot(tmp_path)
@@ -651,6 +674,56 @@ async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: 
     assert render_body(decode_presentation(reply.frozen_display))[0] == "HELLO!"
     assert reply.possibly_shown == reply.frozen_display
     assert _sent_bodies(bot)[-1] == "HELLO!"
+
+
+async def test_a_suppressed_answer_removes_the_placeholder_its_reply_showed(tmp_path: Path) -> None:
+    """A before-response hook that suppresses the answer ends the reply gone, its placeholder redacted."""
+    bot = await _streaming_bot(tmp_path)
+    hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
+    apply = hooks._apply_before_response
+
+    async def suppressed(**kwargs: object) -> ResponseDraft:
+        draft = await apply(**kwargs)  # type: ignore[arg-type]
+        draft.suppress = True
+        return draft
+
+    with patch.object(hooks, "_apply_before_response", new=suppressed):
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden.")) is None
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.GONE
+    assert reply.redaction_pending == ()
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.SUPPRESSED]
+    assert [call.args[1] for call in bot.client.room_redact.await_args_list] == ["$sent1"]
+    assert _sent_bodies(bot) == ["Thinking..."]
+    assert not await bot._reply_runtime.store.is_pending("$event")
+
+
+async def test_a_silent_schedule_whose_hook_fails_reports_the_failure(tmp_path: Path) -> None:
+    """A silent schedule shows nothing until a before-response hook fails; then its failure is sent once."""
+    bot = await _streaming_bot(tmp_path)
+    hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
+    request = _plain_request(_target())
+    silent = replace(
+        request,
+        response_envelope=replace(
+            request.response_envelope,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+            ),
+        ),
+    )
+
+    with patch.object(hooks, "_apply_before_response", new=AsyncMock(side_effect=RuntimeError("hook down"))):
+        await _answer(bot, silent, AsyncMock(return_value="Hidden."))
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.FAILED
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
+    assert _sent_bodies(bot) == ["Response failed. Please retry."]
+    assert not await bot._reply_runtime.store.is_pending("$event")
 
 
 class _FlakyHomeserver:
@@ -1092,6 +1165,37 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
     assert button["m.relates_to"]["event_id"] == reply.event_id
+    assert reply.stop_button_event_id is None
+    assert reply.redaction_pending == ()
+    assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]
+
+
+async def test_a_stopped_regeneration_that_wrote_nothing_removes_its_button_as_it_ends(tmp_path: Path) -> None:
+    """A Stop that restores the old answer without a write still removes the regeneration's Stop button at once."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
+    with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
+        response, _streaming = await _blocked_stream(
+            bot, first_chunk=None, request=_regeneration(answer_event_id="$sent1")
+        )
+
+        async def button() -> str:
+            while (shown := (await _reply(bot)).stop_button_event_id) is None:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            return shown
+
+        button_id = await asyncio.wait_for(button(), timeout=5)
+        await _pending_turn(bot, "$edit")
+        assert await asyncio.wait_for(
+            bot._user_stop_reconciler.finalize("$sent1", 7, room_id=_target().room_id),
+            timeout=5,
+        )
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(response, timeout=5)
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.RESTORED]
     assert reply.stop_button_event_id is None
     assert reply.redaction_pending == ()
     assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]

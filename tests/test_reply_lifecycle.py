@@ -454,6 +454,20 @@ def test_finish_with_a_stop_committed_meanwhile_recomputes() -> None:
     assert not final.reply.unapplied_stop
 
 
+def test_failure_rendered_at_a_stops_revision_recomputes() -> None:
+    """A stream error rendered after the span learned the Stop's revision renders again, cancelled."""
+    reply, span = _turn()
+    reply = replace(reply, event_id="$reply")
+    stopped = rl.stop(reply, span, StopFacts(receipt_order=9, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stopped.reply is not None
+    failed = _write(stopped.reply, ReplyState.FAILED)
+    assert rl.fail(stopped.reply, span, failed, phase="delivery", now_ns=NOW).outcome is Outcome.RECOMPUTE
+    cancelled = rl.fail(stopped.reply, span, _write(stopped.reply, ReplyState.CANCELLED), phase="delivery", now_ns=NOW)
+    assert cancelled.reply is not None
+    assert cancelled.reply.state is ReplyState.CANCELLED
+    assert not cancelled.reply.unapplied_stop
+
+
 def test_finish_of_a_stale_span_cancels_it() -> None:
     """Only the current span changes the answer; a stale live one is cancelled."""
     reply, span = _turn()
@@ -664,21 +678,6 @@ def test_hook_failure_of_substantive_content_fails_the_reply() -> None:
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.FAILED
-
-
-def test_silent_schedule_hook_failure_writes_a_notice() -> None:
-    """A silent schedule with no visible event reports its hook failure durably."""
-    reply, span = _turn()
-    transition = rl.suppress(
-        reply,
-        span,
-        reason="hook_failed",
-        silent_notice=_write(reply, ReplyState.FAILED),
-        now_ns=NOW,
-    )
-    assert transition.row is not None
-    assert transition.reply is not None
-    assert transition.reply.state is ReplyState.FAILED
 
 
 def test_release_and_superseded_keep_sources_pending() -> None:
@@ -1651,6 +1650,41 @@ def test_direct_stop_ends_a_span_nobody_runs() -> None:
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.CANCELLED
     assert _span_after(stop, "ack-span").outcome is SpanOutcome.CANCELLED
+
+
+def test_a_selection_whose_sources_settle_before_its_claim_removes_its_acknowledgement() -> None:
+    """A selection that will never run ends its reply instead of leaving the acknowledgement showing."""
+    created = rl.interactive_acknowledgement(_request("ack-span"), shown="ack")
+    assert created.reply is not None
+    assert created.row is not None
+    ack = created.spans[0]
+    acked = rl.write_acknowledged(
+        created.reply,
+        rl.WriteFacts(
+            stage=WriteStage.INITIAL,
+            sequence=created.row.sequence,
+            span_id=ack.span_id,
+            creates_event=True,
+            placeholder_only=True,
+        ),
+        event_id="$ack",
+        now_ns=NOW,
+    )
+    assert acked.reply is not None
+    for settled in (
+        rl.sources_settled_without_reply(acked.reply, ack, now_ns=NOW),
+        rl.replay_dropped(acked.reply, ack, sources_pending=False, now_ns=NOW),
+    ):
+        assert settled.reply is not None
+        assert settled.reply.state is ReplyState.GONE
+        assert settled.reply.redaction_pending == ("$ack",)
+        assert _span_after(settled, "ack-span").outcome is SpanOutcome.SUPPRESSED
+    # The selection's claim, arriving later, runs nothing.
+    gone = rl.sources_settled_without_reply(acked.reply, ack, now_ns=NOW)
+    assert gone.reply is not None
+    ended = _span_after(gone, "ack-span")
+    late = rl.claim(_request("ack-span"), _context(gone.reply, ended, interactive_span=ended))
+    assert late.outcome is Outcome.DUPLICATE
 
 
 def test_superseded_span_whose_sources_settle_ends_the_reply() -> None:

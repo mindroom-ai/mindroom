@@ -37,7 +37,7 @@ from mindroom.reply_presentation import (
     encode_presentation,
 )
 from mindroom.streaming import unfinished_streamed_reply
-from mindroom.tool_system.events import deserialize_tool_trace
+from mindroom.tool_system.events import deserialize_tool_trace, tool_trace_from_content
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -57,8 +57,10 @@ if TYPE_CHECKING:
 # sending it, so no reply needs its event read back.
 # Handling: after the reply's room syncs, its event is read once per recovery pass, up to three passes, and the read
 # becomes its presentation; a stream that ended without a terminal status within that release's six-hour stale-stream
-# window gets the restart note its startup cleanup gave, and claims and notes wait for the read.
-# Coverage: tests/test_legacy_reply_messages.py::test_reads_after_sync_record_what_the_event_showed.
+# window gets the restart note its startup cleanup gave, and claims and notes wait for the read; only an event showing
+# nothing but the placeholder may later be redacted as one.
+# Coverage: tests/test_legacy_reply_messages.py::test_reads_after_sync_record_what_the_event_showed,
+# tests/test_legacy_reply_messages.py::test_a_superseded_replay_removes_an_adopted_event_only_when_it_showed_the_placeholder.
 _STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 # Passes a read is retried in before its reply proceeds with what it showed unknown.
 _READ_ATTEMPTS = 3
@@ -199,4 +201,6 @@ class LegacyReplyReads:
             event_id=event_id,
             ended_as=_ENDED_AS.get(message.stream_status or ""),
             recent=latest_ms >= int(time.time() * 1000) - _STALE_STREAM_LOOKBACK_MS,
+            # An ended stream's note or partial text is real content, not a placeholder.
+            placeholder_only=message.body.strip() == placeholder and not tool_trace_from_content(message.content),
         )

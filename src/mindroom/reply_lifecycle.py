@@ -1087,6 +1087,11 @@ def fail(  # noqa: C901, PLR0911
     if stale is not None:
         return stale
     if reply.unapplied_stop and span.kind is not SpanKind.APPROVAL_RESUME:
+        if write is not None and write.state is not ReplyState.CANCELLED:
+            # As in ``finish``: the span learned the Stop's revision from one
+            # of its own writes before the Stop reached it, so the payload
+            # renders again, cancelled.
+            return _unchanged(Outcome.RECOMPUTE, reply)
         return stopped(reply, span, write, now_ns=now_ns)
     if span.kind is SpanKind.APPROVAL_RESUME:
         updated = _clear_current(reply, span.span_id)
@@ -1131,12 +1136,11 @@ def fail(  # noqa: C901, PLR0911
 _SuppressReason = Literal["suppressed", "hook_failed"]
 
 
-def suppress(  # noqa: PLR0911
+def suppress(
     reply: Reply,
     span: Span,
     *,
     reason: _SuppressReason,
-    silent_notice: TerminalWrite | None = None,
     confirms: ProgressConfirmation | None = None,
     now_ns: int,
 ) -> Transition:
@@ -1150,11 +1154,6 @@ def suppress(  # noqa: PLR0911
         outcome = SpanOutcome.CANCELLED
     updated = _clear_current(reply, span.span_id)
     effects = _settle_sources(reply, span)
-    if silent_notice is not None and (reply.event_id is None or reply.placeholder_only):
-        recompute = _check_revision(reply, silent_notice.prepared_revision)
-        if recompute is not None:
-            return recompute
-        return _terminal_row(reply, span, silent_notice, outcome, now_ns)
     if reply.event_id is None:
         return Transition(
             outcome=Outcome.APPLIED,
@@ -1570,7 +1569,9 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     """The span's sources settled without an answer."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if not (span.span_id == reply.current_span_id or span.outcome in _SOURCES_PENDING_OUTCOMES):
+    # A selection's first span waits, unended, for its claim to make it current.
+    awaiting_claim = not span.ended and reply.current_span_id is None and span.span_id == reply.last_span_id
+    if not (span.span_id == reply.current_span_id or span.outcome in _SOURCES_PENDING_OUTCOMES or awaiting_claim):
         return _unchanged(Outcome.STALE, reply)
     spans: tuple[Span, ...] = ()
     updated = _clear_current(reply, span.span_id)
@@ -1779,6 +1780,8 @@ class LegacyRead:
     ended_as: ReplyState | None = None
     # The event was still streaming within the stale-stream window earlier releases used.
     recent: bool = False
+    # The event shows only the placeholder, so a later removal may redact it.
+    placeholder_only: bool = False
 
 
 def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pending: bool, now_ns: int) -> Transition:
@@ -1793,10 +1796,10 @@ def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pend
     if reply.legacy_pending is None:
         return _unchanged(Outcome.DUPLICATE, reply)
     updated = replace(reply, legacy_pending=None)
-    if read.event_id is not None and updated.event_id is None:
-        updated = replace(updated, event_id=read.event_id, placeholder_only=read.shown is None)
+    if read.event_id is not None:
+        updated = replace(updated, event_id=updated.event_id or read.event_id, placeholder_only=read.placeholder_only)
     if read.shown is not None:
-        updated = replace(updated, presentation=read.shown, possibly_shown=read.shown, placeholder_only=False)
+        updated = replace(updated, presentation=read.shown, possibly_shown=read.shown)
     updated = _bump(updated, now_ns)
     stream_main_stopped = (
         reply.state is ReplyState.ACTIVE

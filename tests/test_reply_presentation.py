@@ -5,12 +5,9 @@ from __future__ import annotations
 import pytest
 
 from mindroom.constants import (
-    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
 )
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -18,9 +15,7 @@ from mindroom.reply_presentation import (
     NoteKind,
     Presentation,
     Segment,
-    WriteKind,
     _folded,
-    _stream_status_for,
     after_restart,
     continued_by,
     decode_presentation,
@@ -72,7 +67,6 @@ def test_codec_round_trips_every_field() -> None:
         trailing_note=note_segment(NoteKind.ERROR, format_error_note("boom")),
         placeholder=TEAM_PLACEHOLDER,
         show_tool_calls=False,
-        extra_content={"io.mindroom.ai_run": {"model": "m"}},
     )
 
     restored = decode_presentation(encode_presentation(presentation))
@@ -169,49 +163,34 @@ def test_folded_turns_a_frozen_display_into_history() -> None:
 
 
 @pytest.mark.parametrize(
-    ("write", "state", "decision", "expected"),
+    ("state", "expected"),
     [
-        (WriteKind.PLACEHOLDER, "active", False, STREAM_STATUS_PENDING),
-        (WriteKind.CREATE, "active", False, STREAM_STATUS_PENDING),
-        (WriteKind.PROGRESS, "active", False, STREAM_STATUS_STREAMING),
-        (WriteKind.PAUSE, "paused", True, STREAM_STATUS_APPROVAL_PENDING),
-        (WriteKind.PAUSE, "paused", False, STREAM_STATUS_PENDING),
-        (WriteKind.TERMINAL, "completed", False, STREAM_STATUS_COMPLETED),
-        (WriteKind.TERMINAL, "cancelled", False, STREAM_STATUS_CANCELLED),
-        (WriteKind.TERMINAL, "failed", False, STREAM_STATUS_ERROR),
-        (WriteKind.STREAM_TERMINAL_CREATE, "completed", False, STREAM_STATUS_COMPLETED),
-        (WriteKind.STREAM_TERMINAL_CREATE, "cancelled", False, STREAM_STATUS_CANCELLED),
-        (WriteKind.HOOK_FAILURE_NOTICE, "failed", False, STREAM_STATUS_ERROR),
-        (WriteKind.INTERACTIVE_ACKNOWLEDGEMENT, "active", False, None),
-        (WriteKind.BLOCKING_SEND, "completed", False, None),
+        ("completed", STREAM_STATUS_COMPLETED),
+        ("cancelled", STREAM_STATUS_CANCELLED),
+        ("failed", STREAM_STATUS_ERROR),
     ],
 )
-def test_wire_status_per_write(write: WriteKind, state: str, decision: bool, expected: str | None) -> None:
-    """Every write kind carries the wire status earlier releases sent."""
-    assert _stream_status_for(write, state=state, needs_human_decision=decision) == expected
+def test_terminal_wire_status_per_state(state: str, expected: str) -> None:
+    """A terminal write carries the wire status earlier releases sent for its reply state."""
+    assert render(Presentation(segments=(_answer("answer"),)), state=state).stream_status == expected
 
 
 def test_terminal_write_of_a_non_terminal_state_is_refused() -> None:
     """A terminal write needs a terminal reply state."""
     with pytest.raises(ValueError, match="terminal"):
-        _stream_status_for(WriteKind.TERMINAL, state="active")
+        render(Presentation(), state="active")
 
 
-def test_render_uses_a_frozen_display_and_hides_trace_when_tool_calls_are_hidden() -> None:
-    """The frozen post-hook display wins over the canonical answer, and hidden traces stay off the wire."""
-    presentation = Presentation(segments=(_answer("raw", _trace("search")),), show_tool_calls=False)
-    frozen = Presentation(segments=(_answer("transformed"),), show_tool_calls=False)
-    rendered = render(presentation, WriteKind.TERMINAL, state="completed", frozen_display=frozen)
-    assert rendered.body == "transformed"
+def test_render_hides_trace_when_tool_calls_are_hidden() -> None:
+    """Hidden traces stay off the wire while the body keeps its text."""
+    rendered = render(Presentation(segments=(_answer("raw", _trace("search")),), show_tool_calls=False), state="failed")
+    assert rendered.body == "raw"
     assert rendered.tool_trace == ()
-    assert rendered.stream_status == STREAM_STATUS_COMPLETED
 
 
 def test_render_of_an_empty_reply_is_its_placeholder() -> None:
-    """A reply with nothing to show renders its kind's placeholder and says so."""
-    rendered = render(Presentation(placeholder=TEAM_PLACEHOLDER), WriteKind.PLACEHOLDER, state="active")
-    assert rendered.body == TEAM_PLACEHOLDER
-    assert rendered.placeholder_only
+    """A reply with nothing to show renders its kind's placeholder."""
+    assert render(Presentation(placeholder=TEAM_PLACEHOLDER), state="cancelled").body == TEAM_PLACEHOLDER
 
 
 def test_restart_after_a_noted_interruption_carries_one_note() -> None:

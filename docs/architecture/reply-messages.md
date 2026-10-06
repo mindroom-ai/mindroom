@@ -11,7 +11,7 @@ This page is for contributors: it names the records, the rules that change them,
 | Module | Owns |
 |---|---|
 | `reply_lifecycle.py` | Pure rules: every event that changes a reply, as a function from the current records to a `Transition` with an outcome, changed records, effects, and at most one durable row. |
-| `reply_presentation.py` | The presentation model (segments, notes, team state), its JSON codec, and `render`, which turns a presentation into Matrix content. |
+| `reply_presentation.py` | The presentation model (segments, notes, team state), its JSON codec, `render_body` for the body and trace a reply shows, and `render`, which adds the terminal wire status of a terminal row or owed note. |
 | `reply_scope.py` | `ReplyRuntime` (one per bot instance) and `SpanHandle`: claims, span exits, write-ahead, owed writes, and the span slot child tasks share. |
 | `event_journal/reply_messages.py`, `event_journal/reply_spans.py` | Persistence of replies and spans. |
 | `event_journal/replies.py` | `ReplyStore`: each rule applied inside one database transaction, with its in-transaction effects. |

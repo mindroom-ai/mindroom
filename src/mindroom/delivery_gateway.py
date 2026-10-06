@@ -103,7 +103,6 @@ from mindroom.reply_presentation import (
     Presentation,
     RenderedReply,
     Segment,
-    WriteKind,
     decode_presentation,
     note_segment,
     render,
@@ -1735,10 +1734,10 @@ class DeliveryGateway:
             shown = _with_note(_shown_before(reply, handle), note)
             if state is ReplyState.ACTIVE:
                 write = resumed_note_write(handle, shown)
-                rendered = render(shown, WriteKind.TERMINAL, state=ReplyState.FAILED.value)
+                rendered = render(shown, state=ReplyState.FAILED.value)
             else:
                 write = terminal_write(handle, shown, state=state)
-                rendered = render(shown, WriteKind.TERMINAL, state=state.value)
+                rendered = render(shown, state=state.value)
             try:
                 delivered = await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
             except ReplyWriteRefusedError as refused:
@@ -1747,6 +1746,8 @@ class DeliveryGateway:
                     continue
                 delivered = None
             break
+        # A transition that wrote no row, such as a restore, may still leave a button or a note owed.
+        await self.settle_reply_debt(handle.reply_id)
         return FinalDeliveryOutcome(
             terminal_status=_terminal_status_for_reply_state(state),
             event_id=reply.event_id or delivered,
@@ -1769,9 +1770,7 @@ class DeliveryGateway:
 
         Raises ``ReplyWriteRefusedError`` when the reply's rule refuses the row.
         """
-        extra_content: dict[str, Any] = {}
-        if rendered.stream_status is not None:
-            extra_content[constants.STREAM_STATUS_KEY] = rendered.stream_status
+        extra_content: dict[str, Any] = {constants.STREAM_STATUS_KEY: rendered.stream_status}
         tool_trace = list(rendered.tool_trace) or None
         if event_id is None:
             return await self.send_text(
@@ -1861,6 +1860,8 @@ class DeliveryGateway:
         await self._run_reply_effects(enqueued.applied.post_commit)
         if not enqueued.transition.applied:
             raise ReplyWriteRefusedError(enqueued.transition)
+        # The pause wrote nothing to Matrix, so the button the reply no longer shows goes now.
+        await self.settle_reply_debt(handle.reply_id)
         return True
 
     async def write_approval_failure_note(
@@ -1917,7 +1918,7 @@ class DeliveryGateway:
                 state=state,
                 span_has_final=False,
             )
-            rendered = render(shown, WriteKind.TERMINAL, state=state.value)
+            rendered = render(shown, state=state.value)
             try:
                 return (
                     await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
@@ -2060,7 +2061,7 @@ class DeliveryGateway:
             shown = _with_note(_shown_before(reply, None), note_segment(NoteKind(owed.note), owed.text))
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
-            rendered = render(shown, WriteKind.TERMINAL, state=reply.state.value)
+            rendered = render(shown, state=reply.state.value)
             target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
             try:
                 await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
