@@ -124,22 +124,26 @@ def save_independent_usage(
         {**run, "run_id": usage_id, "user_id": requester_id, "metadata": None, "parent_run_id": None, "team_id": None},
     )
     snapshot["kind"] = kind
-    sessions = agno_compat_sqlite.owned_table(storage, "sessions") if initial_session is not None else None
+    session_insert = None
+    if initial_session is not None:
+        is_team = isinstance(initial_session, TeamSession)
+        values = {
+            "session_id": session_id,
+            "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
+            "team_id" if is_team else "agent_id": (
+                initial_session.team_id if isinstance(initial_session, TeamSession) else initial_session.agent_id
+            ),
+            "created_at": initial_session.created_at,
+            "updated_at": initial_session.updated_at,
+        }
+        session_insert = (
+            insert(agno_compat_sqlite.owned_table(storage, "sessions"))
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["session_id"])
+        )
     with storage.db_engine.begin() as connection:
-        if initial_session is not None and sessions is not None:
-            is_team = isinstance(initial_session, TeamSession)
-            values = {
-                "session_id": session_id,
-                "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
-                "team_id" if is_team else "agent_id": (
-                    initial_session.team_id if isinstance(initial_session, TeamSession) else initial_session.agent_id
-                ),
-                "created_at": initial_session.created_at,
-                "updated_at": initial_session.updated_at,
-            }
-            connection.execute(
-                insert(sessions).values(**values).on_conflict_do_nothing(index_elements=["session_id"]),
-            )
+        if session_insert is not None:
+            connection.execute(session_insert)
         connection.exec_driver_sql(usage_table_sql(storage.session_table_name))
         connection.exec_driver_sql(
             usage_upsert_sql(storage.session_table_name),

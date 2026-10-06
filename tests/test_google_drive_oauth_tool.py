@@ -75,6 +75,9 @@ class MinimalModel(Model):
         return response
 
 
+_DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
 class _FakeDriveRequest:
     def __init__(self, response: dict[str, object], media_content: bytes = b"hello") -> None:
         self._response = response
@@ -1088,17 +1091,27 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
     assert service.files_resource.export_media_kwargs is None
 
 
+@pytest.mark.parametrize(
+    ("name", "mime_type", "content"),
+    [
+        ("report.pdf", "application/pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\nstream\nx\x9c\x00\x01"),
+        ("report.docx", _DOCX_MIME_TYPE, b"PK\x03\x04\x14\x00\x06\x00\x08\x00[Content_Types].xml"),
+    ],
+)
 def test_google_drive_read_refuses_binary_content_and_names_enabled_download_function(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mime_type: str,
+    content: bytes,
 ) -> None:
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
-    service.files_resource.file_metadata = {"name": "report.pdf", "mimeType": "application/pdf", "size": "8"}
-    tool._download_bytes = lambda _request: b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\nstream\nx\x9c\x00\x01"
+    service.files_resource.file_metadata = {"name": name, "mimeType": mime_type, "size": str(len(content))}
+    tool._download_bytes = lambda _request: content
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
-    assert result["error"] == "Cannot read application/pdf as text. Use google_drive_download_file instead."
+    assert result["error"] == f"Cannot read {mime_type} as text. Use google_drive_download_file instead."
     assert "content" not in result
 
 
