@@ -152,6 +152,16 @@ class MindRoomE2BTools(E2BTools):
         msg = f"Local path must name a file inside the agent workspace, relative to it and without '..': {path}"
         raise ValueError(msg)
 
+    # AGNO_COMPAT: E2BTools.run_python_code reads sandbox code output without a size bound.
+    # Reason: Agno 3.0.9 calls Sandbox.run_code, which in e2b-code-interpreter 2.1.1 reads each output line whole,
+    # so one large print or image grows the primary's memory before any callback runs. This override copies
+    # Agno's result formatting, and _run_code_within_read_limit copies the SDK's /execute request.
+    # Upstream issue: Tracking gap; no matching issue has been verified.
+    # Upstream PR: No matching fix has been verified.
+    # Remove when: E2BTools stops reading code output past a caller-supplied byte limit; refusing output past
+    # MAX_READ_BYTES with a tool error and keeping the previous last_execution is MindRoom policy and stays.
+    # Coverage: tests/test_e2b_tools.py::test_run_python_code_refuses_output_past_the_limit_while_streaming,
+    # tests/test_e2b_tools.py::test_run_python_code_reports_timeouts_like_the_sdk.
     @override
     def run_python_code(self, code: str) -> str:
         """Run Python code in an isolated E2B sandbox environment.
@@ -185,6 +195,14 @@ class MindRoomE2BTools(E2BTools):
                 results.append(f"Result {number}: Output available")
         return json.dumps(results)
 
+    # AGNO_COMPAT: E2BTools.run_command keeps a command's whole output without a size bound.
+    # Reason: Agno 3.0.9 waits on the E2B SDK's commands.run, which in e2b 2.2.3 keeps all stdout and stderr
+    # until the command ends, so a chatty command grows the primary's memory without limit.
+    # Upstream issue: Tracking gap; no matching issue has been verified.
+    # Upstream PR: No matching fix has been verified.
+    # Remove when: E2BTools stops collecting command output past a caller-supplied byte limit; refusing output
+    # past MAX_READ_BYTES with a tool error is MindRoom policy and stays.
+    # Coverage: tests/test_e2b_tools.py::test_run_command_refuses_output_past_the_limit_while_streaming.
     @override
     def run_command(
         self,
