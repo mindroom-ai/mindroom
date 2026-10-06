@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import io
 import json
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import docx
 import pytest
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
@@ -1086,6 +1088,53 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
         "supportsAllDrives": True,
     }
     assert service.files_resource.export_media_kwargs is None
+
+
+def test_google_drive_read_refuses_binary_files_without_downloading(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {"name": "report.pdf", "mimeType": "application/pdf", "size": "5"}
+    tool.service = service
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["error"] == "Cannot read binary file (application/pdf) as text."
+    assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_read_extracts_office_document_text(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    document = docx.Document()
+    document.add_paragraph("Quarterly numbers")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {
+        "name": "report.docx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "size": str(len(buffer.getvalue())),
+    }
+    tool.service = service
+    tool._download_bytes = lambda _request: buffer.getvalue()
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["extractedFrom"] == "docx"
+    assert "Quarterly numbers" in result["content"]
+    assert service.files_resource.get_media_kwargs == {
+        "fileId": "shared-drive-file-id",
+        "supportsAllDrives": True,
+    }
 
 
 def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:

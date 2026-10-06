@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 # AGNO_COMPAT: Chat usage parsing drops cache-write input tokens.
 # Reason: Agno 3.0.9 copies cached, audio, and reasoning token details but
 # omits OpenAI's prompt_tokens_details.cache_write_tokens counter.
-# Upstream issue: No matching issue identified; this metrics gap is untracked.
-# Upstream PR: None identified.
+# Upstream issue: https://github.com/agno-agi/agno/issues/10314, open.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10313, open.
 # Remove when: The pinned Agno parser preserves cache-write tokens while still
 # accepting provider payloads that omit the newer optional field.
 # Coverage: tests/test_openai_models.py::test_openai_metrics_preserve_sdk_input_details.

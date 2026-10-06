@@ -466,56 +466,17 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    @authenticate
+    # AGNO_COMPAT: Drive read errors name a download function that may be renamed or disabled.
+    # Reason: Agno 3.0.9 `GoogleDriveTools.read_file` ends some errors with "Use download_file instead.",
+    # but MindRoom exposes that function as `google_drive_download_file` and can disable it.
+    # Upstream issue: Tracking gap; no matching issue identified, and the hint is a fixed string with no hook.
+    # Upstream PR: None identified.
+    # Remove when: The pinned Agno read errors name the registered download function, or omit the hint without one.
+    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_error_names_enabled_download_function;
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_large_file_error_names_exposed_download_function.
     def read_file(self, file_id: str) -> str:
-        """Read a Drive file and return its text content, including files in Shared Drives."""
-        try:
-            service = cast("Any", self.service)
-            metadata = self._get_file_metadata(file_id, self.READ_METADATA_FIELDS)
-            mime_type = metadata.get("mimeType", "")
-
-            if mime_type in self.TEXT_EXPORT_TYPES:
-                export_mime = self.TEXT_EXPORT_TYPES[mime_type]
-            elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
-                return json.dumps(
-                    {
-                        "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
-                        "file": metadata,
-                    },
-                )
-            else:
-                export_mime = None
-
-            if export_mime:
-                request = service.files().export_media(fileId=file_id, mimeType=export_mime)
-                content_bytes = self._download_bytes(request)
-            else:
-                file_size = int(metadata.get("size", 0))
-                if file_size > self.max_read_size:
-                    return json.dumps(
-                        {
-                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
-                            f"{self._download_guidance()}",
-                            "file": metadata,
-                        },
-                    )
-                request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-                content_bytes = self._download_bytes(request)
-
-            content = content_bytes.decode("utf-8", errors="replace")
-            return json.dumps(
-                {
-                    "file": metadata,
-                    "content": content,
-                    "contentLength": len(content),
-                    "exportMimeType": export_mime,
-                },
-            )
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
-        except Exception as exc:
-            log_error(f"Could not read Google Drive file {file_id}: {exc}")
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+        """Read a Drive file and return its text content, including files in Shared Drives and Office documents."""
+        return super().read_file(file_id).replace(" Use download_file instead.", self._download_guidance())
 
     @authenticate
     def download_file(self, file_id: str, export_format: str | None = None) -> str:
