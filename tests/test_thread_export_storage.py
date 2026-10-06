@@ -122,6 +122,27 @@ def test_clear_thread_export_root_never_drops_ownership_before_cleanup_finishes(
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
 
 
+def test_clear_thread_export_root_warns_once_per_unrecognized_entry(tmp_path: Path) -> None:
+    """Repeat clearing passes report a foreign entry once and log later passes at debug level."""
+    output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
+    _mark_export_root(output_dir)
+    note = output_dir / "operator-note.txt"
+    note.write_text("keep", encoding="utf-8")
+
+    with (
+        patch("mindroom.thread_export.storage.logger.warning") as warning,
+        patch("mindroom.thread_export.storage.logger.debug") as debug,
+    ):
+        for _ in range(3):
+            assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
+
+    assert note.read_text(encoding="utf-8") == "keep"
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Leaving unrecognized thread export entry untouched",)
+    assert warning.call_args.kwargs["entry"] == "operator-note.txt"
+    assert [call.args for call in debug.call_args_list] == [("Leaving unrecognized thread export entry untouched",)] * 2
+
+
 def test_clear_thread_export_root_rejects_replaced_parent(tmp_path: Path) -> None:
     """Cleanup cannot follow an intermediate symlink installed after discovery."""
     instance_root = tmp_path / "private_instances" / "scope" / "agent"
@@ -336,8 +357,8 @@ def test_room_removal_preserves_a_present_unrecognized_directory(
             remove_room_export(output_dir, _room())
 
     assert keep.read_text(encoding="utf-8") == "private"
-    assert warning.call_count == 2
-    assert all(call.args == ("Leaving unrecognized thread export entry untouched",) for call in warning.call_args_list)
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Leaving unrecognized thread export entry untouched",)
 
 
 def test_room_retraction_is_idempotent_beside_a_foreign_file(tmp_path: Path) -> None:

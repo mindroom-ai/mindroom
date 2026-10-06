@@ -56,6 +56,8 @@ logger = get_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 _THREAD_EXPORT_MUTATION_LOCK = threading.RLock()
+# Every export pass revisits the entries it leaves untouched, so each one warns once per process.
+_WARNED_UNRECOGNIZED_ENTRIES: set[tuple[Path, str | None, str]] = set()
 
 
 def _serialized_export_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -742,8 +744,11 @@ def room_has_thread_exports(
 
 
 def _log_unrecognized_entry(output_dir: Path, entry: str, *, room_key: str | None = None) -> None:
-    """Warn that deletion left an unrecognized entry untouched."""
-    logger.warning(
+    """Warn once that deletion left an unrecognized entry untouched, and log later passes at debug level."""
+    warning_key = (output_dir, room_key, entry)
+    log = logger.debug if warning_key in _WARNED_UNRECOGNIZED_ENTRIES else logger.warning
+    _WARNED_UNRECOGNIZED_ENTRIES.add(warning_key)
+    log(
         "Leaving unrecognized thread export entry untouched",
         output_dir=str(output_dir),
         room_key=room_key,
