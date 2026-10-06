@@ -7961,12 +7961,12 @@ visibility = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.config.automations"
-depends_on = ["mindroom.config.validation", "mindroom.tool_system.worker_routing"]
-visibility = ["mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
+depends_on = ["mindroom.config.validation"]
+visibility = ["mindroom.automations.prompt_curation", "mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
-depends_on = ["mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
+depends_on = ["mindroom.config.automations", "mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
 visibility = ["mindroom.automations.runner"]
 
 [[modules]]

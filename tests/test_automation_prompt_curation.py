@@ -91,15 +91,6 @@ def test_the_band_is_the_configured_reductions_of_the_measured_size(tmp_path: Pa
     assert (plan.upper_tokens, plan.floor_tokens) == (1034, 969)
 
 
-def test_protected_files_are_excluded_from_the_band(tmp_path: Path) -> None:
-    """A protected file is snapshotted for verify but not counted or offered for curation."""
-    plan, config, _root = _plan(tmp_path, protected_files=["SOUL.md"])
-
-    assert "SOUL.md" not in plan.curated
-    assert "SOUL.md" in plan.snapshot
-    assert "6. Leave SOUL.md unchanged." in curation_prompt(config, plan)
-
-
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
     """The visible prompt names every file, the band, the per-file cap, committing first, and the re-check."""
     plan, config, _root = _plan(tmp_path)
@@ -112,7 +103,6 @@ def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) ->
     assert "shrink by more than 25%" in prompt
     assert "git init" in prompt
     assert "asks you to re-check" in prompt
-    assert "6. Leave" not in prompt
 
 
 def test_an_untouched_workspace_is_reported_unchanged(tmp_path: Path) -> None:
@@ -223,19 +213,6 @@ def test_a_fact_another_conversation_writes_during_the_run_is_kept(tmp_path: Pat
 
     assert result.findings
     assert (root / "MEMORY.md").read_text().endswith("- Dentist on Friday.\n")
-
-
-def test_changing_a_protected_file_is_reported(tmp_path: Path) -> None:
-    """A protected file edit is a finding even when the cut itself is fine."""
-    plan, _config, root = _plan(tmp_path, protected_files=["SOUL.md"])
-    (root / "SOUL.md").write_text("Rewritten.\n", encoding="utf-8")
-    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
-    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
-
-    result = verify_curation(plan)
-
-    assert result.findings == ("SOUL.md changed although it is protected",)
-    assert (root / "SOUL.md").read_text() == "Rewritten.\n"
 
 
 def test_a_planted_link_stops_the_check(tmp_path: Path) -> None:

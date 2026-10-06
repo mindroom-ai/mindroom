@@ -31,9 +31,7 @@ def test_a_bare_name_enables_a_built_in_with_its_defaults() -> None:
     assert automation.room is None
     assert automation.trigger_tokens == 50_000
     assert (automation.min_reduction, automation.max_reduction) == (0.10, 0.15)
-    assert automation.max_file_shrink == 0.25
     assert automation.max_content_loss == 0.05
-    assert automation.protected_files == []
 
 
 def test_a_mapping_overrides_fields() -> None:
@@ -42,7 +40,7 @@ def test_a_mapping_overrides_fields() -> None:
     (automation,) = _config(mind=_mind(automations=[entry])).resolve_entity("mind").automations
 
     assert (automation.cron, automation.room, automation.trigger_tokens) == ("30 2 * * 1", "personal", 30_000)
-    assert automation.max_file_shrink == 0.25
+    assert automation.max_content_loss == 0.05
 
 
 def test_eligible_agents_inherit_default_automations() -> None:
@@ -81,12 +79,12 @@ def test_an_agent_cannot_list_automations_it_cannot_run(agent: AgentConfig, mess
         {"name": "prompt_curation", "cron": "0 0 4 * * *"},
         {"name": "prompt_curation", "cron": "0 0 31 2 *"},
         {"name": "prompt_curation", "min_reduction": 0.2, "max_reduction": 0.1},
-        {"name": "prompt_curation", "protected_files": ["../SOUL.md"]},
+        {"name": "prompt_curation", "min_reduction": 0.3, "max_reduction": 0.35},
         {"name": "prompt_curation", "unknown": 1},
     ],
 )
 def test_invalid_entries_fail_config_load(entry: object) -> None:
-    """Unknown built-ins, bad cron, reversed bounds, escaping paths, and unknown fields are rejected."""
+    """Unknown built-ins, bad cron, reversed bounds, a min_reduction above the per-file bound, and unknown fields are rejected."""
     with pytest.raises(ValidationError):
         _mind(automations=[entry])
 

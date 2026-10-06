@@ -288,7 +288,7 @@ Files: {file_sizes}.
 3. When the same fact appears in more than one file, keep it once, in the file that owns it: identity and voice in SOUL.md and IDENTITY.md, workflow rules in AGENTS.md, facts about the person in USER.md, and everything else in MEMORY.md.
 4. Move detail, history, and finished items verbatim into topic files under memory/, such as memory/projects.md, and leave a one-line pointer where it helps; those files are searched on demand.
 5. Never invent facts or change their meaning, names, dates, or numbers.
-{protected_line}
+
 Delete only true duplicates; move everything else.
 When you finish, MindRoom measures the files again and asks you to re-check if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, or detail was deleted instead of moved.
 Reply with one line saying what you changed."""
@@ -661,7 +661,6 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
                 "upper_tokens",
                 "floor_tokens",
                 "max_file_shrink_percent",
-                "protected_line",
             },
         ),
         "PROMPT_CURATION_RECHECK_TEMPLATE": frozenset({"findings"}),
