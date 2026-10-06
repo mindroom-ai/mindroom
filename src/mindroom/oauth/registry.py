@@ -13,6 +13,7 @@ from mindroom.mcp.oauth import mcp_oauth_providers_for_config
 from mindroom.oauth.atlassian import atlassian_oauth_provider
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
+from mindroom.oauth.google_cloud import google_cloud_oauth_provider
 from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
@@ -52,6 +53,7 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
         atlassian_oauth_provider(),
         github_oauth_provider(),
         google_calendar_oauth_provider(),
+        google_cloud_oauth_provider(),
         google_docs_oauth_provider(),
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),

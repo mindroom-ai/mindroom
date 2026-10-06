@@ -50,6 +50,15 @@ def test_builtin_oauth_registry_includes_google_docs() -> None:
     assert providers["google_drive"].scopes[-1] == "https://www.googleapis.com/auth/drive"
 
 
+def test_builtin_oauth_registry_includes_google_cloud() -> None:
+    """Google Cloud is a built-in provider whose tools keep settings under their own tool names."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["google_cloud"].credential_service == "google_cloud_oauth"
+    assert providers["google_cloud"].tool_config_service is None
+    assert providers["google_cloud"].scopes[-1] == "https://www.googleapis.com/auth/cloud-platform.read-only"
+
+
 def test_builtin_oauth_registry_includes_github() -> None:
     """GitHub should participate in built-in discovery and service-collision checks."""
     providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}

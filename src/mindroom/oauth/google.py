@@ -267,7 +267,7 @@ def _google_oauth_provider(
     display_name: str,
     scopes: tuple[str, ...],
     credential_service: str,
-    tool_config_service: str,
+    tool_config_service: str | None,
     client_config_services: tuple[str, ...],
     status_capabilities: tuple[str, ...],
     include_granted_scopes: bool = True,

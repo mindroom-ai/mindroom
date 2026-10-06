@@ -24,6 +24,11 @@ from mindroom.oauth.google import (
     _google_token_parser,
 )
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
+from mindroom.oauth.google_cloud import (
+    _GOOGLE_CLOUD_OAUTH_SCOPES,
+    GOOGLE_CLOUD_READ_ONLY_SCOPE,
+    google_cloud_oauth_provider,
+)
 from mindroom.oauth.google_docs import _GOOGLE_DOCS_OAUTH_SCOPES, google_docs_oauth_provider
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive_oauth_provider
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
@@ -92,6 +97,18 @@ def test_terminal_oauth_refresh_error_classification(value: object, expected: bo
                 "tool_config_service": "google_calendar",
                 "client_config_services": ("google_calendar_oauth_client",),
                 "status_capabilities": ("Calendar event read/write",),
+            },
+        ),
+        (
+            google_cloud_oauth_provider(),
+            {
+                "id": "google_cloud",
+                "display_name": "Google Cloud",
+                "scopes": _GOOGLE_CLOUD_OAUTH_SCOPES,
+                "credential_service": "google_cloud_oauth",
+                "tool_config_service": None,
+                "client_config_services": ("google_cloud_oauth_client",),
+                "status_capabilities": ("Read-only Google Cloud API access",),
             },
         ),
         (
@@ -191,6 +208,22 @@ def test_google_providers_request_minimum_functionality_preserving_scopes() -> N
         *GOOGLE_IDENTITY_SCOPES,
         "https://www.googleapis.com/auth/tasks",
     )
+
+
+def test_google_cloud_provider_requests_only_read_only_cloud_and_identity_scopes() -> None:
+    """Google Cloud asks only for identity plus the read-only cloud-platform scope."""
+    provider = google_cloud_oauth_provider()
+
+    assert provider.id == "google_cloud"
+    assert provider.display_name == "Google Cloud"
+    assert provider.scopes == (*GOOGLE_IDENTITY_SCOPES, GOOGLE_CLOUD_READ_ONLY_SCOPE)
+    assert provider.scopes == _GOOGLE_CLOUD_OAUTH_SCOPES
+    assert GOOGLE_CLOUD_READ_ONLY_SCOPE == "https://www.googleapis.com/auth/cloud-platform.read-only"
+    assert provider.credential_service == "google_cloud_oauth"
+    assert provider.tool_config_service is None
+    assert provider.client_config_services == ("google_cloud_oauth_client",)
+    assert provider.shared_client_config_services == ("google_oauth_client",)
+    assert provider.extra_auth_params == GOOGLE_NARROW_EXTRA_AUTH_PARAMS
 
 
 @pytest.mark.parametrize("scope_field", ["scopes", "scope"])
@@ -326,6 +359,7 @@ def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
     "provider",
     [
         google_calendar_oauth_provider(),
+        google_cloud_oauth_provider(),
         google_docs_oauth_provider(),
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),
@@ -349,7 +383,9 @@ def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provi
         f"MINDROOM_OAUTH_{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
     )
     expected_auth_params = (
-        GOOGLE_NARROW_EXTRA_AUTH_PARAMS if provider.id in {"google_docs", "google_tasks"} else GOOGLE_EXTRA_AUTH_PARAMS
+        GOOGLE_NARROW_EXTRA_AUTH_PARAMS
+        if provider.id in {"google_cloud", "google_docs", "google_tasks"}
+        else GOOGLE_EXTRA_AUTH_PARAMS
     )
     assert provider.extra_auth_params == expected_auth_params
     assert provider.pkce_code_challenge_method == "S256"
