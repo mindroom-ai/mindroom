@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from tests.test_helm_instance_worker_isolation import _render_chart, _values_files
 
 POD_TEMPLATE_KINDS = {"Deployment", "StatefulSet", "Job"}
+WORKER_PULL_SECRETS_ENV = "MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_SECRETS_JSON"
 
 ALL_PODS_VALUES: dict[str, Any] = {
     "approvedEgress": {
@@ -68,3 +70,16 @@ def test_every_runtime_chart_pod_uses_the_image_pull_secrets(tmp_path: Path) -> 
         pull_secrets,
     )
     assert not [name for name, spec in _pod_specs(tmp_path).items() if "imagePullSecrets" in spec]
+
+
+def test_runtime_chart_passes_image_pull_secrets_to_kubernetes_workers(tmp_path: Path) -> None:
+    """The worker manager receives the pull secrets for generated worker pods, and no env var when unset."""
+    pull_secrets = [{"name": "private-registry-pull"}]
+
+    def runtime_env(*values: dict[str, Any]) -> dict[str, str]:
+        runtime = _pod_specs(tmp_path, *values)["Deployment/mindroom-runtime"]
+        container = next(container for container in runtime["containers"] if container["name"] == "mindroom")
+        return {env["name"]: env.get("value") for env in container["env"]}
+
+    assert json.loads(runtime_env({"imagePullSecrets": pull_secrets})[WORKER_PULL_SECRETS_ENV]) == pull_secrets
+    assert WORKER_PULL_SECRETS_ENV not in runtime_env()

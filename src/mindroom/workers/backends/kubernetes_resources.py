@@ -1451,6 +1451,9 @@ class KubernetesResourceManager:
             ]
         if self.config.runtime_class_name is not None:
             template_spec["runtimeClassName"] = self.config.runtime_class_name
+        # Added only when configured so the default template, and its hash, stay unchanged.
+        if self.config.image_pull_secrets:
+            template_spec["imagePullSecrets"] = [{"name": name} for name in self.config.image_pull_secrets]
         node_name = self._worker_node_name_or_none()
         if node_name is not None:
             template_spec["nodeName"] = node_name

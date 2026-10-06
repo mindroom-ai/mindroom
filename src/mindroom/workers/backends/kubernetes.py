@@ -337,6 +337,7 @@ class KubernetesWorkerBackend:
         config = asdict(self.config)
         config.pop("image")
         config.pop("image_pull_policy")
+        config.pop("image_pull_secrets")
         config.pop("default_script_resource_profile")
         config.pop("script_resource_profiles")
         config.pop("resource_requests")
