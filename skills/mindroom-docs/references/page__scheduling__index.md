@@ -247,7 +247,6 @@ The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventT
 ### Scheduled Task Restoration
 
 The router restores a room's schedules and pending configuration changes when it joins the room after startup.
-The router also runs every schedule, so a new schedule in a room the router has not joined, such as an ad-hoc room an agent joined first, is refused until the router joins; the agent can bring it in with `invite_router` (see [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing)).
 A one-time task missed by less than 24 hours runs once Matrix sync is ready; an older one is marked failed instead.
 
 ### Recurring task recovery

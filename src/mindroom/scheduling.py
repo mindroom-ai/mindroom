@@ -76,11 +76,6 @@ _PRE_APPROVED_EDIT_ERROR = (
     "runs a pre-approved tool call, which cannot be edited; cancel it and schedule the call again"
 )
 _SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
-_ROUTER_MISSING_SCHEDULE_ERROR = (
-    "❌ Scheduling needs the router in this room, because the router runs and restores schedules. "
-    "If `router.accept_invites` allows this Matrix account, call `invite_router` and wait for the router to join; "
-    "otherwise enable it or add the router manually, then retry."
-)
 
 # Shared validation message for edit attempts that change task type.
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
@@ -632,32 +627,46 @@ def _start_scheduled_task(
     return True
 
 
-def _router_missing_from_room(room_id: str) -> bool:
-    """Return whether the running router has not joined the room a new schedule is for."""
-    return _runner_owner is not None and room_id not in _runner_owner.client.rooms
+def _router_runtime_for_room(room_id: str) -> ScheduledTaskRunnerOwner | None:
+    """Return the router runtime when the router has joined the room and can write its schedule state."""
+    owner = _runner_owner
+    if owner is None or owner.client.user_id is None:
+        return None
+    room = owner.client.rooms.get(room_id)
+    if room is None or not room.power_levels.can_user_send_state(owner.client.user_id, _SCHEDULED_TASK_EVENT_TYPE):
+        return None
+    return owner
 
 
-def _start_owned_scheduled_task(
+def _start_new_scheduled_task(
+    client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader,
+    matrix_admin: HookMatrixAdmin | None = None,
     config_provider: Callable[[], Config | None] | None = None,
 ) -> None:
-    """Start the runner for a newly saved schedule on the router's runtime."""
-    owner = _runner_owner
-    if owner is None:
-        # The pending state is already saved, and the router restores it when it starts.
-        logger.info("scheduled_task_runner_deferred_to_router_start", task_id=task_id)
-        return
+    """Start a newly saved schedule's runner, on the router's runtime whenever the router can serve the room.
+
+    The router restores schedules when it starts and cancels them when it stops, so its runners never
+    outlive their client. A room the router cannot serve keeps the creating bot's runtime.
+    """
+    assert workflow.room_id is not None
+    owner = _router_runtime_for_room(workflow.room_id)
+    if owner is not None:
+        client = owner.client
+        conversation_reader = owner.conversation_reader
+        matrix_admin = build_hook_matrix_admin(owner.client, runtime_paths, config=config)
     _start_scheduled_task(
-        owner.client,
+        client,
         task_id,
         workflow,
         config,
         runtime_paths,
-        owner.conversation_reader,
-        build_hook_matrix_admin(owner.client, runtime_paths, config=config),
+        conversation_reader,
+        matrix_admin,
         config_provider=config_provider,
     )
 
@@ -1163,6 +1172,7 @@ async def _save_pending_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     config_provider: Callable[[], Config | None] | None = None,
@@ -1179,7 +1189,16 @@ async def _save_pending_scheduled_task(
         created_at=created_at,
         matrix_admin=matrix_admin,
     )
-    _start_owned_scheduled_task(task_id, workflow, config, runtime_paths, config_provider=config_provider)
+    _start_new_scheduled_task(
+        client,
+        task_id,
+        workflow,
+        config,
+        runtime_paths,
+        conversation_reader,
+        matrix_admin,
+        config_provider=config_provider,
+    )
 
 
 async def _save_one_time_task_status(
@@ -1826,8 +1845,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if selected_model is not None and selected_model not in runtime.config.models:
         available = ", ".join(sorted(runtime.config.models))
         return (None, f"❌ Unknown model: {selected_model}. Available models: {available}")
-    if existing_task is None and _router_missing_from_room(room_id):
-        return (None, _ROUTER_MISSING_SCHEDULE_ERROR)
 
     client = runtime.client
     config = runtime.config
@@ -1970,6 +1987,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 workflow=workflow_result,
                 config=config,
                 runtime_paths=runtime_paths,
+                conversation_reader=conversation_reader,
                 created_at=datetime.now(UTC).isoformat(),
                 matrix_admin=runtime.matrix_admin,
                 config_provider=runtime.config_provider,
@@ -2206,11 +2224,14 @@ async def schedule_approved_tool_call(
         if not task_published and card_reserved is not False:
             await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     scheduled_for = _format_scheduled_time(send_at, config.timezone)
-    _start_owned_scheduled_task(
+    _start_new_scheduled_task(
+        runtime.client,
         task_id,
         workflow,
         config,
         runtime.runtime_paths,
+        runtime.conversation_reader,
+        runtime.matrix_admin,
         config_provider=runtime.config_provider,
     )
     return (
