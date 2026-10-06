@@ -270,7 +270,7 @@ class ReplyStop:
 
 
 # What a failed approval's note says.
-type ApprovalFailureNote = Literal["cancelled", "error", "interrupted", "restart"]
+type _ApprovalFailureNote = Literal["cancelled", "error", "interrupted", "restart"]
 
 
 def _owed_answer_outcome() -> FinalDeliveryOutcome:
@@ -1807,7 +1807,7 @@ class DeliveryGateway:
         event_id: str,
         *,
         approval_id: str,
-        reason: ApprovalFailureNote,
+        reason: _ApprovalFailureNote,
         text: str,
         target: MessageTarget,
     ) -> bool | None:

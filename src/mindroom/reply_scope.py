@@ -58,8 +58,6 @@ class SpanHandle:
     base: Presentation
     # What a stopped attempt showed, for the streamer to continue below.
     resumed: UnfinishedStreamedReply | None = None
-    # Whether what the reply showed before this span is known (records, not a legacy read).
-    shown_before_known: bool = True
     # The span's last direct progress edit that Matrix accepted and no durable
     # write has recorded yet.
     unconfirmed_progress: rl.ProgressConfirmation | None = None
@@ -91,7 +89,7 @@ class SpanHandle:
             # A durable write recorded the last progress edit's confirmation.
             self.unconfirmed_progress = None
 
-    def answer_segment(
+    def _answer_segment(
         self,
         text: str,
         tool_trace: tuple[ToolTraceEntry, ...],
@@ -128,7 +126,7 @@ class SpanHandle:
         trailing_note: Segment | None = None,
     ) -> Presentation:
         """Return the whole reply as it would show with this span's answer so far."""
-        answer = self.answer_segment(text, tool_trace, team_state=team_state)
+        answer = self._answer_segment(text, tool_trace, team_state=team_state)
         presentation = with_answer(self.base, answer) if answer.text.strip() or answer.tool_trace else self.base
         return replace(presentation, trailing_note=trailing_note)
 
@@ -280,7 +278,7 @@ class ReplyRuntime:
         """Claim the reply one span answers, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
         request = replace(
-            await self.claim_request(
+            await self._claim_request(
                 delivery_id=delivery_id,
                 sources=sources,
                 room_id=room_id,
@@ -323,7 +321,7 @@ class ReplyRuntime:
             return ClaimRefused.DEFERRED
         return _handle_for(self, transition.reply, transition.claimed, empty)
 
-    async def claim_request(
+    async def _claim_request(
         self,
         *,
         delivery_id: str,
@@ -372,7 +370,7 @@ class ReplyRuntime:
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
         sources = continuation.sources
-        claim = await self.claim_request(
+        claim = await self._claim_request(
             delivery_id=continuation.source_event_ids[0],
             sources=rl.SpanSources(
                 pending=sources.pending_event_ids,
@@ -419,7 +417,7 @@ class ReplyRuntime:
         text: str,
     ) -> ReplyWrite:
         """Return an interactive selection's acknowledgement, the row that creates its reply."""
-        claim = await self.claim_request(
+        claim = await self._claim_request(
             delivery_id=delivery_id,
             sources=rl.SpanSources(pending=pending, logical=logical, discovery=discovery),
             room_id=room_id,
@@ -519,11 +517,6 @@ class ReplyWrite:
     create: ReplyCreation | None = None
     # Records the row coupled to another durable step instead of on its own.
     enqueue: ReplyRowEnqueuer | None = None
-
-    @property
-    def shown_json(self) -> str:
-        """Return the encoded presentation this write may show."""
-        return encode_presentation(self.shown)
 
 
 def _acknowledgement_write(claim: rl.ClaimRequest, shown: Presentation) -> ReplyWrite:

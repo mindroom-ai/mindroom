@@ -144,26 +144,6 @@ def for_event(transaction: Transaction, principal_id: str, event_id: str) -> Rep
     return None if row is None else _reply(row)
 
 
-def for_room(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    *,
-    states: tuple[ReplyState, ...],
-) -> tuple[Reply, ...]:
-    """Return a room's replies in the given states, oldest first."""
-    placeholders = ", ".join("?" for _ in states)
-    rows = transaction.fetchall(
-        f"""
-        SELECT {_REPLY_COLUMNS} FROM reply_messages
-        WHERE principal_id = ? AND room_id = ? AND state IN ({placeholders})
-        ORDER BY created_at_ns, reply_id
-        """,  # noqa: S608 - fixed columns and placeholders
-        (principal_id, room_id, *(state.value for state in states)),
-    )
-    return tuple(_reply(row) for row in rows)
-
-
 def in_states(transaction: Transaction, principal_id: str, states: tuple[ReplyState, ...]) -> tuple[Reply, ...]:
     """Return this principal's replies in the given states, oldest first."""
     placeholders = ", ".join("?" for _ in states)
@@ -271,7 +251,7 @@ def for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[st
     return None if not reply_ids else load(transaction, principal_id, reply_ids[0])
 
 
-def save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
+def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
     """Insert or replace one reply row."""
     transaction.execute(
         """
@@ -349,10 +329,10 @@ def persist(transaction: Transaction, principal_id: str, transition: Transition)
             # older bot instance left current.
             _persist_spans(transaction, principal_id, transition.spans)
             if transition.reply is not None:
-                save(transaction, principal_id, transition.reply)
+                _save(transaction, principal_id, transition.reply)
         return
     if transition.reply is not None:
-        save(transaction, principal_id, transition.reply)
+        _save(transaction, principal_id, transition.reply)
     _persist_spans(transaction, principal_id, transition.spans)
 
 

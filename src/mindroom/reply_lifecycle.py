@@ -34,7 +34,7 @@ class ReplyState(StrEnum):
     GONE = "gone"
 
 
-TERMINAL_STATES = frozenset({ReplyState.COMPLETED, ReplyState.CANCELLED, ReplyState.FAILED, ReplyState.GONE})
+_TERMINAL_STATES = frozenset({ReplyState.COMPLETED, ReplyState.CANCELLED, ReplyState.FAILED, ReplyState.GONE})
 
 
 class SpanKind(StrEnum):
@@ -62,7 +62,7 @@ class SpanOutcome(StrEnum):
 
 # Outcomes after which the span's sources are still pending, so a retry or
 # replay claims the reply again.
-SOURCES_PENDING_OUTCOMES = frozenset({SpanOutcome.RELEASED, SpanOutcome.SUPERSEDED, SpanOutcome.LOST})
+_SOURCES_PENDING_OUTCOMES = frozenset({SpanOutcome.RELEASED, SpanOutcome.SUPERSEDED, SpanOutcome.LOST})
 
 
 class Outcome(StrEnum):
@@ -105,12 +105,12 @@ class LegacyPending(StrEnum):
 
 
 # Note kinds are owned by ``reply_presentation``; the lifecycle names them by value.
-NOTE_CANCELLED = "cancelled"
-NOTE_RESTART = "restart"
-NOTE_INTERRUPTED = "interrupted"
-NOTE_DELIVERY_FAILED = "delivery_failed"
-NOTE_APPROVAL_FAILED = "approval_failed"
-NOTE_ERROR = "error"
+_NOTE_CANCELLED = "cancelled"
+_NOTE_RESTART = "restart"
+_NOTE_INTERRUPTED = "interrupted"
+_NOTE_DELIVERY_FAILED = "delivery_failed"
+_NOTE_APPROVAL_FAILED = "approval_failed"
+_NOTE_ERROR = "error"
 
 FailureDisposition = Literal["cancelled_by_user", "superseded", "failed"]
 
@@ -222,7 +222,7 @@ class Reply:
     @property
     def terminal(self) -> bool:
         """Return whether the reply reached a terminal state."""
-        return self.state in TERMINAL_STATES
+        return self.state in _TERMINAL_STATES
 
     @property
     def unapplied_stop(self) -> bool:
@@ -288,7 +288,7 @@ type Effect = SettleSources | FenceApproval | CancelSpan | WakeApproval | Transf
 
 
 @dataclass(frozen=True, slots=True)
-class RowIntent:
+class _RowIntent:
     """A durable write the transaction enqueues with the caller's prepared payload."""
 
     stage: WriteStage
@@ -305,7 +305,7 @@ class Transition:
     reply: Reply | None
     spans: tuple[Span, ...] = ()
     effects: tuple[Effect, ...] = ()
-    row: RowIntent | None = None
+    row: _RowIntent | None = None
     # Set by claims that took effect.
     claimed: Span | None = None
 
@@ -409,11 +409,11 @@ def _row(
     *,
     shown: str,
     settles_sources: bool,
-) -> tuple[Reply, RowIntent]:
+) -> tuple[Reply, _RowIntent]:
     """Allocate the next write sequence for one durable row and record what it may show."""
     reply, sequence = _next_sequence(reply)
     reply = replace(reply, possibly_shown=shown, possibly_shown_seq=sequence)
-    return reply, RowIntent(stage=stage, sequence=sequence, span_id=span.span_id, settles_sources=settles_sources)
+    return reply, _RowIntent(stage=stage, sequence=sequence, span_id=span.span_id, settles_sources=settles_sources)
 
 
 def _require_current(reply: Reply, span: Span) -> None:
@@ -437,7 +437,7 @@ def _check_revision(reply: Reply, prepared_revision: int) -> Transition | None:
     return None
 
 
-def had_acknowledged_write(reply: Reply, span: Span) -> bool:
+def _had_acknowledged_write(reply: Reply, span: Span) -> bool:
     """Return whether Matrix acknowledged any write the span made."""
     return reply.confirmed_seq is not None and reply.confirmed_seq > span.base_sequence
 
@@ -461,7 +461,7 @@ def _restore(reply: Reply, span: Span, now_ns: int) -> Reply:
             now_ns,
             presentation=rollback.presentation,
             frozen_display=rollback.frozen_display,
-            owed_write=OwedWrite(span.span_id, NOTE_INTERRUPTED),
+            owed_write=OwedWrite(span.span_id, _NOTE_INTERRUPTED),
         )
     if rollback.last_span_id is not None:
         # An active reply goes back to the retry or replay it was waiting for.
@@ -845,7 +845,7 @@ class FailedWrite:
 _DELIVERY_FAILURE_REASONS = frozenset({"delivery_failed", "terminal_update_cancelled", "terminal_update_failed"})
 
 
-def is_delivery_failure_reason(reason: str) -> bool:
+def _is_delivery_failure_reason(reason: str) -> bool:
     """Return whether a failure came from Matrix delivery itself rather than the run."""
     return reason in _DELIVERY_FAILURE_REASONS or reason.startswith("terminal_update_exception:")
 
@@ -854,7 +854,7 @@ def write_failed(reply: Reply, span: Span, failure: FailedWrite, *, now_ns: int)
     """Apply a permanent row failure."""
     write = failure.write
     if write.stage is WriteStage.FINAL:
-        return terminal_write_failed(
+        return _terminal_write_failed(
             reply,
             span,
             reason=failure.reason,
@@ -887,11 +887,11 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
         updated = _clear_current(updated, span.span_id)
         effects.append(CancelSpan(span.span_id))
     if reply.unapplied_stop:
-        owed = OwedWrite(span.span_id, NOTE_CANCELLED)
+        owed = OwedWrite(span.span_id, _NOTE_CANCELLED)
         updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, approval_id=None)
         disposition: FailureDisposition = "cancelled_by_user"
     else:
-        owed = OwedWrite(span.span_id, NOTE_APPROVAL_FAILED)
+        owed = OwedWrite(span.span_id, _NOTE_APPROVAL_FAILED)
         updated = _set_state(updated, ReplyState.FAILED, now_ns, approval_id=None)
         disposition = "failed"
     effects.insert(0, FenceApproval(reply.approval_id, disposition))
@@ -905,7 +905,7 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     )
 
 
-def terminal_write_failed(reply: Reply, span: Span, *, reason: str, first_create: bool, now_ns: int) -> Transition:
+def _terminal_write_failed(reply: Reply, span: Span, *, reason: str, first_create: bool, now_ns: int) -> Transition:
     """A span's terminal row failed for good after the span ended; its outcome stays."""
     if span.span_id != reply.last_span_id:
         # A later span claimed the reply only after this row resolved, so this cannot be its row.
@@ -914,15 +914,15 @@ def terminal_write_failed(reply: Reply, span: Span, *, reason: str, first_create
     if first_create:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.GONE, now_ns))
     if reply.placeholder_only:
-        if is_delivery_failure_reason(reason):
-            owed = OwedWrite(span.span_id, NOTE_DELIVERY_FAILED)
+        if _is_delivery_failure_reason(reason):
+            owed = OwedWrite(span.span_id, _NOTE_DELIVERY_FAILED)
             return Transition(
                 outcome=Outcome.APPLIED,
                 reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
             )
         updated = _with_redactions(_set_state(reply, ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=updated)
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not had_acknowledged_write(reply, span):
+    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(reply, span, now_ns))
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.FAILED, now_ns))
 
@@ -983,7 +983,7 @@ def _terminal_row(
     )
 
 
-def expected_terminal_state(reply: Reply, requested: ReplyState) -> ReplyState:
+def _expected_terminal_state(reply: Reply, requested: ReplyState) -> ReplyState:
     """Return the state a terminal write must render for, given a possibly unapplied Stop."""
     return ReplyState.CANCELLED if reply.unapplied_stop else requested
 
@@ -996,7 +996,7 @@ def finish(reply: Reply, span: Span, write: TerminalWrite, *, now_ns: int) -> Tr
     recompute = _check_revision(reply, write.prepared_revision)
     if recompute is not None:
         return recompute
-    expected = expected_terminal_state(reply, ReplyState.COMPLETED)
+    expected = _expected_terminal_state(reply, ReplyState.COMPLETED)
     if write.state is not expected:
         msg = f"Terminal write rendered {write.state} where the reply requires {expected}"
         raise _invalid(msg)
@@ -1030,7 +1030,7 @@ def stopped(
             reply=_touch(updated, now_ns),
             spans=(_end(span, SpanOutcome.CANCELLED, now_ns),),
         )
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not had_acknowledged_write(reply, span):
+    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
         # The old answer stays untouched.
         return Transition(
             outcome=Outcome.APPLIED,
@@ -1045,7 +1045,7 @@ def stopped(
             _stop_applied(_clear_current(reply, span.span_id)),
             ReplyState.CANCELLED,
             now_ns,
-            owed_write=OwedWrite(span.span_id, NOTE_CANCELLED),
+            owed_write=OwedWrite(span.span_id, _NOTE_CANCELLED),
         )
         return Transition(
             outcome=Outcome.APPLIED,
@@ -1062,7 +1062,7 @@ def stopped(
     return _terminal_row(reply, span, write, SpanOutcome.CANCELLED, now_ns, stop_applied=True)
 
 
-FailurePhase = Literal["pre_delivery", "delivery"]
+_FailurePhase = Literal["pre_delivery", "delivery"]
 
 
 def fail(  # noqa: C901, PLR0911
@@ -1070,7 +1070,7 @@ def fail(  # noqa: C901, PLR0911
     span: Span,
     write: TerminalWrite | None,
     *,
-    phase: FailurePhase,
+    phase: _FailurePhase,
     confirms: ProgressConfirmation | None = None,
     now_ns: int,
 ) -> Transition:
@@ -1095,7 +1095,7 @@ def fail(  # noqa: C901, PLR0911
             reply=_touch(updated, now_ns),
             spans=(_end(span, SpanOutcome.FAILED, now_ns),),
         )
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not had_acknowledged_write(reply, span):
+    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
         return Transition(
             outcome=Outcome.APPLIED,
             reply=_restore(reply, span, now_ns),
@@ -1128,14 +1128,14 @@ def fail(  # noqa: C901, PLR0911
     return _terminal_row(reply, span, write, SpanOutcome.FAILED, now_ns)
 
 
-SuppressReason = Literal["suppressed", "hook_failed"]
+_SuppressReason = Literal["suppressed", "hook_failed"]
 
 
 def suppress(  # noqa: PLR0911
     reply: Reply,
     span: Span,
     *,
-    reason: SuppressReason,
+    reason: _SuppressReason,
     silent_notice: TerminalWrite | None = None,
     confirms: ProgressConfirmation | None = None,
     now_ns: int,
@@ -1165,7 +1165,7 @@ def suppress(  # noqa: PLR0911
     if reply.placeholder_only:
         gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=(_end(span, outcome, now_ns),), effects=effects)
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not had_acknowledged_write(reply, span):
+    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
         return Transition(
             outcome=Outcome.APPLIED,
             reply=_restore(updated, span, now_ns),
@@ -1286,7 +1286,7 @@ def resumed_in_place(reply: Reply, span: Span, *, approval_id: str, now_ns: int)
     )
 
 
-ApprovalResult = Literal["failed", "finished"]
+_ApprovalResult = Literal["failed", "finished"]
 
 
 def approval_settled(  # noqa: PLR0911
@@ -1294,7 +1294,7 @@ def approval_settled(  # noqa: PLR0911
     last_span: Span | None,
     *,
     approval_id: str,
-    result: ApprovalResult,
+    result: _ApprovalResult,
     disposition: FailureDisposition | None,
     now_ns: int,
 ) -> Transition:
@@ -1359,7 +1359,7 @@ def approval_failure_note(
     recompute = _check_revision(reply, prepared_revision)
     if recompute is not None:
         return recompute
-    expected = expected_terminal_state(reply, state)
+    expected = _expected_terminal_state(reply, state)
     if state is not expected:
         msg = f"Approval note rendered {state} where the reply requires {expected}"
         raise _invalid(msg)
@@ -1455,7 +1455,7 @@ def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> T
     if unended is not None:
         spans = (_end(unended, SpanOutcome.CANCELLED, now_ns),)
         updated = _clear_current(updated, unended.span_id)
-    owed = OwedWrite(reply.last_span_id, NOTE_CANCELLED)
+    owed = OwedWrite(reply.last_span_id, _NOTE_CANCELLED)
     cancelled = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
     return Transition(
         outcome=Outcome.APPLIED,
@@ -1510,7 +1510,7 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
         and not current.ended
         and current.kind is SpanKind.REGENERATION
         and current.rollback is not None
-        and not had_acknowledged_write(reply, current)
+        and not _had_acknowledged_write(reply, current)
     ):
         # The old answer stays as it was.
         return Transition(
@@ -1528,10 +1528,10 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
         updated = _clear_current(updated, current.span_id)
     if stopped_first:
         # A Stop recorded before the failure decides what the reply shows.
-        owed = OwedWrite(reply.last_span_id, NOTE_CANCELLED)
+        owed = OwedWrite(reply.last_span_id, _NOTE_CANCELLED)
         updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
     else:
-        owed = OwedWrite(reply.last_span_id, NOTE_ERROR, error_text)
+        owed = OwedWrite(reply.last_span_id, _NOTE_ERROR, error_text)
         updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=spans, effects=(SettleSources(reply.last_span_id),))
 
@@ -1540,20 +1540,20 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     """The span's sources settled without an answer."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if not (span.span_id == reply.current_span_id or span.outcome in SOURCES_PENDING_OUTCOMES):
+    if not (span.span_id == reply.current_span_id or span.outcome in _SOURCES_PENDING_OUTCOMES):
         return _unchanged(Outcome.STALE, reply)
     spans: tuple[Span, ...] = ()
     updated = _clear_current(reply, span.span_id)
     if not span.ended:
         spans = (_end(span, SpanOutcome.SUPPRESSED, now_ns),)
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not had_acknowledged_write(reply, span):
+    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, span, now_ns), spans=spans)
     if reply.event_id is None or reply.placeholder_only:
         gone = _with_redactions(_set_state(updated, ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans)
     # What the reply showed stays, ended by the interrupted note; nothing else
     # would replace the in-progress status it shows.
-    owed = OwedWrite(span.span_id, NOTE_INTERRUPTED)
+    owed = OwedWrite(span.span_id, _NOTE_INTERRUPTED)
     return Transition(
         outcome=Outcome.APPLIED,
         reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed),
@@ -1658,7 +1658,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
     if reply.state is not ReplyState.ACTIVE:
         return _unchanged(Outcome.DUPLICATE, reply)
     orphaned = (last.outcome is None and last.bot_generation != facts.active_generation) or (
-        last.outcome in SOURCES_PENDING_OUTCOMES and not facts.sources_pending
+        last.outcome in _SOURCES_PENDING_OUTCOMES and not facts.sources_pending
     )
     if not orphaned:
         return _unchanged(Outcome.DUPLICATE, reply)
@@ -1672,7 +1672,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
         spans.append(last)
         updated = _clear_current(updated, last.span_id)
     if reply.unapplied_stop:
-        owed = OwedWrite(last.span_id, NOTE_CANCELLED)
+        owed = OwedWrite(last.span_id, _NOTE_CANCELLED)
         updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
         return Transition(
             outcome=Outcome.APPLIED,
@@ -1685,7 +1685,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=tuple(spans))
     if last.kind is SpanKind.REGENERATION and last.rollback is not None:
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, last, now_ns), spans=tuple(spans))
-    owed = OwedWrite(last.span_id, NOTE_RESTART)
+    owed = OwedWrite(last.span_id, _NOTE_RESTART)
     updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=tuple(spans))
 
@@ -1732,7 +1732,7 @@ def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pend
         return Transition(outcome=Outcome.APPLIED, reply=updated)
     if read.ended_as is not None:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, read.ended_as, now_ns))
-    owed = OwedWrite(last.span_id, NOTE_RESTART) if read.recent else None
+    owed = OwedWrite(last.span_id, _NOTE_RESTART) if read.recent else None
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed))
 
 

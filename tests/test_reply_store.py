@@ -94,7 +94,7 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
         stop_applied_receipt_order=8,
         stop_button_event_id="$button",
         redaction_pending=("$old",),
-        owed_write=OwedWrite("span-1", rl.NOTE_ERROR, "boom"),
+        owed_write=OwedWrite("span-1", rl._NOTE_ERROR, "boom"),
         reply_sequence=4,
         approval_id="approval-1",
         revision=7,
@@ -151,17 +151,15 @@ async def test_lookups_by_sources_and_delivery_prefer_the_newest(journal_store: 
     assert [span.span_id for span in await principal.replies.spans("reply-1")] == ["span-1"]
 
 
-async def test_room_and_work_queries(journal_store: EventJournalStore) -> None:
-    """Replies are found by room and state, and by owed work."""
+async def test_work_and_open_reply_queries(journal_store: EventJournalStore) -> None:
+    """Replies are found by owed work, and open ones across principals."""
     transition = _first_claim()
     await _apply(journal_store, transition)
     assert transition.reply is not None
-    active = await journal_store.backend.read(
-        lambda tx: reply_messages.for_room(tx, PRINCIPAL, ROOM, states=(ReplyState.ACTIVE, ReplyState.PAUSED)),
-    )
-    assert [reply.reply_id for reply in active] == ["reply-1"]
+    opened = await journal_store.backend.read(reply_messages.open_replies)
+    assert [(principal, reply.reply_id) for principal, reply in opened] == [(PRINCIPAL, "reply-1")]
     assert await journal_store.backend.read(lambda tx: reply_messages.with_pending_work(tx, PRINCIPAL)) == ()
-    owed = replace(transition.reply, owed_write=OwedWrite("span-1", rl.NOTE_RESTART))
+    owed = replace(transition.reply, owed_write=OwedWrite("span-1", rl._NOTE_RESTART))
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=owed))
     pending = await journal_store.backend.read(lambda tx: reply_messages.with_pending_work(tx, PRINCIPAL))
     assert [reply.reply_id for reply in pending] == ["reply-1"]
@@ -529,7 +527,7 @@ async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: Eve
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.state is ReplyState.CANCELLED
-    assert stored.owed_write == OwedWrite("span-1", rl.NOTE_CANCELLED)
+    assert stored.owed_write == OwedWrite("span-1", rl._NOTE_CANCELLED)
     ended = await principal.replies.span("span-1")
     assert ended is not None
     assert ended.outcome is SpanOutcome.CANCELLED
@@ -649,7 +647,7 @@ async def test_owner_lost_ends_what_an_older_instance_left_running(journal_store
     failed = await principal.replies.load("reply-1")
     assert failed is not None
     assert failed.state is rl.ReplyState.FAILED
-    assert failed.owed_write == OwedWrite("span-1", rl.NOTE_RESTART)
+    assert failed.owed_write == OwedWrite("span-1", rl._NOTE_RESTART)
     lost = await principal.replies.span("span-1")
     assert lost is not None
     assert lost.outcome is rl.SpanOutcome.LOST

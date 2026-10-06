@@ -132,6 +132,11 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
+| `reply_lifecycle.py` | Pure rules for durable reply records: every event that changes a reply, its spans, rows, and effects (see `docs/architecture/reply-messages.md`) |
+| `reply_presentation.py` | Reply presentation model, its JSON codec, and `render` into Matrix content and wire status |
+| `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
+| `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
+| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies an earlier release left in flight, and the post-sync reads of what they showed |
 | `event_journal/response_attempts.py` | Normalized durable response ownership registration, binding, and exact lookup queries |
 | `event_journal/legacy_response_attempts.py` | One-time transactional adoption of released response ownership snapshots |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
@@ -325,7 +330,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
-| `stop.py` | StopManager for cancelling in-progress responses |
+| `stop.py` | `SpanRegistry`: cancels exactly the reply span a Stop reaches, then its Agno run; the Stop button reaction |
 | `topic_generator.py` | AI-generated room topics |
 | `debug_report.py` | Read-only collection of what the backend stored about one reported conversation: event journal, Agno runs, tool-call and LLM request logs, and log lines |
 | `cli/main.py` | Main CLI entry point (Typer app) |

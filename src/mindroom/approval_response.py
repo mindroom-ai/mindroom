@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 # Records a chained pause's advance with the reply's pause row; returns the
 # advanced continuation and whether the row reached Matrix.
-type ReplyPause = Callable[..., Awaitable[tuple[ApprovalContinuation | None, bool]]]
+type _ReplyPause = Callable[..., Awaitable[tuple[ApprovalContinuation | None, bool]]]
 
 
 @dataclass(frozen=True)
@@ -369,7 +369,7 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         pending_text: str,
-        reply_pause: ReplyPause | None = None,
+        reply_pause: _ReplyPause | None = None,
     ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation.
 

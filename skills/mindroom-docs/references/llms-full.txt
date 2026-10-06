@@ -17321,6 +17321,11 @@ A refused database is left untouched.
 | `has never been used by this install` | The configured database is new or empty, usually because the connection URL points somewhere new. | Check `event_journal` and the variable named by `database_url_env` and point them back at the bound database; adopt only if you want to start the journal's history fresh. |
 | `is a different journal from the one this install is bound to` | The configured database belongs to another install, usually because the connection URL points at it. | Point `event_journal` back at the bound database, or adopt deliberately. |
 | `could not be read` or `does not name a generation` | The binding file is corrupt or truncated. | Delete `<storage>/tracking/event_journal_binding.json`, then run `mindroom journal adopt` against the database you want; the file holds nothing the database does not. |
+| `Another MindRoom is already running with the storage at` | A second `mindroom run` uses the same storage root. | Stop the other process; one storage root runs one MindRoom. |
+| `Another MindRoom runtime is already using this event journal` | Another storage root's runtime is bound to the same journal database. | Run one runtime per journal; two would both answer every message. |
+
+A PostgreSQL journal is claimed with a session advisory lock, so its connection must be direct or session-pooled; a transaction-pooling proxy cannot hold it.
+If that session is lost, MindRoom shuts down rather than keep running unclaimed; a process supervisor such as Kubernetes or systemd restarts it.
 
 Do not adopt just because startup refused: a connection URL that drifted to a fresh database is the common cause, and adopting would abandon the real journal's history instead of finding it.
 

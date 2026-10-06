@@ -47,7 +47,7 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-PRESENTATION_VERSION = 1
+_PRESENTATION_VERSION = 1
 AGENT_PLACEHOLDER = PROGRESS_PLACEHOLDER
 TEAM_PLACEHOLDER = TEAM_PROGRESS_PLACEHOLDER
 DELIVERY_FAILED_NOTE = "Response delivery failed. Please retry."
@@ -149,8 +149,6 @@ class RenderedReply:
     body: str
     tool_trace: tuple[ToolTraceEntry, ...]
     stream_status: str | None
-    # Sent as m.notice, which Matrix push rules suppress; only stream sends and edits are.
-    in_progress: bool
     placeholder_only: bool
 
 
@@ -198,7 +196,7 @@ def _terminal_status(state: str) -> str:
     raise ValueError(msg)
 
 
-def stream_status_for(write: WriteKind, *, state: str, needs_human_decision: bool = False) -> str | None:
+def _stream_status_for(write: WriteKind, *, state: str, needs_human_decision: bool = False) -> str | None:
     """Return the wire status one write carries, following the rules earlier releases used."""
     match write:
         case WriteKind.PLACEHOLDER | WriteKind.CREATE:
@@ -228,14 +226,13 @@ def render(
     if frozen_display is not None:
         shown = replace(frozen_display, trailing_note=presentation.trailing_note)
     body, trace = render_body(shown)
-    status = stream_status_for(write, state=state, needs_human_decision=needs_human_decision)
+    status = _stream_status_for(write, state=state, needs_human_decision=needs_human_decision)
     return RenderedReply(
         body=body,
         tool_trace=trace if shown.show_tool_calls else (),
         stream_status=status,
         # Only the stream's own sends and edits are notices; a placeholder or a
         # pause is a plain message, so push rules still apply to it.
-        in_progress=write in {WriteKind.CREATE, WriteKind.PROGRESS},
         placeholder_only=body == shown.placeholder,
     )
 
@@ -245,7 +242,7 @@ def with_trailing_note(presentation: Presentation, note: Segment | None) -> Pres
     return replace(presentation, trailing_note=note)
 
 
-def folded(presentation: Presentation) -> Presentation:
+def _folded(presentation: Presentation) -> Presentation:
     """Return the presentation as one answer segment that later spans continue below.
 
     A frozen display and the notes inside it become plain history: a later
@@ -267,7 +264,7 @@ def shown_work(possibly_shown: Presentation) -> Segment | None:
     reply interrupted twice before its continuation showed anything carries
     one restart note, not two. ``None`` means only a placeholder or notes.
     """
-    body, trace = _combined(folded(possibly_shown).segments, possibly_shown.placeholder)
+    body, trace = _combined(_folded(possibly_shown).segments, possibly_shown.placeholder)
     text = clean_partial_reply_text(body)
     if not text and not trace:
         return None
@@ -371,7 +368,7 @@ def _decode_segment(raw: object) -> Segment:
 def encode_presentation(presentation: Presentation) -> str:
     """Serialize one presentation for the reply store."""
     encoded: dict[str, object] = {
-        "version": PRESENTATION_VERSION,
+        "version": _PRESENTATION_VERSION,
         "segments": [_encode_segment(segment) for segment in presentation.segments],
         "placeholder": presentation.placeholder,
         "show_tool_calls": presentation.show_tool_calls,
@@ -390,7 +387,7 @@ def decode_presentation(stored: str) -> Presentation:
         msg = "Stored reply presentation is not an object"
         raise TypeError(msg)
     data = cast("dict[str, object]", raw)
-    if data.get("version") != PRESENTATION_VERSION:
+    if data.get("version") != _PRESENTATION_VERSION:
         msg = f"Unsupported reply presentation version {data.get('version')!r}"
         raise ValueError(msg)
     segments = data.get("segments")

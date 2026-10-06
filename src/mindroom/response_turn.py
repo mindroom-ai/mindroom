@@ -80,6 +80,7 @@ __all__ = [
     "EmptyRunDiscard",
     "ExcludedAttempt",
     "HandledAttempt",
+    "PausedAnswer",
     "PausedAttempt",
     "ResponsePausedForApproval",
     "ResponseTurnContext",

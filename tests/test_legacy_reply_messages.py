@@ -232,7 +232,7 @@ async def test_a_stream_main_stopped_after_its_sources_settled_gets_the_restart_
     ended = await _only_reply(principal)
     assert ended.state is rl.ReplyState.FAILED
     assert ended.owed_write is not None
-    assert ended.owed_write.note == rl.NOTE_RESTART
+    assert ended.owed_write.note == rl._NOTE_RESTART
 
 
 async def test_a_stream_that_shows_it_completed_keeps_its_answer(journal_store: EventJournalStore) -> None:
@@ -309,7 +309,7 @@ async def test_an_unsettled_stop_reaches_the_reply_it_named(journal_store: Event
     assert reply.state is rl.ReplyState.CANCELLED
     assert reply.stop_receipt_order == 5
     assert reply.owed_write is not None
-    assert reply.owed_write.note == rl.NOTE_CANCELLED
+    assert reply.owed_write.note == rl._NOTE_CANCELLED
     assert not await principal.is_pending("$source")
 
 

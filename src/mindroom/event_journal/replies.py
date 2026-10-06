@@ -46,7 +46,7 @@ class AppliedTransition:
     post_commit: tuple[PostCommitEffect, ...]
 
 
-def span_for(transaction: Transaction, principal_id: str, transition: Transition, span_id: str) -> Span:
+def _span_for(transaction: Transaction, principal_id: str, transition: Transition, span_id: str) -> Span:
     """Return a span as the transition left it, falling back to the stored row."""
     for span in transition.spans:
         if span.span_id == span_id:
@@ -63,7 +63,7 @@ def settled_event_ids(transaction: Transaction, principal_id: str, transition: T
     settled: list[str] = []
     for effect in transition.effects:
         if isinstance(effect, SettleSources):
-            settled.extend(span_for(transaction, principal_id, transition, effect.span_id).sources.pending)
+            settled.extend(_span_for(transaction, principal_id, transition, effect.span_id).sources.pending)
     return tuple(dict.fromkeys(settled))
 
 
@@ -85,7 +85,7 @@ def _run(
 ) -> None:
     match effect:
         case SettleSources(span_id=span_id):
-            span = span_for(transaction, principal_id, transition, span_id)
+            span = _span_for(transaction, principal_id, transition, span_id)
             journal.settle_many(transaction, principal_id, span.sources.pending)
         case FenceApproval(approval_id=approval_id, disposition=disposition):
             approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
@@ -288,7 +288,7 @@ def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: 
     )
 
 
-def supersede_replay(
+def _supersede_replay(
     transaction: Transaction,
     principal_id: str,
     source_event_ids: tuple[str, ...],
@@ -333,7 +333,7 @@ def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *,
     return ended
 
 
-def owner_lost(
+def _owner_lost(
     transaction: Transaction,
     principal_id: str,
     *,
@@ -378,7 +378,7 @@ class StopTarget:
     pending: bool = False
 
 
-def stop_target(
+def _stop_target(
     transaction: Transaction,
     principal_id: str,
     *,
@@ -469,7 +469,7 @@ class ReplyRowEnqueue:
         return self.applied.transition
 
 
-def row_placeholder_only(delivery: MatrixDelivery) -> bool:
+def _row_placeholder_only(delivery: MatrixDelivery) -> bool:
     """Return whether one reply row shows only the reply's placeholder."""
     return (delivery.reply_row or {}).get("placeholder_only") is True
 
@@ -501,7 +501,7 @@ def _write_facts(delivery: MatrixDelivery) -> rl.WriteFacts:
         sequence=delivery.reply_sequence,
         span_id=delivery.span_id,
         creates_event=delivery.edits_event_id is None,
-        placeholder_only=row_placeholder_only(delivery),
+        placeholder_only=_row_placeholder_only(delivery),
     )
 
 
@@ -665,9 +665,9 @@ class ReplyStore:
         return await self._backend.write(write)
 
     async def owner_lost(self, active_generation: str, *, now_ns: int) -> tuple[AppliedTransition, ...]:
-        """End what an older bot instance left running on these replies; see ``owner_lost``."""
+        """End what an older bot instance left running on these replies; see ``_owner_lost``."""
         return await self._backend.write(
-            lambda transaction: owner_lost(
+            lambda transaction: _owner_lost(
                 transaction,
                 self._principal_id,
                 active_generation=active_generation,
@@ -676,9 +676,9 @@ class ReplyStore:
         )
 
     async def supersede_replay(self, source_event_ids: tuple[str, ...], *, now_ns: int) -> AppliedTransition | None:
-        """Settle a superseded replay's sources with the reply they left; see ``supersede_replay``."""
+        """Settle a superseded replay's sources with the reply they left; see ``_supersede_replay``."""
         return await self._backend.write(
-            lambda transaction: supersede_replay(transaction, self._principal_id, source_event_ids, now_ns=now_ns),
+            lambda transaction: _supersede_replay(transaction, self._principal_id, source_event_ids, now_ns=now_ns),
         )
 
     async def accepts_stop(self, event_id: str, room_id: str) -> bool:
@@ -703,7 +703,7 @@ class ReplyStore:
     ) -> StopTarget:
         """Find the reply a Stop reaches, storing the Stop when the event's create is unresolved."""
         return await self._backend.write(
-            lambda transaction: stop_target(
+            lambda transaction: _stop_target(
                 transaction,
                 self._principal_id,
                 event_id=event_id,

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from .models import MatrixDelivery
 
 # The generation of spans main ran: never active, so nothing they left is live.
-LEGACY_GENERATION = "legacy"
+_LEGACY_GENERATION = "legacy"
 
 # What the wire status of an earlier release's answer says its reply ended as.
 _STATE_BY_STATUS = {
@@ -104,7 +104,7 @@ class _Adoption:
     row_placeholder_only: bool = False
 
 
-def classified(transaction: Transaction, principal_id: str) -> bool:
+def _classified(transaction: Transaction, principal_id: str) -> bool:
     """Return whether this principal's earlier-release replies were adopted already."""
     row = transaction.fetchone(
         "SELECT 1 AS present FROM reply_legacy_classifications WHERE principal_id = ?",
@@ -133,7 +133,7 @@ def classify(
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
     """Give each reply an earlier release left in flight a record, once per principal; return what to run after commit."""
-    if classified(transaction, principal_id):
+    if _classified(transaction, principal_id):
         return ()
     adoptions: list[_Adoption] = []
     adopted: set[str] = set()
@@ -271,7 +271,7 @@ def _span(
         kind=kind,
         delivery_id=delivery_id,
         sources=sources,
-        bot_generation=LEGACY_GENERATION,
+        bot_generation=_LEGACY_GENERATION,
         claimed_at_ns=now_ns,
         base_sequence=0,
         approval_id=approval_id,

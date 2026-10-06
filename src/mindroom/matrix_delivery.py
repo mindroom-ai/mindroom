@@ -111,7 +111,7 @@ class ReplyRowDelivery:
     event_id: str | None = None
 
 
-def reply_lock_key(reply_id: str) -> str:
+def _reply_lock_key(reply_id: str) -> str:
     """Return the sending-lock key that orders every row of one reply."""
     return f"reply:{reply_id}"
 
@@ -257,7 +257,7 @@ class MatrixDeliveryWorker:
         the caller re-renders. ``on_enqueued`` hears what committed before any
         send can fail.
         """
-        async with self._delivery_lock(reply_lock_key(request.reply_id)):
+        async with self._delivery_lock(_reply_lock_key(request.reply_id)):
             prepared = await prepare()
             enqueue_row = self.store.enqueue_reply_row if enqueue is None else enqueue
             enqueued = await enqueue_row(
@@ -288,7 +288,7 @@ class MatrixDeliveryWorker:
 
     async def send_reply_rows(self, reply_id: str) -> bool:
         """Send a reply's owed rows in write order; return whether none is left unknown."""
-        async with self._delivery_lock(reply_lock_key(reply_id)):
+        async with self._delivery_lock(_reply_lock_key(reply_id)):
             return await self._flush_reply_rows(reply_id)
 
     async def _flush_reply_rows(self, reply_id: str, *, before_sequence: int | None = None) -> bool:
@@ -809,7 +809,7 @@ class MatrixDeliveryWorker:
                     process_shutdown_requested=process_shutdown_requested,
                     on_cancelled=on_cancelled,
                 )
-        async with self._delivery_lock(reply_lock_key(delivery.reply_id)):
+        async with self._delivery_lock(_reply_lock_key(delivery.reply_id)):
             if not await self._flush_reply_rows(delivery.reply_id, before_sequence=delivery.reply_sequence):
                 return None
             return await self._flush(
@@ -907,6 +907,7 @@ __all__ = [
     "PreparedReplyRow",
     "RecoveryOutcome",
     "ReplyRowDelivery",
+    "ReplyRowEnqueuer",
     "ResolveDelivered",
     "SendDelivery",
     "TurnHandoff",

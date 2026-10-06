@@ -679,7 +679,7 @@ def claim(
     return None if claimed is None else get(transaction, principal_id, approval_id=approval_id)
 
 
-def advance(
+def _advance(
     transaction: Transaction,
     principal_id: str,
     *,
@@ -746,7 +746,7 @@ def advance(
 
 @dataclass(frozen=True, slots=True)
 class ApprovalAdvance:
-    """One claimed generation's next exact Agno pause, as ``advance`` records it."""
+    """One claimed generation's next exact Agno pause, as ``_advance`` records it."""
 
     approval_id: str
     claimant_generation: int
@@ -760,7 +760,7 @@ class ApprovalAdvance:
 
     def apply(self, transaction: Transaction, principal_id: str) -> ApprovalContinuation | None:
         """Record this pause on its continuation."""
-        return advance(
+        return _advance(
             transaction,
             principal_id,
             approval_id=self.approval_id,

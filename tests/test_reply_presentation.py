@@ -19,16 +19,16 @@ from mindroom.reply_presentation import (
     Presentation,
     Segment,
     WriteKind,
+    _folded,
+    _stream_status_for,
     after_restart,
     continued_by,
     decode_presentation,
     encode_presentation,
-    folded,
     format_error_note,
     note_segment,
     render,
     render_body,
-    stream_status_for,
     with_answer,
     with_trailing_note,
 )
@@ -163,7 +163,7 @@ def test_continued_by_hands_the_paused_answer_to_the_resume() -> None:
 def test_folded_turns_a_frozen_display_into_history() -> None:
     """Notes inside a frozen display stay, and later spans append below them."""
     frozen = with_trailing_note(Presentation(segments=(_answer("answer"),)), note_segment(NoteKind.CANCELLED))
-    history = folded(frozen)
+    history = _folded(frozen)
     assert history.trailing_note is None
     assert render_body(history)[0] == build_cancelled_response_update("answer", cancel_source="user_stop")[0]
 
@@ -188,13 +188,13 @@ def test_folded_turns_a_frozen_display_into_history() -> None:
 )
 def test_wire_status_per_write(write: WriteKind, state: str, decision: bool, expected: str | None) -> None:
     """Every write kind carries the wire status earlier releases sent."""
-    assert stream_status_for(write, state=state, needs_human_decision=decision) == expected
+    assert _stream_status_for(write, state=state, needs_human_decision=decision) == expected
 
 
 def test_terminal_write_of_a_non_terminal_state_is_refused() -> None:
     """A terminal write needs a terminal reply state."""
     with pytest.raises(ValueError, match="terminal"):
-        stream_status_for(WriteKind.TERMINAL, state="active")
+        _stream_status_for(WriteKind.TERMINAL, state="active")
 
 
 def test_render_uses_a_frozen_display_and_hides_trace_when_tool_calls_are_hidden() -> None:
@@ -205,7 +205,6 @@ def test_render_uses_a_frozen_display_and_hides_trace_when_tool_calls_are_hidden
     assert rendered.body == "transformed"
     assert rendered.tool_trace == ()
     assert rendered.stream_status == STREAM_STATUS_COMPLETED
-    assert not rendered.in_progress
 
 
 def test_render_of_an_empty_reply_is_its_placeholder() -> None:
@@ -216,17 +215,9 @@ def test_render_of_an_empty_reply_is_its_placeholder() -> None:
 
 
 def test_restart_after_a_noted_interruption_carries_one_note() -> None:
-    """Notes a stopped reply already showed are dropped before the restart note, as main reads them back."""
+    """Notes a stopped reply already showed are dropped before the restart note, as they read back from Matrix."""
     interrupted = with_trailing_note(Presentation(segments=(_answer("partial"),)), note_segment(NoteKind.INTERRUPTED))
     once = after_restart(interrupted)
     assert render_body(once)[0] == "partial\n\n**[Response interrupted by service restart]**"
     twice = after_restart(once)
     assert render_body(twice)[0] == render_body(once)[0]
-
-
-def test_only_stream_sends_and_edits_are_notices() -> None:
-    """Placeholders and pauses stay plain messages so push rules apply to them."""
-    assert not render(Presentation(), WriteKind.PLACEHOLDER, state="active").in_progress
-    assert not render(Presentation(), WriteKind.PAUSE, state="paused").in_progress
-    assert render(Presentation(), WriteKind.CREATE, state="active").in_progress
-    assert render(Presentation(), WriteKind.PROGRESS, state="active").in_progress

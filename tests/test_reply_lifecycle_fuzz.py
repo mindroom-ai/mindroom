@@ -25,7 +25,6 @@ from mindroom.reply_lifecycle import (
     Outcome,
     Reply,
     ReplyState,
-    RowIntent,
     SettleSources,
     Span,
     SpanKind,
@@ -35,6 +34,7 @@ from mindroom.reply_lifecycle import (
     TerminalWrite,
     WriteFacts,
     WriteStage,
+    _RowIntent,
 )
 
 _SETTLING_OUTCOMES = frozenset(
@@ -57,7 +57,7 @@ class _Approval:
 
 @dataclass
 class _Row:
-    intent: RowIntent
+    intent: _RowIntent
     creates_event: bool
 
 
@@ -205,7 +205,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         return TerminalWrite(
             shown=f"shown-{reply.revision}",
             prepared_revision=reply.revision,
-            state=rl.expected_terminal_state(reply, requested),
+            state=rl._expected_terminal_state(reply, requested),
         )
 
     # --- claims -------------------------------------------------------------
@@ -221,7 +221,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self.model.reply is not None
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.current_span_id is None
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
             and self.model.reply.last_span_id not in self.model.settled
         ),
     )
@@ -416,7 +416,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     @precondition(lambda self: self._live() is not None)
     @rule(phase=st.sampled_from(["pre_delivery", "delivery"]), note=st.booleans())
-    def fail(self, phase: rl.FailurePhase, note: bool) -> None:
+    def fail(self, phase: rl._FailurePhase, note: bool) -> None:
         """Fail."""
         span = self._live()
         reply = self.model.reply
@@ -433,7 +433,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     @precondition(lambda self: self._live() is not None)
     @rule(reason=st.sampled_from(["suppressed", "hook_failed"]))
-    def suppress(self, reason: rl.SuppressReason) -> None:
+    def suppress(self, reason: rl._SuppressReason) -> None:
         """Suppress."""
         span = self._live()
         assert span is not None
@@ -671,7 +671,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.current_span_id is None
             and not self.model.reply.unapplied_stop
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
             and self.model.reply.last_span_id not in self.model.settled
         ),
     )
@@ -736,7 +736,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         owned = (
             reply.current_span_id is not None
             or (reply.state is ReplyState.PAUSED and reply.approval_id is not None)
-            or (last.outcome in rl.SOURCES_PENDING_OUTCOMES and last.span_id not in self.model.settled)
+            or (last.outcome in rl._SOURCES_PENDING_OUTCOMES and last.span_id not in self.model.settled)
             or (last.kind is SpanKind.APPROVAL_RESUME and self.model.approval is not None)
             or reply.owed_write is not None
         )

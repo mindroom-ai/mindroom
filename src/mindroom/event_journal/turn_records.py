@@ -352,4 +352,4 @@ def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequen
     )
 
 
-__all__ = ["commit_terminal", "forget", "load_all", "load_record", "upsert", "write_record"]
+__all__ = ["commit_terminal", "forget", "load_all", "load_record", "stop_turn", "upsert", "write_record"]
