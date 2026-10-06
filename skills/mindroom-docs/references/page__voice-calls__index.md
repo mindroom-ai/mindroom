@@ -262,7 +262,7 @@ Otherwise, or when reading the conversation takes longer than 5 seconds, the cal
 
 When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
 The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, so later replies in the thread know what was said.
-Calls shorter than 10 seconds, calls in which the caller said nothing, calls whose conversation snapshot was skipped, and calls cut off by a MindRoom restart post nothing.
+Calls shorter than 10 seconds, calls in which the caller said nothing, calls that started without a conversation snapshot, and calls cut off by a MindRoom restart post nothing.
 The transcript holds only what was said; tool use is left out.
 Before posting, the agent checks the caller's access to the origin room again, and posts nothing if the caller lost that access during the call.
 If the agent's media connection drops and it rejoins the same call, each part of the call posts its own message.
@@ -284,6 +284,7 @@ Other Matrix clients ask for a conversation snapshot with the `origin` field of 
 ```
 
 `thread_id` is `null` when the call starts from the room's main timeline, and `origin` may be left out entirely.
+The agent uses `origin` only when the caller sent the event with `creator_user_id` and `agent_user_id` naming the caller and this agent, `thread_id` is the thread's root event, and `room_id` is not the call room.
 Write `origin` before each call, because the agent reads it when it joins.
 
 ## Transcripts and memory

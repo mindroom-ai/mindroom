@@ -294,7 +294,7 @@ agents:
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
 - An automation does not post again while its previous prompt awaits verify.
-- A restart skips an occurrence it missed.
+- A restart skips an occurrence it missed, and prompts posted before the restart get no verify notice.
 
 For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](hooks.md#event-notes), which can suppress a fire or rewrite its message.
 
