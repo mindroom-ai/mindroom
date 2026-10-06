@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import docx
+import pptx
 import pytest
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
@@ -19,6 +20,7 @@ from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.tools.function import Function
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
+from pptx.util import Inches
 
 import mindroom.custom_tools.google_drive as google_drive_module
 from mindroom import constants
@@ -1140,6 +1142,52 @@ def test_google_drive_read_extracts_office_document_text(tmp_path: Path) -> None
         "fileId": "shared-drive-file-id",
         "supportsAllDrives": True,
     }
+
+
+def test_google_drive_read_extracts_presentation_tables_and_groups(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1)).text_frame.text = "Quarterly review"
+    table = slide.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1)).table
+    for row, cells in zip(table.rows, (("Region", "Revenue"), ("EMEA", "120")), strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    group = slide.shapes.add_group_shape()
+    group.shapes.add_textbox(Inches(1), Inches(4), Inches(2), Inches(1)).text_frame.text = "Grouped note"
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {
+        "name": "review.pptx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "size": str(len(buffer.getvalue())),
+    }
+    tool.service = service
+    tool._download_bytes = lambda _request: buffer.getvalue()
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["extractedFrom"] == "pptx"
+    assert result["content"] == "=== Slide 1 ===\nQuarterly review\nRegion\tRevenue\nEMEA\t120\nGrouped note"
+
+
+def test_google_drive_binary_refusal_names_enabled_download_function(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "report.pdf", "mimeType": "application/pdf", "size": "5"}
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["error"] == "Cannot read binary file (application/pdf) as text. Use google_drive_download_file instead."
+    assert service.files_resource.get_media_kwargs is None
 
 
 def test_google_drive_read_keeps_file_text_that_mentions_the_agno_download_hint(tmp_path: Path) -> None:

@@ -44,8 +44,10 @@ from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
     from typing import BinaryIO
+
+    from pptx.shapes.base import BaseShape
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
@@ -72,7 +74,36 @@ def _extract_docx_text_with_tables(content_bytes: bytes) -> str:
     return "\n".join(lines)
 
 
-def _install_docx_table_extraction() -> None:
+def _pptx_shape_lines(shapes: Iterable[BaseShape]) -> Iterator[str]:
+    from pptx.shapes.graphfrm import GraphicFrame  # noqa: PLC0415
+    from pptx.shapes.group import GroupShape  # noqa: PLC0415
+
+    for shape in shapes:
+        if isinstance(shape, GroupShape):
+            yield from _pptx_shape_lines(shape.shapes)
+        elif isinstance(shape, GraphicFrame) and shape.has_table:
+            for row in shape.table.rows:
+                cells = [cell.text for cell in row.cells]
+                if any(cells):
+                    yield "\t".join(cells)
+        elif shape.has_text_frame:
+            for paragraph in shape.text_frame.paragraphs:
+                text = "".join(run.text for run in paragraph.runs)
+                if text.strip():
+                    yield text
+
+
+def _extract_pptx_text_with_tables(content_bytes: bytes) -> str:
+    from pptx import Presentation  # noqa: PLC0415
+
+    lines: list[str] = []
+    for number, slide in enumerate(Presentation(io.BytesIO(content_bytes)).slides, 1):
+        lines.append(f"=== Slide {number} ===")
+        lines.extend(_pptx_shape_lines(slide.shapes))
+    return "\n".join(lines)
+
+
+def _install_office_table_extraction() -> None:
     # AGNO_COMPAT: Drive .docx text extraction drops tables.
     # Reason: Agno 3.0.9 `_extract_docx_text` reads only `document.paragraphs`, which excludes tables,
     # so `read_file` returns a document's text without any of its table cells.
@@ -81,6 +112,14 @@ def _install_docx_table_extraction() -> None:
     # Remove when: The pinned Agno `_extract_docx_text` returns table rows in document order.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_extracts_office_document_text.
     agno_google_drive._extract_docx_text = _extract_docx_text_with_tables  # ty: ignore[invalid-assignment]
+    # AGNO_COMPAT: Drive .pptx text extraction drops tables and grouped shapes.
+    # Reason: Agno 3.0.9 `_extract_pptx_text` reads only top-level shapes with a text frame, so a
+    # slide's tables and the text inside grouped shapes are missing from `read_file`.
+    # Upstream issue: Tracking gap; no matching issue identified.
+    # Upstream PR: None identified.
+    # Remove when: The pinned Agno `_extract_pptx_text` returns table rows and grouped shape text.
+    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_extracts_presentation_tables_and_groups.
+    agno_google_drive._extract_pptx_text = _extract_pptx_text_with_tables  # ty: ignore[invalid-assignment]
 
 
 _AGNO_DOWNLOAD_HINT = " Use download_file instead."
@@ -246,7 +285,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             defer_to_original_auth=defer_to_original_auth,
             quota_project_id=quota_project_id,
         )
-        _install_docx_table_extraction()
+        _install_office_table_extraction()
         super().__init__(creds=creds, **kwargs)
         # Agno's async variants run Drive calls on the event loop's default executor, which the
         # gateway cannot track; synchronous bodies run on the caller's tool executor instead.
@@ -501,18 +540,22 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
 
     # AGNO_COMPAT: Drive read errors name a download function that may be renamed or disabled.
     # Reason: Agno 3.0.9 `GoogleDriveTools.read_file` ends some errors with "Use download_file instead.",
-    # but MindRoom exposes that function as `google_drive_download_file` and can disable it.
+    # but MindRoom exposes that function as `google_drive_download_file` and can disable it, and its
+    # binary-file refusal gives no download hint at all.
     # Upstream issue: Tracking gap; no matching issue identified, and the hint is a fixed string with no hook.
     # Upstream PR: None identified.
-    # Remove when: The pinned Agno read errors name the registered download function, or omit the hint without one.
+    # Remove when: The pinned Agno read errors for an existing file name the registered download
+    # function, or omit the hint without one.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_error_names_enabled_download_function;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_large_file_error_names_exposed_download_function.
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_large_file_error_names_exposed_download_function;
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_binary_refusal_names_enabled_download_function.
     def read_file(self, file_id: str) -> str:
         """Read a Drive file and return its text content, including files in Shared Drives and Office documents."""
         result = super().read_file(file_id)
         payload = json.loads(result)
         error = payload.get("error")
-        if not isinstance(error, str) or not error.endswith(_AGNO_DOWNLOAD_HINT):
+        # Every refusal of a file that exists can fall back to a download, including binary files.
+        if not isinstance(error, str) or "file" not in payload:
             return result
         payload["error"] = error.removesuffix(_AGNO_DOWNLOAD_HINT) + self._download_guidance()
         return json.dumps(payload)

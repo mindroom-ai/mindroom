@@ -502,12 +502,13 @@ def save_runs(
     runs = list(runs)
     if not runs:
         return
-    # AGNO_COMPAT: Loaded run objects are shared across session reads without a documented contract.
-    # Reason: Agno 3.0.9's session cache hands the same run objects to every read, so editing a loaded
-    # run in place would corrupt later reads before any write lands.
+    # AGNO_COMPAT: Session reads hand out shared, mutable run objects.
+    # Reason: Agno 3.0.9's session cache returns the same run objects to every read; its docstring calls
+    # them immutable, but nothing enforces that, so editing a loaded run in place corrupts later reads.
     # Upstream issue: Tracking gap; no matching issue identified.
     # Upstream PR: None identified.
-    # Remove when: Agno documents loaded runs as immutable or returns copies.
+    # Remove when: Agno session reads return per-read copies or frozen runs, so editing a loaded run
+    # cannot affect later reads.
     # Coverage: tests/test_agent_storage_runs.py::test_save_runs_refuses_a_run_object_loaded_from_the_session.
     loaded = {id(existing) for existing in session.runs or []}
     if any(id(run) in loaded for run in runs):
@@ -565,8 +566,10 @@ def _run_has_prompt_messages(run: object, prompt_roles: frozenset[str]) -> bool:
 # `store_history_messages` switch; MindRoom rebuilds prompts from config, so the stored copies are stale.
 # Upstream issue: Tracking gap; no matching issue identified.
 # Upstream PR: None identified.
-# Remove when: Agno can skip prompt-role messages when it stores a run.
-# Coverage: tests/test_agent_storage_runs.py::test_upsert_run_strips_prompt_roles_from_the_row_only.
+# Remove when: Agno can skip every configured prompt role, including a custom `system_message_role`,
+# when it stores a run, while keeping them on paused runs until their continuation completes.
+# Coverage: tests/test_agent_storage_runs.py::test_upsert_run_strips_prompt_roles_from_the_row_only;
+# tests/test_history_scope_state.py::test_shared_session_paused_run_preserves_prompt_roles_until_continuation_completes.
 def _run_without_prompt_messages(run: _PersistedRun, prompt_roles: frozenset[str]) -> _PersistedRun:
     if not isinstance(run, (RunOutput, TeamRunOutput)) or not _run_has_prompt_messages(run, prompt_roles):
         return run
