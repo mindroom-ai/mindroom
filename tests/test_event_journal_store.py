@@ -2158,6 +2158,32 @@ class TestProjectedInteractivePrompts:
         assert selection is not None
         assert (selection.question_text, selection.selected_value) == ("Choose?", "yes")
 
+    async def test_reenqueueing_an_attempted_delivery_keeps_its_frozen_row(self, alice: PrincipalStore) -> None:
+        """A retry of a delivery already offered to Matrix resolves to the row its first attempt froze."""
+        await admit(alice, "$turn", sender=BOB)
+        first = await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "first"},
+        )
+        assert first is not None
+        assert await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+
+        retried = await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "second"},
+        )
+
+        assert retried == first
+        frozen = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert frozen is not None
+        assert frozen.payload["body"] == "first"
+
     async def test_delivery_acknowledgement_projects_a_prompt_before_its_echo(
         self,
         alice: PrincipalStore,

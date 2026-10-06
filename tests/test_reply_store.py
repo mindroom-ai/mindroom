@@ -438,6 +438,52 @@ async def test_edit_row_waits_for_the_create_and_targets_its_event(journal_store
     assert stored.placeholder_only
 
 
+async def test_a_terminal_row_waiting_for_the_create_takes_its_target_from_the_reply(
+    journal_store: EventJournalStore,
+) -> None:
+    """The create's acknowledgement binds the reply's event; the terminal row reads it from the reply when claimed."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, span: rl.enqueue_initial(
+                reply,
+                span,
+                shown="ph",
+                placeholder_only=True,
+                prepared_revision=reply.revision,
+                now_ns=60,
+            ),
+            placeholder_only=True,
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "Thinking..."},
+    )
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.INITIAL,
+        event_id="$reply",
+        delivered_projections=(),
+    )
+
+    waiting = await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert waiting is not None
+    assert waiting.edits_event_id is None
+    claimed = await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert claimed is not None
+    assert claimed.edits_event_id == "$reply"
+
+
 async def test_permanent_failure_of_a_terminal_row_applies_its_rule(journal_store: EventJournalStore) -> None:
     """A terminal row Matrix refuses for good leaves the reply failed, with the span's outcome kept."""
     principal = journal_store.principal(PRINCIPAL)

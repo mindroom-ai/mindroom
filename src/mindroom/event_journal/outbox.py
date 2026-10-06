@@ -173,7 +173,8 @@ def enqueue(
             """,
             (principal_id, delivery_id, DeliveryStage.INITIAL.value),
         )
-        if initial is not None and initial["acknowledged_event_id"] is not None:
+        if reply_id is None and initial is not None and initial["acknowledged_event_id"] is not None:
+            # A reply row takes its edit target from its reply when it is claimed.
             edits_event_id = str(initial["acknowledged_event_id"])
             edit_target_pending = False
         elif (
@@ -470,6 +471,7 @@ def acknowledge(
         (event_id, principal_id, delivery_id, stage.value),
     )
     if bound is not None and stage is DeliveryStage.INITIAL:
+        # A reply row takes its edit target from its reply when it is claimed.
         transaction.execute(
             """
             UPDATE matrix_delivery_outbox
@@ -477,6 +479,7 @@ def acknowledge(
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND attempted = 0
               AND edit_target_pending = 1
+              AND reply_id IS NULL
             """,
             (event_id, principal_id, delivery_id, DeliveryStage.FINAL.value),
         )
