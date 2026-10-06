@@ -20,6 +20,7 @@ __all__ = [
     "MAX_CANONICAL_JSON_INTEGER",
     "REDACTED",
     "REDACTION_FAILED",
+    "URL_PATTERN",
     "nests_beyond_redaction_depth",
     "redact_config_text",
     "redact_log_event",
@@ -38,7 +39,7 @@ _MAX_DEPTH = 32
 # Start once per scheme-character run, avoiding quadratic suffix rescans.
 # Preserve leading non-letters while still redacting embedded URLs such as
 # ``123https://user:password@host`` that the unanchored scan recognized.
-_URL_PATTERN = re.compile(
+URL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*+)"
     r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>]+)",
 )
@@ -558,7 +559,7 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
     if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token)):
         return _truncate_text(bounded_value, max_length)
-    redacted = _URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    redacted = URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
     redact_token = _redact_prose_token if prose else _redact_matched_token
     if has_bearer:
         redacted = _BEARER_TOKEN_PATTERN.sub(redact_token, redacted)

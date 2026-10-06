@@ -5430,7 +5430,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.redaction"
-depends_on = ["mindroom.git_urls"]
+depends_on = ["mindroom.git_urls", "mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.git_urls"
