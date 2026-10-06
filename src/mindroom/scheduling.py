@@ -94,6 +94,10 @@ _DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
 _running_tasks: dict[str, asyncio.Task] = {}
 _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
+# The router restores runners when it starts and cancels them all when it stops, so new runners
+# use its runtime in rooms it can serve (write schedule state and send the trigger); a runner on
+# another bot's client outlives that client when the bot is replaced.
+_runner_owner: ScheduledTaskRunnerOwner | None = None
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
 _schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
@@ -311,6 +315,26 @@ class SchedulingRuntime:
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     matrix_admin: HookMatrixAdmin | None = None
     config_provider: Callable[[], Config | None] | None = None
+
+
+@dataclass(frozen=True)
+class ScheduledTaskRunnerOwner:
+    """The started router's runtime, used for new runners in rooms it can serve."""
+
+    client: nio.AsyncClient
+    conversation_reader: ConversationReader
+
+
+def set_scheduled_task_runner_owner(owner: ScheduledTaskRunnerOwner) -> None:
+    """Offer a started router's runtime to new scheduled-task runners."""
+    global _runner_owner
+    _runner_owner = owner
+
+
+def clear_scheduled_task_runner_owner() -> None:
+    """Stop starting runners on a router that is shutting down."""
+    global _runner_owner
+    _runner_owner = None
 
 
 @dataclass
@@ -601,6 +625,58 @@ def _start_scheduled_task(
         )
     _running_tasks[task_id] = task
     return True
+
+
+def _router_runtime_for_room(workflow: ScheduledWorkflow) -> ScheduledTaskRunnerOwner | None:
+    """Return the router runtime when the router has joined the room and may write its state and triggers."""
+    assert workflow.room_id is not None  # Callers save the schedule in its room first.
+    owner = _runner_owner
+    if owner is None:
+        return None
+    room = owner.client.rooms.get(workflow.room_id)
+    if room is None:
+        return None
+    router_id = owner.client.user_id
+    trigger_type = (
+        "m.room.encrypted" if room.encrypted else scheduling_executor.scheduled_trigger_message_type(workflow)
+    )
+    if not (
+        room.power_levels.can_user_send_state(router_id, _SCHEDULED_TASK_EVENT_TYPE)
+        and room.power_levels.can_user_send_message(router_id, trigger_type)
+    ):
+        return None
+    return owner
+
+
+def _start_new_scheduled_task(
+    client: nio.AsyncClient,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader,
+    matrix_admin: HookMatrixAdmin | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> None:
+    """Start a newly saved schedule's runner, on the router's runtime whenever the router can serve the room.
+
+    The router restores schedules when it starts and cancels them when it stops, so its runners never
+    outlive their client. A room the router cannot serve keeps the creating bot's runtime.
+    """
+    owner = _router_runtime_for_room(workflow)
+    if owner is not None:
+        client = owner.client
+        conversation_reader = owner.conversation_reader
+    _start_scheduled_task(
+        client,
+        task_id,
+        workflow,
+        config,
+        runtime_paths,
+        conversation_reader,
+        matrix_admin,
+        config_provider=config_provider,
+    )
 
 
 def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> bool:
@@ -1121,7 +1197,7 @@ async def _save_pending_scheduled_task(
         created_at=created_at,
         matrix_admin=matrix_admin,
     )
-    _start_scheduled_task(
+    _start_new_scheduled_task(
         client,
         task_id,
         workflow,
@@ -2156,7 +2232,7 @@ async def schedule_approved_tool_call(
         if not task_published and card_reserved is not False:
             await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     scheduled_for = _format_scheduled_time(send_at, config.timezone)
-    _start_scheduled_task(
+    _start_new_scheduled_task(
         runtime.client,
         task_id,
         workflow,
