@@ -576,9 +576,14 @@ class TurnStore:
         *,
         delivery_settled: bool = False,
         deleted_turn_id: str | None = None,
+        turn_id: str | None = None,
         also: Callable[[Transaction, TurnRecord], object] | None = None,
     ) -> TurnRecord | None:
-        """Terminate a visible response, or its exact retired INITIAL proven by the delivery owner."""
+        """Terminate a visible response, or its exact retired INITIAL proven by the delivery owner.
+
+        ``turn_id`` names the turn a reply record says the response answers, for
+        a running reply whose turn does not name its event until it finishes.
+        """
         if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
             msg = "User-stop receipt order must be positive"
             raise ValueError(msg)
@@ -611,6 +616,14 @@ class TurnStore:
                     stopped_deleted_record,
                     also=also,
                 )
+        if turn_record is None and turn_id is not None:
+            return await self._stop_running_turn(
+                turn_id,
+                response_event_id,
+                stop_receipt_order,
+                delivery_settled=delivery_settled,
+                also=also,
+            )
         if turn_record is None:
             return None
 
@@ -623,6 +636,29 @@ class TurnStore:
             )
 
         return await self._update_response_turn(response_event_id, stopped_record, also=also)
+
+    async def _stop_running_turn(
+        self,
+        turn_id: str,
+        response_event_id: str,
+        stop_receipt_order: int,
+        *,
+        delivery_settled: bool,
+        also: Callable[[Transaction, TurnRecord], object] | None,
+    ) -> TurnRecord | None:
+        """Record a Stop on the turn a running reply answers, naming the reply's event."""
+        turn_record = self.get_turn_record(turn_id)
+        if turn_record is None or turn_record.response_event_id not in {None, response_event_id}:
+            return None
+
+        def stopped_record(records: Mapping[str, TurnRecord]) -> TurnRecord:
+            current = records[turn_id]
+            if current.response_event_id not in {None, response_event_id}:
+                msg = f"Turn {turn_id!r} answered another response while {response_event_id!r} was stopped"
+                raise RuntimeError(msg)
+            return with_user_stop(current, response_event_id, stop_receipt_order, delivery_settled=delivery_settled)
+
+        return await self._ledger.update_handled_turn(turn_record.indexed_event_ids, stopped_record, also=also)
 
     def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether these sources already own an incomplete response attempt."""

@@ -35,6 +35,7 @@ from mindroom.event_journal.replies import (
     AppliedTransition,
     ReplyRowEnqueue,
     ReplyRowRequest,
+    StopTarget,
     edit_delivery_id,
     row_new_text,
 )
@@ -87,6 +88,7 @@ from mindroom.matrix_delivery import (
     PermanentDeliveryError,
     PreparedReplyRow,
     RecoveryOutcome,
+    ReplyRowDelivery,
     ReplyRowEnqueuer,
     SendDelivery,
     TurnHandoff,
@@ -123,6 +125,7 @@ from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, respon
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
+from mindroom.stop import send_stop_button
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     USER_STOP_CANCEL_MSG,
@@ -235,8 +238,25 @@ class ReplyStop:
     principal_id: str
     event_id: str
     receipt_order: int
+    # What the Stop reached before the transaction: a reply, a pending create, or neither.
+    target: StopTarget
     # Set when a reply owns the event and the transaction committed.
     applied: AppliedTransition | None = None
+
+    @property
+    def pending(self) -> bool:
+        """Return whether the Stop waits for its target's create, recorded already."""
+        return self.target.pending
+
+    @property
+    def owned(self) -> bool:
+        """Return whether a reply was bound to the event before the transaction."""
+        return self.target.reply is not None
+
+    @property
+    def turn_id(self) -> str | None:
+        """Return the turn the reply answers, for a running reply whose turn does not name its event yet."""
+        return self.target.turn_id
 
     def __call__(self, transaction: Transaction, record: TurnRecord) -> None:
         """Record the Stop on the reply, a Duplicate when a newer edit superseded it."""
@@ -1607,8 +1627,11 @@ class DeliveryGateway:
                 ),
             )
 
+        recorded: list[ReplyRowEnqueue] = []
+
         def enqueued(row: ReplyRowEnqueue) -> None:
             # Before any send can fail, so a retry knows the span moved on.
+            recorded.append(row)
             if write.handle is not None:
                 write.handle.note(row.applied)
 
@@ -1630,7 +1653,8 @@ class DeliveryGateway:
                 on_enqueued=enqueued,
             )
         except _DeliveryRefusedError:
-            return None
+            # Refused before or while sending: what was recorded still ran its transaction.
+            delivery = ReplyRowDelivery(enqueue=recorded[0] if recorded else None)
         if delivery.enqueue is not None:
             await self._run_reply_effects(delivery.enqueue.applied.post_commit)
             if not delivery.enqueue.transition.applied and delivery.enqueue.delivery_id is None:
@@ -1655,8 +1679,7 @@ class DeliveryGateway:
 
     async def end_reply_span(self, handle: SpanHandle, decide: Decide) -> None:
         """Apply a span exit that writes nothing itself, then settle what it left owed."""
-        applied = await handle.runtime.decide(handle, decide)
-        await self._run_reply_effects(applied.post_commit)
+        await handle.runtime.decide(handle, decide)
         await self.settle_reply_debt(handle.reply_id)
 
     async def end_reply_span_with_note(
@@ -1873,9 +1896,49 @@ class DeliveryGateway:
         await self.settle_reply_debt(reply.reply_id)
         return True
 
-    def reply_stop(self, event_id: str, receipt_order: int) -> ReplyStop:
-        """Return the Stop on a reply that commits with the turn record's Stop (PR-1.md §4.3)."""
-        return ReplyStop(principal_id=self.deps.outbox.principal_id, event_id=event_id, receipt_order=receipt_order)
+    async def add_reply_stop_button(self, handle: SpanHandle, event_id: str) -> None:
+        """Show the Stop button on a span's reply, best effort, and record it on the reply (DESIGN.md §7.4)."""
+        if handle.reply.stop_button_event_id is not None:
+            # An earlier span of the reply already shows one.
+            return
+        button_event_id = await send_stop_button(self._client(), handle.reply.room_id, event_id)
+        if button_event_id is None:
+            return
+        applied = await self.deps.outbox.replies.update(
+            handle.reply_id,
+            lambda reply: rl.record_stop_button(reply, event_id=button_event_id, now_ns=time.time_ns()),
+        )
+        if applied is None:
+            return
+        handle.note(applied)
+        reply = applied.transition.reply
+        if reply is not None and reply.redaction_pending:
+            # The reply left active while the button was sent.
+            await self.settle_reply_debt(handle.reply_id)
+
+    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str) -> ReplyStop:
+        """Return the Stop on a reply that commits with the turn record's Stop (PR-1.md §4.3).
+
+        A Stop on an event no reply is bound to yet, while a reply create in
+        its room is unresolved, is recorded here; that create's acknowledgement
+        applies it.
+        """
+        target = await self.deps.outbox.replies.stop_target(
+            event_id,
+            room_id=room_id,
+            receipt_order=receipt_order,
+            now_ns=time.time_ns(),
+        )
+        return ReplyStop(
+            principal_id=self.deps.outbox.principal_id,
+            event_id=event_id,
+            receipt_order=receipt_order,
+            target=target,
+        )
+
+    async def accepts_reply_stop(self, event_id: str, room_id: str) -> bool:
+        """Return whether a Stop reaction on this event reaches a running reply or a pending create."""
+        return await self.deps.outbox.replies.accepts_stop(event_id, room_id)
 
     async def finish_reply_stop(self, stop: ReplyStop) -> bool:
         """Run what a committed Stop left, cancelling the span or owing the note; return whether a reply owns it."""

@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -32,15 +31,15 @@ from mindroom.reply_presentation import (
     shown_work,
     with_answer,
 )
+from mindroom.stop import SpanRegistry
 from mindroom.streaming import UnfinishedStreamedReply
 from mindroom.tool_system.events import remap_visible_tool_marker_indices
 
 if TYPE_CHECKING:
-    import asyncio
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
-    from mindroom.cancellation import TaskCancelSource
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
+    from mindroom.event_journal.replies import PostCommitEffect
     from mindroom.matrix_delivery import ReplyRowEnqueuer
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -169,11 +168,11 @@ class ReplyRuntime:
     entity_name: str
     generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
+    # Runs what a committed transition left for after its commit.
+    run_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]]
     clock: Callable[[], int] = field(default=time.time_ns)
-    # The task executing each live span of this bot instance.
-    _tasks: dict[str, asyncio.Task[object]] = field(default_factory=dict, init=False, repr=False)
-    # Cancellations of live spans whose task had not started yet (DESIGN.md §8 registration recheck).
-    _cancel_on_start: dict[str, TaskCancelSource] = field(default_factory=dict, init=False, repr=False)
+    # The task of each span this bot instance executes, which a Stop cancels.
+    spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited for a reply's earlier writes, by reply.
     _waiting_for_rows: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
         default_factory=dict,
@@ -195,28 +194,16 @@ class ReplyRuntime:
         for room_id, sources in self._waiting_for_rows.pop(reply_id, ()):
             self.retry_sources(room_id, sources)
 
-    def register_task(self, handle: SpanHandle, task: asyncio.Task[object]) -> None:
-        """Remember the task that executes one span, cancelling it at once if a Stop already reached the span."""
-        self._tasks[handle.span_id] = task
-        task.add_done_callback(lambda _task: self._tasks.pop(handle.span_id, None))
-        cancel_source = self._cancel_on_start.pop(handle.span_id, None)
-        if cancel_source is not None:
-            request_task_cancel(task, cancel_source=cancel_source)
+    async def committed(self, applied: AppliedTransition, handle: SpanHandle | None = None) -> AppliedTransition:
+        """Remember what a committed transition left on the span, then run its post-commit effects."""
+        if handle is not None:
+            handle.note(applied)
+        await self.run_effects(applied.post_commit)
+        return applied
 
-    def cancel_span(self, span_id: str, *, cancel_source: TaskCancelSource) -> bool:
-        """Cancel exactly the named span's task; a span whose task has not started is cancelled when it does."""
-        task = self._tasks.get(span_id)
-        if task is None:
-            self._cancel_on_start[span_id] = cancel_source
-            return False
-        if task.done():
-            return False
-        request_task_cancel(task, cancel_source=cancel_source)
-        return True
-
-    def forget_span(self, span_id: str) -> None:
-        """Drop a cancellation that the span ended before starting its task."""
-        self._cancel_on_start.pop(span_id, None)
+    async def live_event_ids(self, room_id: str) -> frozenset[str]:
+        """Return the events of a room's replies whose span runs in this bot instance (DESIGN.md §8)."""
+        return await self.store.replies.event_ids_of_spans(room_id, self.spans.live_span_ids())
 
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies."""
@@ -232,7 +219,7 @@ class ReplyRuntime:
         finally:
             _current_slot.reset(token)
             if slot.handle is not None:
-                self.forget_span(slot.handle.span_id)
+                self.spans.forget(slot.handle.span_id)
 
     async def claim(
         self,
@@ -271,12 +258,14 @@ class ReplyRuntime:
             interactive_span_id=interactive_span_id,
             historical_event_id=historical_event_id,
         )
-        applied = await self.store.replies.claim(
-            request,
-            ClaimLookup(
-                interactive_span_id=interactive_span_id,
-                existing_event_id=existing_event_id,
-                edit_receipt_order=edit_receipt_order,
+        applied = await self.committed(
+            await self.store.replies.claim(
+                request,
+                ClaimLookup(
+                    interactive_span_id=interactive_span_id,
+                    existing_event_id=existing_event_id,
+                    edit_receipt_order=edit_receipt_order,
+                ),
             ),
         )
         transition = applied.transition
@@ -353,7 +342,7 @@ class ReplyRuntime:
         )
         if applied is None:
             return claimed, None
-        transition = applied.transition
+        transition = (await self.committed(applied)).transition
         if claimed is None or transition.claimed is None or transition.reply is None:
             assert transition.reply is not None, "only a reply with earlier writes defers a resume"
             await self._wait_for_rows(transition.reply.reply_id, continuation.room_id, sources.pending_event_ids)
@@ -386,9 +375,10 @@ class ReplyRuntime:
 
     async def decide(self, handle: SpanHandle, decide: Decide) -> AppliedTransition:
         """Apply one span exit in its own transaction and remember what it left."""
-        applied = await self.store.replies.decide(reply_id=handle.reply_id, span_id=handle.span_id, decide=decide)
-        handle.note(applied)
-        return applied
+        return await self.committed(
+            await self.store.replies.decide(reply_id=handle.reply_id, span_id=handle.span_id, decide=decide),
+            handle,
+        )
 
     async def write_ahead(self, handle: SpanHandle, presentation: Presentation) -> bool:
         """Record the presentation of the next direct progress edit; ``False`` refuses the edit."""
@@ -406,8 +396,9 @@ class ReplyRuntime:
             ),
         )
         if not applied.transition.applied:
+            await self.run_effects(applied.post_commit)
             return False
-        handle.note(applied)
+        await self.committed(applied, handle)
         handle.unconfirmed_progress = None
         return True
 

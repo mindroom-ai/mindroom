@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ import pytest
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import DeliveryStage, DepartureSource, replies, reply_messages, reply_spans
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyRowRequest
+from mindroom.handled_turns import TurnRecordCodec
 from mindroom.reply_lifecycle import (
     ClaimContext,
     ClaimRequest,
@@ -21,6 +23,7 @@ from mindroom.reply_lifecycle import (
     SpanOutcome,
     SpanSources,
 )
+from mindroom.turn_record import TurnRecord
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_event_journal_store import ROOM, admit
 
@@ -237,7 +240,7 @@ async def test_post_commit_effects_are_returned(journal_store: EventJournalStore
     assert claim.reply is not None
     stop = rl.stop(claim.reply, claim.claimed, rl.StopFacts(3, newer_edit=False, span_live=True), now_ns=40)
     applied = await _apply(journal_store, stop)
-    assert applied.post_commit == (rl.CancelSpan("span-1"),)
+    assert applied.post_commit == (rl.CancelSpan("span-1", by_stop=True),)
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.stop_receipt_order == 3
@@ -436,6 +439,14 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
     """A Stop on an event not yet bound reaches the running span once the create is acknowledged."""
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
+    turns = journal_store.turn_records("agent")
+    pending_turn = TurnRecord.create(["$source"], requester_id="@user:localhost")
+    assert pending_turn.anchor_event_id is not None
+    await turns.upsert(
+        index_event_ids=pending_turn.indexed_event_ids,
+        anchor_event_id=pending_turn.anchor_event_id,
+        record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending_turn)),
+    )
     await principal.enqueue_reply_row(
         request=ReplyRowRequest(
             reply_id=reply.reply_id,
@@ -471,10 +482,20 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
         event_id="$reply",
         delivered_projections=(),
     )
-    assert acknowledged.reply_effects == (rl.CancelSpan("span-1"),)
+    assert acknowledged.reply_effects == (
+        rl.CancelSpan("span-1", by_stop=True),
+        rl.TransferStop(9, "$reply", turn_id="$source"),
+    )
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.stop_receipt_order == 9
+    # The turn learned the Stop and the reply's event in the same transaction.
+    ((_index, _anchor, record_json),) = await turns.load_all()
+    stopped = TurnRecordCodec._from_ledger_record("$source", json.loads(record_json))
+    assert stopped is not None
+    assert stopped.response_event_id == "$reply"
+    assert stopped.user_stop_receipt_order == 9
+    assert stopped.user_stop_settled_receipt_order == 9
 
 
 async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:

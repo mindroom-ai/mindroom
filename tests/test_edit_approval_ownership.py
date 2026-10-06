@@ -139,7 +139,7 @@ class _ApprovalCase:
 
     async def stop(self, order: int = 4) -> None:
         reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.runner, self.gateway))
-        assert await reconciler.finalize("$answer", order, AsyncMock())
+        assert await reconciler.finalize("$answer", order, AsyncMock(), room_id=self.room.room_id)
 
     async def failed_stop(self) -> None:
         self.bot.client.room_send.side_effect = RuntimeError("Transport unavailable")

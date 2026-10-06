@@ -70,6 +70,8 @@ class _Model:
     reply: Reply | None = None
     spans: dict[str, Span] = field(default_factory=dict)
     settled: set[str] = field(default_factory=set)
+    # Spans that ended while an approval held their reply: its finish settles their sources.
+    held: set[str] = field(default_factory=set)
     cancel_requested: set[str] = field(default_factory=set)
     rows: list[_Row] = field(default_factory=list)
     finals: set[str] = field(default_factory=set)
@@ -118,23 +120,15 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if transition.outcome is Outcome.RECOMPUTE:
             msg = "rendered from the current revision, yet asked to recompute"
             raise AssertionError(msg)
+        before = self.model.reply
         if transition.reply is not None:
             self.model.reply = transition.reply
         for span in transition.spans:
+            if before is not None and before.approval_id is not None and span.kind is not SpanKind.APPROVAL_RESUME:
+                self.model.held.add(span.span_id)
             self.model.spans[span.span_id] = span
         for effect in transition.effects:
-            match effect:
-                case SettleSources(span_id=span_id):
-                    self.model.settled.add(span_id)
-                case CancelSpan(span_id=span_id):
-                    self.model.cancel_requested.add(span_id)
-                case FenceApproval(disposition=disposition):
-                    assert self.model.approval is not None
-                    self.model.approval.state = "failing"
-                    self.model.approval.disposition = disposition
-                case _:
-                    # Waking the approval and transferring a Stop need no model state.
-                    pass
+            self._apply_effect(effect)
         if transition.row is not None:
             reply = self.model.reply
             assert reply is not None
@@ -143,6 +137,20 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             if transition.row.stage is WriteStage.FINAL:
                 self.model.finals.add(transition.row.span_id)
         return transition
+
+    def _apply_effect(self, effect: rl.Effect) -> None:
+        match effect:
+            case SettleSources(span_id=span_id):
+                self.model.settled.add(span_id)
+            case CancelSpan(span_id=span_id):
+                self.model.cancel_requested.add(span_id)
+            case FenceApproval(disposition=disposition):
+                assert self.model.approval is not None
+                self.model.approval.state = "failing"
+                self.model.approval.disposition = disposition
+            case _:
+                # Waking the approval and transferring a Stop need no model state.
+                pass
 
     def _sources(self) -> SpanSources:
         return SpanSources(pending=("$source",), logical=("$source",))
@@ -180,6 +188,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             # A regeneration of a gone reply starts a new record.
             self.model.spans = {}
             self.model.settled = set()
+            self.model.held = set()
             self.model.rows = []
             self.model.finals = set()
         return self._apply(transition)
@@ -243,7 +252,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 now_ns=self._now(),
             )
             assert settled.outcome in {Outcome.DUPLICATE, Outcome.STALE}
-            self.model.approval = None
+            self._approval_finished()
 
     # --- progress and durable rows -----------------------------------------
 
@@ -333,7 +342,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         reply = self.model.reply
         approval = self.model.approval
         if reply is not None and reply.state is ReplyState.FAILED and approval and approval.state == "failing":
-            self.model.approval = None
+            self._approval_finished()
 
     @precondition(lambda self: self.model.reply is not None and self.model.reply.owed_write is not None)
     @rule()
@@ -486,7 +495,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 now_ns=self._now(),
             )
             self._apply(finished)
-            self.model.approval = None
+            self._approval_finished()
 
     # --- approvals ----------------------------------------------------------
 
@@ -567,7 +576,13 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         )
         if current is not None and self.model.reply is not None and self.model.reply.terminal:
             self._apply(rl.release(self.model.reply, current, now_ns=self._now()))
+        self._approval_finished()
+
+    def _approval_finished(self) -> None:
+        """The continuation finished, settling the sources it held."""
         self.model.approval = None
+        self.model.settled |= self.model.held
+        self.model.held = set()
 
     # --- reply-authored -----------------------------------------------------
 
@@ -703,9 +718,13 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     @invariant()
     def terminal_spans_settled_their_sources(self) -> None:
-        """I6: a span's sources settle with its terminal transition, except approval resumes."""
+        """I6: a span's sources settle with its terminal transition, except those an approval holds."""
         for span in self.model.spans.values():
-            if span.kind is SpanKind.APPROVAL_RESUME or span.outcome not in _SETTLING_OUTCOMES:
+            if (
+                span.kind is SpanKind.APPROVAL_RESUME
+                or span.outcome not in _SETTLING_OUTCOMES
+                or span.span_id in self.model.held
+            ):
                 continue
             assert span.span_id in self.model.settled, span
 

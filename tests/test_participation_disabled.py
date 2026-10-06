@@ -260,7 +260,14 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
                     await bot._turn_store.record_pending_turn(
                         canonicalize_turn_record(turn, response_event_id="$response"),
                     )
-                    stop = asyncio.create_task(bot._user_stop_reconciler.finalize("$response", 1, AsyncMock()))
+                    stop = asyncio.create_task(
+                        bot._user_stop_reconciler.finalize(
+                            "$response",
+                            1,
+                            AsyncMock(),
+                            room_id=envelope.target.room_id,
+                        ),
+                    )
                 assert await task == "$response"
                 if stop is not None:
                     assert await stop

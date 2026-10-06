@@ -556,7 +556,7 @@ async def test_deleted_acknowledged_initial_remains_cleanup_debt(
             reconciler = UserStopReconciler(
                 UserStopReconcilerDeps(store, cast("ResponseRunner", _SerializingRunner()), gateway),
             )
-            stop_task = asyncio.create_task(reconciler.finalize(INITIAL, 20, AsyncMock()))
+            stop_task = asyncio.create_task(reconciler.finalize(INITIAL, 20, AsyncMock(), room_id=ROOM_ID))
             await asyncio.sleep(0)
             assert not stop_task.done()
         return True
@@ -601,8 +601,8 @@ async def _assert_removed_stop_replay(store: TurnStore, gateway: DeliveryGateway
         UserStopReconcilerDeps(store, cast("ResponseRunner", _SerializingRunner()), gateway),
     )
     with patch("mindroom.delivery_gateway.edit_message_outcome", new=AsyncMock()) as edit:
-        assert await reconciler.finalize(INITIAL, 20, finalized)
-        assert await reconciler.finalize(INITIAL, 20, finalized)
+        assert await reconciler.finalize(INITIAL, 20, finalized, room_id=ROOM_ID)
+        assert await reconciler.finalize(INITIAL, 20, finalized, room_id=ROOM_ID)
     assert finalized.await_count == 2
     edit.assert_not_awaited()
     assert store.get_turn_record(SOURCE) == record

@@ -2826,6 +2826,7 @@ class TestAgentBot(AgentBotTestBase):
                     "$response-a",
                     2,
                     on_current_stop_finalized,
+                    room_id="!test:localhost",
                 )
             await asyncio.sleep(0)
 

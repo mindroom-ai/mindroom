@@ -114,7 +114,7 @@ from mindroom.reply_scope import (
     pause_decision,
     pause_write,
 )
-from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_shutdown_diagnostics import (
     ResponseShutdownPhase,
     ResponseShutdownPhaseTrace,
@@ -1714,7 +1714,9 @@ class ResponseRunner:
         current = await self.deps.approval_store.approval_continuation(advance.approval_id)
         if current is None or current.generation != advance.claimant_generation + 1:
             return None, False
-        return current, shown
+        # The pause row committed with the advance: recovery sends it if this send
+        # did not land, and only a permanent refusal fails the approval.
+        return current, shown or current.state == "waiting"
 
     async def _claim_in_place_approval(
         self,
@@ -1737,7 +1739,7 @@ class ResponseRunner:
             span_id=handle.span_id,
         )
         if applied is not None:
-            handle.note(applied)
+            await handle.runtime.committed(applied, handle)
         return claimed
 
     async def _advance_in_place_approval(
@@ -1794,8 +1796,10 @@ class ResponseRunner:
     ) -> bool:
         """Pause the span's reply and create the continuation that holds its run, in one transaction.
 
-        Returns whether the pause was published; a rule that refuses it (a Stop
-        committed while it was prepared) raises ``ReplyWriteRefusedError``.
+        Returns whether the pause was recorded: its row commits with the
+        continuation, so recovery sends a row this send left owed, and only a
+        permanent refusal fails the approval. A rule that refuses the pause (a
+        Stop committed while it was prepared) raises ``ReplyWriteRefusedError``.
         """
         enqueue = partial(self.deps.approval_store.pause_for_approval, continuation)
         if stage is None:
@@ -1805,7 +1809,7 @@ class ResponseRunner:
                 enqueue=enqueue,
                 target=target,
             )
-        return await self.deps.delivery_gateway.edit_text(
+        shown_now = await self.deps.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=continuation.response_event_id,
@@ -1821,6 +1825,7 @@ class ResponseRunner:
                 ),
             ),
         )
+        return shown_now or await self.deps.approval_store.approval_continuation(continuation.approval_id) is not None
 
     @asynccontextmanager
     async def _cli_approval_scope(
@@ -2637,7 +2642,7 @@ class ResponseRunner:
                         request,
                         response_run_id=continuation.run_id,
                     ),
-                    run_id_callback=lambda run_id: self.deps.stop_manager.update_run_id(
+                    run_id_callback=lambda run_id: self._note_run_id(
                         continuation.response_event_id,
                         run_id,
                     ),
@@ -3048,13 +3053,16 @@ class ResponseRunner:
             ),
         )
 
-    def _active_response_event_ids(self, room_id: str) -> set[str]:
-        """Return still-running response event IDs for one room."""
-        return {
+    async def _active_response_event_ids(self, room_id: str) -> set[str]:
+        """Return still-running response event IDs for one room: replies whose span runs here, then the rest."""
+        active = {
             event_id
             for event_id, tracked in self.deps.stop_manager.tracked_messages.items()
             if tracked.target.room_id == room_id and not tracked.task.done()
         }
+        if self.deps.replies is not None:
+            active |= await self.deps.replies.live_event_ids(room_id)
+        return active
 
     async def _run_locked_response_lifecycle(
         self,
@@ -5189,7 +5197,7 @@ class ResponseRunner:
         team_run_metadata_content: dict[str, Any] = {}
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
-        active_event_ids = self._active_response_event_ids(request.room_id)
+        active_event_ids = await self._active_response_event_ids(request.room_id)
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
         team_turn_ctx = ResponseTurnContext(
@@ -5258,7 +5266,7 @@ class ResponseRunner:
             )
 
             def _note_attempt_run_id(current_run_id: str) -> None:
-                self.deps.stop_manager.update_run_id(message_id, current_run_id)
+                self._note_run_id(message_id, current_run_id)
                 team_turn_recorder.set_run_id(current_run_id)
 
             def _note_visible_response_event_id(response_event_id: str) -> None:
@@ -5614,15 +5622,27 @@ class ResponseRunner:
                 user_id=user_id,
                 run_id=run_id,
                 on_cancelled=on_cancelled,
-                on_task_started=self._register_span_task,
+                span=self._span_attempt(),
             ),
         )
 
-    def _register_span_task(self, task: asyncio.Task[None]) -> None:
-        """Let a Stop on the current span cancel exactly this attempt."""
+    def _span_attempt(self) -> SpanAttempt | None:
+        """Return the current reply span's ownership of an attempt: its Stop and its Stop button."""
+        handle = current_span()
+        if handle is None:
+            return None
+        return SpanAttempt(
+            register=lambda task: handle.runtime.spans.register(handle.span_id, task),
+            add_stop_button=lambda message_id: self.deps.delivery_gateway.add_reply_stop_button(handle, message_id),
+        )
+
+    def _note_run_id(self, message_id: str | None, run_id: str | None) -> None:
+        """Tell whoever cancels this attempt which Agno run it is on."""
         handle = current_span()
         if handle is not None:
-            handle.runtime.register_task(handle, task)
+            handle.runtime.spans.update_run_id(handle.span_id, run_id)
+        else:
+            self.deps.stop_manager.update_run_id(message_id, run_id)
 
     @timed("prepare_response_runtime")
     async def prepare_response_runtime(
@@ -5690,7 +5710,7 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any] = {}
 
         def note_attempt_run_id(current_run_id: str) -> None:
-            self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
+            self._note_run_id(request.existing_event_id, current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
@@ -5794,7 +5814,7 @@ class ResponseRunner:
         )
 
         def note_attempt_run_id(current_run_id: str) -> None:
-            self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
+            self._note_run_id(request.existing_event_id, current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
@@ -5954,7 +5974,7 @@ class ResponseRunner:
         # The caller's list survives raising exit paths (cancellation, stream
         # re-raises), unlike the returned outcome.
         attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
-        active_event_ids = self._active_response_event_ids(request.room_id)
+        active_event_ids = await self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
             user_message=runtime.model_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
@@ -6100,7 +6120,7 @@ class ResponseRunner:
         # The caller's list survives raising exit paths (cancellation, stream
         # re-raises), unlike the returned outcome.
         attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
-        active_event_ids = self._active_response_event_ids(request.room_id)
+        active_event_ids = await self._active_response_event_ids(request.room_id)
         tool_trace: list[Any] = []
         transport_outcome: StreamTransportOutcome | None = None
         turn_recorder = self._build_turn_recorder(

@@ -435,7 +435,7 @@ def test_stopped_cancels_with_the_shown_content() -> None:
     """A Stop reaching the running span ends it cancelled with a terminal row."""
     reply, span = _turn()
     stop = rl.stop(reply, span, StopFacts(receipt_order=3, newer_edit=False, span_live=True), now_ns=NOW)
-    assert stop.effects == (CancelSpan(span.span_id),)
+    assert stop.effects == (CancelSpan(span.span_id, by_stop=True),)
     assert stop.reply is not None
     transition = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
     assert transition.reply is not None
@@ -730,7 +730,7 @@ def test_a_resume_that_waited_in_place_stays_stoppable_through_its_approval() ->
     )
     assert stop.effects == (
         FenceApproval("approval-1", "cancelled_by_user"),
-        CancelSpan(resume.claimed.span_id),
+        CancelSpan(resume.claimed.span_id, by_stop=True),
         WakeApproval("approval-1"),
     )
 
@@ -774,8 +774,60 @@ def test_stop_on_an_in_place_wait_also_cancels_the_waiting_span() -> None:
     """A response-local wait's span is cancelled and its cards expire through the approval wake."""
     reply, span, _transition = _paused(in_place=True)
     stop = rl.stop(reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
-    assert CancelSpan(span.span_id) in stop.effects
+    assert CancelSpan(span.span_id, by_stop=True) in stop.effects
     assert FenceApproval("approval-1", "cancelled_by_user") in stop.effects
+    assert WakeApproval("approval-1") in stop.effects
+
+
+def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
+    """The cancelled wait shows the note, but the continuation's settlement, which its wake runs, settles the sources."""
+    reply, span, _transition = _paused(in_place=True)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    stopped = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
+    assert stopped.reply is not None
+    assert stopped.reply.state is ReplyState.CANCELLED
+    assert stopped.row is not None
+    assert not stopped.row.settles_sources
+    assert not any(isinstance(effect, rl.SettleSources) for effect in stopped.effects)
+    released = rl.stopped(stop.reply, span, None, now_ns=NOW)
+    assert not any(isinstance(effect, rl.SettleSources) for effect in released.effects)
+
+
+def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None:
+    """A resume already cancelled leaves its reply to the approval; a newer Stop fences it again, settling nothing."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.PAUSED)
+    reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1", event_id="$reply")
+    resume = rl.claim(_request("span-2", approval_id="approval-1", approval_generation=1), _context(reply, span))
+    assert resume.reply is not None
+    assert resume.claimed is not None
+    first = rl.stop(
+        resume.reply, resume.claimed, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW
+    )
+    assert first.reply is not None
+    cancelled = rl.stopped(first.reply, resume.claimed, None, now_ns=NOW)
+    assert cancelled.reply is not None
+    ended = _span_after(cancelled, resume.claimed.span_id)
+    again = rl.stop(cancelled.reply, ended, StopFacts(receipt_order=6, newer_edit=False, span_live=False), now_ns=NOW)
+    assert again.effects == (FenceApproval("approval-1", "cancelled_by_user"), WakeApproval("approval-1"))
+    assert again.reply is not None
+    assert again.reply.state is ReplyState.ACTIVE
+
+
+def test_a_reply_shows_one_stop_button() -> None:
+    """A second button recorded on a running reply queues the first for removal; a reply that ended removes it."""
+    reply, _span = _turn()
+    first = rl.record_stop_button(reply, event_id="$button-1", now_ns=NOW)
+    assert first.reply is not None
+    second = rl.record_stop_button(first.reply, event_id="$button-2", now_ns=NOW)
+    assert second.reply is not None
+    assert second.reply.stop_button_event_id == "$button-2"
+    assert second.reply.redaction_pending == ("$button-1",)
+    ended = rl.record_stop_button(replace(reply, state=ReplyState.COMPLETED), event_id="$button-3", now_ns=NOW)
+    assert ended.reply is not None
+    assert ended.reply.stop_button_event_id is None
+    assert ended.reply.redaction_pending == ("$button-3",)
 
 
 def test_permanently_failed_pause_row_fences_the_approval() -> None:
@@ -802,7 +854,7 @@ def test_permanently_failed_pause_row_fences_the_approval() -> None:
     assert failed.reply.state is ReplyState.FAILED
     assert failed.reply.owed_write is not None
     assert failed.reply.owed_write.note == rl.NOTE_APPROVAL_FAILED
-    assert failed.effects == (FenceApproval("approval-1", "failed"),)
+    assert failed.effects == (FenceApproval("approval-1", "failed"), WakeApproval("approval-1"))
 
 
 def test_approval_settlement_guards() -> None:

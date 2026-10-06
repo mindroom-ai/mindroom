@@ -25,7 +25,7 @@ from mindroom.reply_lifecycle import (
     WakeApproval,
 )
 
-from . import approval_continuations, journal, outbox, reply_messages, reply_spans
+from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from .models import MatrixDelivery
 
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval
+type PostCommitEffect = CancelSpan | WakeApproval | TransferStop
 type Decide = Callable[[Reply, Span], Transition]
 
 
@@ -91,9 +91,20 @@ def _run(
             approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
         case CancelSpan() | WakeApproval():
             post_commit.append(effect)
-        case TransferStop():
-            # The turn-record copy is written by the caller that owns the ledger write.
-            pass
+        case TransferStop(receipt_order=receipt_order, target_event_id=event_id):
+            reply = transition.reply
+            assert reply is not None
+            last = reply_spans.load(transaction, principal_id, reply.last_span_id)
+            assert last is not None
+            turn_records.stop_turn(
+                transaction,
+                reply.entity_name,
+                turn_id=last.delivery_id,
+                response_event_id=event_id,
+                receipt_order=receipt_order,
+            )
+            # The ledger's cache learns it after the commit.
+            post_commit.append(replace(effect, turn_id=last.delivery_id))
         case _:
             msg = f"Reply effect {effect!r} has no transactional owner yet"
             raise NotImplementedError(msg)
@@ -268,6 +279,47 @@ def record_stop(
             now_ns=time.time_ns(),
         ),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class StopTarget:
+    """What a Stop on one event reaches among the reply records."""
+
+    # The reply bound to the event, in the Stop's room.
+    reply: Reply | None = None
+    # The turn that reply's latest span answers.
+    turn_id: str | None = None
+    # No reply is bound to the event yet; the Stop waits for its create.
+    pending: bool = False
+
+
+def stop_target(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    event_id: str,
+    room_id: str,
+    receipt_order: int,
+    now_ns: int,
+) -> StopTarget:
+    """Find the reply a Stop reaches, or store the Stop for a create still unresolved in its room (§6.4 ``stop``)."""
+    found = reply_messages.for_event(transaction, principal_id, event_id)
+    if found is not None:
+        if found.room_id != room_id:
+            return StopTarget()
+        span = reply_spans.load(transaction, principal_id, found.last_span_id)
+        return StopTarget(reply=found, turn_id=None if span is None else span.delivery_id)
+    if not reply_messages.has_unresolved_create(transaction, principal_id, room_id):
+        return StopTarget()
+    reply_messages.record_pending_stop(
+        transaction,
+        principal_id,
+        target_event_id=event_id,
+        receipt_order=receipt_order,
+        room_id=room_id,
+        now_ns=now_ns,
+    )
+    return StopTarget(pending=True)
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +577,43 @@ class ReplyStore:
             return None if reply is None else apply(transaction, self._principal_id, decide(reply))
 
         return await self._backend.write(write)
+
+    async def accepts_stop(self, event_id: str, room_id: str) -> bool:
+        """Return whether a Stop on this event reaches a reply: a running one bound to it, or a create in its room."""
+
+        def read(transaction: Transaction) -> bool:
+            found = reply_messages.for_event(transaction, self._principal_id, event_id)
+            if found is not None:
+                return found.room_id == room_id and not found.terminal
+            return reply_messages.has_unresolved_create(transaction, self._principal_id, room_id)
+
+        return await self._backend.read(read)
+
+    async def stop_target(self, event_id: str, *, room_id: str, receipt_order: int, now_ns: int) -> StopTarget:
+        """Find the reply a Stop reaches, storing the Stop when the event's create is unresolved."""
+        return await self._backend.write(
+            lambda transaction: stop_target(
+                transaction,
+                self._principal_id,
+                event_id=event_id,
+                room_id=room_id,
+                receipt_order=receipt_order,
+                now_ns=now_ns,
+            ),
+        )
+
+    async def event_ids_of_spans(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:
+        """Return the events of a room's replies whose current span is one of these."""
+        if not span_ids:
+            return frozenset()
+        return await self._backend.read(
+            lambda transaction: reply_messages.event_ids_of_spans(
+                transaction,
+                self._principal_id,
+                room_id,
+                tuple(sorted(span_ids)),
+            ),
+        )
 
     async def with_pending_work(self) -> tuple[Reply, ...]:
         """Return replies owing a redaction or a note not yet enqueued."""

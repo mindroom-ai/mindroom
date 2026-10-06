@@ -177,6 +177,24 @@ def in_states(transaction: Transaction, principal_id: str, states: tuple[ReplySt
     return tuple(_reply(row) for row in rows)
 
 
+def event_ids_of_spans(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    span_ids: tuple[str, ...],
+) -> frozenset[str]:
+    """Return the bound events of a room's replies whose current span is one of these."""
+    placeholders = ", ".join("?" for _ in span_ids)
+    rows = transaction.fetchall(
+        f"""
+        SELECT event_id FROM reply_messages
+        WHERE principal_id = ? AND room_id = ? AND event_id IS NOT NULL AND current_span_id IN ({placeholders})
+        """,  # noqa: S608 - fixed placeholders
+        (principal_id, room_id, *span_ids),
+    )
+    return frozenset(str(row["event_id"]) for row in rows)
+
+
 def with_pending_work(transaction: Transaction, principal_id: str) -> tuple[Reply, ...]:
     """Return replies owing a redaction or a write that has not been enqueued yet."""
     rows = transaction.fetchall(
@@ -284,6 +302,19 @@ def persist(transaction: Transaction, principal_id: str, transition: Transition)
 def _persist_spans(transaction: Transaction, principal_id: str, spans: tuple[Span, ...]) -> None:
     for span in spans:
         reply_spans.save(transaction, principal_id, span)
+
+
+def has_unresolved_create(transaction: Transaction, principal_id: str, room_id: str) -> bool:
+    """Return whether a running reply in the room has no event yet, so a Stop may name its create."""
+    row = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM reply_messages
+        WHERE principal_id = ? AND room_id = ? AND event_id IS NULL AND state IN ('active', 'paused')
+        LIMIT 1
+        """,
+        (principal_id, room_id),
+    )
+    return row is not None
 
 
 def record_pending_stop(

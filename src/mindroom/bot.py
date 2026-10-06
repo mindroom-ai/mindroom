@@ -133,7 +133,7 @@ from .matrix.room_member_joins import (
 )
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
-from .reply_lifecycle import CancelSpan, WakeApproval
+from .reply_lifecycle import CancelSpan, TransferStop, WakeApproval
 from .reply_scope import ReplyRuntime
 from .response_admission import admitted_response_decision
 from .response_delivery_recovery import ResponseDeliveryRecovery
@@ -642,6 +642,7 @@ class AgentBot:
             generation=self._approval_runtime_generation,
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
+            run_effects=self._run_reply_effects,
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
@@ -961,9 +962,19 @@ class AgentBot:
         """Run what committed reply transitions left for after their commit."""
         for effect in effects:
             if isinstance(effect, CancelSpan):
-                self._reply_runtime.cancel_span(effect.span_id, cancel_source="user_stop")
+                self._reply_runtime.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
+            elif isinstance(effect, TransferStop):
+                # The acknowledgement already wrote it; the ledger's cache learns it here.
+                await self._turn_store.record_user_stopped_response(
+                    effect.target_event_id,
+                    effect.receipt_order,
+                    delivery_settled=True,
+                    turn_id=effect.turn_id,
+                )
             elif isinstance(effect, WakeApproval):
-                # The continuation's source worker runs its failure settlement, as on main.
+                # The continuation's source worker runs its failure settlement, as
+                # on main. Its journal sources, not a response-local CLI waiter: a
+                # waiter woken now would only see its own span being cancelled.
                 continuation = await self._reply_runtime.store.approval_continuation(effect.approval_id)
                 if continuation is not None:
                     self._journal_dispatcher.retry_turn_sources(continuation.room_id, continuation.source_event_ids)

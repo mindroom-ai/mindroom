@@ -49,6 +49,7 @@ class UserStopReconciler:
             stop_receipt_order,
             delivery_settled=delivery_settled,
             deleted_turn_id=deleted_turn_id,
+            turn_id=None if reply_stop is None else reply_stop.turn_id,
             also=reply_stop,
         )
         if (
@@ -103,33 +104,53 @@ class UserStopReconciler:
             await on_current_stop_finalized()
         return True
 
+    async def accepts_reply_stop(self, response_event_id: str, room_id: str) -> bool:
+        """Return whether a Stop on this event reaches a reply record in the room."""
+        return await self.deps.delivery_gateway.accepts_reply_stop(response_event_id, room_id)
+
     async def finalize(
         self,
         response_event_id: str,
         stop_receipt_order: int,
         on_current_stop_finalized: Callable[[], Awaitable[None]],
+        *,
+        room_id: str,
     ) -> bool:
         """Make one user-stop intent terminal independently of runtime recovery order.
 
         Returns False, before writing anything, when the event's owning turn has
         no conversation target: a visible voice echo is such an owner, and
         there is no response to stop.
+
+        A reply's records own its Stop: the Stop commits on the reply in the
+        transaction that records it on the turn, so no terminal row slips
+        between them, and the span's exit, the approval's failure settlement,
+        or the owed cancel note shows it. Nothing waits for the conversation.
         """
         owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
         if owner is not None and owner.conversation_target is None:
             return False
-        # The reply's records learn the Stop in the transaction that records it on
-        # the turn, so no terminal row can slip between the two, and before its
-        # span is cancelled, so the span's exit renders the cancellation.
-        reply_stop = self.deps.delivery_gateway.reply_stop(response_event_id, stop_receipt_order)
+        reply_stop = await self.deps.delivery_gateway.reply_stop(
+            response_event_id,
+            stop_receipt_order,
+            room_id=room_id,
+        )
+        if reply_stop.pending:
+            # Recorded for the event's create, whose acknowledgement applies it.
+            return True
         async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
             stopped_turn = await self._record(
                 response_event_id,
                 stop_receipt_order,
+                delivery_settled=reply_stop.owned,
                 deleted_turn_id=deleted_turn_id,
                 reply_stop=reply_stop,
             )
-        reply_owned = await self.deps.delivery_gateway.finish_reply_stop(reply_stop)
+        if await self.deps.delivery_gateway.finish_reply_stop(reply_stop):
+            if not self._is_settled(stopped_turn, stop_receipt_order):
+                # The reply's create bound its event after the Stop looked.
+                await self._record(response_event_id, stop_receipt_order, delivery_settled=True)
+            return True
         target = stopped_turn.conversation_target
         if target is None:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
@@ -146,7 +167,7 @@ class UserStopReconciler:
                 stop_receipt_order,
                 target,
                 on_current_stop_finalized,
-                approval_settled or reply_owned,
+                approval_settled,
             ),
         )
         if not stopped:

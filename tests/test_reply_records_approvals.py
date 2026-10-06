@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -13,22 +13,23 @@ from agno.models.response import ToolExecution
 from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _noop_typing, _plain_request, _target
 from tests.test_reply_records_turns import (
     _FlakyHomeserver,
+    _pending_turn,
     _regeneration,
     _reply,
     _sent_bodies,
     _stop,
     _streaming_bot,
-    _turn_with_response,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -99,6 +100,25 @@ async def _respond(bot: AgentBot, *, resume: AsyncMock | None = None) -> str | N
         return await runner.generate_response(_plain_request(_target()))
 
 
+@contextmanager
+def _journal_wakes(bot: AgentBot) -> Iterator[list[tuple[str, ...]]]:
+    """Collect the sources the reply records hand back to the journal, which these tests do not run."""
+    wakes: list[tuple[str, ...]] = []
+    with patch.object(
+        bot._journal_dispatcher,
+        "retry_turn_sources",
+        side_effect=lambda _room_id, sources: wakes.append(sources),
+    ):
+        yield wakes
+
+
+async def _run_approval_wakes(bot: AgentBot, wakes: list[tuple[str, ...]]) -> None:
+    """Do what the journal's worker does with a woken approval source: its continuation settles."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    while wakes:
+        await runner._resume_approval_source(wakes.pop(0)[0])
+
+
 async def _span_kinds(bot: AgentBot) -> list[tuple[rl.SpanKind, rl.SpanOutcome | None]]:
     reply = await _reply(bot)
     return [(span.kind, span.outcome) for span in await bot._reply_runtime.store.replies.spans(reply.reply_id)]
@@ -141,8 +161,12 @@ async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: 
     """A Stop fences the approval with the turn's durable Stop; the settlement shows the note and ends the reply."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
-        stop = await _stop(bot, "$sent1", 5)
-        assert await asyncio.wait_for(stop, timeout=5)
+        with _journal_wakes(bot) as wakes:
+            stop = await _stop(bot, "$sent1", 5)
+            assert await asyncio.wait_for(stop, timeout=5)
+        # The Stop fenced the approval and woke its source; its settlement expires the cards.
+        assert wakes == [("$event",)]
+        await _run_approval_wakes(bot, wakes)
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED
@@ -195,10 +219,13 @@ async def test_an_edit_supersedes_the_approval_of_the_reply_it_regenerates(tmp_p
         assert old is not None
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        with patch_response_runner_module(
-            ai_response=AsyncMock(return_value="A fresh answer."),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
+        with (
+            patch_response_runner_module(
+                ai_response=AsyncMock(return_value="A fresh answer."),
+                should_use_streaming=AsyncMock(return_value=False),
+                typing_indicator=_noop_typing,
+            ),
+            _journal_wakes(bot) as wakes,
         ):
             assert await runner.generate_response(_regeneration(answer_event_id="$sent1")) == "$sent1"
 
@@ -206,12 +233,15 @@ async def test_an_edit_supersedes_the_approval_of_the_reply_it_regenerates(tmp_p
         assert fenced is not None
         assert fenced.state == "failing"
         assert fenced.failure_reason == "superseded"
+        # The claim woke the old approval's source, whose cleanup finishes it.
+        assert wakes == [("$event",)]
         sends = len(_sent_bodies(bot))
-        assert await runner._approval_responses.settle_failure(fenced, "superseded")
+        await _run_approval_wakes(bot, wakes)
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.COMPLETED
         assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert not await bot._reply_runtime.store.is_pending("$event")
         assert len(_sent_bodies(bot)) == sends
         assert _sent_bodies(bot)[-1] == "A fresh answer."
 
@@ -316,12 +346,42 @@ async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path
         failing = await runner._approval_responses.request_failure(continuation, "Card publication failed")
         assert failing is not None
         # The Stop commits with the turn record, before this settlement writes its note.
-        await _turn_with_response(bot, "$sent1")
-        stop = gateway.reply_stop("$sent1", 5)
-        assert await bot._turn_store.record_user_stopped_response("$sent1", 5, also=stop) is not None
+        await _pending_turn(bot)
+        stop = await gateway.reply_stop("$sent1", 5, room_id=_target().room_id)
+        assert await bot._turn_store.record_user_stopped_response("$sent1", 5, turn_id=stop.turn_id, also=stop)
 
         assert await runner._approval_responses.settle_failure(failing, "Card publication failed")
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED
         assert _sent_bodies(bot)[-1] == "**[Response cancelled by user]**"
+
+
+async def test_a_pause_whose_send_failed_once_still_waits_for_its_approval(tmp_path: Path) -> None:
+    """The pause row commits with the continuation, so a refused send leaves it owed, not the approval failed."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        real_send = _FlakyHomeserver(failures=0).real
+        failed: list[str] = []
+
+        async def refuse_the_pause_once(*args: object, **kwargs: object) -> object:
+            content = args[2] if len(args) > 2 else kwargs.get("content")
+            new_content = content.get("m.new_content", {}) if isinstance(content, dict) else {}
+            if not failed and new_content.get("body") == "Reading document":
+                failed.append("pause")
+                return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup")
+            return await real_send(*args, **kwargs)
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", new=refuse_the_pause_once):
+            await _respond(bot)
+
+        assert failed == ["pause"]
+        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
+        assert continuation is not None
+        assert continuation.state == "waiting"
+        reply = await _reply(bot)
+        assert reply.state is rl.ReplyState.PAUSED
+        assert reply.confirmed_seq != reply.reply_sequence
+        assert (await bot._delivery_gateway.recover_deliveries()).complete
+        reply = await _reply(bot)
+        assert reply.confirmed_seq == reply.reply_sequence
+        assert _sent_bodies(bot)[-1] == "Reading document"

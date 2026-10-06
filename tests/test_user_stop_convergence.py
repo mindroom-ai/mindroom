@@ -94,14 +94,26 @@ class _CountingGateway:
         self.finalized.append(response_event_id)
         return True
 
-    def reply_stop(self, event_id: str, receipt_order: int) -> Callable[[object, object], None]:
+    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str) -> _NoReplyStop:
         """Return a Stop step for a response no durable reply record owns."""
-        del event_id, receipt_order
-        return lambda _transaction, _record: None
+        del event_id, receipt_order, room_id
+        return _NoReplyStop()
 
     async def finish_reply_stop(self, _stop: object) -> bool:
         """Report that no durable reply record owns this response."""
         return False
+
+
+@dataclass
+class _NoReplyStop:
+    """A Stop no reply record owns: not pending, owned by no reply, writing nothing."""
+
+    pending: bool = False
+    owned: bool = False
+    turn_id: str | None = None
+
+    def __call__(self, _transaction: object, _record: object) -> None:
+        """Write nothing on the reply side."""
 
 
 def _reconciler(store: TurnStore, runner: _SerializingRunner, gateway: _CountingGateway) -> UserStopReconciler:
@@ -154,6 +166,7 @@ async def test_one_stop_makes_the_turn_terminal_and_commits_one_cancellation(jou
         _RESPONSE_EVENT_ID,
         _STOP_RECEIPT_ORDER,
         _noop,
+        room_id=_ROOM_ID,
     )
 
     assert finalized
@@ -172,8 +185,8 @@ async def test_the_same_stop_delivered_twice_cancels_once(journal_store: EventJo
     runner, gateway = _SerializingRunner(), _CountingGateway()
     reconciler = _reconciler(store, runner, gateway)
 
-    await reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop)
-    await reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop)
+    await reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop, room_id=_ROOM_ID)
+    await reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop, room_id=_ROOM_ID)
 
     assert gateway.finalized == [_RESPONSE_EVENT_ID]
 
@@ -192,8 +205,8 @@ async def test_one_stop_delivered_concurrently_cancels_once(journal_store: Event
     reconciler = _reconciler(store, runner, gateway)
 
     results = await asyncio.gather(
-        reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop),
-        reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop),
+        reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop, room_id=_ROOM_ID),
+        reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop, room_id=_ROOM_ID),
     )
 
     assert all(results)
@@ -214,6 +227,8 @@ def _stop_dispatcher(
     entity_ids(config, runtime_paths)
     journal = MagicMock(spec=JournalDispatcher)
     reconciler = MagicMock(spec=UserStopReconciler)
+    # No reply records exist here: only main's turn and live-run owners can accept a Stop.
+    reconciler.accepts_reply_stop.return_value = False
     dispatcher = ReactionDispatcher(
         ReactionDispatcherDeps(
             runtime=SimpleNamespace(config=config, client=None, orchestrator=None),
@@ -324,7 +339,12 @@ async def test_stop_on_a_voice_echo_without_a_response_target_changes_nothing(
     before = store.get_turn_record("$voice")
     runner, gateway = _SerializingRunner(), _CountingGateway()
 
-    finalized = await _reconciler(store, runner, gateway).finalize("$echo", _STOP_RECEIPT_ORDER, _noop)
+    finalized = await _reconciler(store, runner, gateway).finalize(
+        "$echo",
+        _STOP_RECEIPT_ORDER,
+        _noop,
+        room_id=_ROOM_ID,
+    )
 
     assert finalized is False
     assert store.get_turn_record("$voice") == before

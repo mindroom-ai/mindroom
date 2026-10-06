@@ -31,7 +31,7 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.handled_turns import TurnRecordCodec, resolve_turn_record
+from mindroom.handled_turns import TurnRecordCodec, resolve_turn_record, with_user_stop
 from mindroom.turn_record import (
     canonicalize_turn_record,
     completed_response_record,
@@ -219,6 +219,29 @@ def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> Te
         record_json=write.record_json,
     )
     return write
+
+
+def stop_turn(
+    transaction: Transaction,
+    agent_name: str,
+    *,
+    turn_id: str,
+    response_event_id: str,
+    receipt_order: int,
+) -> None:
+    """Record a Stop that waited for a reply's create on the turn the reply answers, naming its event."""
+    current = _claim_records(transaction, agent_name, (turn_id,)).get(turn_id)
+    if current is None or current.response_event_id not in {None, response_event_id}:
+        return
+    stopped = with_user_stop(current, response_event_id, receipt_order, delivery_settled=True)
+    assert stopped.anchor_event_id is not None
+    upsert(
+        transaction,
+        agent_name,
+        index_event_ids=stopped.indexed_event_ids,
+        anchor_event_id=stopped.anchor_event_id,
+        record_json=json.dumps(TurnRecordCodec._to_ledger_record(stopped)),
+    )
 
 
 def upsert(

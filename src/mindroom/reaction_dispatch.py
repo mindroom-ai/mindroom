@@ -128,7 +128,10 @@ class ReactionDispatcher:
                 and turn_record.conversation_target.room_id == room.room_id
             )
             if sender_agent_name or not (
-                self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to, room.room_id) or has_stoppable_turn
+                self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to, room.room_id)
+                or has_stoppable_turn
+                # A running reply, including one whose create is still unacknowledged.
+                or await self.deps.user_stop_reconciler.accepts_reply_stop(event.reacts_to, room.room_id)
             ):
                 return False
             await self.deps.journal_dispatcher.claim_semantic_consumer(
@@ -145,6 +148,7 @@ class ReactionDispatcher:
             event.reacts_to,
             await self.deps.journal_dispatcher.receipt_order(),
             remove_current_stop_button,
+            room_id=room.room_id,
         )
         if stopped:
             self.deps.logger.info(

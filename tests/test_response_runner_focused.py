@@ -1915,6 +1915,7 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
                 "$waiting",
                 7,
                 on_current_stop_finalized,
+                room_id=target.room_id,
             )
 
         await store.acknowledge_matrix_delivery(
@@ -1940,6 +1941,7 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
             "$waiting",
             7,
             on_current_stop_finalized,
+            room_id=target.room_id,
         )
 
     finalize_stopped_response.assert_not_awaited()
