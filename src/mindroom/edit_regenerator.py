@@ -19,7 +19,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError, canonicalize_turn_record
-from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
+from mindroom.turn_store import record_deferred_outcome_response
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -384,7 +384,7 @@ class EditRegenerator:
             ),
         )
 
-        record_deferred_outcome, record_user_stop = self._settlement_callbacks(record=record, applied=applied)
+        record_deferred_outcome = self._settlement_callbacks(record=record, applied=applied)
 
         stale_runs_removed = False
 
@@ -433,7 +433,6 @@ class EditRegenerator:
                 source_handoff=asyncio.Event(),
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=record_deferred_outcome,
-                on_user_stop_handled=record_user_stop,
             ),
             record,
             applied,
@@ -477,11 +476,8 @@ class EditRegenerator:
         *,
         record: TurnRecord,
         applied: dict[str, SourceEventRevision],
-    ) -> tuple[
-        Callable[[str], Awaitable[None]],
-        Callable[[str, int], Awaitable[None]],
-    ]:
-        """Build the terminal-outcome callbacks that commit one regeneration's applied revisions."""
+    ) -> Callable[[str], Awaitable[None]]:
+        """Build the terminal-outcome callback that commits one regeneration's applied revisions."""
 
         async def record_deferred_outcome(response_event_id: str) -> None:
             if applied:
@@ -491,16 +487,7 @@ class EditRegenerator:
                     response_event_id,
                 )
 
-        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
-            if applied:
-                await record_user_stop_terminal(
-                    self.deps.turn_store,
-                    record,
-                    response_event_id,
-                    stop_receipt_order,
-                )
-
-        return record_deferred_outcome, record_user_stop
+        return record_deferred_outcome
 
     @staticmethod
     def _discard(mailbox: _Mailbox, revisions: dict[str, SourceEventRevision]) -> None:

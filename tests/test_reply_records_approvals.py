@@ -731,10 +731,9 @@ async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path
         assert continuation is not None
         failing = await runner._approval_responses.request_failure(continuation, "Card publication failed")
         assert failing is not None
-        # The Stop commits with the turn record, before this settlement writes its note.
-        await _pending_turn(bot)
+        # The Stop commits on the reply before this settlement writes its note.
         stop = await gateway.reply_stop("$sent1", 5, room_id=_target().room_id, may_wait=False)
-        assert await bot._turn_store.record_user_stopped_response("$sent1", 5, turn_id=stop.turn_id, also=stop)
+        assert await gateway.finish_reply_stop(stop)
 
         assert await runner._approval_responses.settle_failure(failing, "Card publication failed")
 

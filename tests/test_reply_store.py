@@ -1050,27 +1050,13 @@ async def _acknowledge_the_create(principal: PrincipalStore) -> tuple[object, ..
     return acknowledged.reply_effects
 
 
-async def _assert_the_turn_learned_the_stop(journal_store: EventJournalStore) -> None:
-    # The turn learned the Stop and the reply's event in the same transaction.
-    ((_index, _anchor, record_json),) = await journal_store.turn_records("agent").load_all()
-    stopped = TurnRecordCodec._from_ledger_record("$source", json.loads(record_json))
-    assert stopped is not None
-    assert stopped.response_event_id == "$reply"
-    assert stopped.user_stop_receipt_order == 9
-    assert stopped.user_stop_settled_receipt_order == 9
-
-
 async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_store: EventJournalStore) -> None:
     """A Stop on an event not yet bound reaches the running span once the create is acknowledged."""
     principal = await _stop_waiting_for_the_create(journal_store)
-    assert await _acknowledge_the_create(principal) == (
-        rl.CancelSpan("span-1", by_stop=True),
-        rl.TransferStop(9, "$reply", turn_id="$source"),
-    )
+    assert await _acknowledge_the_create(principal) == (rl.CancelSpan("span-1", by_stop=True),)
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.stop_receipt_order == 9
-    await _assert_the_turn_learned_the_stop(journal_store)
 
 
 @pytest.mark.parametrize("own_room_stop", [False, True])
@@ -1098,7 +1084,7 @@ async def test_a_pending_stop_from_another_room_never_reaches_the_reply(
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     if own_room_stop:
-        assert effects == (rl.CancelSpan("span-1", by_stop=True), rl.TransferStop(9, "$reply", turn_id="$source"))
+        assert effects == (rl.CancelSpan("span-1", by_stop=True),)
         assert stored.stop_receipt_order == 9
     else:
         assert effects == ()
@@ -1130,7 +1116,8 @@ async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: Eve
     """A create acknowledged after a restart ends its span with the Stop: no task here would see a cancel."""
     principal = await _stop_waiting_for_the_create(journal_store)
     await principal.replies.write_generation("gen-2", now_ns=70)
-    assert await _acknowledge_the_create(principal) == (rl.TransferStop(9, "$reply", turn_id="$source"),)
+    effects = await _acknowledge_the_create(principal)
+    assert not any(isinstance(effect, rl.CancelSpan) for effect in effects)
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.state is ReplyState.CANCELLED
@@ -1138,7 +1125,6 @@ async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: Eve
     ended = await principal.replies.span("span-1")
     assert ended is not None
     assert ended.outcome is SpanOutcome.CANCELLED
-    await _assert_the_turn_learned_the_stop(journal_store)
 
 
 async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue(

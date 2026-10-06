@@ -7983,16 +7983,12 @@ async def test_landed_terminal_interruption_settles_the_turn(
     failure_reason: str,
     final_visible_body: str,
 ) -> None:
-    """A landed interruption is terminal, so the turn is handled, without recording a user stop."""
+    """A landed interruption is terminal, so the turn is handled."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    user_stops: list[tuple[str, int]] = []
     request = replace(
         _plain_request(_target(thread_id=thread_id)),
         on_deferred_outcome_handled=_async_callback(lambda _event_id: None),
-        on_user_stop_handled=_async_callback(
-            lambda event_id, receipt_order: user_stops.append((event_id, receipt_order)),
-        ),
     )
     progress = response_runner._DeliveryProgress()
     progress.settle(
@@ -8032,7 +8028,6 @@ async def test_landed_terminal_interruption_settles_the_turn(
             )
 
     assert result == "$response"
-    assert user_stops == []
 
 
 @pytest.mark.asyncio

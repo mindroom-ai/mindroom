@@ -15,7 +15,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import FinalDeliveryRequest
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime, with_user_stop
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -506,7 +506,9 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
         elif mutation == "newer":
             await store.register_edit_revision("$source", (30, "$newer"))
         else:
-            await store.record_user_stopped_response("$answer", 2)
+            stopped_turn = store.get_turn_record("$source")
+            assert stopped_turn is not None
+            await store.record_turn(with_user_stop(stopped_turn, "$answer", 2))
 
     async def publish(turn_id: str, event_id: str, committed: TurnRecord | None) -> None:
         if timing == "publication":

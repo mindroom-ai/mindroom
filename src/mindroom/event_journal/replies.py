@@ -20,7 +20,6 @@ from mindroom.reply_lifecycle import (
     Reply,
     SettleSources,
     Span,
-    TransferStop,
     Transition,
     WakeApproval,
 )
@@ -44,7 +43,7 @@ class TurnCompleted:
 
 
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | TransferStop | TurnCompleted
+type PostCommitEffect = CancelSpan | WakeApproval | TurnCompleted
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,20 +125,6 @@ def _run(
             approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
         case CancelSpan() | WakeApproval():
             post_commit.append(effect)
-        case TransferStop(receipt_order=receipt_order, target_event_id=event_id):
-            reply = transition.reply
-            assert reply is not None
-            last = reply_spans.load(transaction, principal_id, reply.last_span_id)
-            assert last is not None
-            turn_records.stop_turn(
-                transaction,
-                reply.entity_name,
-                turn_id=last.delivery_id,
-                response_event_id=event_id,
-                receipt_order=receipt_order,
-            )
-            # The ledger's cache learns it after the commit.
-            post_commit.append(replace(effect, turn_id=last.delivery_id))
         case _:
             msg = f"Reply effect {effect!r} has no transactional owner yet"
             raise NotImplementedError(msg)
@@ -335,7 +320,6 @@ def record_stop(
     *,
     event_id: str,
     receipt_order: int,
-    newer_edit: bool,
 ) -> AppliedTransition | None:
     """Record a Stop on the reply bound to one event; ``None`` when no reply is bound to it."""
     found = reply_messages.for_event(transaction, principal_id, event_id)
@@ -353,12 +337,17 @@ def record_stop(
             span,
             rl.StopFacts(
                 receipt_order=receipt_order,
-                newer_edit=newer_edit,
+                newer_edit=_newer_edit(reply, receipt_order),
                 span_live=_runs_here(transaction, principal_id, reply, span),
             ),
             now_ns=time.time_ns(),
         ),
     )
+
+
+def _newer_edit(reply: Reply, receipt_order: int) -> bool:
+    """Return whether a regeneration of the reply answers an edit newer than this Stop, which it then misses."""
+    return (reply.edit_receipt_order or 0) > receipt_order
 
 
 def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:
@@ -662,12 +651,12 @@ def acknowledge_row(
     stopped = apply(
         transaction,
         principal_id,
-        rl.apply_pending_stop(
+        rl.stop(
             bound,
             current,
             rl.StopFacts(
                 receipt_order=receipt_order,
-                newer_edit=False,
+                newer_edit=_newer_edit(bound, receipt_order),
                 span_live=_runs_here(transaction, principal_id, bound, current),
             ),
             now_ns=now_ns,
@@ -838,6 +827,17 @@ class ReplyStore:
         """Settle a superseded replay's sources with the reply they left; see ``_supersede_replay``."""
         return await self._backend.write(
             lambda transaction: _supersede_replay(transaction, self._principal_id, source_event_ids, now_ns=now_ns),
+        )
+
+    async def record_stop(self, event_id: str, receipt_order: int) -> AppliedTransition | None:
+        """Record a Stop on the reply bound to one event; ``None`` when no reply is bound to it."""
+        return await self._backend.write(
+            lambda transaction: record_stop(
+                transaction,
+                self._principal_id,
+                event_id=event_id,
+                receipt_order=receipt_order,
+            ),
         )
 
     async def accepts_stop(self, event_id: str, room_id: str) -> bool:

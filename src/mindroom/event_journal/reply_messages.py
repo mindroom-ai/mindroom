@@ -32,7 +32,7 @@ _REPLY_COLUMNS = """
     reply_id, entity_name, room_id, thread_id, membership_epoch,
     event_id, state, current_span_id, last_span_id, presentation_json,
     frozen_display_json, possibly_shown_json, possibly_shown_seq, confirmed_seq, revision, legacy_pending,
-    placeholder_only, stop_receipt_order, stop_applied_receipt_order, stop_button_event_id,
+    placeholder_only, stop_receipt_order, stop_applied_receipt_order, edit_receipt_order, stop_button_event_id,
     redaction_pending_json, owed_write_json, reply_sequence, approval_id, created_at_ns, updated_at_ns
 """
 
@@ -106,6 +106,7 @@ def _reply(row: Row) -> Reply:
         placeholder_only=bool(row["placeholder_only"]),
         stop_receipt_order=_optional_int(row["stop_receipt_order"]),
         stop_applied_receipt_order=_optional_int(row["stop_applied_receipt_order"]),
+        edit_receipt_order=_optional_int(row["edit_receipt_order"]),
         stop_button_event_id=cast("str | None", row["stop_button_event_id"]),
         redaction_pending=_ids(row["redaction_pending_json"]),
         approval_id=cast("str | None", row["approval_id"]),
@@ -388,9 +389,9 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             principal_id, reply_id, entity_name, room_id, thread_id, membership_epoch, event_id, state,
             current_span_id, last_span_id, presentation_json, frozen_display_json, possibly_shown_json,
             possibly_shown_seq, confirmed_seq, revision, legacy_pending, placeholder_only, stop_receipt_order,
-            stop_applied_receipt_order, stop_button_event_id, redaction_pending_json, owed_write_json,
-            reply_sequence, approval_id, created_at_ns, updated_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            stop_applied_receipt_order, edit_receipt_order, stop_button_event_id, redaction_pending_json,
+            owed_write_json, reply_sequence, approval_id, created_at_ns, updated_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
             event_id = excluded.event_id,
             state = excluded.state,
@@ -406,6 +407,7 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             placeholder_only = excluded.placeholder_only,
             stop_receipt_order = excluded.stop_receipt_order,
             stop_applied_receipt_order = excluded.stop_applied_receipt_order,
+            edit_receipt_order = excluded.edit_receipt_order,
             stop_button_event_id = excluded.stop_button_event_id,
             redaction_pending_json = excluded.redaction_pending_json,
             owed_write_json = excluded.owed_write_json,
@@ -434,6 +436,7 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             reply.placeholder_only,
             reply.stop_receipt_order,
             reply.stop_applied_receipt_order,
+            reply.edit_receipt_order,
             reply.stop_button_event_id,
             _ids_json(reply.redaction_pending),
             _owed_json(reply.owed_write),

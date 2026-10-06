@@ -32,14 +32,12 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY, UnreadableMatrixDelivery
 from mindroom.event_journal.replies import (
-    AppliedTransition,
     ReplyRowEnqueue,
     ReplyRowRequest,
     StopTarget,
     edit_delivery_id,
     row_new_text,
 )
-from mindroom.event_journal.replies import record_stop as record_reply_stop_in
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
@@ -150,7 +148,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.event_journal.backend import Transaction
     from mindroom.event_journal.replies import Decide, PostCommitEffect
     from mindroom.history.types import (
         CompactionLifecycleFailure,
@@ -228,15 +225,12 @@ def _refused_reply_outcome(
 
 @dataclass
 class ReplyStop:
-    """A Stop on the reply bound to one event, applied inside the turn record's Stop transaction."""
+    """What a Stop on one event reaches among the reply records, before it is recorded."""
 
-    principal_id: str
     event_id: str
     receipt_order: int
-    # What the Stop reached before the transaction: a reply, a pending create, or neither.
+    # What the Stop reached: a reply, a pending create, or neither.
     target: StopTarget
-    # Set when a reply owns the event and the transaction committed.
-    applied: AppliedTransition | None = None
 
     @property
     def pending(self) -> bool:
@@ -245,23 +239,8 @@ class ReplyStop:
 
     @property
     def owned(self) -> bool:
-        """Return whether a reply was bound to the event before the transaction."""
+        """Return whether a reply is bound to the event."""
         return self.target.reply is not None
-
-    @property
-    def turn_id(self) -> str | None:
-        """Return the turn the reply answers, for a running reply whose turn does not name its event yet."""
-        return self.target.turn_id
-
-    def __call__(self, transaction: Transaction, record: TurnRecord) -> None:
-        """Record the Stop on the reply, a Duplicate when a newer edit superseded it."""
-        self.applied = record_reply_stop_in(
-            transaction,
-            self.principal_id,
-            event_id=self.event_id,
-            receipt_order=self.receipt_order,
-            newer_edit=(record.latest_edit_receipt_order or 0) > self.receipt_order,
-        )
 
 
 # What a failed approval's note says.
@@ -1738,7 +1717,7 @@ class DeliveryGateway:
             await self.settle_reply_debt(handle.reply_id)
 
     async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> ReplyStop:
-        """Return the Stop on a reply that commits with the turn record's Stop.
+        """Return what a Stop on one event reaches among the reply records.
 
         A Stop on an event no reply is bound to yet, while a reply create in
         its room is unresolved, is recorded here; that create's acknowledgement
@@ -1751,23 +1730,22 @@ class DeliveryGateway:
             may_wait=may_wait,
             now_ns=time.time_ns(),
         )
-        return ReplyStop(
-            principal_id=self.deps.outbox.principal_id,
-            event_id=event_id,
-            receipt_order=receipt_order,
-            target=target,
-        )
+        return ReplyStop(event_id=event_id, receipt_order=receipt_order, target=target)
 
     async def accepts_reply_stop(self, event_id: str, room_id: str) -> bool:
         """Return whether a Stop reaction on this event reaches a running reply or a pending create."""
         return await self.deps.outbox.replies.accepts_stop(event_id, room_id)
 
     async def finish_reply_stop(self, stop: ReplyStop) -> bool:
-        """Run what a committed Stop left, cancelling the span or owing the note; return whether a reply owns it."""
-        if stop.applied is None:
+        """Record a Stop on the reply it reaches and run what it left, cancelling the span or owing the note.
+
+        Returns whether a reply owns the event.
+        """
+        applied = await self.deps.outbox.replies.record_stop(stop.event_id, stop.receipt_order)
+        if applied is None:
             return False
-        await self._run_reply_effects(stop.applied.post_commit)
-        reply = stop.applied.transition.reply
+        await self._run_reply_effects(applied.post_commit)
+        reply = applied.transition.reply
         if reply is not None:
             await self.settle_reply_debt(reply.reply_id)
         return True

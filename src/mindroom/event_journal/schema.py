@@ -506,6 +506,8 @@ _TABLES = (
         placeholder_only BOOLEAN NOT NULL,
         stop_receipt_order BIGINT,
         stop_applied_receipt_order BIGINT,
+        -- The receipt order of the newest edit a regeneration of this reply answers; an older Stop does not stop it.
+        edit_receipt_order BIGINT,
         stop_button_event_id TEXT,
         redaction_pending_json TEXT,
         -- A durable write a transition decided without a payload; rendered

@@ -211,6 +211,8 @@ class Reply:
     placeholder_only: bool = False
     stop_receipt_order: int | None = None
     stop_applied_receipt_order: int | None = None
+    # The newest edit a regeneration of this reply answers; a Stop older than it does not stop the regeneration.
+    edit_receipt_order: int | None = None
     stop_button_event_id: str | None = None
     redaction_pending: tuple[str, ...] = ()
     approval_id: str | None = None
@@ -273,17 +275,7 @@ class WakeApproval:
     approval_id: str
 
 
-@dataclass(frozen=True, slots=True)
-class TransferStop:
-    """In the transaction: copy the reply's Stop onto the turn record of its source; after commit, publish it."""
-
-    receipt_order: int
-    target_event_id: str
-    # The turn the reply answers, filled in by the transaction that copies the Stop.
-    turn_id: str | None = None
-
-
-type Effect = SettleSources | FenceApproval | CancelSpan | WakeApproval | TransferStop
+type Effect = SettleSources | FenceApproval | CancelSpan | WakeApproval
 
 
 @dataclass(frozen=True, slots=True)
@@ -659,7 +651,10 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
     if reply is None:
         if request.driving_edit_id is not None:
             # A reply older than the records: the handled-turn ledger named its event.
-            historical = _new_reply(request, state=ReplyState.COMPLETED, event_id=request.historical_event_id)
+            historical = replace(
+                _new_reply(request, state=ReplyState.COMPLETED, event_id=request.historical_event_id),
+                edit_receipt_order=context.edit_receipt_order,
+            )
             span = _new_span(
                 request,
                 historical,
@@ -677,7 +672,10 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
     last = context.last_span
     if request.driving_edit_id is not None and (last is None or request.driving_edit_id != last.delivery_id):
         if reply.state is ReplyState.GONE:
-            created = _new_reply(request, state=ReplyState.ACTIVE)
+            created = replace(
+                _new_reply(request, state=ReplyState.ACTIVE),
+                edit_receipt_order=context.edit_receipt_order,
+            )
             span = _new_span(request, created, SpanKind.REGENERATION)
             return claimed(_make_current(created, span, request.now_ns), span)
         rollback = _rollback_of(reply)
@@ -692,7 +690,10 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         # The regeneration's sources are its own: no approval holds them,
         # including one a stopped in-place wait left still settling.
         reply = replace(reply, approval_id=None)
-        next_reply = reply
+        next_reply = replace(
+            reply,
+            edit_receipt_order=max(reply.edit_receipt_order or 0, context.edit_receipt_order or 0) or None,
+        )
         if (
             context.edit_receipt_order is not None
             and reply.stop_receipt_order is not None
@@ -1529,17 +1530,6 @@ def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> T
         reply=cancelled,
         spans=spans,
         effects=(SettleSources(reply.last_span_id),),
-    )
-
-
-def apply_pending_stop(reply: Reply, current: Span | None, facts: StopFacts, *, now_ns: int) -> Transition:
-    """Apply a Stop that waited for its target event to be bound (``create_sent``)."""
-    transition = stop(reply, current, facts, now_ns=now_ns)
-    if transition.reply is None or not transition.applied:
-        return transition
-    return replace(
-        transition,
-        effects=(*transition.effects, TransferStop(facts.receipt_order, transition.reply.event_id or "")),
     )
 
 

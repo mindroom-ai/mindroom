@@ -573,7 +573,6 @@ class ResponseRequest:
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
     # Records and settles a turn that ended before any reply span existed to settle it.
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
-    on_user_stop_handled: Callable[[str, int], Awaitable[None]] | None = None
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
     # Set only after another durable owner can finish the source.
     source_handoff: asyncio.Event | None = None
@@ -3931,26 +3930,6 @@ class ResponseRunner:
             redacted_history_events=partial(self.deps.redacted_history_events, runtime.resolved_target),
         )
 
-    async def _record_user_stop_handled(
-        self,
-        request: ResponseRequest,
-        final_outcome: FinalDeliveryOutcome,
-        *,
-        cancel_source: str | None,
-        source_handled: bool,
-    ) -> None:
-        """Make explicit user-stop settlement durable before releasing the response lock."""
-        on_user_stop_handled = request.on_user_stop_handled
-        handle = current_span()
-        if not source_handled or cancel_source != "user_stop" or on_user_stop_handled is None or handle is None:
-            return
-        response_event_id = final_outcome.final_visible_event_id
-        assert response_event_id is not None
-        reply = await handle.runtime.store.replies.load(handle.reply_id)
-        if reply is None or reply.stop_applied_receipt_order is None:
-            return
-        await on_user_stop_handled(response_event_id, reply.stop_applied_receipt_order)
-
     async def _request_remains_authorized(
         self,
         request: ResponseRequest,
@@ -4439,12 +4418,6 @@ class ResponseRunner:
             or cancel_source is None
             or cancel_source == "user_stop"
             or _interruption_note_landed(current_span())
-        )
-        await self._record_user_stop_handled(
-            request,
-            final_outcome,
-            cancel_source=cancel_source,
-            source_handled=source_handled,
         )
         if deferred_error is not None:
             if source_handled and request.on_deferred_outcome_handled is not None:

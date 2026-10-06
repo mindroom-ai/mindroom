@@ -1847,32 +1847,6 @@ async def test_unsettled_cancellation_leaves_interrupted_edit_uncommitted(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_user_stop_durably_commits_the_edit_revision_before_generation_returns(tmp_path: Path) -> None:
-    """A stopped edit must not become eligible for regeneration after a crash."""
-    record = _turn_record()
-    harness = _harness(tmp_path, turn_record=record)
-
-    async def stop(request: ResponseRequest) -> str:
-        assert request.on_user_stop_handled is not None
-        await request.on_user_stop_handled(NEW_RESPONSE_EVENT_ID, 2)
-        return NEW_RESPONSE_EVENT_ID
-
-    harness.generate_response.side_effect = stop
-    event, event_info = _edit_event(new_body="stop this revision")
-
-    await _handle_edit(harness, event, event_info)
-
-    harness.turn_store.record_turn.assert_awaited_once()
-    stopped_record = harness.turn_store.record_turn.call_args.args[0]
-    assert stopped_record.response_event_id == NEW_RESPONSE_EVENT_ID
-    assert stopped_record.source_event_revisions == {
-        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
-    }
-    assert stopped_record.user_stop_receipt_order == 2
-    assert stopped_record.user_stop_settled_receipt_order == 2
-
-
-@pytest.mark.asyncio
 async def test_durable_user_stop_suppresses_preceding_edit_recovery(tmp_path: Path) -> None:
     """An edit accepted before STOP must not regenerate after the process restarts."""
     record = replace(

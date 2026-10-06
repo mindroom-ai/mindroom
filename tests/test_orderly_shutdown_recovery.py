@@ -403,39 +403,6 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
 
 
 @pytest.mark.asyncio
-async def test_explicit_stop_keeps_edited_revision_terminal_after_restart(
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-) -> None:
-    """A durable user STOP remains final even when the exact edit callback is replayed."""
-    store = await _store(journal_store, agent_name=AGENT_NAME)
-    await store.record_responded_turn(_turn_record())
-    harness = _harness(tmp_path, turn_record=None)
-    generations = 0
-
-    async def stop(request: ResponseRequest) -> str:
-        nonlocal generations
-        generations += 1
-        assert request.on_user_stop_handled is not None
-        await request.on_user_stop_handled(NEW_RESPONSE_EVENT_ID, 2)
-        return NEW_RESPONSE_EVENT_ID
-
-    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store, generate_response=stop)
-    event, event_info = _edit_event()
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID)
-    _reset_handled_turn_ledger_runtime()
-    reopened = await _store(journal_store, agent_name=AGENT_NAME)
-    stopped_record = reopened.get_turn_record(ORIGINAL_EVENT_ID)
-    assert stopped_record is not None
-    assert stopped_record.completed
-    assert stopped_record.user_stop_receipt_order == 2
-    assert stopped_record.source_event_revisions[ORIGINAL_EVENT_ID] == (1_000_001, EDIT_EVENT_ID)
-    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=reopened)
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID)
-    assert generations == 1
-
-
-@pytest.mark.asyncio
 async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR0915
     tmp_path: Path,
     journal_store: EventJournalStore,

@@ -917,7 +917,7 @@ async def _blocked_stream(
 
 
 async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_path: Path) -> None:
-    """The reply's records take the Stop at once; the turn names the reply's event and its Stop, already settled."""
+    """The reply's records take the Stop at once, without waiting for the conversation or naming it on the turn."""
     bot = await _streaming_bot(tmp_path)
     response, _streaming = await _blocked_stream(bot)
     reply = await _reply(bot)
@@ -925,10 +925,7 @@ async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_
     await _pending_turn(bot)
 
     assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
-    stopped = bot._turn_store.get_turn_record("$event")
-    assert stopped is not None
-    assert stopped.response_event_id == reply.event_id
-    assert stopped.user_stop_settled_receipt_order == 7
+    assert (await _reply(bot)).stop_receipt_order == 7
 
     await asyncio.wait_for(response, timeout=5)
     reply = await _reply(bot)
@@ -936,23 +933,34 @@ async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_
     assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
 
 
-async def test_a_stopped_reply_reports_its_stop_to_its_turn(tmp_path: Path) -> None:
-    """The request learns which Stop ended its reply, so its turn records that Stop as handled."""
+async def test_a_stop_on_the_new_reply_of_a_regeneration_stops_it(tmp_path: Path) -> None:
+    """A regeneration of a reply that ended gone answers in a new reply; a Stop on that reply stops it."""
     bot = await _streaming_bot(tmp_path)
-    handled: list[tuple[str, int]] = []
+    hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
+    apply = hooks._apply_before_response
 
-    async def record_user_stop(event_id: str, receipt_order: int) -> None:
-        handled.append((event_id, receipt_order))
+    async def suppressed(**kwargs: object) -> ResponseDraft:
+        draft = await apply(**kwargs)  # type: ignore[arg-type]
+        draft.suppress = True
+        return draft
 
-    request = replace(_plain_request(_target()), on_user_stop_handled=record_user_stop)
-    response, _streaming = await _blocked_stream(bot, request=request)
-    reply = await _reply(bot)
-    assert reply.event_id is not None
-    stop = await _stop(bot, reply.event_id, 7)
+    with patch.object(hooks, "_apply_before_response", new=suppressed):
+        await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden."))
+    gone = await _reply(bot)
+    assert gone.state is rl.ReplyState.GONE
+    await _admit_edit(bot)
+    response, _streaming = await _blocked_stream(bot, request=_regeneration(answer_event_id="$sent1"))
+    regenerated = await bot._reply_runtime.store.replies.for_sources(("$edit",))
+    assert regenerated is not None
+    assert regenerated.reply_id != gone.reply_id
+    assert regenerated.event_id is not None
+
+    assert await bot._user_stop_reconciler.finalize(regenerated.event_id, 9, room_id=_target().room_id)
+
     await asyncio.wait_for(response, timeout=5)
-    assert await asyncio.wait_for(stop, timeout=5)
-
-    assert handled == [(reply.event_id, 7)]
+    stopped = await bot._reply_runtime.store.replies.load(regenerated.reply_id)
+    assert stopped is not None
+    assert stopped.state is rl.ReplyState.CANCELLED
 
 
 def _stop_reaction(reacts_to: str) -> MagicMock:
@@ -1007,11 +1015,8 @@ async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_p
     reply = await _reply(bot)
     assert reply.event_id == "$sent1"
     assert reply.state is rl.ReplyState.CANCELLED
+    assert reply.stop_receipt_order == 7
     assert not reply.unapplied_stop
-    stopped = bot._turn_store.get_turn_record("$event")
-    assert stopped is not None
-    assert stopped.user_stop_receipt_order == 7
-    assert stopped.response_event_id == "$sent1"
 
 
 async def test_a_stop_reaches_a_reply_whose_attempt_created_its_event(tmp_path: Path) -> None:
@@ -1058,9 +1063,6 @@ async def test_a_stop_after_the_answer_was_written_changes_nothing(tmp_path: Pat
     assert reply.presentation == answered.presentation
     assert reply.owed_write is None
     assert len(bot.client.room_send.await_args_list) == sent
-    stopped = bot._turn_store.get_turn_record("$event")
-    assert stopped is not None
-    assert stopped.user_stop_settled_receipt_order == 7
 
 
 async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tmp_path: Path) -> None:

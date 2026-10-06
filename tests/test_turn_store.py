@@ -71,10 +71,9 @@ from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     from mindroom.event_journal import EventJournalStore
-    from mindroom.event_journal.backend import Transaction
 
 
 async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent") -> TurnStore:
@@ -201,7 +200,6 @@ async def test_load_turn_waits_for_requested_provisional_write_without_blocking_
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         if "$event" in index_event_ids:
             write_started.set()
@@ -211,7 +209,6 @@ async def test_load_turn_waits_for_requested_provisional_write_without_blocking_
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
-            also=also,
         )
 
     with (
@@ -277,7 +274,6 @@ async def test_load_turn_imports_recovery_after_requested_provisional_write_fail
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         nonlocal selected_write
         if selected_write and "$event" in index_event_ids:
@@ -291,7 +287,6 @@ async def test_load_turn_imports_recovery_after_requested_provisional_write_fail
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
-            also=also,
         )
 
     with (
@@ -339,7 +334,6 @@ async def test_cancelling_provisional_load_does_not_cancel_owning_write(
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-        also: Callable[[Transaction], object] | None = None,
     ) -> str | None:
         write_started.set()
         await release_write.wait()
@@ -348,7 +342,6 @@ async def test_cancelling_provisional_load_does_not_cancel_owning_write(
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
-            also=also,
         )
 
     with (
@@ -731,92 +724,6 @@ async def _prepare_redaction(
         store.deps.state_writer.create_storage(None, scope=HistoryScope(kind="agent", scope_id="agent")),
     )
     return should_suppress
-
-
-@pytest.mark.asyncio
-async def test_user_stop_durably_terminates_the_turn_that_owns_the_response(journal_store: EventJournalStore) -> None:
-    """A user stop must become durable turn truth before dispatch settles it."""
-    store = await _store(journal_store)
-    target = MessageTarget.resolve("!room:example.org", None, "$source")
-    pending = TurnRecord.create(
-        ["$source"],
-        response_event_id="$reply",
-        completed=False,
-        response_owner="agent",
-        requester_id="@user:example.org",
-        conversation_target=target,
-    )
-    await store.record_pending_turn(pending)
-
-    stop_receipt_order = 2
-    stopped = await store.record_user_stopped_response("$reply", stop_receipt_order)
-
-    assert stopped is not None
-    assert stopped.completed is True
-    assert stopped.user_stop_receipt_order == stop_receipt_order
-    assert stopped.user_stop_settled_receipt_order is None
-    assert store.is_handled("$source") is True
-    retried = await store.record_user_stopped_response("$reply", stop_receipt_order)
-    assert retried is not None
-    assert retried.completed is True
-    assert retried.user_stop_receipt_order == stop_receipt_order
-    assert retried.user_stop_settled_receipt_order is None
-
-    finalized = await store.record_user_stopped_response(
-        "$reply",
-        stop_receipt_order,
-        delivery_settled=True,
-    )
-    assert finalized is not None
-    assert finalized.user_stop_settled_receipt_order == stop_receipt_order
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_receipt_order", [0, -1, True])
-async def test_user_stop_rejects_invalid_receipt_order(
-    journal_store: EventJournalStore,
-    invalid_receipt_order: int,
-) -> None:
-    """STOP ordering requires a real positive durable admission sequence."""
-    with pytest.raises(ValueError, match="receipt order must be positive"):
-        await (await _store(journal_store)).record_user_stopped_response("$reply", invalid_receipt_order)
-
-
-@pytest.mark.asyncio
-async def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(
-    journal_store: EventJournalStore,
-) -> None:
-    """A response queued before STOP must recheck terminal truth after taking its lock."""
-    store = await _store(journal_store)
-    target = MessageTarget.resolve("!room:example.org", None, "$source")
-    pending = TurnRecord.create(
-        ["$source"],
-        response_event_id="$reply",
-        completed=False,
-        response_owner="agent",
-        requester_id="@user:example.org",
-        conversation_target=target,
-    )
-    await store.record_pending_turn(pending)
-    assert (
-        await store.prepare_pending_response_source(
-            target=target,
-            source_event_ids=("$source",),
-            terminal_source_event_ids=("$source",),
-        )
-        is False
-    )
-
-    await store.record_user_stopped_response("$reply", 2)
-
-    assert (
-        await store.prepare_pending_response_source(
-            target=target,
-            source_event_ids=("$source",),
-            terminal_source_event_ids=("$source",),
-        )
-        is True
-    )
 
 
 @pytest.mark.asyncio

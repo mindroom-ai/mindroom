@@ -16,7 +16,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime, with_user_stop
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LegacyReplyReads
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -30,7 +30,6 @@ from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError
-from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from tests.conftest import (
     make_relation_lookup,
@@ -307,7 +306,6 @@ async def test_a_newer_requester_message_supersedes_the_recovered_reply(  # noqa
         (True, "none"),
         (True, "after_retirement"),
         (True, "before_detachment"),
-        (True, "stop_before_detachment"),
     ],
 )
 async def test_deleted_acknowledged_initial_remains_cleanup_debt(
@@ -362,10 +360,6 @@ async def test_deleted_acknowledged_initial_remains_cleanup_debt(
         visible.pop(event_id, None)
         if terminal_write == "before_detachment":
             await store.record_responded_turn(replace(stale_record, response_event_id=INITIAL))
-        elif terminal_write == "stop_before_detachment":
-            stopped = await store.record_user_stopped_response(INITIAL, 20)
-            assert stopped is not None
-            assert stopped.completed
         return True
 
     gateway.deps.redact_message_event.side_effect = redact
@@ -380,26 +374,12 @@ async def test_deleted_acknowledged_initial_remains_cleanup_debt(
     assert visible == {}
     assert store.is_revision_redacted(SOURCE)
     assert store.get_turn_record(SOURCE).response_event_id is None
-    assert store.get_turn_record(SOURCE).completed is terminal_write.startswith("stop_")
+    assert not store.get_turn_record(SOURCE).completed
     _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_database())
     assert reopened.get_turn_record(SOURCE).response_event_id is None
-    assert reopened.get_turn_record(SOURCE).completed is terminal_write.startswith("stop_")
+    assert not reopened.get_turn_record(SOURCE).completed
     assert reopened.get_turn_record(SOURCE).redacted_source_event_ids == (SOURCE,)
-    if terminal_write.startswith("stop_"):
-        await _assert_removed_stop_replay(reopened, gateway)
-
-
-async def _assert_removed_stop_replay(store: TurnStore, gateway: DeliveryGateway) -> None:
-    """A replayed STOP on the removed response changes nothing, since no reply owns it."""
-    record = store.get_turn_record(SOURCE)
-    assert record.user_stop_receipt_order == 20
-    assert record.user_stop_settled_receipt_order == 20
-    reconciler = UserStopReconciler(UserStopReconcilerDeps(store, gateway))
-    with patch("mindroom.delivery_gateway.edit_message_outcome", new=AsyncMock()) as edit:
-        assert not await reconciler.finalize(INITIAL, 20, room_id=ROOM_ID)
-    edit.assert_not_awaited()
-    assert store.get_turn_record(SOURCE) == record
 
 
 @pytest.mark.parametrize("own_final", [False, True])
@@ -672,7 +652,9 @@ async def test_recovery_respects_existing_source_and_final_owners(  # noqa: C901
         if owner == "completed_final":
             await worker.flush(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
     if owner == "stop":
-        await store.record_user_stopped_response(INITIAL, 20, delivery_settled=True)
+        stopped_turn = store.get_turn_record(SOURCE)
+        assert stopped_turn is not None
+        await store.record_turn(with_user_stop(stopped_turn, INITIAL, 20, delivery_settled=True))
         visible[INITIAL] = "Stopped by user"
         await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
         await store.mark_source_redacted(SOURCE, room_id=ROOM_ID)

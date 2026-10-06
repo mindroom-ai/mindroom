@@ -638,12 +638,6 @@ class AgentBot:
             generation=self._approval_runtime_generation,
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
-            record_stop=lambda stop: self._turn_store.record_user_stopped_response(
-                stop.target_event_id,
-                stop.receipt_order,
-                delivery_settled=True,
-                turn_id=stop.turn_id,
-            ),
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
             clean_up_superseded=self._clean_up_superseded_approval,
         )

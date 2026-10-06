@@ -17,7 +17,7 @@ from mindroom.approval_manager import initialize_approval_store
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
-from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime, with_user_stop
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -263,7 +263,10 @@ async def _paused_case(  # noqa: PLR0915
         ),
     )
     if stopped:
-        await store.record_user_stopped_response(answer_id, 1)
+        # A Stop an earlier release recorded on the turn, before the edit.
+        stopped_turn = store.get_turn_record(source_id)
+        assert stopped_turn is not None
+        await store.record_turn(with_user_stop(stopped_turn, answer_id, 1))
     principal = journal_store.principal("general@@mindroom_general:localhost")
     original = nio.RoomMessageText.from_dict(
         {
@@ -642,10 +645,10 @@ class TestEditApprovalOwnership:
             )
 
         await case.journal_store.backend.write(remove_snapshot_routing)
-        sends = case.bot.client.room_send.await_count
         await case.stop()
         await case.assert_stopped_edit_settled()
-        assert case.bot.client.room_send.await_count == sends
+        # The reply learns the newer edit when its regeneration claims it, so the older
+        # Stop ends the paused reply; the newer edit still regenerates it.
         assert await case.principal.approval_continuation_for_source("$newer-edit") is None
         assert await case.principal.is_pending("$newer-edit")
 

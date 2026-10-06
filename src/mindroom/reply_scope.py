@@ -188,8 +188,6 @@ class ReplyRuntime:
     entity_name: str
     generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Tells the turn ledger's cache about a Stop an acknowledgement already wrote.
-    record_stop: Callable[[rl.TransferStop], Awaitable[object]]
     # Tells the turn ledger about a turn a reply's settlement already recorded answered.
     complete_turn: Callable[[TurnRecord], Awaitable[object]]
     # Starts the cleanup of an approval an edit superseded, outside any conversation.
@@ -211,9 +209,7 @@ class ReplyRuntime:
         in the span's own task, whose next await the cancel interrupts.
         """
         for effect in effects:
-            if isinstance(effect, rl.TransferStop):
-                await self.record_stop(effect)
-            elif isinstance(effect, TurnCompleted):
+            if isinstance(effect, TurnCompleted):
                 await self.complete_turn(effect.record)
             elif isinstance(effect, rl.WakeApproval):
                 await self._wake_fenced_approval(effect.approval_id)

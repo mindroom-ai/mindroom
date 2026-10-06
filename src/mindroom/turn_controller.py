@@ -117,7 +117,7 @@ from mindroom.turn_origin import (
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
-from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
+from mindroom.turn_store import record_deferred_outcome_response
 from mindroom.voice_readiness import VoiceReadiness
 
 if TYPE_CHECKING:
@@ -1771,7 +1771,7 @@ class TurnController:
             attachment_ids=selection_attachment_ids,
         )
 
-        record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
+        record_deferred_outcome = self._build_response_settlement_callbacks(
             handled_turn=selection_handled_turn,
         )
 
@@ -1804,7 +1804,6 @@ class TurnController:
                     thread_history=history,
                 ),
                 on_deferred_outcome_handled=record_deferred_outcome,
-                on_user_stop_handled=record_user_stop,
                 source_handoff=source_handoff,
             ),
         )
@@ -1925,11 +1924,8 @@ class TurnController:
         self,
         *,
         handled_turn: TurnRecord,
-    ) -> tuple[
-        Callable[[str], Awaitable[None]],
-        Callable[[str, int], Awaitable[None]],
-    ]:
-        """Build callbacks that record a deferred handled outcome or a user stop."""
+    ) -> Callable[[str], Awaitable[None]]:
+        """Build the callback that records a deferred handled outcome."""
 
         async def record_deferred_outcome(response_event_id: str) -> None:
             await record_deferred_outcome_response(
@@ -1938,15 +1934,7 @@ class TurnController:
                 response_event_id,
             )
 
-        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
-            await record_user_stop_terminal(
-                self.deps.turn_store,
-                handled_turn,
-                response_event_id,
-                stop_receipt_order,
-            )
-
-        return record_deferred_outcome, record_user_stop
+        return record_deferred_outcome
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -2051,7 +2039,7 @@ class TurnController:
                         self.deps.runtime_paths,
                     )
 
-            record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
+            record_deferred_outcome = self._build_response_settlement_callbacks(
                 handled_turn=handled_turn,
             )
 
@@ -2100,7 +2088,6 @@ class TurnController:
                     on_source_turn_suppressed=settle_redacted_sources,
                     on_deferred_outcome_handled=record_deferred_outcome,
                     on_no_response_handled=record_no_response,
-                    on_user_stop_handled=record_user_stop,
                     on_visible_response=record_visible_response,
                 )
                 if action.kind == "team":
