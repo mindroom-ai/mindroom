@@ -14,6 +14,7 @@ import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -161,6 +162,15 @@ def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
     return UnfinishedStreamedReply(visible_text=work.text, tool_trace=work.tool_trace)
 
 
+class ClaimRefused(Enum):
+    """Why a claim opened no span."""
+
+    # Earlier writes of the reply are unresolved; their resolution retries the sources.
+    DEFERRED = "deferred"
+    # A retried regeneration whose edit the reply already answered.
+    ANSWERED = "answered"
+
+
 @dataclass
 class ReplyRuntime:
     """One bot instance's owner of its replies' claims and span exits."""
@@ -257,8 +267,8 @@ class ReplyRuntime:
         approval_id: str | None = None,
         approval_generation: int | None = None,
         interactive_span_id: str | None = None,
-    ) -> SpanHandle | None:
-        """Claim the reply one span answers; ``None`` when the claim must wait for earlier writes."""
+    ) -> SpanHandle | ClaimRefused:
+        """Claim the reply one span answers, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
         request = replace(
             await self.claim_request(
@@ -292,14 +302,16 @@ class ReplyRuntime:
             raise
         transition = applied.transition
         if transition.claimed is None or transition.claimed.span_id != request.span_id:
-            # Deferred, or continuing the span an interactive selection acknowledged.
+            # Refused, or continuing the span an interactive selection acknowledged.
             self.spans.forget(request.span_id)
+        if transition.outcome is rl.Outcome.DUPLICATE:
+            return ClaimRefused.ANSWERED
         if transition.claimed is None or transition.reply is None:
             # Earlier writes of this reply are unresolved; their resolution
             # wakes these sources instead of waiting under the conversation lock.
             assert transition.reply is not None, "only a reply with earlier writes defers a claim"
             await self._wait_for_rows(transition.reply.reply_id, room_id, sources.pending)
-            return None
+            return ClaimRefused.DEFERRED
         return _handle_for(self, transition.reply, transition.claimed, empty)
 
     async def claim_request(

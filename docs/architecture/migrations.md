@@ -95,7 +95,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J11 | Isolated | [`matrix/legacy_sync_continuity.py`][legacy-sync] converts valid v2/v3 join fences to current v4. |
 | J12 | Removed/superseded | [The upgrade fixture][pre-journal-test] confirms old event-cache and dispatch-obligation files have no runtime reader and remain untouched. |
 | J13 | Current behavior | [`event_journal_open.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
-| J14 | Current behavior | [`sync_restart_retry.py`][restart-retry] and [`visible_response_reconciliation.py`][visible-recovery] keep current replay and visible-response safety. |
+| J14 | Current behavior | Reply claims in [`reply_lifecycle.py`][reply-lifecycle] decide replays and retried regenerations; [`visible_response_reconciliation.py`][visible-recovery] keeps visible-response safety. |
 | J15 | Isolated | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] recognizes approvals stranded by historical INITIAL retirement; current owners retain consent, failure handling, and settlement. |
 | J16 | Current behavior | [`turn_store.py`][turn-store] does not migrate ledger tombstones that carry no room, so one that v2026.10.30 or earlier wrote for a redaction delivered in another room still marks its event handled and blocks replies in threads that contain it until ledger retention drops it. |
 | J17 | Current behavior | [`handled_turns.py`][handled] ignores the redaction cleanup obligations that v2026.10.145 or earlier stored in turn records; responses derive history cleanup from the ledger tombstones those records still carry. |
@@ -295,7 +295,7 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
 [legacy-replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/legacy_replay_store.py
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
-[restart-retry]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/sync_restart_retry.py
+[reply-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/reply_lifecycle.py
 [saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py

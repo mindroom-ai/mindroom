@@ -102,6 +102,7 @@ from mindroom.reply_presentation import (
     note_segment,
 )
 from mindroom.reply_scope import (
+    ClaimRefused,
     ReplyWriteRefusedError,
     SpanHandle,
     SpanSlot,
@@ -146,7 +147,6 @@ from mindroom.streaming import (
     clean_partial_reply_text,
     strip_visible_tool_markers,
 )
-from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
     TeamMode,
     continue_paused_team_run,
@@ -3349,8 +3349,9 @@ class ResponseRunner:
     ) -> ResponseRequest | None:
         """Claim the reply this request answers, after main's first source gate passed (PR-1.md §6.1).
 
-        ``None`` means earlier writes of the reply are unresolved; the claim
-        retries the sources once they resolve.
+        ``None`` means no span opened: earlier writes of the reply are
+        unresolved, and the claim retries the sources once they resolve; or a
+        retried regeneration finds its edit already answered.
         """
         replies = self.deps.replies
         slot = current_slot()
@@ -3366,7 +3367,13 @@ class ResponseRunner:
             # settle with a dispatch error instead of retrying forever.
             self.deps.logger.exception("reply_claim_invalid", source_event_id=request.response_envelope.source_event_id)
             raise PostLockRequestPreparationError from error
-        if handle is None:
+        if handle is ClaimRefused.ANSWERED:
+            self.deps.logger.info(
+                "sync_restart_retry_skipped",
+                source_event_id=request.response_envelope.source_event_id,
+            )
+            return None
+        if handle is ClaimRefused.DEFERRED:
             # The reply's earlier writes resolve first, and their resolution
             # retries these sources: they stay pending, owned by that wake.
             if request.source_handoff is not None:
@@ -3388,7 +3395,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         history_scope: HistoryScope,
-    ) -> SpanHandle | None:
+    ) -> SpanHandle | ClaimRefused:
         regeneration = request.prepared_edit_record is not None
         return await replies.claim(
             delivery_id=request.response_envelope.source_event_id,
@@ -4046,42 +4053,16 @@ class ResponseRunner:
             await request.on_source_turn_suppressed()
         return False
 
-    async def _locked_turn_can_begin(
-        self,
-        request: ResponseRequest,
-        *,
-        history_scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity,
-        reply_entity_names: tuple[str, ...] = (),
-    ) -> bool:
-        """Require current replay identity and requester authority under the lock."""
-        if not self._sync_restart_retry_is_current(
-            request,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-        ):
-            return False
-        return await self._request_remains_authorized(
-            request,
-            reply_entity_names=reply_entity_names,
-        )
-
     async def _admit_locked_turn(
         self,
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity,
         reply_entity_names: tuple[str, ...] = (),
     ) -> ResponseRequest | None:
-        """Pass locked replay, authorization, and terminal-source gates before setup."""
-        if not await self._locked_turn_can_begin(
-            request,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-            reply_entity_names=reply_entity_names,
-        ):
+        """Pass locked authorization and terminal-source gates, then claim the reply, before setup."""
+        if not await self._request_remains_authorized(request, reply_entity_names=reply_entity_names):
             return None
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
@@ -4328,7 +4309,6 @@ class ResponseRunner:
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
-            execution_identity=execution_identity,
             reply_entity_names=reply_entity_names,
         )
         if admitted_request is None:
@@ -4341,44 +4321,6 @@ class ResponseRunner:
             placeholder_message=placeholder_message,
             early_placeholder_state=early_placeholder_state,
         )
-
-    def _sync_restart_retry_is_current(
-        self,
-        request: ResponseRequest,
-        *,
-        history_scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity,
-    ) -> bool:
-        """Fail closed unless persisted history still ends in this retry's interrupted source."""
-        source_event_id = request.sync_restart_retry_source_event_id
-        if source_event_id is None:
-            return True
-
-        try:
-            storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
-            try:
-                session = storage.get_session(
-                    request.response_envelope.target.session_id,
-                    self.deps.state_writer.session_type_for_scope(history_scope),
-                )
-                should_retry = isinstance(session, AgentSession | TeamSession) and interrupted_source_needs_retry(
-                    session.runs or (),
-                    scope=history_scope,
-                    source_event_id=source_event_id,
-                )
-            finally:
-                storage.close()
-        except Exception as error:
-            self.deps.logger.warning(
-                "sync_restart_retry_history_check_failed",
-                source_event_id=source_event_id,
-                scope=history_scope.key,
-                exception_type=error.__class__.__name__,
-            )
-            return False
-        if not should_retry:
-            self.deps.logger.info("sync_restart_retry_skipped", source_event_id=source_event_id)
-        return should_retry
 
     async def _finalize_pre_delivery_terminal(
         self,
@@ -4932,7 +4874,6 @@ class ResponseRunner:
             request,
             resolved_target=resolved_target,
             history_scope=session_scope,
-            execution_identity=retry_execution_identity,
             reply_entity_names=tuple(agent_names),
         )
         if admitted_request is None:
@@ -6242,7 +6183,6 @@ class ResponseRunner:
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
-            execution_identity=execution_identity,
         )
         if admitted_request is None:
             return None

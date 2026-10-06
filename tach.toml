@@ -1109,7 +1109,6 @@ visibility = [
     "mindroom.ai_runtime",
     "mindroom.history.replay",
     "mindroom.history.storage",
-    "mindroom.sync_restart_retry",
     "mindroom.skill_learning.transcript",
 ]
 
@@ -2792,7 +2791,6 @@ depends_on = [
     "mindroom.response_terminal",
     "mindroom.response_turn",
     "mindroom.streaming",
-    "mindroom.sync_restart_retry",
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.tool_system.dynamic_toolkits",
@@ -2830,7 +2828,6 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.reaction_dispatch",
     "mindroom.response_runner",
-    "mindroom.sync_restart_retry",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
     "mindroom.visible_voice_echo",
@@ -3341,20 +3338,6 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.cancellation"
 depends_on = []
-
-[[modules]]
-path = "mindroom.sync_restart_retry"
-depends_on = [
-    "mindroom.response_admission",
-    "mindroom.constants",
-    "mindroom.history_run_visibility",
-    "mindroom.history.types",
-    "mindroom.logging_config",
-]
-visibility = [
-    "mindroom.bot",
-    "mindroom.response_runner",
-]
 
 [[modules]]
 path = "mindroom.matrix.client"
@@ -4243,7 +4226,6 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
-    "mindroom.sync_restart_retry",
     "mindroom.teams",
     "mindroom.timestamp_formatting",
     "mindroom.tool_approval",

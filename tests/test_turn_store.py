@@ -3730,7 +3730,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
                     execution_identity=MagicMock(),
                 )
 
-        with patch.object(runner, "_locked_turn_can_begin", AsyncMock(return_value=True)):
+        with patch.object(runner, "_request_remains_authorized", AsyncMock(return_value=True)):
             task = asyncio.create_task(prepare_locked())
             await waiting.wait()
             runner.deps.resolver.fetch_thread_history = AsyncMock(

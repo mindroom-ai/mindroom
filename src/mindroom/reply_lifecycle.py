@@ -682,6 +682,15 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
             span,
         )
 
+    if (
+        request.driving_edit_id is not None
+        and last is not None
+        and last.ended
+        and last.outcome not in {SpanOutcome.RELEASED, SpanOutcome.LOST, SpanOutcome.SUPERSEDED}
+    ):
+        # A retry of the edit the last span already answered, as a sync
+        # restart retries a regeneration that finished: nothing runs again.
+        return _unchanged(Outcome.DUPLICATE, reply)
     if reply.state is not ReplyState.ACTIVE or reply.current_span_id is not None or last is None or not last.ended:
         msg = f"Reply {reply.reply_id} in state {reply.state} cannot be claimed again"
         raise _invalid(msg)

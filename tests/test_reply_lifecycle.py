@@ -241,6 +241,37 @@ def test_regeneration_rerun_keeps_its_rollback() -> None:
     assert rerun.claimed.rollback == regen.claimed.rollback
 
 
+@pytest.mark.parametrize(
+    ("outcome", "state"),
+    [
+        (SpanOutcome.COMPLETED, ReplyState.COMPLETED),
+        (SpanOutcome.CANCELLED, ReplyState.CANCELLED),
+        (SpanOutcome.FAILED, ReplyState.FAILED),
+    ],
+)
+def test_a_retried_regeneration_its_reply_already_answered_is_a_duplicate(
+    outcome: SpanOutcome,
+    state: ReplyState,
+) -> None:
+    """A retry of the edit the reply's last span answered runs nothing again; an interrupted one re-runs."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    reply = replace(reply, state=ReplyState.COMPLETED)
+    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regen.reply is not None
+    assert regen.claimed is not None
+    answered, last = _ended(regen.reply, regen.claimed, outcome)
+    answered = replace(answered, state=state)
+
+    retry = rl.claim(_request("span-3", delivery_id="$edit", driving_edit_id="$edit"), _context(answered, last))
+
+    assert retry.outcome is Outcome.DUPLICATE
+    assert retry.claimed is None
+    assert retry.reply == answered
+    assert retry.spans == ()
+    assert retry.effects == ()
+
+
 def test_approval_resume_claims_the_paused_reply() -> None:
     """A resume continues the paused reply as the current span."""
     reply, span = _turn()
@@ -814,7 +845,10 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
     assert regeneration.claimed is not None
     assert regeneration.reply.approval_id is None
     answer = rl.finish(
-        regeneration.reply, regeneration.claimed, _write(regeneration.reply, ReplyState.COMPLETED), now_ns=NOW
+        regeneration.reply,
+        regeneration.claimed,
+        _write(regeneration.reply, ReplyState.COMPLETED),
+        now_ns=NOW,
     )
     assert rl.SettleSources(regeneration.claimed.span_id) in answer.effects
 
