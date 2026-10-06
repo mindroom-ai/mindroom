@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
     ReplyMembershipPendingError,
     classify_responder_candidates_from_cached_room,
     configured_responder_entities_for_room,
+    get_available_responders_in_room,
     is_sender_allowed_for_agent_reply_in_room,
+    is_sender_allowed_for_responder,
 )
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
@@ -31,6 +33,7 @@ from mindroom.hooks import (
     render_enrichment_block,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.responder_availability import (
     filter_materializable_responders,
     live_responder_entity_names,
@@ -39,6 +42,7 @@ from mindroom.responder_availability import (
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams import (
     TeamIntent,
+    TeamMemberStatus,
     TeamMode,
     TeamOutcome,
     TeamResolution,
@@ -127,11 +131,6 @@ _ROUTER_ONLY_MENTION_GUIDANCE = (
     "adaptive participation, but teams do not form automatically. In a new untagged message, "
     "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
     "agent you can tag directly."
-)
-
-_NOT_CONFIGURED_FOR_ROOM_MESSAGE = (
-    "I'm not configured for this room, so I can't answer here. "
-    "Mention an agent that is configured for this room, or ask a MindRoom administrator to add this room to my `rooms`."
 )
 
 
@@ -877,10 +876,15 @@ class TurnPolicy:
                 availability=availability,
                 available_responders_in_room=sender_visible_responders_in_room,
             )
-            team_action = self._team_response_action(
-                form_team,
-                [*available_responders_in_room, *pending_responders_in_room],
-                candidates.pending,
+            team_action = self._explain_managed_room_team_rejection(
+                self._team_response_action(
+                    form_team,
+                    [*available_responders_in_room, *pending_responders_in_room],
+                    candidates.pending,
+                ),
+                room,
+                requester_user_id,
+                available_responders_in_room,
             )
         if team_action is not None:
             return team_action
@@ -910,7 +914,12 @@ class TurnPolicy:
             ):
                 return ResponseAction(kind="individual")
             self._log_multi_agent_thread_skip(context, agent_response_decision)
-        if rejection := self._unlisted_room_mention_rejection(context, room, agent_response_decision):
+        if rejection := self._unlisted_room_mention_rejection(
+            context,
+            room,
+            agent_response_decision,
+            available_responders_in_room,
+        ):
             return rejection
         return ResponseAction(kind="individual" if agent_response_decision.should_respond else "skip")
 
@@ -919,6 +928,7 @@ class TurnPolicy:
         context: MessageContext,
         room: nio.MatrixRoom,
         agent_response_decision: AgentResponseDecision,
+        available_responders: list[MatrixID],
     ) -> ResponseAction | None:
         """Explain a direct mention that the configured room's responder boundary excludes."""
         if not context.am_i_mentioned or agent_response_decision.skip_reason != "agent_not_available":
@@ -931,7 +941,57 @@ class TurnPolicy:
         if configured_responders is None or self.deps.matrix_id in configured_responders:
             return None
         self.deps.logger.info("Rejecting mention: agent is not configured for this room", room_id=room.room_id)
-        return ResponseAction(kind="reject", rejection_message=_NOT_CONFIGURED_FOR_ROOM_MESSAGE)
+        return ResponseAction(
+            kind="reject",
+            rejection_message=managed_room_notice(available=self._display_names(available_responders)),
+        )
+
+    def _explain_managed_room_team_rejection(
+        self,
+        team_action: ResponseAction | None,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+        available_responders: list[MatrixID],
+    ) -> ResponseAction | None:
+        """Use the managed-room note when only that room's responder boundary rejected a team request."""
+        if team_action is None or team_action.kind != "reject" or team_action.form_team is None:
+            return team_action
+        rejected = [
+            member for member in team_action.form_team.member_statuses if member.status is not TeamMemberStatus.ELIGIBLE
+        ]
+        config = self.deps.runtime.config
+        configured_responders = configured_responder_entities_for_room(room, config, self.deps.runtime_paths)
+        if not rejected or configured_responders is None:
+            return team_action
+        configured_ids = {responder.full_id for responder in configured_responders}
+        joined_ids = {
+            responder.full_id for responder in get_available_responders_in_room(room, config, self.deps.runtime_paths)
+        }
+        if any(
+            member.agent.full_id in configured_ids
+            or member.agent.full_id not in joined_ids
+            or not is_sender_allowed_for_responder(
+                requester_user_id,
+                member.name,
+                room.room_id,
+                config,
+                self.deps.runtime_paths,
+                self.deps.agent_reply_memberships,
+            )
+            for member in rejected
+        ):
+            return team_action
+        return replace(
+            team_action,
+            rejection_message=managed_room_notice(
+                available=self._display_names(available_responders),
+                unavailable=[config.entity_display_name(member.name) for member in rejected],
+            ),
+        )
+
+    def _display_names(self, responders: list[MatrixID]) -> list[str]:
+        """Return the configured display names of responder Matrix IDs."""
+        return responder_display_names(responders, self.deps.runtime.config, self.deps.runtime_paths)
 
     def _has_resolved_planning_candidates(
         self,

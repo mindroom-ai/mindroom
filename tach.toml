@@ -2042,6 +2042,7 @@ path = "mindroom.bot_room_lifecycle"
 depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
+    "mindroom.managed_room_notice",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
@@ -5254,6 +5255,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.managed_room_notice"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+]
+
+[[modules]]
 path = "mindroom.turn_policy"
 depends_on = [
     "mindroom.config.participation",
@@ -5262,6 +5271,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
+    "mindroom.managed_room_notice",
     "mindroom.matrix.identity",
     "mindroom.responder_availability",
     "mindroom.runtime_protocols",

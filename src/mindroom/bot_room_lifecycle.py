@@ -13,6 +13,7 @@ import nio
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
@@ -352,6 +353,25 @@ class BotRoomLifecycle:
         msg = f"Failed to complete welcome message for {room_id}"
         raise RuntimeError(msg)
 
+    async def _send_managed_room_notice(self, room: nio.MatrixRoom, sender: str) -> None:
+        """Tell the room once that its configuration does not let this agent answer there."""
+        notice = managed_room_join_notice(
+            room,
+            agent_name=self.deps.agent_name,
+            agent_user_id=self.deps.agent_user.user_id,
+            inviter=sender,
+            config=self._config(),
+            runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.runtime.agent_reply_memberships,
+        )
+        if notice is None:
+            return
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id=None, reply_to_event_id=None, room_mode=True)
+        async with self.deps.admit_response():
+            event_id = await self.deps.send_response(target=target, response_text=notice, skip_mentions=True)
+        if event_id is None:
+            self._logger().warning("Managed room notice delivery failed", room_id=room.room_id)
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
         await self._refresh_invited_rooms()
@@ -630,6 +650,8 @@ class BotRoomLifecycle:
             self._logger().info("Joined room", room_id=room.room_id)
             self._remember_invited_room(room.room_id)
             await self._send_invite_welcome(room.room_id, sender)
+            if not joined:
+                await self._send_managed_room_notice(room, sender)
             await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:
