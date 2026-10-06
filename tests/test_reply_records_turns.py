@@ -1021,6 +1021,55 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
             await response
 
 
+async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt_showed(tmp_path: Path) -> None:
+    """A regeneration a restart stopped after it showed new text is retried, never rolled back by its re-run."""
+    old = await _streaming_bot(tmp_path)
+    await _answer(old, _plain_request(_target()), AsyncMock(return_value="First answer."))
+    await old.journal_principal().admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={},
+        ),
+    )
+    response, _streaming = await _blocked_stream(old, "New partial", _regeneration(answer_event_id="$sent1"))
+
+    async def shown() -> None:
+        while "New partial" not in _sent_bodies(old):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(shown(), timeout=5)
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._reply_runtime.start()
+    try:
+        with pytest.raises(RuntimeError, match="model down"):
+            await _answer(
+                restarted,
+                _regeneration(answer_event_id="$sent1"),
+                AsyncMock(side_effect=RuntimeError("model down")),
+            )
+
+        reply = await _reply(restarted)
+        assert reply.state is rl.ReplyState.ACTIVE
+        assert await restarted._reply_runtime.store.is_pending("$edit")
+        spans = await restarted._reply_runtime.store.replies.spans(reply.reply_id)
+        assert [(span.kind, span.outcome) for span in spans] == [
+            (rl.SpanKind.TURN, rl.SpanOutcome.COMPLETED),
+            (rl.SpanKind.REGENERATION, rl.SpanOutcome.LOST),
+            (rl.SpanKind.REGENERATION, rl.SpanOutcome.RELEASED),
+        ]
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
 async def test_a_replay_ingress_will_not_answer_ends_the_reply_a_restart_left(tmp_path: Path) -> None:
     """Ingress settling the replayed source without a turn ends that reply interrupted, its Stop button redacted."""
     old = await _streaming_bot(tmp_path)
@@ -1176,7 +1225,9 @@ async def test_a_stopped_regeneration_that_wrote_nothing_removes_its_button_as_i
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
         response, _streaming = await _blocked_stream(
-            bot, first_chunk=None, request=_regeneration(answer_event_id="$sent1")
+            bot,
+            first_chunk=None,
+            request=_regeneration(answer_event_id="$sent1"),
         )
 
         async def button() -> str:

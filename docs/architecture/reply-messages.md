@@ -15,7 +15,7 @@ This page is for contributors: it names the records, the rules that change them,
 | `reply_scope.py` | `ReplyRuntime` (one per bot instance) and `SpanHandle`: claims, span exits, write-ahead, owed writes, and the span slot child tasks share. |
 | `event_journal/reply_messages.py`, `event_journal/reply_spans.py` | Persistence of replies and spans. |
 | `event_journal/replies.py` | `ReplyStore`: each rule applied inside one database transaction, with its in-transaction effects. |
-| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies main left in flight, and the post-sync reads of what they showed. |
+| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies an earlier release left in flight, and the post-sync reads of what they showed. |
 | `stop.py` | `SpanRegistry`: the task and Agno run of each span this instance executes. |
 | `delivery_gateway.py` | Rendering and sending reply rows, owed notes, Stop buttons, and redactions. |
 

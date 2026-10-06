@@ -1282,6 +1282,67 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert after_restart.effects == (SettleSources("span-2"),)
 
 
+def _regeneration_that_showed_partial_text() -> tuple[Reply, Span]:
+    """Return a completed answer's regeneration after it wrote new text ahead, as a restart leaves it."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    reply = replace(reply, state=ReplyState.COMPLETED, presentation="answer", event_id="$reply")
+    regeneration = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regeneration.reply is not None
+    assert regeneration.claimed is not None
+    wrote = rl.write_ahead(
+        regeneration.reply,
+        regeneration.claimed,
+        shown="partial",
+        previous=None,
+        active_generation=GEN,
+        durable_write_debt=False,
+        now_ns=NOW,
+    )
+    assert wrote.reply is not None
+    return wrote.reply, regeneration.claimed
+
+
+def test_a_regeneration_a_restart_lost_after_it_wrote_keeps_what_it_showed() -> None:
+    """Once a regeneration showed new text, neither its restart nor a re-run that writes nothing puts the old answer back."""
+    reply, regeneration = _regeneration_that_showed_partial_text()
+    settled = rl.owner_lost(
+        reply,
+        regeneration,
+        rl.OwnerLostFacts(active_generation="gen-next", sources_pending=False),
+        now_ns=NOW,
+    )
+    assert settled.reply is not None
+    assert settled.reply.state is ReplyState.FAILED
+    assert settled.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_RESTART)
+
+    lost = rl.owner_lost(
+        reply,
+        regeneration,
+        rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True),
+        now_ns=NOW,
+    )
+    assert lost.reply is not None
+    waiting = _span_after(lost, "span-2")
+    rerun = rl.claim(_request("span-3", delivery_id="$edit", driving_edit_id="$edit"), _context(lost.reply, waiting))
+    assert rerun.reply is not None
+    assert rerun.claimed is not None
+    assert rerun.claimed.kind is SpanKind.REGENERATION
+    assert rerun.claimed.rollback is None
+    # A provider error before the re-run's first chunk leaves its sources for a retry.
+    failed = rl.fail(rerun.reply, rerun.claimed, None, phase="pre_delivery", now_ns=NOW)
+    assert failed.reply is not None
+    assert failed.reply.state is ReplyState.ACTIVE
+    assert failed.effects == ()
+    # A Stop ends it cancelled, below what the room shows.
+    stop = rl.stop(rerun.reply, rerun.claimed, StopFacts(9, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    cancelled = rl.stopped(stop.reply, rerun.claimed, None, now_ns=NOW)
+    assert cancelled.reply is not None
+    assert cancelled.reply.state is ReplyState.CANCELLED
+    assert cancelled.reply.owed_write == rl.OwedWrite("span-3", rl._NOTE_CANCELLED)
+
+
 def test_deleting_sources_keeps_paused_and_completed_replies() -> None:
     """Replies an approval holds and finished answers survive their sources' deletion.
 

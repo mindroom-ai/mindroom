@@ -427,12 +427,26 @@ def _had_acknowledged_write(reply: Reply, span: Span) -> bool:
 
 
 def _wrote_anything(reply: Reply, span: Span) -> bool:
-    """Return whether the span recorded any write, which Matrix may show though no confirmation says so yet.
-
-    Rules a span's own exit applies learn its last confirmation first; rules
-    applied from outside the span cannot, so they count every recorded write.
-    """
+    """Return whether the span recorded any write, which Matrix may show though no confirmation says so yet."""
     return reply.possibly_shown_seq is not None and reply.possibly_shown_seq > span.base_sequence
+
+
+def _keeps_earlier_answer(reply: Reply, span: Span, *, from_span: bool) -> bool:
+    """Return whether a regeneration ending now leaves the answer it was replacing as the room shows it.
+
+    Exits the span applies itself (``from_span``) learn its last confirmation
+    first, so only acknowledged writes count; rules applied from outside the
+    span cannot, so they count every recorded write. A regeneration claimed
+    again after an attempt that wrote carries no rollback.
+    """
+    if span.kind is not SpanKind.REGENERATION or span.rollback is None:
+        return False
+    return not (_had_acknowledged_write(reply, span) if from_span else _wrote_anything(reply, span))
+
+
+def _rollback_after(reply: Reply, last: Span) -> Rollback | None:
+    """Return the rollback a regeneration claimed again carries: none once an earlier attempt wrote."""
+    return None if _wrote_anything(reply, last) else last.rollback
 
 
 def _restore(reply: Reply, span: Span, now_ns: int) -> Reply:
@@ -699,11 +713,11 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         msg = f"Reply {reply.reply_id} in state {reply.state} cannot be claimed again"
         raise _invalid(msg)
     if last.outcome is SpanOutcome.SUPERSEDED:
-        span = _new_span(request, reply, last.kind, rollback=last.rollback)
+        span = _new_span(request, reply, last.kind, rollback=_rollback_after(reply, last))
         return claimed(_make_current(reply, span, request.now_ns), span)
     if last.outcome in {SpanOutcome.RELEASED, SpanOutcome.LOST}:
         if last.kind is SpanKind.REGENERATION:
-            span = _new_span(request, reply, SpanKind.REGENERATION, rollback=last.rollback)
+            span = _new_span(request, reply, SpanKind.REGENERATION, rollback=_rollback_after(reply, last))
         else:
             span = _new_span(request, reply, SpanKind.REPLAY)
         return claimed(_make_current(reply, span, request.now_ns), span)
@@ -918,7 +932,7 @@ def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, now_
             outcome=Outcome.APPLIED,
             reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
         )
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
+    if _keeps_earlier_answer(reply, span, from_span=True):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(reply, span, now_ns))
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.FAILED, now_ns))
 
@@ -1030,7 +1044,7 @@ def stopped(
             reply=_touch(updated, now_ns),
             spans=(_end(span, SpanOutcome.CANCELLED, now_ns),),
         )
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
+    if _keeps_earlier_answer(reply, span, from_span=True):
         # The old answer stays untouched.
         return Transition(
             outcome=Outcome.APPLIED,
@@ -1100,7 +1114,7 @@ def fail(  # noqa: C901, PLR0911
             reply=_touch(updated, now_ns),
             spans=(_end(span, SpanOutcome.FAILED, now_ns),),
         )
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
+    if _keeps_earlier_answer(reply, span, from_span=True):
         return Transition(
             outcome=Outcome.APPLIED,
             reply=_restore(reply, span, now_ns),
@@ -1164,7 +1178,7 @@ def suppress(
     if reply.placeholder_only:
         gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=(_end(span, outcome, now_ns),), effects=effects)
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
+    if _keeps_earlier_answer(reply, span, from_span=True):
         return Transition(
             outcome=Outcome.APPLIED,
             reply=_restore(updated, span, now_ns),
@@ -1534,13 +1548,7 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
     """A dispatch failed before or after a claim: the reply shows the error."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if (
-        current is not None
-        and not current.ended
-        and current.kind is SpanKind.REGENERATION
-        and current.rollback is not None
-        and not _had_acknowledged_write(reply, current)
-    ):
+    if current is not None and not current.ended and _keeps_earlier_answer(reply, current, from_span=True):
         # The old answer stays as it was.
         return Transition(
             outcome=Outcome.APPLIED,
@@ -1577,7 +1585,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     updated = _clear_current(reply, span.span_id)
     if not span.ended:
         spans = (_end(span, SpanOutcome.SUPPRESSED, now_ns),)
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _wrote_anything(reply, span):
+    if _keeps_earlier_answer(reply, span, from_span=False):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, span, now_ns), spans=spans)
     if reply.event_id is None or (reply.placeholder_only and reply.confirmed):
         gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
@@ -1653,10 +1661,9 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     regeneration = current or waiting
     if (
         regeneration is not None
-        and regeneration.kind is SpanKind.REGENERATION
+        and _keeps_earlier_answer(reply, regeneration, from_span=False)
         and regeneration.rollback is not None
         and regeneration.rollback.state in _TERMINAL_STATES
-        and not _wrote_anything(reply, regeneration)
     ):
         # The answer an edit was regenerating stands, as when the regeneration
         # fails before showing anything: a finished answer is kept.
@@ -1762,7 +1769,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
     if facts.sources_pending:
         # Replay claims it; the lost span marks where the claim continues.
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=tuple(spans))
-    if last.kind is SpanKind.REGENERATION and last.rollback is not None:
+    if _keeps_earlier_answer(reply, last, from_span=False):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, last, now_ns), spans=tuple(spans))
     if reply.event_id is None and reply.possibly_shown_seq is None:
         # It never wrote anything: a restart note would be a message of its own.

@@ -72,6 +72,7 @@ A refused database is left untouched.
 
 A PostgreSQL journal is claimed with a session advisory lock, so its connection must be direct or session-pooled; a transaction-pooling proxy cannot hold it.
 If that session is lost, MindRoom shuts down rather than keep running unclaimed; a process supervisor such as Kubernetes or systemd restarts it.
+After a runtime's host is lost without closing that session, a replacement is refused with `Another MindRoom runtime is already using this event journal` for about a minute, until PostgreSQL drops the old session; a supervisor's retries get through after that.
 
 Do not adopt just because startup refused: a connection URL that drifted to a fresh database is the common cause, and adopting would abandon the real journal's history instead of finding it.
 

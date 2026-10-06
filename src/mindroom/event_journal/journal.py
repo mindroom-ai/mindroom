@@ -1285,7 +1285,7 @@ def sources_settled_by_departure(
     )
 
 
-def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
+def _settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
     """Mark one event's semantic work terminal and release its replay payload.
 
     The payload is cleared rather than the row deleted: the row is the proof
@@ -1314,7 +1314,7 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
 def settle_many(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> None:
     """Settle several events that one terminal turn accounted for."""
     for event_id in event_ids:
-        settle(transaction, principal_id, event_id)
+        _settle(transaction, principal_id, event_id)
 
 
 def unsettled_event_ids(transaction: Transaction, principal_id: str) -> frozenset[str]:
@@ -1379,7 +1379,7 @@ def claim_semantic_consumer(
         and EventKind(row["kind"]) is EventKind.REACTION
         and int(row["membership_epoch"]) != current_membership_epoch(transaction, principal_id, row["room_id"])
     ):
-        settle(transaction, principal_id, event_id)
+        _settle(transaction, principal_id, event_id)
         return None
     return claimed
 
