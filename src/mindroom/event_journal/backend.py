@@ -52,6 +52,14 @@ class Backend(Protocol):
         """Run one shutdown handoff read independently of ordinary backlog."""
         ...
 
+    async def hold_exclusively(self, identity: str) -> bool:
+        """Claim the journal named ``identity`` for this runtime until close; ``False`` when another runtime holds it."""
+        ...
+
+    async def still_held(self) -> bool:
+        """Return whether the claim ``hold_exclusively`` took still holds."""
+        ...
+
     async def close(self) -> None:
-        """Release every connection this backend owns."""
+        """Release every connection this backend owns, and the claim."""
         ...

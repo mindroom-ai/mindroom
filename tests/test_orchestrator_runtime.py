@@ -82,6 +82,7 @@ from mindroom.orchestrator import (
     _SignalAwareUvicornServer,
     _wait_for_runtime_completion,
     _wait_for_runtime_shutdown_cleanup,
+    _watch_event_journal_hold,
     main,
 )
 from mindroom.runtime_state import (
@@ -399,6 +400,41 @@ async def test_entity_removal_recovers_original_final_before_bot_cleanup(tmp_pat
     assert ends("removed")
     assert not ends("kept")
     assert "removed" not in orchestrator.agent_bots
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_refuses_a_journal_another_runtime_holds(tmp_path: Path) -> None:
+    """Binding succeeds, but a journal another runtime claimed stops this one before any bot exists."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = MagicMock()
+    journal = MagicMock()
+    journal.hold_exclusively = AsyncMock(return_value=False)
+
+    with (
+        patch.object(orchestrator, "_shared_journal_store", return_value=journal),
+        patch("mindroom.orchestrator.bind_event_journal", new=AsyncMock(return_value="journal-identity")),
+        pytest.raises(PermanentStartupError, match="already using this event journal"),
+    ):
+        await orchestrator._bind_event_journal()
+
+    journal.hold_exclusively.assert_awaited_once_with("journal-identity")
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_loses_its_journal_stops() -> None:
+    """Once the journal's claim lapses, another runtime could take it over, so this one shuts down."""
+    orchestrator = MagicMock()
+    orchestrator.event_journal_still_held = AsyncMock(side_effect=[True, False])
+    shutdown_requested = asyncio.Event()
+
+    with patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0):
+        await asyncio.wait_for(_watch_event_journal_hold(orchestrator, shutdown_requested), timeout=5)
+
+    assert shutdown_requested.is_set()
+    assert orchestrator.event_journal_still_held.await_count == 2
 
 
 @pytest.mark.asyncio

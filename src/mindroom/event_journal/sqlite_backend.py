@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
 from .legacy_response_attempts import migrate_response_attempts
@@ -35,6 +36,7 @@ from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+    from typing import TextIO
 
     from .backend import Operation, Row
 
@@ -158,6 +160,8 @@ class SqliteBackend:
     _closed: bool = field(default=False, init=False, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
+    # The claim of one runtime on this database file, held by an open descriptor.
+    _hold: TextIO | None = field(default=None, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
     _recovery_offload: ThreadOffload = field(
@@ -440,8 +444,24 @@ class SqliteBackend:
             self._close_task = close_task
         await settled(close_task)
 
+    async def hold_exclusively(self, identity: str) -> bool:
+        """Claim this database file for one runtime; the operating system withdraws it if the process dies."""
+        del identity
+        if self._hold is None:
+            self._hold = try_exclusive_file_lock(
+                self.database_path.with_name(f"{self.database_path.name}.runtime.lock"),
+            )
+        return self._hold is not None
+
+    async def still_held(self) -> bool:
+        """Return whether this runtime holds the database; an open descriptor holds it until close."""
+        return self._hold is not None
+
     async def _finish_close(self) -> None:
         """Finish the teardown every close waiter shares."""
+        hold, self._hold = self._hold, None
+        if hold is not None:
+            release_file_lock(hold)
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:

@@ -10033,3 +10033,19 @@ class TestCrossProcessWriters:
             assert await bodies(principal) == ["$before", "$during"]
         finally:
             await store.close()
+
+
+async def test_one_runtime_holds_a_journal_at_a_time(journal_database: Callable[[], EventJournalStore]) -> None:
+    """A second runtime on the same database is refused until the first one's store closes."""
+    first = journal_database()
+    second = journal_database()
+    assert await first.hold_exclusively("journal-identity")
+    assert await first.hold_exclusively("journal-identity")
+    assert await first.still_held()
+    assert not await second.hold_exclusively("journal-identity")
+    assert not await second.still_held()
+
+    await first.close()
+
+    assert await second.hold_exclusively("journal-identity")
+    assert await second.still_held()

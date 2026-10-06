@@ -8,6 +8,7 @@ parity tests would have nothing meaningful to compare.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
@@ -83,6 +84,9 @@ class PostgresBackend:
     _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    # The session whose advisory lock claims this journal for one runtime;
+    # the server releases the lock when the session ends.
+    _hold: psycopg.Connection[tuple[Any, ...]] | None = field(default=None, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
     _recovery_offload: ThreadOffload = field(
         default_factory=lambda: ThreadOffload.serial(
@@ -266,8 +270,52 @@ class PostgresBackend:
             self._close_task = close_task
         await settled(close_task)
 
+    async def hold_exclusively(self, identity: str) -> bool:
+        """Claim the journal named ``identity`` with a session advisory lock held until close.
+
+        Every storage root bound to this database shares its identity, so a
+        second runtime against it is refused here. The lock needs a session of
+        its own, which a direct or session-pooled connection provides.
+        """
+        if self._hold is not None:
+            return True
+        key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
+
+        def take() -> psycopg.Connection[tuple[Any, ...]] | None:
+            session = psycopg.connect(self.database_url, autocommit=True)
+            try:
+                row = session.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()
+            except BaseException:
+                session.close()
+                raise
+            if row is None or row[0] is not True:
+                session.close()
+                return None
+            return session
+
+        self._hold = await asyncio.to_thread(take)
+        return self._hold is not None
+
+    async def still_held(self) -> bool:
+        """Return whether the session holding the journal's lock is still alive."""
+        session = self._hold
+        if session is None:
+            return False
+
+        def probe() -> bool:
+            try:
+                session.execute("SELECT 1")
+            except psycopg.Error:
+                return False
+            return True
+
+        return await asyncio.to_thread(probe)
+
     async def _finish_close(self) -> None:
         """Finish the teardown every close waiter shares."""
+        hold, self._hold = self._hold, None
+        if hold is not None:
+            await asyncio.to_thread(hold.close)
         try:
             await asyncio.gather(
                 self._offload.drain(),

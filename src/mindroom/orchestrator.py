@@ -199,6 +199,7 @@ _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
+_EVENT_JOURNAL_HOLD_CHECK_SECONDS = 30.0
 
 
 async def _gather_periodic_shutdown_phase(
@@ -398,6 +399,7 @@ class _MultiAgentOrchestrator:
     # The one journal every bot in this process borrows a store from, opened on
     # first use and closed after the last bot stops.
     _open_journal: OpenEventJournal | None = field(default=None, init=False, repr=False)
+    _journal_held: bool = field(default=False, init=False, repr=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
@@ -2343,12 +2345,24 @@ class _MultiAgentOrchestrator:
         re-answer a past that already happened.
         """
         config = self._require_config()
-        await bind_event_journal(
-            self._shared_journal_store(),
+        store = self._shared_journal_store()
+        identity = await bind_event_journal(
+            store,
             journal_config=config.event_journal,
             runtime_paths=self.runtime_paths,
             storage_path=self.storage_path,
         )
+        # Storage roots bound to one database share its identity: a second
+        # runtime against it would answer every message again.
+        if not await store.hold_exclusively(identity):
+            msg = "Another MindRoom runtime is already using this event journal"
+            raise PermanentStartupError(msg)
+        self._journal_held = True
+
+    async def event_journal_still_held(self) -> bool:
+        """Return whether this runtime still holds the journal it claimed; true before it claims one."""
+        journal = self._open_journal
+        return journal is None or not self._journal_held or await journal.store.still_held()
 
     def _shared_journal_store(self) -> EventJournalStore:
         """Return the one journal store every bot in this process borrows.
@@ -2481,6 +2495,7 @@ class _MultiAgentOrchestrator:
         journal_failures: list[BaseException] = []
         if self._open_journal is not None and pending_response_owner_count == 0 and not callback_cleanup_pending:
             journal, self._open_journal = self._open_journal, None
+            self._journal_held = False
             close_results, cancellation = await _run_shutdown_step(
                 "event_journal",
                 gather_shutdown_phase(journal.close()),
@@ -2958,6 +2973,16 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
+async def _watch_event_journal_hold(orchestrator: _MultiAgentOrchestrator, shutdown_requested: asyncio.Event) -> None:
+    """Stop the runtime once it no longer holds its event journal, before another runtime can take it over."""
+    while not shutdown_requested.is_set():
+        await asyncio.sleep(_EVENT_JOURNAL_HOLD_CHECK_SECONDS)
+        if not await orchestrator.event_journal_still_held():
+            logger.error("event_journal_hold_lost")
+            shutdown_requested.set()
+            return
+
+
 def _start_auxiliary_tasks(
     orchestrator: _MultiAgentOrchestrator,
     runtime_paths: RuntimePaths,
@@ -2986,6 +3011,12 @@ def _start_auxiliary_tasks(
         )
         for task_name, operation, supervisor_name in auxiliary_specs
     ]
+    tasks.append(
+        create_background_task(
+            _watch_event_journal_hold(orchestrator, shutdown_requested),
+            name="event_journal_hold_watch",
+        ),
+    )
     # The heartbeat ends by itself for unpaired or rejected installs, so it must not be restarted;
     # create_background_task logs an unexpected failure as soon as it happens.
     tasks.append(create_background_task(run_provisioning_heartbeat(runtime_paths), name="provisioning_heartbeat"))
