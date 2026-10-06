@@ -39,6 +39,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
     StreamingDeliveryRequest,
+    _reply_body,
     _segment_transaction_id,
     _take_published,
 )
@@ -56,7 +57,7 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome, TurnHandoff
 from mindroom.message_target import MessageTarget
-from mindroom.reply_presentation import Presentation
+from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseAttempt, ResponseSources
@@ -4772,3 +4773,23 @@ def test_a_published_body_is_remembered_until_a_later_one_is_written_ahead() -> 
     assert _take_published(published, "body-1") is None
     assert _take_published(published, "body-11") == shows["body-11"]
     assert list(published) == ["body-11"]
+
+
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+def test_a_whole_reply_write_sends_its_trace_only_when_tool_calls_show(show_tool_calls: bool) -> None:
+    """A write over earlier spans' work renders the whole reply, and a reply that hides tool calls sends no trace."""
+    lookup = ToolTraceEntry(type="tool_call_completed", tool_name="lookup", args_preview="q=secret")
+    shown = Presentation(
+        segments=(
+            Segment(kind="answer", text="Earlier work", span_id="span-1", tool_trace=(lookup,)),
+            note_segment(NoteKind.RESTART),
+            Segment(kind="answer", text="Waiting for approval", span_id="span-2"),
+        ),
+        show_tool_calls=show_tool_calls,
+    )
+
+    body, trace = _reply_body("Waiting for approval", None, shown)
+
+    assert body.startswith("Earlier work\n\n")
+    assert body.endswith("Waiting for approval")
+    assert trace == ([lookup] if show_tool_calls else None)

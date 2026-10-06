@@ -1690,7 +1690,11 @@ class PrincipalStore:
         reply_id: str,
         span_id: str,
     ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
-        """Claim a ready continuation for the response waiting on it, and resume its reply in place."""
+        """Claim a ready continuation for the response waiting on it, and resume its reply in place.
+
+        Only a span this bot instance still owns resumes; when the reply's
+        rule refuses, the continuation stays ready and nothing executes.
+        """
 
         def claim(transaction: Transaction) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
             claimed = approval_continuations.claim(
@@ -1702,11 +1706,12 @@ class PrincipalStore:
             )
             if claimed is None:
                 return None, None
-            return claimed, replies.decide_on_span(
+            resumed = replies.decide_on_span(
                 transaction,
                 self._principal_id,
                 reply_id=reply_id,
                 span_id=span_id,
+                author_generation=runtime_generation,
                 decide=lambda reply, span: rl.resumed_in_place(
                     reply,
                     span,
@@ -1714,8 +1719,14 @@ class PrincipalStore:
                     now_ns=time.time_ns(),
                 ),
             )
+            if not resumed.transition.applied:
+                raise _InPlaceResumeRefusedError(resumed)
+            return claimed, resumed
 
-        return await self._backend.write(claim)
+        try:
+            return await self._backend.write(claim)
+        except _InPlaceResumeRefusedError as refused:
+            return None, refused.applied
 
     async def advance_approval_continuation(
         self,
@@ -1832,15 +1843,23 @@ class PrincipalStore:
         *,
         notice_principal_id: str,
     ) -> bool:
-        """Release sources after permanent owner loss and visible card cleanup."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.discard_unavailable(
+        """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused."""
+
+        def discard(transaction: Transaction) -> bool:
+            continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
+            if not approval_continuations.discard_unavailable(
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
                 notice_principal_id=notice_principal_id,
-            ),
-        )
+            ):
+                return False
+            if continuation is not None:
+                # The owner that could settle the reply is gone; the notice is what the room sees.
+                replies.approval_finished(transaction, self._principal_id, continuation)
+            return True
+
+        return await self._backend.write(discard)
 
     @property
     def principal_id(self) -> str:
@@ -2108,6 +2127,14 @@ def _finish_approval_continuation(transaction: Transaction, principal_id: str, a
 
 class _ReplyRowRefusedError(Exception):
     """The outbox refused a reply row the lifecycle had already decided; roll both back."""
+
+
+class _InPlaceResumeRefusedError(Exception):
+    """The reply's rule refused an in-place resume; the continuation's claim rolls back."""
+
+    def __init__(self, applied: AppliedTransition) -> None:
+        super().__init__("The reply's rule refused the in-place resume")
+        self.applied = applied
 
 
 class _PauseRefusedError(Exception):

@@ -283,12 +283,13 @@ def _reply_body(
 
     Once a reply holds more than the writing span's answer, such as a resume
     below a replay's stopped attempt, only its whole presentation says that;
-    the span's own text would replace what the reply already shows.
+    the span's own text would replace what the reply already shows. A reply
+    that hides tool calls sends no trace.
     """
     if shown is None or len(shown.segments) < 2:
         return text, tool_trace
     body, trace = render_body(shown)
-    return body, list(trace) or None
+    return body, (list(trace) or None) if shown.show_tool_calls else None
 
 
 def _take_published(published: dict[str, Presentation], body: str) -> Presentation | None:

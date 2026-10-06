@@ -24,8 +24,9 @@ from mindroom.reply_lifecycle import (
     SpanSources,
 )
 from mindroom.turn_record import TurnRecord
+from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
-from tests.test_event_journal_store import ROOM, admit
+from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore, PrincipalStore
@@ -708,6 +709,125 @@ async def test_a_retired_instance_resume_writes_nothing_while_the_owner_may_end_
     lost = await principal.replies.span(resume.span_id)
     assert lost is not None
     assert lost.outcome is rl.SpanOutcome.LOST
+
+
+async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_paused(
+    journal_store: EventJournalStore,
+) -> None:
+    """When the owner can never settle its approval, the cleanup that releases its sources ends its paused reply too."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    await alice.replies.write_generation("gen-1", now_ns=1)
+    claim = (
+        await alice.replies.claim(
+            replace(
+                _request(source="$source-1"),
+                sources=SpanSources(pending=("$source-1", "$source-2"), logical=("$source-1", "$source-2")),
+            ),
+            ClaimLookup(),
+        )
+    ).transition
+    assert claim.reply is not None
+    assert claim.claimed is not None
+    paused = replace(
+        claim.reply,
+        state=ReplyState.PAUSED,
+        approval_id="approval-1",
+        event_id="$waiting",
+        current_span_id=None,
+    )
+    await journal_store.backend.write(
+        lambda tx: replies.apply(
+            tx,
+            "agent@alice",
+            rl.Transition(
+                outcome=rl.Outcome.APPLIED,
+                reply=paused,
+                spans=(replace(claim.claimed, outcome=SpanOutcome.PAUSED, ended_at_ns=2),),
+            ),
+        ),
+    )
+    await alice.create_approval_continuation(journal_tests.TestApprovalContinuations.continuation(state="waiting"))
+    assert await alice.request_approval_failure("approval-1", "agent removed", expected_state="waiting") is not None
+    router = journal_store.principal("router@alice")
+    delivery_id = await router.enqueue_unavailable_approval_notice(
+        approval_id="approval-1",
+        room_id=ROOM,
+        thread_id="$thread",
+        payload=text("agent removed"),
+    )
+    assert delivery_id is not None
+    await router.claim_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+    await router.acknowledge_matrix_delivery(
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_id="$unavailable",
+        delivered_projections=(),
+    )
+
+    assert await alice.discard_unavailable_approval_continuation("approval-1", notice_principal_id="router@alice")
+
+    ended = await alice.replies.load(paused.reply_id)
+    assert ended is not None
+    assert ended.state is ReplyState.FAILED
+    assert ended.approval_id is None
+    assert not await alice.is_pending("$source-1")
+
+
+@pytest.mark.parametrize("kind", [rl.SpanKind.TURN, rl.SpanKind.APPROVAL_RESUME])
+@pytest.mark.parametrize("taken_over", [False, True])
+async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
+    journal_store: EventJournalStore,
+    kind: rl.SpanKind,
+    taken_over: bool,
+) -> None:
+    """A waiter a newer instance took over neither claims the approval nor resumes the reply; the owner's waiter does."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    await alice.replies.write_generation("gen-1", now_ns=1)
+    claim = _first_claim(source="$source-1")
+    assert claim.reply is not None
+    assert claim.claimed is not None
+    waiting = replace(
+        claim.claimed,
+        kind=kind,
+        approval_id="approval-1" if kind is rl.SpanKind.APPROVAL_RESUME else None,
+    )
+    paused = replace(claim.reply, state=ReplyState.PAUSED, approval_id="approval-1", event_id="$waiting")
+    await journal_store.backend.write(
+        lambda tx: replies.apply(
+            tx,
+            "agent@alice",
+            rl.Transition(outcome=rl.Outcome.APPLIED, reply=paused, spans=(waiting,)),
+        ),
+    )
+    await alice.create_approval_continuation(journal_tests.TestApprovalContinuations.continuation(state="ready"))
+    if taken_over:
+        await alice.replies.write_generation("gen-2", now_ns=70)
+
+    claimed, applied = await alice.claim_approval_in_place(
+        "approval-1",
+        runtime_generation="gen-1",
+        legacy_show_tool_calls=None,
+        reply_id=paused.reply_id,
+        span_id=waiting.span_id,
+    )
+
+    continuation = await alice.approval_continuation("approval-1")
+    reply = await alice.replies.load(paused.reply_id)
+    assert continuation is not None
+    assert reply is not None
+    assert applied is not None
+    if taken_over:
+        assert claimed is None
+        assert applied.transition.outcome is rl.Outcome.STALE
+        assert continuation.state == "ready"
+        assert reply == paused
+    else:
+        assert claimed is not None
+        assert applied.transition.applied
+        assert continuation.state == "claimed"
+        assert reply.state is ReplyState.ACTIVE
 
 
 async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_store: EventJournalStore) -> None:

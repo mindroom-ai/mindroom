@@ -1605,29 +1605,6 @@ class ReplacementStreamingResponse(StreamingResponse):
         """Return whether each visible chunk replaces the current body."""
         return True
 
-    def committed_presentation(self) -> StreamingPresentation:
-        """Return the document's own presentation, which its approval snapshot must reproduce.
-
-        A stopped attempt's part above a resumed document is not in that
-        snapshot, so a resumed document that pauses for approval goes on without it.
-        """
-        presentation = super().committed_presentation()
-        resumed_count = len(self.resumed_tool_trace)
-        resumed_text = self.resumed_text.rstrip()
-        if not resumed_text or not presentation.response_text.startswith(resumed_text):
-            return presentation
-        own_count = len(presentation.tool_trace) - resumed_count
-        own_text = presentation.response_text.removeprefix(resumed_text).lstrip()
-        return replace(
-            presentation,
-            response_text=remap_visible_tool_marker_indices(
-                own_text,
-                {index + resumed_count: index for index in range(1, own_count + 1)},
-            ),
-            rendered_response_text=None,
-            tool_trace=presentation.tool_trace[resumed_count:],
-        )
-
     def _update(self, new_chunk: str) -> None:
         """Replace the text below any stopped attempt's text with new chunk, numbering its tools after that attempt's."""
         resumed_count = len(self.resumed_tool_trace)
