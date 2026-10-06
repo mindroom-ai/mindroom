@@ -14,7 +14,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
 | [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
 | [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
-| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud credentials |
+| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud connection or service account |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
 | [`google_docs`](#google_docs) | Creating, reading, and editing Google Docs | Google Docs OAuth |
 | [`google_sheets`](#google_sheets) | Reading, creating, updating, and formatting spreadsheets | Google Sheets OAuth |
@@ -26,9 +26,9 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
-`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, `credentials`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
+`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
-The Google tools connect through per-service OAuth; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
+The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
 
 ## [`sql`]
@@ -214,16 +214,23 @@ run_dataframe_operation("sales", "describe", {})
 
 ## [`google_bigquery`]
 
-`google_bigquery` provides `list_tables()`, `describe_table()`, and `run_sql_query()` for the configured dataset.
-The dataset is only the default for unqualified table names, so queries can still reference other datasets that the Google Cloud credentials can read.
-It authenticates with the MindRoom process's default Google Cloud credentials, not with MindRoom's Google OAuth connections.
+`google_bigquery` provides `list_tables()`, `describe_table(table_id)`, and `run_sql_query(query)` for the configured dataset.
+The dataset is only the default for unqualified table names, so queries can still reference other datasets that the account can read.
+It runs as the [Google Cloud connection](https://docs.mindroom.chat/deployment/google-services-oauth/#providers) for the agent's credential scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured, never as the MindRoom process's Application Default Credentials.
+That account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
+If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
+The tool always runs in the primary runtime, even when `worker_tools` lists it.
+
+`run_sql_query` accepts exactly one `SELECT` or `WITH` statement, with an optional trailing `;`.
+It refuses DML, DDL, scripts, and multiple statements with `Only a single read-only SELECT query is allowed`.
+It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `true` when more than `max_rows` rows were available.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `project` | `text` | yes | `null` | Google Cloud project ID. |
 | `dataset` | `text` | yes | `null` | Dataset name. |
 | `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
-| `credentials` | `text` | no | `null` | Programmatic only: a Google credentials object; rejected as an inline override. |
+| `max_rows` | `number` | no | `100` | Most rows `run_sql_query` returns, from `1` to `1000`. |
 | `list_tables` | `boolean` | no | `true` | Enable `list_tables()`. |
 | `describe_table` | `boolean` | no | `true` | Enable `describe_table()`. |
 | `run_sql_query` | `boolean` | no | `true` | Enable `run_sql_query()`. |

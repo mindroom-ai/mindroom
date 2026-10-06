@@ -65,6 +65,7 @@ const scopedMockTools = [
 let mockStatusAuthoritative = true;
 const {
   mockUseTools,
+  mockGoogleCloudOnAction,
   mockGoogleDriveOnAction,
   mockGoogleDriveOnDisconnect,
   mockGoogleGmailOnAction,
@@ -76,6 +77,7 @@ const {
   mockGenericOAuthOnAction,
   mockGenericOAuthOnDisconnect,
   mockGenericOAuthLoadStatus,
+  mockGoogleCloudLoadStatus,
   mockGoogleDriveLoadStatus,
   mockGoogleGmailLoadStatus,
   mockSpotifyLoadStatus,
@@ -83,6 +85,7 @@ const {
   mockEnhancedConfigDialogProps,
 } = vi.hoisted(() => ({
   mockUseTools: vi.fn(),
+  mockGoogleCloudOnAction: vi.fn(),
   mockGoogleDriveOnAction: vi.fn(),
   mockGoogleDriveOnDisconnect: vi.fn(),
   mockGoogleGmailOnAction: vi.fn(),
@@ -94,6 +97,9 @@ const {
   mockGenericOAuthOnAction: vi.fn(),
   mockGenericOAuthOnDisconnect: vi.fn(),
   mockGenericOAuthLoadStatus: vi
+    .fn()
+    .mockResolvedValue({ status: "available", connected: false }),
+  mockGoogleCloudLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
   mockGoogleDriveLoadStatus: vi
@@ -110,6 +116,26 @@ const {
     .mockResolvedValue({ status: "connected", connected: true }),
   mockEnhancedConfigDialogProps: vi.fn(),
 }));
+
+function googleCloudTool(name: string, displayName: string, field: string) {
+  return {
+    name,
+    display_name: displayName,
+    description: `${displayName} on the shared Google Cloud connection`,
+    icon: "SiGooglecloud",
+    icon_color: "text-blue-600",
+    category: "development",
+    status: "available",
+    setup_type: "oauth",
+    auth_provider: "google_cloud",
+    config_fields: [
+      { name: field, label: field, type: "text", required: true },
+    ],
+    helper_text: null,
+    docs_url: null,
+    dependencies: null,
+  };
+}
 
 function createDeferred() {
   let resolve: () => void = () => undefined;
@@ -215,6 +241,22 @@ vi.mock("./integrations/index", () => ({
     }
   },
   integrationProviders: {
+    google_cloud: {
+      getConfig: () => ({
+        integration: {
+          id: "google_cloud",
+          name: "Google Cloud",
+          description: "Connect Google Cloud with read-only access",
+          category: "development",
+          icon: <span>Google Cloud Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleCloudOnAction,
+      }),
+      loadStatus: mockGoogleCloudLoadStatus,
+    },
     google_drive: {
       getConfig: () => ({
         integration: {
@@ -287,6 +329,22 @@ vi.mock("./integrations/index", () => ({
     },
   },
   getAllIntegrations: () => [
+    {
+      getConfig: () => ({
+        integration: {
+          id: "google_cloud",
+          name: "Google Cloud",
+          description: "Connect Google Cloud with read-only access",
+          category: "development",
+          icon: <span>Google Cloud Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleCloudOnAction,
+      }),
+      loadStatus: mockGoogleCloudLoadStatus,
+    },
     {
       getConfig: () => ({
         integration: {
@@ -365,6 +423,7 @@ describe("Integrations", () => {
     vi.clearAllMocks();
     mockToast.mockReset();
     mockStatusAuthoritative = true;
+    mockGoogleCloudOnAction.mockResolvedValue(undefined);
     mockGoogleDriveOnAction.mockResolvedValue(undefined);
     mockGoogleDriveOnDisconnect.mockResolvedValue(undefined);
     mockGoogleGmailOnAction.mockResolvedValue(undefined);
@@ -377,6 +436,10 @@ describe("Integrations", () => {
     mockGenericOAuthOnDisconnect.mockResolvedValue(undefined);
     mockEnhancedConfigDialogProps.mockClear();
     mockGenericOAuthLoadStatus.mockResolvedValue({
+      status: "available",
+      connected: false,
+    });
+    mockGoogleCloudLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
     });
@@ -495,7 +558,7 @@ describe("Integrations", () => {
         screen.getAllByText(
           /Project maintainers have no automatic access merely because they maintain MindRoom/,
         ),
-      ).toHaveLength(3);
+      ).toHaveLength(4);
     });
   });
 
@@ -1497,6 +1560,92 @@ describe("Integrations", () => {
       expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
     });
     expect(mockGoogleDriveOnAction).not.toHaveBeenCalled();
+  });
+
+  it("opens the only Google Cloud tool's settings from the Google Cloud card", async () => {
+    mockGoogleCloudLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    const tools = [
+      googleCloudTool("google_bigquery", "Google BigQuery", "dataset"),
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    const cloudCard = await screen.findByText("Google Cloud");
+    expect(screen.queryByText("Google BigQuery")).not.toBeInTheDocument();
+    const editButton = await waitFor(() => {
+      const button = within(
+        cloudCard.closest(".h-full") as HTMLElement,
+      ).getByRole("button", { name: /edit/i });
+      expect(button).not.toBeDisabled();
+      return button;
+    });
+    fireEvent.click(editButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Service: google_bigquery")).toBeInTheDocument();
+    });
+    expect(mockGoogleCloudOnAction).not.toHaveBeenCalled();
+  });
+
+  it("keeps each tool's own settings card when several tools share Google Cloud", async () => {
+    mockGoogleCloudLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    const tools = [
+      {
+        ...googleCloudTool("google_bigquery", "Google BigQuery", "dataset"),
+        status: "requires_config",
+      },
+      googleCloudTool("cloud_storage", "Cloud Storage", "project"),
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    const cloudCard = (await screen.findByText("Google Cloud")).closest(
+      ".h-full",
+    ) as HTMLElement;
+    await waitFor(() => {
+      expect(
+        within(cloudCard).getByRole("button", { name: /disconnect/i }),
+      ).not.toBeDisabled();
+    });
+    expect(screen.queryByText(/Requires Google Cloud/)).not.toBeInTheDocument();
+
+    for (const [displayName, service, field] of [
+      ["Google BigQuery", "google_bigquery", "dataset"],
+      ["Cloud Storage", "cloud_storage", "project"],
+    ]) {
+      const toolCard = screen.getByText(displayName).closest(".h-full");
+      fireEvent.click(
+        within(toolCard as HTMLElement).getByRole("button", {
+          name: /configure/i,
+        }),
+      );
+      await waitFor(() => {
+        expect(screen.getByText(`Service: ${service}`)).toBeInTheDocument();
+      });
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service,
+        configFields: [expect.objectContaining({ name: field })],
+      });
+    }
+    expect(mockGoogleCloudOnAction).not.toHaveBeenCalled();
   });
 
   it("opens Gmail OAuth provider configuration using the Gmail tool service", async () => {
