@@ -102,6 +102,7 @@ memory:
   llm: null  # Optional LLM for memory operations (provider + config dict)
   file:
     max_entrypoint_lines: 200  # Max lines preloaded from MEMORY.md
+    max_entrypoint_tokens: 50000  # Max estimated tokens (characters / 4) preloaded from MEMORY.md
   auto_flush:
     enabled: false  # Background file-memory auto-flush (see memory consolidation plan)
     flush_interval_seconds: 1800

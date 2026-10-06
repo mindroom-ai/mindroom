@@ -274,7 +274,8 @@ FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
 )
 FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
     "[Memory entrypoint truncated - showing the first {included_lines} of {total_lines} lines "
-    "(capped by memory.file.max_entrypoint_lines={max_entrypoint_lines}). "
+    "(capped by memory.file.max_entrypoint_lines={max_entrypoint_lines} "
+    "and memory.file.max_entrypoint_tokens={max_entrypoint_tokens}). "
     "Read `{memory_path}` directly for the omitted lines.]"
 )
 MEMORY_EXISTING_SNIPPETS_TEMPLATE = "Existing memory snippets (avoid duplicates):\n{existing_context}\n"
@@ -633,7 +634,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset({"tool_catalog"}),
         "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE": frozenset({"memory_path"}),
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": frozenset(
-            {"included_lines", "total_lines", "max_entrypoint_lines", "memory_path"},
+            {"included_lines", "total_lines", "max_entrypoint_lines", "max_entrypoint_tokens", "memory_path"},
         ),
         "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE": frozenset({"tool_domains"}),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(

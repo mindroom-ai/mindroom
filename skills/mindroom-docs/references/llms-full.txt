@@ -2516,6 +2516,7 @@ Then:
 
 If routing fails, for example because of a model error or an invalid choice, the router replies "Please try mentioning an agent or team directly with @ or rephrase your request."
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.
+When only one entity is mentioned and it is in a configured room without listing it, it replies, to senders its `access` admits, that it is not configured for this room instead of answering.
 See [Multi-Human Thread Protection](https://docs.mindroom.chat/configuration/threads/#multi-human-thread-protection) for when threads require explicit tags.
 
 ### Mentioning the router
@@ -3071,6 +3072,7 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+    max_entrypoint_tokens: 50000
   search:
     mode: keyword
     include:
@@ -3083,7 +3085,9 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines; when it truncates, a marker reports the included and total line counts and the path to read for the rest.
+`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
+Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
+When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
 `memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
 ### File layout
@@ -3208,7 +3212,7 @@ Failures are returned as readable error messages rather than raised into the con
 
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.
 
@@ -4983,7 +4987,8 @@ matrix_message(message="Here is the report.", attachments=["att_abc123", "export
 ```
 
 Attachment arguments must be `att_*` IDs available in the current conversation or registered earlier in the same tool run.
-Metadata includes the kind, filename, MIME type, size, room ID, thread ID, sender, timestamps, the runtime-local path, and an `available` flag that reports whether the file still exists.
+Metadata includes the kind, filename, MIME type, size, room ID, thread ID, sender, timestamps, and an `available` flag that reports whether the file still exists.
+It also includes the runtime-local path, except for agents whose workspace tools run on a worker, where that path does not exist; their metadata has a `usage` note saying to save the file with `mindroom_output_path` instead.
 To post files into Matrix, pass attachment IDs or file paths to `matrix_message`; see [`matrix_message` attachments](https://docs.mindroom.chat/tools/matrix-message/#attachments).
 
 ### Viewing Content
@@ -5005,9 +5010,9 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because the runtime-local path in the metadata does not exist inside the worker.
+Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
-Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference) (default 16 MiB).
+Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
 
 ### Registering Local Files
@@ -8496,7 +8501,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud credentials |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
 | [`google_docs`](#google_docs) | Creating, reading, and editing Google Docs | Google Docs OAuth |
-| [`google_sheets`](#google_sheets) | Reading, creating, and updating spreadsheets | Google Sheets OAuth |
+| [`google_sheets`](#google_sheets) | Reading, creating, updating, and formatting spreadsheets | Google Sheets OAuth |
 | [`openbb`](#openbb) | Stock quotes, symbol search, news, profiles, and price targets from switchable providers | Optional OpenBB PAT |
 | [`yfinance`](#yfinance) | Yahoo Finance quotes, fundamentals, statements, news, and history | None |
 | [`financial_datasets_api`](#financial_datasets_api) | Financial statements, filings, ownership, earnings, and crypto prices | API key |
@@ -8798,10 +8803,12 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 
 ## [`google_sheets`]
 
-`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, and `update_sheet(data, spreadsheet_id=None, range_name=None)`.
+`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, `update_sheet(data, spreadsheet_id=None, range_name=None)`, and `batch_update_sheet(spreadsheet_id, requests)`.
 When `spreadsheet_id` or `spreadsheet_range` is configured, `read_sheet()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
 `update_sheet()` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
 `update_sheet()` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
+`batch_update_sheet()` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
+`batch_update_sheet()` can also delete sheets, rows, and ranges, and a [Tool Approval](https://docs.mindroom.chat/tool-approval/) rule for `update_sheet` does not match it; a `*update_sheet` rule matches both, including the prefixed names of additional Google workspace accounts.
 The tool is available only once the stored Google Sheets connection includes the Sheets scope; if the account is not connected, calls return an `OAuthConnectionRequired` result with a connect link.
 
 | Option | Type | Default | Notes |
@@ -8810,7 +8817,7 @@ The tool is available only once the stored Google Sheets connection includes the
 | `spreadsheet_range` | `text` | `null` | Range used by every `read_sheet()` call, such as `Sheet1!A1:Z100`. |
 | `read` | `boolean` | `true` | Enable `read_sheet()`. |
 | `create` | `boolean` | `true` | Enable `create_sheet()`. |
-| `update` | `boolean` | `true` | Enable `update_sheet()`. |
+| `update` | `boolean` | `true` | Enable `update_sheet()` and `batch_update_sheet()`. |
 
 ```yaml
 agents:
@@ -11650,8 +11657,8 @@ To give an agent read access only, hide the write functions with [`exclude_tools
 The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 
-Downloads are limited to the inline attachment size, 16 MiB by default, which an operator raises with [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference).
-The 64 MiB limit for [registered files](https://docs.mindroom.chat/attachments/) still applies and cannot be raised.
+Downloads are limited to 64 MiB, the limit for [registered files](https://docs.mindroom.chat/attachments/), which cannot be raised.
+An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference).
 
 ## Limits
 
@@ -11670,7 +11677,7 @@ The 64 MiB limit for [registered files](https://docs.mindroom.chat/attachments/)
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
 | `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
 | `response_too_large` | The API response exceeded the size limit; narrow the request, for example with fewer fields or a smaller limit. |
-| `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit and the setting that raises it. |
+| `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit, and also the setting that raises it when an operator has lowered the limit. |
 | `attachment_unavailable` | The attachment does not exist or the connected account may not view it. |
 | `attachment_context_unavailable` | The call ran outside a conversation with attachment storage. |
 
@@ -16847,7 +16854,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
-| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download | `16777216` (16 MiB) |
+| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |
