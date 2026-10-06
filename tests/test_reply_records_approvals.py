@@ -19,7 +19,7 @@ from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliver
 from mindroom.reply_presentation import NoteKind, Segment, decode_presentation, encode_presentation, note_segment
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _noop_typing, _plain_request, _target
@@ -384,13 +384,27 @@ async def test_a_chained_pause_pauses_the_resume_span_and_the_next_resume_answer
 
 
 async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_path: Path) -> None:
-    """A replay that paused continues below the stopped attempt it showed; the approved answer keeps that above it."""
+    """A replay that paused continues below the stopped attempt it showed; its progress and answer keep that above it."""
     earlier = Segment(kind="answer", text="Earlier partial", span_id="earlier-span")
+    resuming = False
+
+    async def streaming(*_args: object, **_kwargs: object) -> bool:
+        # The paused answer was blocking; the resume streams its progress.
+        return resuming
+
+    async def resume_with_progress(*_args: object, progress: object = None, **_kwargs: object) -> CompletedApprovalRun:
+        assert progress is not None
+        await progress(StructuredStreamChunk(content="Reading document, then more"))  # type: ignore[operator]
+        return CompletedApprovalRun("Approved answer.", {})
+
     async with _approval_bot(tmp_path, requires_human=False) as bot:
         runtime_type = type(bot._reply_runtime)
         claim = runtime_type.claim_approval_resume
+        runner = unwrap_extracted_collaborator(bot._response_runner)
 
         async def claim_below_an_earlier_attempt(runtime: object, *args: object, **kwargs: object) -> object:
+            nonlocal resuming
+            resuming = True
             def below_earlier(current: rl.Reply) -> rl.Transition:
                 shown = decode_presentation(current.presentation)
                 prefixed = encode_presentation(
@@ -404,13 +418,24 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
             await bot._reply_runtime.store.replies.update((await _reply(bot)).reply_id, below_earlier)
             return await claim(runtime, *args, **kwargs)  # type: ignore[arg-type]
 
-        with patch.object(runtime_type, "claim_approval_resume", claim_below_an_earlier_attempt):
-            await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
+        with (
+            patch.object(runtime_type, "claim_approval_resume", claim_below_an_earlier_attempt),
+            patch_response_runner_module(
+                ai_response=AsyncMock(side_effect=ResponsePausedForApproval(_paused())),
+                should_use_streaming=AsyncMock(side_effect=streaming),
+                typing_indicator=_noop_typing,
+            ),
+            patch.object(type(runner), "_continue_entity_call", AsyncMock(side_effect=resume_with_progress)),
+        ):
+            await runner.generate_response(_plain_request(_target()))
 
-        final = _sent_bodies(bot)[-1]
+        progress, final = _sent_bodies(bot)[-2:]
+        assert progress.startswith("Earlier partial")
+        assert "Reading document, then more" in progress
         assert final.startswith("Earlier partial")
         assert final.endswith("Approved answer.")
-        assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
+        reply = await _reply(bot)
+        assert reply.state is rl.ReplyState.COMPLETED
 
 
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:

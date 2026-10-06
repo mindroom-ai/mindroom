@@ -169,7 +169,7 @@ if TYPE_CHECKING:
     from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
     from mindroom.streaming import ProgressPublisher, StreamInputChunk, UnfinishedStreamedReply
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 _PLACEHOLDER_DELIVERY_FAILURE_TEXT = DELIVERY_FAILED_NOTE
 _BEFORE_RESPONSE_HOOK_FAILURE_TEXT = "Response failed. Please retry."
@@ -181,6 +181,8 @@ _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
     },
 )
 _SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
+# Whole-reply bodies a progress stream remembers, enough to cover its edits in flight.
+_PUBLISHED_BODIES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +275,47 @@ class ReplyStop:
 
 # What a failed approval's note says.
 type _ApprovalFailureNote = Literal["cancelled", "error", "interrupted", "restart"]
+
+
+def _reply_body(
+    text: str,
+    tool_trace: list[ToolTraceEntry] | None,
+    shown: Presentation | None,
+) -> tuple[str, list[ToolTraceEntry] | None]:
+    """Return the body and trace a reply write shows.
+
+    Once a reply holds more than the writing span's answer, such as a resume
+    below a replay's stopped attempt, only its whole presentation says that;
+    the span's own text would replace what the reply already shows.
+    """
+    if shown is None or len(shown.segments) < 2:
+        return text, tool_trace
+    body, trace = render_body(shown)
+    return body, list(trace) or None
+
+
+@asynccontextmanager
+async def _whole_reply_progress(
+    progress: AbstractAsyncContextManager[ProgressPublisher],
+    handle: SpanHandle,
+    published: dict[str, Presentation],
+) -> AsyncIterator[ProgressPublisher]:
+    """Publish the whole reply for each of the span's own publications, remembering what each body shows."""
+    async with progress as publish:
+
+        async def publish_whole(chunk: StructuredStreamChunk) -> None:
+            shown = handle.presentation(
+                chunk.content,
+                tuple(chunk.tool_trace or ()),
+                team_state=chunk.presentation_state,
+            )
+            body, trace = render_body(shown)
+            published[body] = shown
+            while len(published) > _PUBLISHED_BODIES:
+                del published[next(iter(published))]
+            await publish(replace(chunk, content=body, tool_trace=list(trace)))
+
+        yield publish_whole
 
 
 def _owed_answer_outcome() -> FinalDeliveryOutcome:
@@ -2024,6 +2067,13 @@ class DeliveryGateway:
         """Send one response message to a room."""
         config = self.deps.runtime.config
         resolved_target = request.target
+        if request.reply_write is not None:
+            response_text, tool_trace = _reply_body(
+                request.response_text,
+                request.tool_trace,
+                request.reply_write.shown,
+            )
+            request = replace(request, response_text=response_text, tool_trace=tool_trace)
         effective_thread_id = resolved_target.resolved_thread_id
 
         if effective_thread_id is None:
@@ -2197,6 +2247,9 @@ class DeliveryGateway:
         """Edit one existing response message."""
         config = self.deps.runtime.config
         target = request.target
+        if request.reply_write is not None:
+            new_text, tool_trace = _reply_body(request.new_text, request.tool_trace, request.reply_write.shown)
+            request = replace(request, new_text=new_text, tool_trace=tool_trace)
         # The edit envelope discards any pre-existing relation before adding m.replace.
         content = format_message_with_mentions(
             config,
@@ -2431,18 +2484,19 @@ class DeliveryGateway:
         if request.existing_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
-            # The reply shows its whole presentation: a resume continues below
-            # what earlier spans showed, which this answer alone would replace.
-            shown_text, shown_trace = (
-                (display_text, draft.tool_trace) if reply_write is None else render_body(reply_write.shown)
+            # What the reply shows is what its outcome reports, earlier spans' work included.
+            shown_text, _shown_trace = _reply_body(
+                display_text,
+                draft.tool_trace,
+                None if reply_write is None else reply_write.shown,
             )
             try:
                 edited = await self.edit_text(
                     EditTextRequest(
                         target=request.target,
                         event_id=request.existing_event_id,
-                        new_text=shown_text,
-                        tool_trace=list(shown_trace) if shown_trace else None,
+                        new_text=display_text,
+                        tool_trace=draft.tool_trace,
                         extra_content=delivery_extra_content,
                         delivery_turn_id=request.identity.response_envelope.source_event_id,
                         response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
@@ -2459,7 +2513,7 @@ class DeliveryGateway:
                     terminal_status="completed",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
-                    final_visible_body=display_text,
+                    final_visible_body=shown_text,
                     delivery_kind="edited",
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=delivery_extra_content,
@@ -2929,15 +2983,21 @@ class DeliveryGateway:
         target: MessageTarget,
         response_attempt: ResponseAttempt,
         completed_edit_record: Callable[[], TurnRecord | None] | None,
+        *,
+        published: Mapping[str, Presentation] | None = None,
     ) -> dict[str, Any]:
         """Return the streamer callbacks that make a span's stream a durable reply.
 
         The first visible create and every terminal update become the reply's
         rows; each direct progress edit is recorded before it is sent and
-        confirmed by the next write.
+        confirmed by the next write. ``published`` maps the whole-reply bodies a
+        progress stream sent to the presentations they show.
         """
 
         def shown(progress: ProgressState) -> Presentation:
+            whole = None if published is None else published.get(progress.text)
+            if whole is not None:
+                return whole
             return handle.presentation(
                 progress.text,
                 progress.tool_trace,
@@ -3126,14 +3186,26 @@ class DeliveryGateway:
         extra_content: dict[str, Any] | None = None,
         visible_progress_callback: Callable[[str], None] | None = None,
     ) -> AbstractAsyncContextManager[ProgressPublisher]:
-        """Stream live progress into an existing reply whose terminal delivery the caller owns."""
+        """Stream live progress into an existing reply whose terminal delivery the caller owns.
+
+        Each publication is the span's own answer; once the reply also shows
+        earlier spans' work, such as a resume below a replay's stopped attempt,
+        the stream sends the whole reply so that work stays.
+        """
         handle = self._live_span()
+        published: dict[str, Presentation] = {}
         hooks = (
             {}
             if handle is None
-            else self._reply_stream_hooks(handle, target, ResponseAttempt(self.deps.agent_name, identity.sources), None)
+            else self._reply_stream_hooks(
+                handle,
+                target,
+                ResponseAttempt(self.deps.agent_name, identity.sources),
+                None,
+                published=published,
+            )
         )
-        return stream_progress_edits(
+        progress = stream_progress_edits(
             self._client(),
             target,
             self.deps.runtime.config,
@@ -3150,6 +3222,9 @@ class DeliveryGateway:
             progress_write_ahead=hooks.get("progress_write_ahead"),
             progress_delivered=hooks.get("progress_delivered"),
         )
+        if handle is None or all(segment.span_id == handle.span_id for segment in handle.base.segments):
+            return progress
+        return _whole_reply_progress(progress, handle, published)
 
     def _stream_transport_gate(
         self,
