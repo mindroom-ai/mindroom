@@ -3143,7 +3143,7 @@
         },
         "min_reduction": {
           "default": 0.1,
-          "description": "Fraction of the files' size each pass is asked to remove, unless less is needed",
+          "description": "Smallest fraction of the files' size each pass is asked to remove",
           "exclusiveMaximum": 1,
           "exclusiveMinimum": 0,
           "title": "Min Reduction",
@@ -3151,7 +3151,7 @@
         },
         "max_reduction": {
           "default": 0.15,
-          "description": "Largest fraction of the files' size one pass may remove",
+          "description": "Largest fraction of the files' size one pass may remove before verify asks for a re-check",
           "exclusiveMaximum": 1,
           "exclusiveMinimum": 0,
           "title": "Max Reduction",
@@ -3159,7 +3159,7 @@
         },
         "max_file_shrink": {
           "default": 0.25,
-          "description": "Largest fraction any single file may shrink in one pass",
+          "description": "Largest fraction any single file may shrink in one pass before verify asks for a re-check",
           "exclusiveMinimum": 0,
           "maximum": 1,
           "title": "Max File Shrink",
@@ -3167,7 +3167,7 @@
         },
         "max_content_loss": {
           "default": 0.05,
-          "description": "Largest net drop in total memory content (the files plus memory/**), as a fraction of the files' size; detail must move to memory/ instead of being deleted",
+          "description": "Largest net drop in total memory content (the files plus memory/**), as a fraction of the files' size, before verify asks for a re-check; detail should move to memory/ instead of being deleted",
           "exclusiveMaximum": 1,
           "minimum": 0,
           "title": "Max Content Loss",
@@ -3175,7 +3175,7 @@
         },
         "protected_files": {
           "default": [],
-          "description": "Workspace-relative files the pass must leave unchanged",
+          "description": "Workspace-relative files the pass should leave unchanged",
           "items": {
             "type": "string"
           },

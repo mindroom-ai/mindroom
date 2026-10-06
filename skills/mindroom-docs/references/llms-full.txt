@@ -3189,7 +3189,7 @@ memory:
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
-Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, with the bounds enforced afterwards in code.
+Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
 
 ```yaml
 agents:
@@ -4228,7 +4228,7 @@ agents:
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a one-line notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
+- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
 - An automation does not post again while its previous prompt awaits verify.
 - Nothing is persisted: the schedule is the cooldown, and a restart skips the occurrence it missed.
 
@@ -4240,32 +4240,30 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
 1. The check measures `MEMORY.md` plus the agent's `context_files`, except `protected_files`, with the estimate behind `static_prompt_tokens` (characters / 4).
-2. Above `trigger_tokens`, it snapshots those files and posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", which asks for a 10 to 15% cut, or only the gap to 90% of the trigger when that is smaller.
+2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
-4. Verify writes the snapshot back over every changed file, and posts why, when any of these holds:
+4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
     - a file can no longer be read safely, for example because it became a link or grew past 1 MiB;
     - a file shrank by more than `max_file_shrink`;
     - the files total less than the floor, or did not shrink;
     - a protected file changed, or a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
-A restore also rewrites any `memory/` topic file the run changed other than by appending, back to its archived text followed by everything the run left in it, and new files are kept, so moved detail is never lost.
-A topic file that grew past 1 MiB or is no longer valid UTF-8 cannot be compared safely, so it is left as it is.
-When the prompt files are unchanged, only lost memory content triggers that restore.
-A reply that rewrites a curated file or a changed topic file during the run can be overwritten when verify restores the snapshot.
+When the prompt files are unchanged, verify only checks that no `memory/` detail was deleted, and otherwise reports that nothing changed.
+Verify never writes the files, because other conversations with the same agent may save memories to them during the run; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
 
 | Field | Default | Description |
 |---|---|---|
 | `cron` | `0 4 * * *` | When to check |
 | `room` | first configured room | Where to post the prompt |
 | `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
-| `min_reduction` | `0.10` | Cut the prompt asks for, or only the gap to 90% of the trigger when that is smaller |
-| `max_reduction` | `0.15` | Largest cut one run may make |
-| `max_file_shrink` | `0.25` | Largest shrink of any single file in one run |
-| `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size |
-| `protected_files` | `[]` | Workspace-relative paths the run must leave unchanged |
+| `min_reduction` | `0.10` | Smallest cut the prompt asks for |
+| `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
+| `max_file_shrink` | `0.25` | Largest shrink of any single file before verify asks for a re-check |
+| `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
+| `protected_files` | `[]` | Workspace-relative paths the run should leave unchanged |
 
-`prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt template is overridable as `PROMPT_CURATION_PROMPT_TEMPLATE`.
+`prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
 
 # Chat Commands
 
@@ -13681,7 +13679,7 @@ Kubernetes mounts such knowledge read-only, because kubelet follows links inside
 ### Workspace files the primary reads and writes
 
 The primary treats everything inside a mounted workspace as worker-controlled.
-Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, and the files `prompt_curation` snapshots and restores, are reached through `path_confinement` descriptors walked from the workspace root.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, and the files `prompt_curation` measures, are reached through `path_confinement` descriptors walked from the workspace root.
 Those descriptors refuse links, never write to a file that has another hard link, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
@@ -13701,7 +13699,7 @@ Reads of worker-controlled files are capped per surface.
 | Surface | Cap | Above the cap |
 |---|---|---|
 | Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
-| `prompt_curation` snapshots of `MEMORY.md` and context files | 1 MiB per file | Refused, so the check is skipped with a warning or verify restores the snapshot |
+| `prompt_curation` snapshots of `MEMORY.md` and context files | 1 MiB per file | Refused, so the check is skipped with a warning or verify reports the file as unreadable |
 | Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |

@@ -284,7 +284,7 @@ memory:
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
-Enable the [`prompt_curation`](scheduling.md#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, with the bounds enforced afterwards in code.
+Enable the [`prompt_curation`](scheduling.md#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
 
 ```yaml
 agents:

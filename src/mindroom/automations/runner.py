@@ -127,7 +127,7 @@ class AutomationRunner:
                 self._start_verify(pending)
 
     def _start_verify(self, pending: _PendingVerify) -> None:
-        # The automation stays busy until verify ends, so a new pass never snapshots files a restore is replacing.
+        # The automation stays busy until verify ends, so a new pass never starts before the last one is reported.
         self._verifying.add(pending.key)
         create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
 
@@ -174,17 +174,7 @@ class AutomationRunner:
             if bot is None:
                 logger.warning("Automation agent is not running", agent=agent_name, automation=automation.name)
                 return
-            # Like a todo poke without a human requester, the prompt runs as MindRoom's internal user.
-            original_sender = mindroom_user_id(config, self.runtime_paths)
-            event_id = await bot._hook_send_message(
-                room_id,
-                # Only a mentioned agent answers a top-level message in a room with other responders.
-                f"@{agent_name} {curation_prompt(config, plan)}",
-                None,
-                _SOURCE_HOOK,
-                {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None,
-                trigger_dispatch=True,
-            )
+            event_id = await self._post_mention(config, bot, room_id, agent_name, curation_prompt(config, plan), None)
             if event_id is not None:
                 self._pending[event_id] = _PendingVerify(key, room_id, event_id, plan, now + _VERIFY_FALLBACK)
                 self._wake.set()
@@ -218,16 +208,39 @@ class AutomationRunner:
             agent=plan.agent_name,
             automation=plan.settings.name,
             changed=result.changed,
-            restored=result.restored,
-            violations=list(result.violations),
+            findings=list(result.findings),
             tokens_before=plan.measured_tokens,
             tokens_after=result.tokens_after,
         )
+        config = self.config_provider()
         bot = self.bot_provider(plan.agent_name)
-        if bot is not None:
-            await bot._hook_send_message(
-                pending.room_id,
-                curation_notice(plan, result),
-                pending.thread_id,
-                _SOURCE_HOOK,
-            )
+        if config is None or bot is None:
+            return
+        notice = curation_notice(config, plan, result)
+        if not result.findings:
+            await bot._hook_send_message(pending.room_id, notice, pending.thread_id, _SOURCE_HOOK)
+            return
+        # A re-check asks the agent once, like the prompt itself; its answer is not verified again.
+        await self._post_mention(config, bot, pending.room_id, plan.agent_name, notice, pending.thread_id)
+
+    async def _post_mention(
+        self,
+        config: Config,
+        bot: AgentBot | TeamBot,
+        room_id: str,
+        agent_name: str,
+        text: str,
+        thread_id: str | None,
+    ) -> str | None:
+        """Post ``text`` mentioning the agent so it answers with a normal run, and return the event ID."""
+        # Like a todo poke without a human requester, the message runs as MindRoom's internal user.
+        original_sender = mindroom_user_id(config, self.runtime_paths)
+        return await bot._hook_send_message(
+            room_id,
+            # Only a mentioned agent answers a message in a room with other responders.
+            f"@{agent_name} {text}",
+            thread_id,
+            _SOURCE_HOOK,
+            {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None,
+            trigger_dispatch=True,
+        )

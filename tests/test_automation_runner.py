@@ -177,6 +177,29 @@ async def test_the_finished_response_triggers_verify_and_a_notice_in_the_prompt_
 
 
 @pytest.mark.asyncio
+async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_path: Path) -> None:
+    """Findings are posted as a mention in the prompt's thread, run as the internal user, and not verified again."""
+    config, paths, runner, bot = _setup(tmp_path)
+    await _tick(runner, NOON)
+    with patch("mindroom.automations.runner.mindroom_user_id", return_value="@mindroom_user:example.test"):
+        await _tick(runner, DAY_LATER)
+        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        assert root is not None
+        (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+        runner.response_finished(["$event1"])
+        assert await wait_for_background_tasks(5)
+    runner.response_finished(["$event2"])
+    assert await wait_for_background_tasks(5)
+
+    assert len(bot.sent) == 2
+    recheck = bot.sent[1]
+    assert recheck["body"].startswith("@mind ⚠️ Prompt maintenance needs a re-check: MEMORY.md shrank 100%")
+    assert recheck["thread_id"] == "$event1"
+    assert recheck["trigger_dispatch"] is True
+    assert recheck["extra_content"] == {ORIGINAL_SENDER_KEY: "@mindroom_user:example.test"}
+
+
+@pytest.mark.asyncio
 async def test_a_run_that_never_reports_back_is_verified_after_an_hour(tmp_path: Path) -> None:
     """The fallback verifies a prompt whose response never became final."""
     _config, _paths, runner, bot = _setup(tmp_path)
@@ -208,8 +231,8 @@ async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_no_new_prompt_while_verify_is_still_restoring(tmp_path: Path) -> None:
-    """The automation stays busy until verify ends, so a new pass never snapshots files a restore is replacing."""
+async def test_no_new_prompt_while_verify_is_still_running(tmp_path: Path) -> None:
+    """The automation stays busy until verify ends, so a new pass never starts before the last one is reported."""
     config, _paths, runner, bot = _setup(tmp_path)
     config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, cron="* * * * *")]
     await _tick(runner, NOON)

@@ -7956,7 +7956,7 @@ visibility = ["mindroom.config.agent", "mindroom.config.main", "mindroom.config.
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
-depends_on = ["mindroom.atomic_file", "mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
+depends_on = ["mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
 visibility = ["mindroom.automations.runner"]
 
 [[modules]]
