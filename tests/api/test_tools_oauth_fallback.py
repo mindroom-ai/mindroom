@@ -153,11 +153,11 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
     manager = get_runtime_credentials_manager(runtime_paths)
     target = resolve_worker_target("shared", "code", execution_identity=None, tenant_id="test-tenant")
     assert target.worker_key is not None
-    manager.for_worker(target.worker_key).save_credentials("google_bigquery", {"project": "worker-planted"})
+    manager.for_worker(target.worker_key).save_credentials("postgres", {"host": "worker-planted.example.test"})
     tool = {
-        "name": "google_bigquery",
+        "name": "postgres",
         "status": "requires_config",
-        "config_fields": [{"name": "project", "required": True}],
+        "config_fields": [{"name": "host", "required": True}],
     }
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope="shared",
@@ -174,6 +174,6 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
     await tools_api._update_tools_statuses([tool], context)
     assert tool["status"] == "requires_config"
 
-    manager.for_primary_runtime_agent_scope("code").save_credentials("google_bigquery", {"project": "primary"})
+    manager.for_primary_runtime_agent_scope("code").save_credentials("postgres", {"host": "primary.example.test"})
     await tools_api._update_tools_statuses([tool], context)
     assert tool["status"] == "available"

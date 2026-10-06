@@ -2142,7 +2142,6 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
         ("custom_api", "headers"),
         ("daytona", "sandbox_env_vars"),
         ("baidusearch", "headers"),
-        ("google_bigquery", "credentials"),
     ],
 )
 def test_credential_bearing_tool_fields_cannot_be_authored_inline(tool_name: str, field_name: str) -> None:

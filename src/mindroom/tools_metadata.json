@@ -3946,7 +3946,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": null,
+      "auth_provider": "google_cloud",
       "category": "development",
       "config_fields": [
         {
@@ -3986,15 +3986,15 @@
           "validation": null
         },
         {
-          "authored_override": false,
-          "default": null,
-          "description": "Optional Google Cloud credentials object passed directly to the toolkit",
-          "label": "Credentials",
-          "name": "credentials",
+          "authored_override": true,
+          "default": 100,
+          "description": "Maximum rows returned by run_sql_query (1 to 1000)",
+          "label": "Max Rows",
+          "name": "max_rows",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "number",
           "validation": null
         },
         {
@@ -4049,11 +4049,15 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "google-cloud-bigquery"
+        "google-cloud-bigquery",
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
       ],
       "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
       "display_name": "Google BigQuery",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_bigquery",
+      "docs_url": "https://cloud.google.com/bigquery/docs/reference/rest",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -4061,12 +4065,13 @@
         "list_tables",
         "run_sql_query"
       ],
-      "helper_text": "Configure dataset, project, and location explicitly. If the toolkit needs credentials, pass them explicitly through saved config or a credentials object.",
+      "helper_text": "Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
       "name": "google_bigquery",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {

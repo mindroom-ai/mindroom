@@ -217,7 +217,11 @@ gmail = [
   "google-auth-oauthlib>=1.2.2",
 ]
 google_bigquery = [
-  "google-cloud-bigquery",
+  "google-api-python-client>=2.178",
+  "google-auth>=2.40.3",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
+  "google-cloud-bigquery>=3.41",
 ]
 google_calendar = [
   "google-api-python-client>=2.178",

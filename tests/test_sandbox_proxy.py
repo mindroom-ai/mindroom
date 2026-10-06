@@ -1470,7 +1470,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         # The called tool itself: a scoped call leases its primary-owned settings on every backend.
         ("calculator", "primary"),
         ("github", "primary"),
-        ("google_bigquery", "primary"),
+        ("postgres", "primary"),
         # A model provider service is a tool too, so its settings are primary-owned.
         ("openai", "primary"),
         # A service that configures no tool stays in the worker store.
@@ -2419,14 +2419,17 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
             dataset: str,
             project: str,
             location: str,
-            credentials: object | None = None,
+            runtime_paths: RuntimePaths,
+            credentials_manager: CredentialsManager,
+            worker_target: object | None,
             **_: object,
         ) -> None:
             self.dataset = dataset
             self.project = project
             self.location = location
-            captured["project"] = project
-            captured["credentials"] = credentials
+            captured["runtime_paths"] = runtime_paths
+            captured["credentials_manager"] = credentials_manager
+            captured["worker_target"] = worker_target
 
     monkeypatch.setitem(TOOL_REGISTRY, "google_bigquery", lambda: _FakeGoogleBigQueryTools)
 
@@ -2435,8 +2438,9 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
     assert tool.dataset == "demo_dataset"
     assert tool.project == "demo-project"
     assert tool.location == "us-central1"
-    assert captured["project"] == "demo-project"
-    assert captured["credentials"] is None
+    assert captured["runtime_paths"] is runtime_paths
+    assert captured["credentials_manager"] is not None
+    assert captured["worker_target"] is None
 
 
 def test_primary_built_tool_ignores_worker_written_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -2449,32 +2453,32 @@ def test_primary_built_tool_ignores_worker_written_settings(monkeypatch: pytest.
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
     assert target.worker_key is not None
-    settings = {"dataset": "demo_dataset", "location": "us-central1"}
+    settings = {"db_name": "demo", "user": "alpha"}
     credentials_manager.for_primary_runtime_agent_scope("alpha").save_credentials(
-        "google_bigquery",
-        {**settings, "project": "primary-project"},
+        "postgres",
+        {**settings, "host": "primary.example.test"},
     )
     credentials_manager.for_worker(target.worker_key).save_credentials(
-        "google_bigquery",
-        {**settings, "project": "worker-project"},
+        "postgres",
+        {**settings, "host": "worker.example.test"},
     )
     captured: dict[str, object] = {}
 
-    class _FakeGoogleBigQueryTools:
-        def __init__(self, *, project: str, **_: object) -> None:
-            captured["project"] = project
+    class _FakePostgresTools:
+        def __init__(self, *, host: str, **_: object) -> None:
+            captured["host"] = host
 
-    monkeypatch.setitem(TOOL_REGISTRY, "google_bigquery", lambda: _FakeGoogleBigQueryTools)
+    monkeypatch.setitem(TOOL_REGISTRY, "postgres", lambda: _FakePostgresTools)
 
     get_tool_by_name(
-        "google_bigquery",
+        "postgres",
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_tools_override=[],
         worker_target=target,
     )
 
-    assert captured["project"] == "primary-project"
+    assert captured["host"] == "primary.example.test"
 
 
 def test_routed_browser_ignores_worker_planted_desktop_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

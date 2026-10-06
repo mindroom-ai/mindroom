@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.google.bigquery import GoogleBigQueryTools
+    from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools
 
 
 @register_tool_with_metadata(
@@ -18,7 +25,9 @@ if TYPE_CHECKING:
     description="Query Google BigQuery - list tables, describe schemas, and run SQL queries",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.SPECIAL,
+    setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
+    auth_provider="google_cloud",
     icon="SiGooglebigquery",
     icon_color="text-blue-600",
     config_fields=[
@@ -47,13 +56,12 @@ if TYPE_CHECKING:
             description="BigQuery location",
         ),
         ConfigField(
-            name="credentials",
-            label="Credentials",
-            type="text",
+            name="max_rows",
+            label="Max Rows",
+            type="number",
             required=False,
-            default=None,
-            description="Optional Google Cloud credentials object passed directly to the toolkit",
-            authored_override=False,
+            default=100,
+            description="Maximum rows returned by run_sql_query (1 to 1000)",
         ),
         ConfigField(
             name="list_tables",
@@ -84,13 +92,25 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
-    dependencies=["google-cloud-bigquery"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/google_bigquery",
-    helper_text="Configure dataset, project, and location explicitly. If the toolkit needs credentials, pass them explicitly through saved config or a credentials object.",
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
+    ),
+    dependencies=[
+        "google-cloud-bigquery",
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib",
+    ],
+    docs_url="https://cloud.google.com/bigquery/docs/reference/rest",
+    helper_text="Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
     function_names=("describe_table", "list_tables", "run_sql_query"),
 )
 def google_bigquery_tools() -> type[GoogleBigQueryTools]:
     """Return Google BigQuery tools for data analytics."""
-    from agno.tools.google.bigquery import GoogleBigQueryTools
+    from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools
 
     return GoogleBigQueryTools
