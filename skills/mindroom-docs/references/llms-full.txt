@@ -5328,6 +5328,16 @@ When the panel cannot open, the **Open panel** button is disabled and a message 
 
 Other people in the room, and other Matrix clients, see only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
+### Find a canvas again
+
+A canvas the user comes back to, such as a landing page an agent keeps current or a checklist used every day, does not have to be found in its thread again.
+Where canvases are on, the **Canvases** button in Chat's sidebar lists the canvases agents made for the user: pinned ones first, then the most recently updated, with the agent, the room, and when each was updated and created.
+Choosing a title opens the canvas at its latest version, filling the conversation's column; choosing the room opens the conversation.
+
+Pins are kept in the user's Matrix account data (`io.mindroom.pinned_canvases`, room and event IDs only), so they show on every device.
+The rest of the list holds the canvases this browser has received, so a new device starts with recent canvases and older ones appear once their thread is opened.
+For a page the user returns to, update the same canvas with `canvas_event_id` rather than showing a new one, so its row and pin keep pointing at it.
+
 ## Answering a canvas
 
 Typing, toggling, and moving between steps inside the page send nothing.
