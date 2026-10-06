@@ -471,10 +471,12 @@ def _bounded_str(content: dict[str, object], key: str, label: str, *, max_length
 
 def _setup_homeserver(content: dict[str, object]) -> str:
     # The app shows this URL as the sign-in server, so nothing may disguise its real host.
+    # Plain http would send the sign-in over the network unencrypted, so it is only for a homeserver on this computer.
     value = _bounded_str(content, "homeserver", "setup", max_length=2048)
     parts = urlsplit(value)
-    if not value.isascii() or parts.scheme not in {"http", "https"} or not parts.hostname or "@" in parts.netloc:
-        msg = "Desktop setup homeserver must be a plain http or https URL."
+    local_http = parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"}
+    if not value.isascii() or not (parts.scheme == "https" or local_http) or not parts.hostname or "@" in parts.netloc:
+        msg = "Desktop setup homeserver must be a plain https URL, or http on localhost."
         raise DesktopProtocolError(msg)
     return value
 
