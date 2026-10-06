@@ -168,24 +168,31 @@ class ReplyRuntime:
     clock: Callable[[], int] = field(default=time.time_ns)
     # The task executing each live span of this bot instance.
     _tasks: dict[str, asyncio.Task[object]] = field(default_factory=dict, init=False, repr=False)
+    # Cancellations of live spans whose task had not started yet (DESIGN.md §8 registration recheck).
+    _cancel_on_start: dict[str, TaskCancelSource] = field(default_factory=dict, init=False, repr=False)
 
     def register_task(self, handle: SpanHandle, task: asyncio.Task[object]) -> None:
-        """Remember the task that executes one span, until it finishes."""
+        """Remember the task that executes one span, cancelling it at once if a Stop already reached the span."""
         self._tasks[handle.span_id] = task
         task.add_done_callback(lambda _task: self._tasks.pop(handle.span_id, None))
+        cancel_source = self._cancel_on_start.pop(handle.span_id, None)
+        if cancel_source is not None:
+            request_task_cancel(task, cancel_source=cancel_source)
 
     def cancel_span(self, span_id: str, *, cancel_source: TaskCancelSource) -> bool:
-        """Cancel exactly the named span's task, if it runs here; return whether one was cancelled."""
+        """Cancel exactly the named span's task; a span whose task has not started is cancelled when it does."""
         task = self._tasks.get(span_id)
-        if task is None or task.done():
+        if task is None:
+            self._cancel_on_start[span_id] = cancel_source
+            return False
+        if task.done():
             return False
         request_task_cancel(task, cancel_source=cancel_source)
         return True
 
-    def span_is_live(self, span_id: str) -> bool:
-        """Return whether a span's task runs here now."""
-        task = self._tasks.get(span_id)
-        return task is not None and not task.done()
+    def forget_span(self, span_id: str) -> None:
+        """Drop a cancellation that the span ended before starting its task."""
+        self._cancel_on_start.pop(span_id, None)
 
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies."""
@@ -200,6 +207,8 @@ class ReplyRuntime:
             yield slot
         finally:
             _current_slot.reset(token)
+            if slot.handle is not None:
+                self.forget_span(slot.handle.span_id)
 
     async def claim(
         self,

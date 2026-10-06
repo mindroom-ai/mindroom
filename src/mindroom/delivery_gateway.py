@@ -1675,6 +1675,33 @@ class DeliveryGateway:
         )
         return event_id if edited else None
 
+    async def settle_unclaimed_reply(self, source_event_ids: tuple[str, ...], *, source_deleted: bool) -> bool:
+        """End the reply an earlier attempt left for sources that became terminal before a claim.
+
+        Returns whether reply records own those sources, so main's interrupted
+        note is not written (PR-1.md §6.2, first gate).
+        """
+        reply = await self.deps.outbox.replies.for_sources(source_event_ids)
+        if reply is None:
+            return False
+        if reply.terminal or reply.current_span_id is not None:
+            # A terminal reply keeps its answer; a span an older instance left
+            # current is ended when this instance starts.
+            return True
+        now_ns = time.time_ns()
+        applied = await self.deps.outbox.replies.decide(
+            reply_id=reply.reply_id,
+            span_id=reply.last_span_id,
+            decide=lambda current, span: (
+                rl.sources_deleted(current, None, now_ns=now_ns)
+                if source_deleted
+                else rl.sources_settled_without_reply(current, span, now_ns=now_ns)
+            ),
+        )
+        await self._run_reply_effects(applied.post_commit)
+        await self.settle_reply_debt(reply.reply_id)
+        return True
+
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Show a dispatch failure on the reply bound to one event before a span ran it.
 
@@ -2781,7 +2808,20 @@ class DeliveryGateway:
 
         def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite:
             status = state_content.get(constants.STREAM_STATUS_KEY)
-            return terminal_write(handle, shown(progress), state=_reply_state_for_stream_status(status))
+            state = _reply_state_for_stream_status(status)
+            if progress.untransformed_text is None:
+                return terminal_write(handle, shown(progress), state=state)
+            # The final transform reshaped the whole reply: that is what it
+            # shows from now on, and the span's own answer stays canonical.
+            whole = Presentation(
+                segments=(
+                    Segment(kind="answer", text=progress.text, span_id=handle.span_id, tool_trace=progress.tool_trace),
+                ),
+                placeholder=handle.base.placeholder,
+                show_tool_calls=handle.base.show_tool_calls,
+            )
+            canonical = shown(replace(progress, text=progress.untransformed_text))
+            return terminal_write(handle, canonical, state=state, frozen_display=whole)
 
         async def terminal_send(
             client: nio.AsyncClient,

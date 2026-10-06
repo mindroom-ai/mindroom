@@ -3975,9 +3975,20 @@ class ResponseRunner:
             source_deleted = await self.deps.delivery_gateway.cleanup_deleted_response(
                 request.response_envelope.source_event_id,
             )
-            if handle is not None and not handle.exited:
+            reply_owned = handle is not None and not handle.exited
+            if handle is not None and reply_owned:
                 await self._end_span_for_terminal_source(handle, resolved_target, source_deleted=source_deleted)
-            elif not source_deleted and request.existing_event_id is not None and request.existing_event_is_placeholder:
+            elif self.deps.replies is not None:
+                reply_owned = await self.deps.delivery_gateway.settle_unclaimed_reply(
+                    (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
+                    source_deleted=source_deleted,
+                )
+            if (
+                not reply_owned
+                and not source_deleted
+                and request.existing_event_id is not None
+                and request.existing_event_is_placeholder
+            ):
                 await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=resolved_target,

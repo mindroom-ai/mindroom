@@ -373,6 +373,8 @@ class _CommittedDeliveryState:
     visible_body_state: Literal["placeholder_only", "visible_body"]
     interactive_metadata: interactive.InteractiveMetadata | None
     stream_status: str
+    # The text before the final transform reshaped it, when it did.
+    untransformed_text: str | None = None
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
@@ -480,6 +482,7 @@ class _StreamingDeliverySnapshot:
     interactive_creator_agent: str | None
     interactive_source_event_id: str | None
     markdown_renderer: Callable[[str], str]
+    untransformed_text: str | None = None
 
 
 def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
@@ -488,6 +491,7 @@ def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
         tool_trace=tuple(committed.tool_trace),
         presentation_state=deepcopy(committed.presentation_state),
         placeholder_only=committed.visible_body_state == "placeholder_only",
+        untransformed_text=committed.untransformed_text,
     )
 
 
@@ -561,6 +565,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             ),
             interactive_metadata=response.interactive_metadata,
             stream_status=snapshot.stream_status,
+            untransformed_text=snapshot.untransformed_text,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
     )
@@ -574,6 +579,8 @@ class ProgressState:
     tool_trace: tuple[ToolTraceEntry, ...]
     presentation_state: dict[str, object] | None
     placeholder_only: bool
+    # The whole reply before the final transform reshaped it into ``text``, when it did.
+    untransformed_text: str | None = None
 
 
 type ProgressWriteAhead = Callable[[ProgressState], Awaitable[bool]]
@@ -1306,7 +1313,11 @@ class StreamingResponse:
                 logger.exception("final_response_transform_failed_preserving_streamed_text")
             else:
                 if transformed.strip() and transformed != snapshot.accumulated_text:
-                    snapshot = replace(snapshot, accumulated_text=transformed)
+                    snapshot = replace(
+                        snapshot,
+                        accumulated_text=transformed,
+                        untransformed_text=snapshot.accumulated_text,
+                    )
         return await asyncio.to_thread(_prepare_delivery_from_snapshot, snapshot)
 
     def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:

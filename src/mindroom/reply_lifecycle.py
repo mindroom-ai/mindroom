@@ -931,7 +931,8 @@ def _terminal_row(
         presentation=write.shown,
         frozen_display=write.frozen_display,
     )
-    updated, row = _row(updated, span, stage, shown=write.shown, settles_sources=settles)
+    shown = write.shown if write.frozen_display is None else write.frozen_display
+    updated, row = _row(updated, span, stage, shown=shown, settles_sources=settles)
     effects: tuple[Effect, ...] = (SettleSources(span.span_id),) if settles else ()
     return Transition(
         outcome=Outcome.APPLIED,
@@ -996,8 +997,20 @@ def stopped(
             effects=(SettleSources(span.span_id),),
         )
     if write is None:
-        msg = "A stopped span needs its cancelled terminal write"
-        raise _invalid(msg)
+        # An exit that rendered nothing (a release, an error before delivery)
+        # still ends the reply as stopped; the cancel note it owes follows.
+        cancelled = _set_state(
+            _stop_applied(_clear_current(reply, span.span_id)),
+            ReplyState.CANCELLED,
+            now_ns,
+            owed_write=OwedWrite(span.span_id, NOTE_CANCELLED),
+        )
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=cancelled,
+            spans=(_end(span, SpanOutcome.CANCELLED, now_ns),),
+            effects=(SettleSources(span.span_id),),
+        )
     recompute = _check_revision(reply, write.prepared_revision)
     if recompute is not None:
         return recompute
@@ -1032,8 +1045,6 @@ def fail(  # noqa: C901, PLR0911
     if stale is not None:
         return stale
     if reply.unapplied_stop and span.kind is not SpanKind.APPROVAL_RESUME:
-        if write is None:
-            return _unchanged(Outcome.RECOMPUTE, reply)
         return stopped(reply, span, write, now_ns=now_ns)
     if span.kind is SpanKind.APPROVAL_RESUME:
         updated = _clear_current(reply, span.span_id)
@@ -1149,7 +1160,11 @@ def release(
     _require_current(reply, span)
     if span.ended:
         return _unchanged(Outcome.DUPLICATE, reply)
-    updated = _touch(_clear_current(confirm_progress(reply, confirms), span.span_id), now_ns)
+    reply = confirm_progress(reply, confirms)
+    if reply.unapplied_stop and span.kind is not SpanKind.APPROVAL_RESUME and reply.current_span_id == span.span_id:
+        # A recorded Stop outranks a retry: the sources settle and the reply ends stopped.
+        return stopped(reply, span, None, now_ns=now_ns)
+    updated = _touch(_clear_current(reply, span.span_id), now_ns)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=(_end(span, outcome, now_ns),))
 
 
@@ -1159,11 +1174,15 @@ def release(
 
 @dataclass(frozen=True, slots=True)
 class PauseWrite:
-    """The prepared pause row: its stage, what it shows, and the canonical presentation."""
+    """The prepared pause row: its stage, what it shows, and the canonical presentation.
+
+    ``stage`` is ``None`` when the reply's create already showed the pause, so
+    the pause writes no row of its own.
+    """
 
     shown: str
     prepared_revision: int
-    stage: WriteStage
+    stage: WriteStage | None
     # The span's last direct progress edit, which this durable write confirms.
     confirms: ProgressConfirmation | None = None
 
@@ -1197,7 +1216,9 @@ def pause(
         approval_id=approval_id,
         presentation=write.shown,
     )
-    updated, row = _row(updated, span, write.stage, shown=write.shown, settles_sources=False)
+    row = None
+    if write.stage is not None:
+        updated, row = _row(updated, span, write.stage, shown=write.shown, settles_sources=False)
     if in_place:
         return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
     updated = _clear_current(updated, span.span_id)

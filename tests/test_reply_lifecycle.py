@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -26,6 +27,9 @@ from mindroom.reply_lifecycle import (
     WriteFacts,
     WriteStage,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 GEN = "gen-2"
 OLD_GEN = "gen-1"
@@ -509,10 +513,34 @@ def test_failure_with_an_unapplied_stop_cancels() -> None:
     reply, span = _turn()
     stop = rl.stop(reply, span, StopFacts(receipt_order=2, newer_edit=False, span_live=True), now_ns=NOW)
     assert stop.reply is not None
-    assert rl.fail(stop.reply, span, None, phase="delivery", now_ns=NOW).outcome is Outcome.RECOMPUTE
     cancelled = rl.fail(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), phase="delivery", now_ns=NOW)
     assert cancelled.reply is not None
     assert cancelled.reply.state is ReplyState.CANCELLED
+    assert cancelled.row is not None
+
+
+@pytest.mark.parametrize(
+    "exit_without_write",
+    [
+        lambda reply, span: rl.fail(reply, span, None, phase="pre_delivery", now_ns=NOW),
+        lambda reply, span: rl.release(reply, span, now_ns=NOW),
+    ],
+    ids=["error_before_delivery", "release"],
+)
+def test_an_exit_that_rendered_nothing_still_honors_a_recorded_stop(
+    exit_without_write: Callable[[Reply, Span], rl.Transition],
+) -> None:
+    """A Stop outranks a retry: the reply ends cancelled, its sources settle, and it owes the cancel note."""
+    reply, span = _turn()
+    stop = rl.stop(reply, span, StopFacts(receipt_order=2, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    transition = exit_without_write(stop.reply, span)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.CANCELLED
+    assert not transition.reply.unapplied_stop
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl.NOTE_CANCELLED)
+    assert transition.effects == (SettleSources(span.span_id),)
+    assert _span_after(transition, span.span_id).outcome is SpanOutcome.CANCELLED
 
 
 @pytest.mark.parametrize(
@@ -601,6 +629,25 @@ def test_pause_ends_the_span_and_writes_an_edit_row() -> None:
     assert reply.current_span_id is None
     assert transition.row is not None
     assert transition.row.stage is WriteStage.EDIT
+    assert _span_after(transition, span.span_id).outcome is SpanOutcome.PAUSED
+
+
+def test_pause_shown_by_the_replys_create_writes_no_row() -> None:
+    """A reply that had no event shows its pause with its create; the pause then only records the wait."""
+    reply, span = _turn()
+    reply = replace(reply, event_id="$reply", possibly_shown="paused")
+    transition = rl.pause(
+        reply,
+        span,
+        rl.PauseWrite(shown="paused", prepared_revision=reply.revision, stage=None),
+        approval_id="approval-1",
+        in_place=False,
+        now_ns=NOW,
+    )
+    assert transition.row is None
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.PAUSED
+    assert transition.reply.reply_sequence == reply.reply_sequence
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.PAUSED
 
 

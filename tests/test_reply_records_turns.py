@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.hooks import FinalResponseDraft
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.delivery_gateway import ResponseIdentity
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,6 +34,20 @@ async def _streaming_bot(tmp_path: Path) -> AgentBot:
     bot = _bot(tmp_path)
     # Startup makes this bot instance the owner of its replies, so a Stop finds its spans live.
     await bot._reply_runtime.start()
+    # Ingress admitted the request, so the journal holds it pending until a reply settles it.
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$event",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={},
+        ),
+    )
+    assert await bot._reply_runtime.store.is_pending("$event")
     unique_room_send_responses(bot.client)
     streaming = bot.config.defaults.streaming
     # Send every progress edit, so the write-ahead path runs on each chunk.
@@ -187,6 +203,7 @@ async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp
     assert reply.state is rl.ReplyState.ACTIVE
     assert reply.event_id == "$sent1"
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.RELEASED]
+    assert await bot._reply_runtime.store.is_pending("$event")
 
     # The journal retries the sources; the dispatcher names the placeholder it recovered.
     retry = replace(
@@ -444,3 +461,98 @@ async def test_a_dispatch_failure_before_the_answer_ends_the_selection_reply(tmp
     assert reply.owed_write is None
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
     assert _sent_bodies(bot)[-1] == "[general] ⚠️ Error: lookup failed"
+
+
+async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_runs(tmp_path: Path) -> None:
+    """A Stop that reaches a span still preparing cancels its task the moment it registers."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    preparing = asyncio.Event()
+    release = asyncio.Event()
+    prepare = ResponseRunner.prepare_response_runtime
+
+    async def slow_prepare(self: ResponseRunner, *args: object, **kwargs: object) -> object:
+        preparing.set()
+        await release.wait()
+        return await prepare(self, *args, **kwargs)
+
+    model = AsyncMock(return_value="An answer.")
+    with (
+        patch.object(ResponseRunner, "prepare_response_runtime", new=slow_prepare),
+        patch_response_runner_module(
+            ai_response=model,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(preparing.wait(), timeout=5)
+        assert await bot._delivery_gateway.record_reply_stop("$sent1", 7, newer_edit=False)
+        release.set()
+        await asyncio.wait_for(response, timeout=5)
+
+    model.assert_not_awaited()
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.CANCELLED
+    assert not reply.unapplied_stop
+    assert _sent_bodies(bot)[-1] == "**[Response cancelled by user]**"
+    assert not await bot._reply_runtime.store.is_pending("$event")
+
+
+async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_left(tmp_path: Path) -> None:
+    """The first gate's rejection of a terminal source ends the released reply through its records."""
+    bot = await _streaming_bot(tmp_path)
+    with pytest.raises(RuntimeError, match="model down"):
+        await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=RuntimeError("model down")))
+    assert (await _reply(bot)).state is rl.ReplyState.ACTIVE
+
+    retry = replace(
+        _plain_request(_target()),
+        existing_event_id="$sent1",
+        existing_event_is_placeholder=True,
+        prepare_source_turn=AsyncMock(return_value=True),
+    )
+    assert await _answer(bot, retry, AsyncMock(return_value="Never.")) is None
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.GONE
+    assert reply.redaction_pending == ()
+    bot.client.room_redact.assert_awaited_once()
+    assert "$sent1" in (*bot.client.room_redact.await_args.args, *bot.client.room_redact.await_args.kwargs.values())
+    # Main's interrupted note is not written over the placeholder.
+    assert _sent_bodies(bot) == ["Thinking..."]
+
+
+async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: Path) -> None:
+    """The transformed whole reply is its frozen display; the span's own answer stays canonical."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Hello"
+
+    async def shout(*, identity: ResponseIdentity, response_text: str) -> FinalResponseDraft:
+        return FinalResponseDraft(
+            response_text=response_text.upper() + "!",
+            response_kind=identity.response_kind,
+            envelope=identity.response_envelope,
+        )
+
+    with (
+        patch.object(hooks, "_apply_final_response_transform", new=shout),
+        patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await runner.generate_response(_plain_request(_target()))
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert render_body(decode_presentation(reply.presentation))[0] == "Hello"
+    assert reply.frozen_display is not None
+    assert render_body(decode_presentation(reply.frozen_display))[0] == "HELLO!"
+    assert reply.possibly_shown == reply.frozen_display
+    assert _sent_bodies(bot)[-1] == "HELLO!"
