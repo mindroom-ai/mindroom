@@ -260,7 +260,7 @@ def _validate_early_response_headers(request: Request, payload: object) -> None:
         return
     version = request.headers.get("mcp-protocol-version")
     if version is not None and version not in SUPPORTED_PROTOCOL_VERSIONS:
-        # Newer clients first probe with their own revision and fall back to the handshake on this rejection.
+        # Newer clients may probe with their own revision first and fall back to the handshake on this rejection.
         request.scope[_VERSION_PROBE_SCOPE_KEY] = True
         raise HTTPException(400, "Unsupported MCP protocol version")
 
