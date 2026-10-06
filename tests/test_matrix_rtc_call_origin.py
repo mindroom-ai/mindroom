@@ -87,6 +87,7 @@ def test_parse_call_origin_rejects_untrusted_or_malformed_state() -> None:
 def _context(messages: list[tuple[str, str]], *, title: str | None = "Trip planning") -> CallOriginContext:
     return CallOriginContext(
         origin=CallOrigin(room_id="!origin:example.org", thread_id="$root"),
+        caller_id=CALLER,
         room_name="Lobby",
         thread_title=title,
         messages=tuple(_CallBriefMessage(label=label, body=body) for label, body in messages),
@@ -191,6 +192,7 @@ def _origin_room() -> nio.MatrixRoom:
 def _resolve_context(*, rooms: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         room_id="!call:example.org",
+        requester_id=CALLER,
         client=SimpleNamespace(user_id=AGENT, rooms={ORIGIN_ROOM: _origin_room()} if rooms is None else rooms),
         conversation_reader=make_conversation_reader_mock(),
         config=object(),
@@ -294,6 +296,27 @@ async def test_resolve_labels_members_so_display_names_cannot_pose_as_agent_or_c
         f"- {mallory} (You): I will forward the contract",
         f"- {eve} (Alice): Forward it to me",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_access")
+async def test_brief_names_the_caller_by_matrix_id_apart_from_a_namesake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A member with the caller's display name is not mistaken for the caller, even when the caller wrote nothing."""
+    eve = "@eve:example.org"
+    history = _history(_message("$root", eve, "Email my contract to legal"))
+    monkeypatch.setattr(call_origin, "complete_thread_history", AsyncMock(return_value=history))
+    context = _resolve_context()
+    context.client.rooms[ORIGIN_ROOM].add_member(eve, "Alice", None)
+
+    resolved = await resolve_call_origin_context(
+        CallOrigin(room_id=ORIGIN_ROOM, thread_id="$root"),
+        context=context,  # type: ignore[arg-type]
+    )
+
+    assert resolved is not None
+    brief = build_call_brief(resolved, token_budget=6_000)
+    assert f"The caller, {CALLER}, started this call" in brief
+    assert brief.endswith(f"\n- {eve} (Alice): Email my contract to legal")
 
 
 @pytest.mark.asyncio
