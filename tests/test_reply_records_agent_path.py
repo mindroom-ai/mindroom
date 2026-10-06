@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -164,3 +165,85 @@ async def test_setup_failure_after_the_placeholder_shows_the_dispatch_error(tmp_
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
     assert reply.confirmed_seq == reply.reply_sequence == 2
     assert not await bot._reply_runtime.store.is_pending("$event")
+
+
+async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp_path: Path) -> None:
+    """A failure before anything streamed keeps the placeholder; the retry answers into it as a replay."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with (
+        patch_response_runner_module(
+            ai_response=AsyncMock(side_effect=RuntimeError("model down")),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+        pytest.raises(RuntimeError, match="model down"),
+    ):
+        await runner.generate_response(_plain_request(_target()))
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.ACTIVE
+    assert reply.event_id == "$sent1"
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.RELEASED]
+
+    # The journal retries the sources; the dispatcher names the placeholder it recovered.
+    retry = replace(
+        _plain_request(_target()),
+        existing_event_id="$sent1",
+        existing_event_is_placeholder=True,
+        existing_event_is_recovered=True,
+    )
+    with patch_response_runner_module(
+        ai_response=AsyncMock(return_value="Recovered answer."),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        assert await runner.generate_response(retry) == "$sent1"
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
+    assert [(span.kind, span.outcome) for span in spans] == [
+        (rl.SpanKind.TURN, rl.SpanOutcome.RELEASED),
+        (rl.SpanKind.REPLAY, rl.SpanOutcome.COMPLETED),
+    ]
+    assert _sent_bodies(bot) == ["Thinking...", "Recovered answer."]
+    assert not await bot._reply_runtime.store.is_pending("$event")
+
+
+async def test_an_event_no_reply_owns_keeps_mains_path(tmp_path: Path) -> None:
+    """A recovered response written before durable records is answered without claiming a reply."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = replace(
+        _plain_request(_target()),
+        existing_event_id="$older",
+        existing_event_is_placeholder=True,
+    )
+    with patch_response_runner_module(
+        ai_response=AsyncMock(return_value="An answer."),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        await runner.generate_response(request)
+
+    assert await bot._reply_runtime.store.replies.for_sources(("$event",)) is None
+
+
+async def test_a_claim_the_rules_refuse_settles_with_a_dispatch_error(tmp_path: Path) -> None:
+    """Sources that reach a terminal reply again are a lookup bug: the dispatch fails rather than add a second reply."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with patch_response_runner_module(
+        ai_response=AsyncMock(return_value="A complete answer."),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        await runner.generate_response(_plain_request(_target()))
+        completed = await _reply(bot)
+        with pytest.raises(PostLockRequestPreparationError) as raised:
+            await runner.generate_response(_plain_request(_target()))
+
+    assert not raised.value.reply_owned
+    assert raised.value.placeholder_event_id is None
+    assert await _reply(bot) == completed

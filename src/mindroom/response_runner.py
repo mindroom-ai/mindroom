@@ -3126,12 +3126,7 @@ class ResponseRunner:
         Paths move to records as every write on them is ported; the rest keep
         main's behavior with no span claimed.
         """
-        return (
-            self.deps.replies is not None
-            and history_scope.kind == "agent"
-            and request.prepared_edit_record is None
-            and request.existing_event_id is None
-        )
+        return self.deps.replies is not None and history_scope.kind == "agent" and request.prepared_edit_record is None
 
     async def _claim_reply_span(
         self,
@@ -3156,7 +3151,40 @@ class ResponseRunner:
             # A reply started before durable records exist keeps main's path
             # until the startup migration adopts it.
             return request
-        handle = await replies.claim(
+        if (
+            request.existing_event_id is not None
+            and await replies.store.replies.for_event(request.existing_event_id) is None
+        ):
+            # So does an answer written before durable records exist.
+            return request
+        try:
+            handle = await self._claim_reply(replies, request, history_scope=history_scope)
+        except rl.InvalidTransitionError as error:
+            # A lookup bug, never a reason to add a second reply: the sources
+            # settle with a dispatch error instead of retrying forever.
+            self.deps.logger.exception("reply_claim_invalid", source_event_id=request.response_envelope.source_event_id)
+            raise PostLockRequestPreparationError from error
+        if handle is None:
+            return None
+        slot.handle = handle
+        event_id = handle.reply.event_id
+        return replace(
+            request,
+            existing_event_id=event_id,
+            existing_event_is_placeholder=event_id is not None,
+            # Records decide what a stopped attempt showed; Matrix is not read back.
+            existing_event_is_recovered=False,
+            resumed_reply=handle.resumed,
+        )
+
+    async def _claim_reply(
+        self,
+        replies: ReplyRuntime,
+        request: ResponseRequest,
+        *,
+        history_scope: HistoryScope,
+    ) -> SpanHandle | None:
+        return await replies.claim(
             delivery_id=request.response_envelope.source_event_id,
             sources=rl.SpanSources(
                 pending=request.sources.pending_event_ids,
@@ -3174,18 +3202,6 @@ class ResponseRunner:
             placeholder=TEAM_PLACEHOLDER if history_scope.kind == "team" else AGENT_PLACEHOLDER,
             show_tool_calls=self._show_tool_calls(),
             existing_event_id=request.existing_event_id,
-        )
-        if handle is None:
-            return None
-        slot.handle = handle
-        event_id = handle.reply.event_id
-        return replace(
-            request,
-            existing_event_id=event_id,
-            existing_event_is_placeholder=event_id is not None,
-            # Records decide what a stopped attempt showed; Matrix is not read back.
-            existing_event_is_recovered=False,
-            resumed_reply=handle.resumed,
         )
 
     async def _settle_unauthorized_approval_continuation(
@@ -4160,6 +4176,12 @@ class ResponseRunner:
         non-placeholder existing event (for example a prior answer being
         regenerated) must never be treated as a redactable placeholder.
         """
+        if current_span() is not None:
+            # The span's exit decides the reply; a placeholder stays for the retry (PR-1.md §6.2).
+            return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
+                terminal_status=terminal_status,
+                failure_reason=failure_reason,
+            )
         # Pre-delivery, a tracked event with no adopted existing event is a
         # message this turn created on its own, so classify it as the run
         # message for placeholder cleanup instead of leaving it dangling.
