@@ -18,7 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, resolve_runtime_paths
+from mindroom.constants import ORIGINAL_SENDER_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
@@ -197,6 +197,23 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
     assert recheck["thread_id"] == "$event1"
     assert recheck["trigger_dispatch"] is True
     assert recheck["extra_content"] == {ORIGINAL_SENDER_KEY: "@mindroom_user:example.test"}
+
+
+@pytest.mark.asyncio
+async def test_a_configured_model_runs_the_prompt_and_its_recheck(tmp_path: Path) -> None:
+    """The automation's model rides on both mentions as the trusted per-run model."""
+    config, paths, runner, bot = _setup(tmp_path)
+    config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, model="large")]
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    assert root is not None
+    (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    runner.response_finished(["$event1"])
+    assert await wait_for_background_tasks(5)
+
+    assert [message["extra_content"] for message in bot.sent] == [{SCHEDULED_MODEL_KEY: "large"}] * 2
+    assert [message["trigger_dispatch"] for message in bot.sent] == [True, True]
 
 
 @pytest.mark.asyncio

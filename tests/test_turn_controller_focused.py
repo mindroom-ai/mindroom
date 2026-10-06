@@ -60,6 +60,7 @@ from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EXTERNAL_TRIGGER_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
@@ -3396,8 +3397,36 @@ async def test_scheduled_fire_without_annotation_keeps_full_history(config: Conf
 
 
 @pytest.mark.asyncio
-async def test_user_message_cannot_spoof_scheduled_history_limit(config: Config, tmp_path: Path) -> None:
-    """History-limit annotations on untrusted user messages are ignored."""
+async def test_a_hook_dispatch_carries_its_per_run_model(config: Config, tmp_path: Path) -> None:
+    """Built-in automations post hook dispatches, so the per-run model they annotate reaches the request."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _scheduled_fire_event(
+        config,
+        extra_content={
+            constants.SOURCE_KIND_KEY: HOOK_DISPATCH_SOURCE_KIND,
+            constants.SCHEDULED_HISTORY_LIMIT_KEY: 3,
+            constants.SCHEDULED_MODEL_KEY: "cheap",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.response_envelope.origin.intent is TurnIntent.HOOK_DISPATCH
+    assert request.scheduled_model == "cheap"
+    assert request.scheduled_history_budget is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", [SCHEDULED_SOURCE_KIND, HOOK_DISPATCH_SOURCE_KIND])
+async def test_user_message_cannot_spoof_scheduled_history_limit(
+    config: Config,
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """History-limit and model annotations on untrusted user messages are ignored."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = nio.RoomMessageText.from_dict(
@@ -3405,7 +3434,7 @@ async def test_user_message_cannot_spoof_scheduled_history_limit(config: Config,
             "content": {
                 "body": "please summarize the build failure",
                 "msgtype": "m.text",
-                constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                constants.SOURCE_KIND_KEY: source_kind,
                 constants.SCHEDULED_HISTORY_LIMIT_KEY: 0,
                 "com.mindroom.scheduled_model": "cheap",
             },

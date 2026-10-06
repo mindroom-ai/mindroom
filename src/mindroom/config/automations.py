@@ -56,6 +56,10 @@ class PromptCurationAutomation(BaseModel):
             "size, before verify asks for a re-check; detail should move to memory/ instead of being deleted"
         ),
     )
+    model: str | None = Field(
+        default=None,
+        description="Model for the prompt's runs, a key of models; defaults to the agent's own model",
+    )
     protected_files: list[str] = Field(
         default_factory=list,
         description="Workspace-relative files the pass should leave unchanged",

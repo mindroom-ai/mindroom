@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import RouterConfig
+from mindroom.config.models import ModelConfig, RouterConfig
 
 
 def _config(defaults: list[object] | None = None, **agents: AgentConfig) -> Config:
@@ -95,3 +95,19 @@ def test_a_built_in_is_listed_once() -> None:
     """The same built-in cannot run twice for one agent."""
     with pytest.raises(ValidationError, match="Duplicate"):
         _mind(automations=["prompt_curation", {"name": "prompt_curation", "cron": "0 5 * * *"}])
+
+
+def test_an_automation_model_must_be_a_configured_model() -> None:
+    """A model override names a key of models, both on an agent and in the defaults."""
+    models = {"large": ModelConfig(provider="test", id="test-large")}
+    entry = {"name": "prompt_curation", "model": "large"}
+    (automation,) = (
+        Config(agents={"mind": _mind(automations=[entry])}, models=models).resolve_entity("mind").automations
+    )
+    assert automation.model == "large"
+
+    missing = {"name": "prompt_curation", "model": "missing"}
+    with pytest.raises(ValidationError, match="unknown model 'missing'"):
+        Config(agents={"mind": _mind(automations=[missing])}, models=models)
+    with pytest.raises(ValidationError, match="unknown model 'missing'"):
+        Config(defaults={"automations": [missing]}, agents={"mind": _mind()}, models=models)
