@@ -254,6 +254,9 @@ def test_participation_state_has_no_framework_dependencies() -> None:
 _WINDOWS_DESKTOP_PROBE = """
 import json, sys, types
 
+# The MCP SDK gates its POSIX-only imports on sys.platform, which this probe keeps at the host's value.
+import mcp
+
 for name in ("fcntl", "pwd", "termios"):
     sys.modules[name] = None
 

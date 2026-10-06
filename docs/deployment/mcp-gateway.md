@@ -87,7 +87,7 @@ Forward these paths to the MindRoom API:
 Browser consent lives at `/connections/mcp/authorize`, inside the authenticated browser prefix, so keep it out of any other frontend's service-worker navigation fallback.
 Machine endpoints must receive MCP and OAuth responses, not an access proxy's HTML login page.
 Strip client-supplied trusted identity headers at the proxy, including on machine paths.
-Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, and `MCP-Protocol-Version` headers.
+Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers.
 Forward the exact `/mcp` path without adding a trailing slash.
 
 Native clients can omit `Origin`.
@@ -121,7 +121,8 @@ Client callbacks must be registered HTTPS URLs or loopback HTTP URLs.
 Dashboard API keys, browser cookies, and unsigned identity headers do not authenticate `/mcp`.
 Client names are self-declared, so users should check the displayed client address before approving.
 
-The gateway speaks the Python MCP SDK 1.x Streamable HTTP protocol and is tested with protocol version `2025-11-25`.
+The gateway serves MCP protocol revision `2026-07-28` and the handshake revisions `2024-11-05` through `2025-11-25` over Streamable HTTP.
+Clients on `2026-07-28` connect with `server/discover`, and clients on an earlier revision connect with the `initialize` handshake.
 It uses stateless requests with JSON responses and does not offer resumable SSE sessions, resources, or prompts.
 
 ## External authorization
@@ -322,6 +323,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 
 Tools that need the live Matrix room, such as Matrix messaging, scheduling, and conversation attachments, are never exposed.
 Explicit MCP cancellation applies only to a matching request ID from the same client.
+A `2026-07-28` client cancels a call by closing that call's request, which stops only that call.
 Cancellation cannot forcibly stop synchronous tool work, so a stuck provider call can hold capacity and delay shutdown until the process supervisor terminates the API.
 
 ## Inbound request diagnostics
@@ -336,5 +338,5 @@ These log events describe inbound `/mcp` traffic, separately from outbound MCP i
 Join these events by the server-generated `request_id`, which differs from the client's JSON-RPC ID.
 In `mcp_gateway_agent_selection`, `agent_eligible=false` with `agent_case_match=true` means a case mismatch, and `agent_eligible=true` with `agent_selected=false` means the user has not selected that agent.
 A zero `selected_agent_count` explains empty discovery.
-A 400 in `mcp_gateway_http_completed` with `unsupported_protocol_version=true` means the client asked for an MCP revision the gateway does not support.
-It is logged at info because compatible clients send this as a probe and then fall back to a supported handshake; if no successful request from the same requester follows, that client cannot connect.
+A 400 in `mcp_gateway_http_completed` with `unsupported_protocol_version=true` means the client asked for an MCP revision the gateway does not serve, such as one newer than `2026-07-28`.
+It is logged at info because compatible clients send this as a probe and then retry with a revision the gateway serves; if no successful request from the same requester follows, that client cannot connect.

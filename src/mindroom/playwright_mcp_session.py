@@ -15,22 +15,11 @@ from mcp.client.stdio import stdio_client
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from anyio.streams.memory import MemoryObjectReceiveStream
-    from mcp.shared.message import SessionMessage
     from mcp.types import CallToolResult, Tool
 
 PLAYWRIGHT_MCP_PACKAGE = "@playwright/mcp@0.0.78"
 
 logger = logging.getLogger(__name__)
-
-
-async def _drain_closed_session(stream: MemoryObjectReceiveStream[SessionMessage | Exception]) -> None:
-    """Keep late server output from cancelling the transport's process cleanup."""
-    try:
-        async for _message in stream:
-            pass
-    except (anyio.ClosedResourceError, anyio.EndOfStream):
-        pass
 
 
 @dataclass(slots=True)
@@ -143,52 +132,41 @@ class PlaywrightMCPSession:
             if cancellation is not None:
                 raise cancellation
 
-    async def _run_actor(self) -> None:  # noqa: C901, PLR0912, PLR0915 - one task owns all MCP contexts
+    async def _run_actor(self) -> None:  # noqa: C901, PLR0912 - one task owns all MCP contexts
         active: _QueuedCall | None = None
         cancelled: list[_QueuedCall] = []
-        drain: asyncio.Task[None] | None = None
         error: BaseException = RuntimeError("Playwright MCP session is closed.")
         try:
             # The request deadline covers startup; failure closes entered contexts.
-            async with stdio_client(self._parameters) as (read_stream, write_stream):
-                try:
-                    # Session closure must not close the transport's last reader:
-                    # a late initialize/tool reply otherwise raises BrokenResourceError
-                    # in the SDK reader and interrupts its subprocess cleanup.
-                    async with ClientSession(read_stream.clone(), write_stream.clone()) as session:
-                        with anyio.CancelScope() as scope:
-                            self._work_scope = scope
-                            if self._closed:
-                                scope.cancel()
-                            await session.initialize()
-                            while True:
-                                active = await self._queue.get()
-                                if active.future.done():
-                                    active = None
-                                    continue
-                                try:
-                                    if active.tool_name is None:
-                                        result = tuple((await session.list_tools()).tools)
-                                    else:
-                                        result = await session.call_tool(active.tool_name, active.arguments)
-                                    if not active.future.done():
-                                        active.future.set_result(result)
-                                finally:
-                                    if (
-                                        active.future.cancelled()
-                                        and self._cleanup is not None
-                                        and active.tool_name is not None
-                                    ):
-                                        cancelled.append(active)
-                                active = None
-                finally:
-                    drain = asyncio.create_task(_drain_closed_session(read_stream))
+            # The transport drains late server output itself while it stops the process.
+            async with (
+                stdio_client(self._parameters) as (read_stream, write_stream),
+                ClientSession(read_stream, write_stream) as session,
+            ):
+                with anyio.CancelScope() as scope:
+                    self._work_scope = scope
+                    if self._closed:
+                        scope.cancel()
+                    await session.initialize()
+                    while True:
+                        active = await self._queue.get()
+                        if active.future.done():
+                            active = None
+                            continue
+                        try:
+                            if active.tool_name is None:
+                                result = tuple((await session.list_tools()).tools)
+                            else:
+                                result = await session.call_tool(active.tool_name, active.arguments)
+                            if not active.future.done():
+                                active.future.set_result(result)
+                        finally:
+                            if active.future.cancelled() and self._cleanup is not None and active.tool_name is not None:
+                                cancelled.append(active)
+                        active = None
         except Exception as exc:
             error = exc
         finally:
-            if drain is not None:
-                drain.cancel()
-                await asyncio.gather(drain, return_exceptions=True)
             try:
                 # The process tree has stopped before removing late screenshot output.
                 if self._cleanup is not None:

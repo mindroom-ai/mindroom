@@ -792,7 +792,7 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     assert "Use the original session." in events[-1].execution.result
     script = tmp_path / "server.py"
     script.write_text(
-        'from mcp.server.fastmcp import FastMCP\nserver = FastMCP("echo")\n@server.tool()\ndef echo(text: str) -> str:\n    return "echo:" + text\nserver.run()\n',
+        'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n    return "echo:" + text\nserver.run()\n',
     )
     paths = catalog.runtime_context.runtime_paths
     config = Config.validate_with_runtime(
