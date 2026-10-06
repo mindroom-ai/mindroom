@@ -9954,51 +9954,18 @@ def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
     assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
 
 
-def _basic_authorization_header(credential: str) -> str:
-    return f"Authorization: Basic {base64.b64encode(credential.encode()).decode()}"
-
-
 def test_redacting_basic_secrets_scrubs_a_secret_that_contains_another_whole() -> None:
     """Decoded Basic credentials are scrubbed wherever else they appear, the longest first."""
     entries = [("alice", "hunter2"), ("bob", "hunter2-extra"), ("carol", "plain")]
-    text = "\n".join(
-        [
-            *(_basic_authorization_header(f"{user}:{password}") for user, password in entries),
-            "echo hunter2-extra and hunter2 and alice:plain and carol:plain",
-        ],
-    )
+    headers = [
+        f"Authorization: Basic {base64.b64encode(f'{user}:{password}'.encode()).decode()}" for user, password in entries
+    ]
+    text = "\n".join([*headers, "echo hunter2-extra and hunter2 and alice:plain and carol:plain"])
 
     assert redact_credentials_in_text(text).splitlines() == [
         *["Authorization: Basic ***"] * len(entries),
         "echo *** and *** and alice:*** and ***",
     ]
-
-
-def test_redacting_basic_secrets_up_to_the_limit_keeps_the_diagnostic() -> None:
-    """Sixteen distinct decoded values, from eight credentials, are each scrubbed in place."""
-    credentials = [f"user{i}:secret{i}" for i in range(8)]
-    leaked = [*credentials, *(credential.split(":")[1] for credential in credentials)]
-    text = "\n".join([*map(_basic_authorization_header, credentials), f"fatal: {' '.join(leaked)}"])
-
-    assert redact_credentials_in_text(text).splitlines()[-1] == "fatal: " + " ".join(["***"] * len(leaked))
-
-
-def test_redacting_more_basic_secrets_than_the_limit_replaces_the_text_within_a_cpu_budget() -> None:
-    """Hostile Git output carrying many distinct Basic credentials must not stall the event loop.
-
-    Each scrubbed value costs a pass over the text, so a text decoding to more values
-    than the limit is replaced whole rather than scrubbed or returned with one left in.
-    Near-misses that share a long prefix are the worst case for matching every value
-    in a single regex pass; the ``B`` credential keeps that prefix from being factored out.
-    """
-    shared_prefix = "A" * 40
-    headers = [_basic_authorization_header(f"{shared_prefix}{i:05d}") for i in range(1_000)]
-    text = "\n".join([*headers, _basic_authorization_header("B"), *[shared_prefix * 2] * 2_500])
-
-    with cpu_budget(0.5):
-        redacted = redact_credentials_in_text(text)
-
-    assert redacted == "***"
 
 
 @pytest.mark.parametrize("lead", ["", "-", "1.", "+x9-"])
@@ -10010,7 +9977,7 @@ def test_redacting_a_url_finds_its_scheme_after_other_scheme_characters(lead: st
 
 
 def test_redacting_a_long_run_of_scheme_characters_stays_within_a_cpu_budget() -> None:
-    """Hostile Git output with a long run of scheme characters and no ``://`` must not stall the event loop."""
+    """A stored Git error is re-redacted on every knowledge API read, so a long non-URL run must not stall the loop."""
     text = "remote: " + "A" * 100_000
 
     with cpu_budget(0.5):

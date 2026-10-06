@@ -1,11 +1,11 @@
 """Credential redaction helpers for knowledge Git URLs.
 
-Deliberately the same logic as ``origin/main``, made *total*. ``urlsplit`` raises
-when a netloc holds a codepoint that NFKC-normalises to a URL delimiter --
-U+FF20 for ``@``, U+FF1A for ``:`` -- and these helpers were called unguarded, so
-a malformed URL turned a Git failure into an unrelated ``ValueError`` while that
-failure was being recorded, and left the knowledge API returning 500 for as long
-as the error stayed persisted. No credential is needed to reach any of that.
+These helpers never raise on a URL's contents. ``urlsplit`` raises when a netloc
+holds a codepoint that NFKC-normalises to a URL delimiter -- U+FF20 for ``@``,
+U+FF1A for ``:`` -- and a raise here would turn a Git failure into an unrelated
+``ValueError`` while that failure is recorded, leaving the knowledge API
+returning 500 for as long as the error stays persisted. No credential is needed
+to reach any of that.
 
 Widening *what* gets redacted is a separate and larger question:
 ``src/mindroom/redaction.py`` is a second, older redactor wired in as a global
@@ -24,16 +24,11 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse, urlunparse
 
 from mindroom.git_urls import credential_free_repo_url
+from mindroom.redaction import URL_PATTERN
 
 if TYPE_CHECKING:
     from urllib.parse import ParseResult
 
-#: A URL starts at the first letter of the run of scheme characters that ends at
-#: ``://``. Trying each run once from its start, not again from every letter in
-#: it, keeps a long run without ``://`` from being rescanned once per position.
-_URL_PATTERN: re.Pattern[str] = re.compile(
-    r"(?<![a-zA-Z0-9+.-])(?P<lead>[0-9+.-]*)(?P<url>[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+)",
-)
 _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
     r"\bAuthorization:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
     re.IGNORECASE,
@@ -44,12 +39,6 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 #: it. Deliberately *not* applied when redacting diagnostics: nothing on that
 #: path decodes, and bounding reads only costs error messages.
 MAX_REDACTABLE_TOKEN_LENGTH = 2048
-#: Most distinct decoded ``Authorization: Basic`` values one text may carry. Each
-#: is scrubbed with its own pass over the text, and a remote chooses how many its
-#: Git output carries, so a text decoding to more is withheld whole. Ordinary Git
-#: output carries a credential or two, each giving ``user:password`` and the
-#: password.
-_MAX_DECODED_BASIC_VALUES = 16
 __all__ = [
     "MAX_REDACTABLE_TOKEN_LENGTH",
     "credential_free_repo_url",
@@ -165,12 +154,10 @@ def redact_credentials_in_text(value: str) -> str:
 
     redacted: str = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_authorization_header, value)
     unique_decoded_values = list(set(decoded_basic_values))
-    if len(unique_decoded_values) > _MAX_DECODED_BASIC_VALUES:
-        return "***"
     unique_decoded_values.sort(key=len, reverse=True)
     for decoded_value in unique_decoded_values:
         redacted = redacted.replace(decoded_value, "***")
-    return _URL_PATTERN.sub(lambda match: match["lead"] + redact_url_credentials(match["url"]), redacted)
+    return URL_PATTERN.sub(lambda match: match["prefix"] + redact_url_credentials(match["url"]), redacted)
 
 
 def credential_free_url_identity(value: str) -> str:
