@@ -67,8 +67,8 @@ _CANVAS_STATE_SCAN_LIMIT = 50
 _CHAT_UI_INSTRUCTIONS = (
     "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and "
     "none of them touches the user's own computer or browser. Side panels share one place on the screen, so "
-    "opening one replaces whichever is open. Each call only sends a request into the conversation: success "
-    "means it was sent, not that the user saw it."
+    "opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the "
+    "conversation: success means it was sent, not that the user saw it."
 )
 _FUNCTION_INSTRUCTIONS: dict[str, str] = {
     "open_panel": (
