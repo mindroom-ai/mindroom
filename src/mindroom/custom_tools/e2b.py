@@ -17,6 +17,7 @@ from agno.tools.function import ToolResult
 from agno.utils.code_execution import prepare_python_code
 from e2b.envd.api import ENVD_API_FILES_ROUTE, handle_envd_api_exception
 from e2b_code_interpreter.constants import DEFAULT_TIMEOUT, JUPYTER_PORT
+from e2b_code_interpreter.exceptions import format_execution_timeout_error, format_request_timeout_error
 from e2b_code_interpreter.models import Execution, extract_exception, parse_output
 
 from mindroom.atomic_file import atomic_write_file_at
@@ -87,17 +88,22 @@ def _run_code_within_read_limit(sandbox: Sandbox, code: str) -> Execution:
     before any output callback could stop it; this sends the same request and stops reading at the limit.
     """
     config = sandbox.connection_config
-    with httpx.stream(
-        "POST",
-        f"{'http' if config.debug else 'https'}://{sandbox.get_host(JUPYTER_PORT)}/execute",
-        json={"code": code, "context_id": None, "language": None, "env_vars": None},
-        headers=config.sandbox_headers,
-        proxy=config.proxy,
-        timeout=httpx.Timeout(config.request_timeout, read=DEFAULT_TIMEOUT),
-    ) as response:
-        if error := extract_exception(response):
-            raise error
-        output = b"".join(_within_read_limit(response.iter_bytes(), "Sandbox code output"))
+    try:
+        with httpx.stream(
+            "POST",
+            f"{'http' if config.debug else 'https'}://{sandbox.get_host(JUPYTER_PORT)}/execute",
+            json={"code": code, "context_id": None, "language": None, "env_vars": None},
+            headers=config.sandbox_headers,
+            proxy=config.proxy,
+            timeout=httpx.Timeout(config.request_timeout, read=DEFAULT_TIMEOUT),
+        ) as response:
+            if error := extract_exception(response):
+                raise error
+            output = b"".join(_within_read_limit(response.iter_bytes(), "Sandbox code output"))
+    except httpx.ReadTimeout:
+        raise format_execution_timeout_error() from None
+    except httpx.TimeoutException:
+        raise format_request_timeout_error() from None
     execution = Execution()
     for line in output.splitlines():
         parse_output(execution, line.decode())

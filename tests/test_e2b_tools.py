@@ -485,6 +485,31 @@ def test_run_python_code_refuses_output_past_the_limit_while_streaming(
 
 
 @pytest.mark.parametrize(
+    ("timeout", "message"),
+    [
+        (httpx.ReadTimeout("timed out"), "Execution timed out"),
+        (httpx.ConnectTimeout("timed out"), "Request timed out"),
+    ],
+)
+def test_run_python_code_reports_timeouts_like_the_sdk(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: httpx.TimeoutException,
+    message: str,
+) -> None:
+    """A cell that stays silent too long, or a sandbox that cannot be reached, reports the SDK's timeout message."""
+    tool = make_tool(workspace)
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        raise timeout
+
+    monkeypatch.setattr(httpx, "stream", _mock_stream(handle))
+
+    assert message in _error(tool.run_python_code("train()"))
+
+
+@pytest.mark.parametrize(
     "requested",
     [
         "absolute",
