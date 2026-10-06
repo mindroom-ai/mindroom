@@ -15,7 +15,7 @@ from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import journal, membership_state, outbox, response_attempts, turn_records
+from . import membership_state, outbox, response_attempts, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
 
@@ -897,13 +897,15 @@ def finish(
     *,
     approval_id: str,
 ) -> bool:
-    """Release sources after terminal FINAL delivery, proven failed-response deletion, or supersession."""
+    """End a paused run after terminal FINAL delivery, proven failed-response deletion, or supersession.
+
+    The caller settles its sources through the reply settlement path in the same transaction.
+    """
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
     if continuation.state == "failing" and continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
         # An edit regenerates the reply; the old approval publishes nothing.
-        journal.settle_many(transaction, principal_id, continuation.source_event_ids)
         transaction.execute(
             "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
             (principal_id, approval_id),
@@ -923,7 +925,6 @@ def finish(
         and not _settle_superseded_failure_delivery(transaction, principal_id, continuation)
     ):
         return False
-    journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
@@ -1022,7 +1023,7 @@ def discard_unavailable(
     approval_id: str,
     notice_principal_id: str,
 ) -> bool:
-    """Release a permanently unavailable owner's sources after visible card cleanup."""
+    """End a permanently unavailable owner's paused run after visible card cleanup; the caller settles its sources."""
     observed = get(transaction, principal_id, approval_id=approval_id)
     if observed is None or observed.state != "failing":
         return False
@@ -1060,7 +1061,6 @@ def discard_unavailable(
     )
     if delivered is None:
         return False
-    journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),

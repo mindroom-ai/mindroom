@@ -1554,13 +1554,18 @@ class DeliveryGateway:
             await self.settle_reply_debt(applied.transition.reply.reply_id)
         return True
 
-    async def settle_unclaimed_reply(self, source_event_ids: tuple[str, ...], *, source_deleted: bool) -> None:
-        """End the reply an earlier attempt left for sources that became terminal before a claim."""
+    async def settle_unclaimed_reply(self, source_event_ids: tuple[str, ...], *, source_deleted: bool) -> bool:
+        """End the reply an earlier attempt left for sources that became terminal before a claim.
+
+        Returns whether a reply exists for them, whose records then own their settlement.
+        """
         reply = await self.deps.outbox.replies.for_sources(source_event_ids)
-        if reply is None or reply.terminal or reply.current_span_id is not None:
-            # No reply, or a terminal one that keeps its answer; a span an
-            # older instance left current is ended when this instance starts.
-            return
+        if reply is None:
+            return False
+        if reply.terminal or reply.current_span_id is not None:
+            # A terminal reply keeps its answer; a span an older instance left
+            # current is ended when this instance starts.
+            return True
         now_ns = time.time_ns()
         applied = await self.deps.outbox.replies.decide(
             reply_id=reply.reply_id,
@@ -1573,6 +1578,7 @@ class DeliveryGateway:
         )
         await self._run_reply_effects(applied.post_commit)
         await self.settle_reply_debt(reply.reply_id)
+        return True
 
     async def pause_shown_reply(
         self,

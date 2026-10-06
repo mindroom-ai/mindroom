@@ -211,7 +211,7 @@ class CliApprovalWaits:
             and (current.state != "claimed" or current.runtime_generation == self.runtime_generation)
         ):
             if await self.responses.final_delivery(current) is not None:
-                await self.store.finish_approval_continuation(current.approval_id)
+                await self.responses.finish_approval(current.approval_id)
             elif not current_task_is_process_shutdown():
                 await self.responses.request_failure(
                     current,

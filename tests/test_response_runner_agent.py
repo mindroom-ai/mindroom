@@ -3316,12 +3316,12 @@ class TestAgentBot(AgentBotTestBase):
         assert _handled_response_event_id(resolution) == "$response"
 
     @pytest.mark.asyncio
-    async def test_suppressed_no_response_settles_only_after_lifecycle_cleanup(
+    async def test_a_suppressed_reply_settles_through_its_records_without_the_no_reply_callback(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Successful suppression settles its source after response cleanup completes."""
+        """A suppressed reply settles its source through its own records; the no-reply callback stays unused."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -3385,7 +3385,9 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert result is None
-        assert events == ["cleanup_complete", "source_settled"]
+        # The suppressed reply's records settled its source as its span ended; no second settlement follows.
+        assert events == ["cleanup_complete"]
+        assert not await runner.deps.replies.store.is_pending("$event")
 
     @pytest.mark.asyncio
     async def test_paused_approval_releases_conversation_for_the_next_turn(
@@ -3604,7 +3606,11 @@ class TestAdaptiveResponse(AgentBotTestBase):
             assert bodies == []
             assert bot.client.room_typing.await_count == 0
             if action != "sync_restart":
-                assert source_settled == ["quiet"]
+                # The declined reply's records settled its sources; the no-reply callback is not needed.
+                assert source_settled == []
+                reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+                assert reply is not None
+                assert reply.terminal
             assert memory_queued == []
             assert len(model.requests) == (
                 0 if action == "compression_failure" or (backend != "model" and action != "decision_failure") else 1
@@ -3690,7 +3696,11 @@ class TestAdaptiveResponse(AgentBotTestBase):
             ),
         )
         assert result is None
-        assert source_settled == ["quiet"]
+        # The declined reply's records settled its sources; the no-reply callback is not needed.
+        assert source_settled == []
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+        assert reply is not None
+        assert reply.terminal
         assert bot.client.room_send.await_count == 0
         assert bot.client.room_typing.await_count == 0
 

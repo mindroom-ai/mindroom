@@ -221,6 +221,14 @@ class ReplyRuntime:
             if isinstance(effect, rl.CancelSpan):
                 self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
 
+    async def finish_approval(self, approval_id: str) -> bool:
+        """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
+        finished = await self.store.finish_approval_continuation(approval_id)
+        if finished is None:
+            return False
+        await self.run_effects(finished.post_commit)
+        return True
+
     async def _wake_fenced_approval(self, approval_id: str) -> None:
         """Run a fenced approval's failure settlement."""
         continuation = await self.store.approval_continuation(approval_id)

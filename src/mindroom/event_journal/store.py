@@ -74,7 +74,14 @@ from .projection import (
     project,
     tombstoned_event_ids,
 )
-from .replies import AppliedTransition, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
+from .replies import (
+    AppliedTransition,
+    FinishedApproval,
+    PostCommitEffect,
+    ReplyRowEnqueue,
+    ReplyRowRequest,
+    ReplyStore,
+)
 from .scheduled_approvals import (  # noqa: TC001
     ScheduledApprovalArmState,
     ScheduledCall,
@@ -1739,8 +1746,11 @@ class PrincipalStore:
 
         return await self._backend.write(release)
 
-    async def finish_approval_continuation(self, approval_id: str) -> bool:
-        """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply."""
+    async def finish_approval_continuation(self, approval_id: str) -> FinishedApproval | None:
+        """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply.
+
+        Returns ``None`` when the run is not ready to finish.
+        """
         return await self._backend.write(
             lambda transaction: _finish_approval_continuation(transaction, self._principal_id, approval_id),
         )
@@ -1784,7 +1794,8 @@ class PrincipalStore:
                 return False
             if continuation is not None:
                 # The owner that could settle the reply is gone; the notice is what the room sees.
-                replies.approval_finished(transaction, self._principal_id, continuation)
+                # No live ledger of that owner learns it; its next start loads it.
+                _settled_approval(transaction, self._principal_id, continuation)
             return True
 
         return await self._backend.write(discard)
@@ -2043,14 +2054,40 @@ def _claim_approval_resume(
     return claimed, applied
 
 
-def _finish_approval_continuation(transaction: Transaction, principal_id: str, approval_id: str) -> bool:
-    """Finish a continuation and apply the outcome to the reply it paused, in one transaction."""
+def _finish_approval_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+) -> FinishedApproval | None:
+    """Finish a continuation, settle its turn, and apply the outcome to the reply it paused, in one transaction."""
     continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if not approval_continuations.finish(transaction, principal_id, approval_id=approval_id):
-        return False
-    if continuation is not None:
-        replies.approval_finished(transaction, principal_id, continuation)
-    return True
+        return None
+    if continuation is None:
+        return FinishedApproval(post_commit=())
+    return FinishedApproval(post_commit=_settled_approval(transaction, principal_id, continuation))
+
+
+def _settled_approval(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> tuple[PostCommitEffect, ...]:
+    """Settle a finished continuation's sources through the reply settlement path, then end its reply."""
+    completed = turn_records.settle_turn(
+        transaction,
+        principal_id,
+        continuation.entity_name,
+        pending=continuation.source_event_ids,
+        logical=continuation.sources.logical_source_event_ids,
+        # An answer the run completed consumes the edit a regeneration carries.
+        prepared_edit=None if continuation.state == "failing" else continuation.prepared_edit_record,
+    )
+    applied = replies.approval_finished(transaction, principal_id, continuation)
+    effects: list[PostCommitEffect] = [] if completed is None else [replies.TurnCompleted(completed)]
+    if applied is not None:
+        effects.extend(applied.post_commit)
+    return tuple(effects)
 
 
 class _ReplyRowRefusedError(Exception):

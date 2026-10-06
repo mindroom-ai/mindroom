@@ -1602,7 +1602,7 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
 
 
 def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> Transition:
-    """The span's sources settled without an answer."""
+    """The span's sources became terminal without an answer; the rule settles them."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     # A selection's first span waits, unended, for its claim to make it current.
@@ -1610,14 +1610,15 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     if not (span.span_id == reply.current_span_id or span.outcome in _SOURCES_PENDING_OUTCOMES or awaiting_claim):
         return _unchanged(Outcome.STALE, reply)
     spans: tuple[Span, ...] = ()
+    effects = _settle_sources(reply, span)
     updated = _clear_current(reply, span.span_id)
     if not span.ended:
         spans = (_end(span, SpanOutcome.SUPPRESSED, now_ns),)
     if _keeps_earlier_answer(reply, span, from_span=False):
-        return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, span, now_ns), spans=spans)
+        return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, span, now_ns), spans=spans, effects=effects)
     if reply.event_id is None or (reply.placeholder_only and reply.confirmed):
         gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
-        return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans)
+        return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans, effects=effects)
     if reply.unapplied_stop:
         # A Stop recorded before the sources settled decides how the reply ends.
         owed = OwedWrite(span.span_id, _NOTE_CANCELLED)
@@ -1625,6 +1626,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
             outcome=Outcome.APPLIED,
             reply=_set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed),
             spans=spans,
+            effects=effects,
         )
     # What the reply showed stays, ended by the interrupted note; nothing else
     # would replace the in-progress status it shows. An edit Matrix has not
@@ -1634,6 +1636,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
         outcome=Outcome.APPLIED,
         reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed),
         spans=spans,
+        effects=effects,
     )
 
 
@@ -1647,10 +1650,7 @@ def replay_superseded(reply: Reply, last: Span, *, durable_write_debt: bool, now
         return _unchanged(Outcome.DUPLICATE, reply)
     if durable_write_debt or reply.owed_write is not None:
         return _unchanged(Outcome.DEFERRED, reply)
-    settled = replay_dropped(reply, last, sources_pending=False, now_ns=now_ns)
-    if not settled.applied:
-        return settled
-    return replace(settled, effects=(*settled.effects, SettleSources(last.span_id)))
+    return replay_dropped(reply, last, sources_pending=False, now_ns=now_ns)
 
 
 def replay_dropped(reply: Reply, last: Span, *, sources_pending: bool, now_ns: int) -> Transition:

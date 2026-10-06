@@ -204,6 +204,8 @@ class ApprovalResponseCoordinator:
     store: PrincipalStore
     delivery_gateway: DeliveryGateway
     retry_sources: Callable[[str, tuple[str, ...]], None]
+    # Finishes a paused run once its FINAL is terminal, settling its turn.
+    finish_approval: Callable[[str], Awaitable[bool]]
 
     async def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Persist one born-bound paused run against its original sources."""
@@ -481,7 +483,7 @@ class ApprovalResponseCoordinator:
             runtime_paths=self.runtime_paths,
             reason=reason,
         )
-        if await self.store.finish_approval_continuation(current.approval_id):
+        if await self.finish_approval(current.approval_id):
             return True
         user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
         visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if user_stop else redact_sensitive_text(reason))
@@ -495,7 +497,7 @@ class ApprovalResponseCoordinator:
         )
         if written is not None:
             # The reply's records show the note; the finish ends the reply.
-            return written and await self.store.finish_approval_continuation(current.approval_id)
+            return written and await self.finish_approval(current.approval_id)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
@@ -507,7 +509,7 @@ class ApprovalResponseCoordinator:
                 defer_source_handoff=True,
             ),
         )
-        return delivered and await self.store.finish_approval_continuation(current.approval_id)
+        return delivered and await self.finish_approval(current.approval_id)
 
     async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
         """End an interrupted continuation's cards and hand its pending sources back to ordinary replay."""

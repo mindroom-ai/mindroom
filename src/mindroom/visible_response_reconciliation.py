@@ -136,8 +136,7 @@ class VisibleResponseReconciler:
         """Discard a superseded replay unless what it would answer still owes Matrix a write."""
         superseded = await self.deps.delivery_gateway.supersede_replay(handled_turn.source_event_ids)
         if superseded is not None:
-            if superseded:
-                await self.settle_source_events_ignored(handled_turn)
+            # The reply's records settled what the replay would have answered.
             return superseded
         assert handled_turn.anchor_event_id is not None
         async with self.deps.delivery_gateway.supersession_scope(handled_turn.anchor_event_id, room_id) as allowed:

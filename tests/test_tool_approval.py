@@ -1294,7 +1294,7 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
             event_id="$final-edit",
             delivered_projections=(),
         )
-        return await principal.finish_approval_continuation(observed.approval_id)
+        return await principal.finish_approval_continuation(observed.approval_id) is not None
 
     transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
     recovery = ApprovalRecovery(

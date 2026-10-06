@@ -1442,7 +1442,8 @@ def test_a_dropped_replay_ends_the_reply_its_earlier_span_left() -> None:
     assert dropped.reply is not None
     assert dropped.reply.state is ReplyState.FAILED
     assert dropped.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
-    assert dropped.effects == ()
+    # Settling again is idempotent, and it is what records the turn answered.
+    assert dropped.effects == (SettleSources(span.span_id),)
     # A placeholder is removed, unless an edit Matrix has not confirmed may show more.
     unconfirmed = replace(reply, placeholder_only=True, possibly_shown_seq=3, confirmed_seq=2)
     shown = rl.replay_dropped(unconfirmed, span, sources_pending=False, now_ns=NOW)

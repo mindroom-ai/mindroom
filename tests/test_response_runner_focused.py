@@ -1413,6 +1413,8 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     envelope = _envelope(target, source_event_id="$event")
     delivery_gateway = MagicMock(spec=DeliveryGateway)
     delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    # No earlier attempt left a reply, so no reply's records settle the sources.
+    delivery_gateway.settle_unclaimed_reply = AsyncMock(return_value=False)
     request_preparer = MagicMock(spec=ResponsePayloadPreparer)
     request_preparer.prepare = AsyncMock()
     runner = ResponseRunner(

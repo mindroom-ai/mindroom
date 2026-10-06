@@ -311,11 +311,17 @@ async def _paused_case(  # noqa: PLR0915
         approval_store=principal,
         # These cases end a superseded approval by hand, as its source's worker
         # would after a crash cut its background cleanup short.
-        replies=replace(runner.deps.replies, store=principal, clean_up_superseded=lambda _continuation: None),
+        replies=replace(
+            runner.deps.replies,
+            store=principal,
+            complete_turn=store.publish_completed_turn,
+            clean_up_superseded=lambda _continuation: None,
+        ),
     )
     await runner.deps.replies.start()
     runner._approval_responses.store = principal
     runner._approval_responses.delivery_gateway = gateway
+    runner._approval_responses.finish_approval = runner.deps.replies.finish_approval
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
         regenerator.deps,
@@ -689,7 +695,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         runner.deps,
         approval_store=principal,
         delivery_gateway=gateway,
-        replies=replace(runner.deps.replies, store=principal),
+        replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
     )
     request = replace(
         _plain_request(_target(), source_event_id="$edit"),

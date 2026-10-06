@@ -55,13 +55,13 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
 
     store = MagicMock(spec=PrincipalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
-    store.finish_approval_continuation = AsyncMock(side_effect=finish)
     coordinator = ApprovalResponseCoordinator(
         config=lambda: config,
         runtime_paths=paths,
         store=store,
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
+        finish_approval=finish,
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
@@ -91,7 +91,7 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
     reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
     store = MagicMock(spec=PrincipalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
-    store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
+    finish_approval = AsyncMock(side_effect=[False, True])
     gateway = MagicMock(spec=DeliveryGateway)
     gateway.edit_text = AsyncMock(return_value=True)
     # A continuation older than reply records: main's failure edit shows the note.
@@ -102,6 +102,7 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
         store=store,
         delivery_gateway=gateway,
         retry_sources=lambda _room, _sources: None,
+        finish_approval=finish_approval,
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
@@ -134,7 +135,7 @@ async def test_failure_reply_is_marked_interrupted(
     continuation = _continuation()
     store = MagicMock(spec=PrincipalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
-    store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
+    finish_approval = AsyncMock(side_effect=[False, True])
     gateway = MagicMock(spec=DeliveryGateway)
     gateway.edit_text = AsyncMock(return_value=True)
     # A continuation older than reply records: main's failure edit shows the note.
@@ -145,6 +146,7 @@ async def test_failure_reply_is_marked_interrupted(
         store=store,
         delivery_gateway=gateway,
         retry_sources=lambda _room, _sources: None,
+        finish_approval=finish_approval,
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),

@@ -6861,7 +6861,7 @@ class TestApprovalContinuations:
         for index, event_id in enumerate(deleted):
             await admit(alice, f"$redact-{index}", redacts=event_id, kind=EventKind.REDACTION)
 
-        finished = await alice.finish_approval_continuation("approval-1")
+        finished = await alice.finish_approval_continuation("approval-1") is not None
 
         assert finished is (proof == "complete")
         assert await alice.is_pending("$source-1") is not finished
@@ -8008,7 +8008,7 @@ class TestApprovalContinuations:
         await alice.create_approval_continuation(self.continuation())
         await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
 
-        assert await alice.finish_approval_continuation("approval-1") is False
+        assert await alice.finish_approval_continuation("approval-1") is None
         assert await alice.is_pending("$source-1")
         assert await alice.is_pending("$source-2")
 
@@ -8028,7 +8028,7 @@ class TestApprovalContinuations:
             delivered_projections=(),
         )
 
-        assert await alice.finish_approval_continuation("approval-1") is True
+        assert await alice.finish_approval_continuation("approval-1") is not None
         assert await alice.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")

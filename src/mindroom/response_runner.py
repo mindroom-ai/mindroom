@@ -566,10 +566,12 @@ class ResponseRequest:
     prepare_source_turn: (
         Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool | EditPreparation]] | None
     ) = None
+    # Settles the turn's sources when they became terminal before any reply existed to settle them.
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
+    # Records and settles a turn that ended before any reply span existed to settle it.
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
     on_user_stop_handled: Callable[[str, int], Awaitable[None]] | None = None
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
@@ -1031,6 +1033,7 @@ class ResponseRunner:
             store=self.deps.approval_store,
             delivery_gateway=self.deps.delivery_gateway,
             retry_sources=self.deps.retry_approval_sources,
+            finish_approval=self.deps.replies.finish_approval,
         )
         self._cli_approval_waits = CliApprovalWaits(
             store=self.deps.approval_store,
@@ -2101,7 +2104,7 @@ class ResponseRunner:
             msg = "Approval continuation ended without a terminal lifecycle outcome"
             raise RuntimeError(msg)
         if outcome.terminal_status == "completed":
-            if not await self.deps.approval_store.finish_approval_continuation(claimed.approval_id):
+            if not await self.deps.replies.finish_approval(claimed.approval_id):
                 msg = "Approval continuation final delivery was not durably acknowledged"
                 raise RuntimeError(msg)
         elif outcome.terminal_status != "suspended":
@@ -2264,7 +2267,7 @@ class ResponseRunner:
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
         )
-        if not await self.deps.approval_store.finish_approval_continuation(claimed.approval_id):
+        if not await self.deps.replies.finish_approval(claimed.approval_id):
             msg = "Recovered approval final delivery lost its journal ownership"
             raise RuntimeError(msg)
         return True, recovered_outcome.event_id
@@ -3531,7 +3534,7 @@ class ResponseRunner:
             if delivery.acknowledged_event_id is None:
                 return False
             if await self._approval_responses.successful_final_delivery(continuation) is None:
-                return await self.deps.approval_store.finish_approval_continuation(continuation.approval_id)
+                return await self.deps.replies.finish_approval(continuation.approval_id)
             owns_final, event_id = await self._recover_frozen_approval_final(
                 continuation,
                 target=target,
@@ -4087,13 +4090,15 @@ class ResponseRunner:
             )
             if handle is not None and not handle.exited:
                 await self._end_span_for_terminal_source(handle, resolved_target, source_deleted=source_deleted)
-            else:
+            elif (
                 # Before the claim, the reply an earlier attempt left ends through its records.
-                await self.deps.delivery_gateway.settle_unclaimed_reply(
+                not await self.deps.delivery_gateway.settle_unclaimed_reply(
                     (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
                     source_deleted=source_deleted,
                 )
-            if request.on_source_turn_suppressed is not None:
+                and request.on_source_turn_suppressed is not None
+            ):
+                # No reply exists to settle them.
                 await request.on_source_turn_suppressed()
             return None
         return request
@@ -4426,14 +4431,6 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        if final_outcome.suppressed and final_outcome.final_visible_event_id is None:
-            on_suppressed = (
-                request.on_source_turn_suppressed
-                if final_outcome.failure_reason == "source_deleted"
-                else request.on_no_response_handled
-            )
-            if on_suppressed is not None:
-                await on_suppressed()
         if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
             request.source_handoff.set()
         cancel_source = final_outcome.resolved_cancel_source
@@ -5947,7 +5944,9 @@ class ResponseRunner:
             participation.decline("preparation_failed")
             self.deps.logger.exception("Response preparation skipped before participation", error=str(error))
             handle = current_span()
+            settled_by_reply = False
             if handle is not None and not handle.exited:
+                settled_by_reply = True
                 # The declined turn shows nothing; its reply ends while the conversation is still held.
                 confirms = handle.unconfirmed_progress
                 now_ns = time.time_ns()
@@ -5970,7 +5969,8 @@ class ResponseRunner:
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
                 post_response_deps=lambda: self._post_response_deps(request),
             )
-            if request.on_no_response_handled is not None:
+            if not settled_by_reply and request.on_no_response_handled is not None:
+                # No reply span exists to settle the sources.
                 await request.on_no_response_handled()
             return None
 

@@ -40,6 +40,8 @@ from mindroom.turn_record import (
     same_turn_identity,
 )
 
+from . import journal
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -230,6 +232,24 @@ def decode_prepared_edit(stored: str, index_event_id: str) -> TurnRecord:
     record = TurnRecordCodec._from_ledger_record(index_event_id, json.loads(stored))
     assert record is not None, "Corrupt prepared edit on a regeneration span"
     return record
+
+
+def settle_turn(
+    transaction: Transaction,
+    principal_id: str,
+    agent_name: str,
+    *,
+    pending: tuple[str, ...],
+    logical: tuple[str, ...],
+    prepared_edit: TurnRecord | None,
+) -> TurnRecord | None:
+    """Settle an AI reply's journal sources and record its turn answered, in one transaction.
+
+    The only way an AI reply's sources settle: a reply rule's ``SettleSources``
+    and an approval continuation's finish both come here.
+    """
+    journal.settle_many(transaction, principal_id, pending)
+    return complete_turn(transaction, agent_name, logical_event_ids=logical, prepared_edit=prepared_edit)
 
 
 def complete_turn(

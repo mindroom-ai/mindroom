@@ -45,6 +45,15 @@ class TurnCompleted:
 
 # Effects the caller runs after the transaction commits.
 type PostCommitEffect = CancelSpan | WakeApproval | TransferStop | TurnCompleted
+
+
+@dataclass(frozen=True, slots=True)
+class FinishedApproval:
+    """A finished approval continuation, and the work its commit left for afterwards."""
+
+    post_commit: tuple[PostCommitEffect, ...]
+
+
 type Decide = Callable[[Reply, Span], Transition]
 
 
@@ -96,13 +105,14 @@ def _run(
     match effect:
         case SettleSources(span_id=span_id, consumes_edit=consumes_edit):
             span = _span_for(transaction, principal_id, transition, span_id)
-            journal.settle_many(transaction, principal_id, span.sources.pending)
             reply = transition.reply
             assert reply is not None, "a settlement belongs to a reply's transition"
-            completed = turn_records.complete_turn(
+            completed = turn_records.settle_turn(
                 transaction,
+                principal_id,
                 reply.entity_name,
-                logical_event_ids=span.sources.logical,
+                pending=span.sources.pending,
+                logical=span.sources.logical,
                 prepared_edit=(
                     turn_records.decode_prepared_edit(span.prepared_edit, span.sources.logical[0])
                     if consumes_edit and span.prepared_edit is not None

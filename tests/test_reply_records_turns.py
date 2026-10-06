@@ -763,6 +763,28 @@ async def test_a_suppressed_answer_removes_the_placeholder_its_reply_showed(tmp_
     assert not await bot._reply_runtime.store.is_pending("$event")
 
 
+async def test_a_suppressed_reply_settles_its_sources_through_its_records_alone(tmp_path: Path) -> None:
+    """The reply's suppression settles its sources; the no-reply callback is for turns no reply span ran."""
+    bot = await _streaming_bot(tmp_path)
+    await _pending_turn(bot)
+    hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
+    apply = hooks._apply_before_response
+
+    async def suppressed(**kwargs: object) -> ResponseDraft:
+        draft = await apply(**kwargs)  # type: ignore[arg-type]
+        draft.suppress = True
+        return draft
+
+    no_reply = AsyncMock()
+    request = replace(_plain_request(_target()), on_no_response_handled=no_reply)
+    with patch.object(hooks, "_apply_before_response", new=suppressed):
+        assert await _answer(bot, request, AsyncMock(return_value="Hidden.")) is None
+
+    no_reply.assert_not_awaited()
+    assert not await bot._reply_runtime.store.is_pending("$event")
+    assert bot._turn_store.is_handled("$event")
+
+
 async def test_a_silent_schedule_whose_hook_fails_reports_the_failure(tmp_path: Path) -> None:
     """A silent schedule shows nothing until a before-response hook fails; then its failure is sent once."""
     bot = await _streaming_bot(tmp_path)
