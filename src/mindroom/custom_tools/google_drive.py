@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import mimetypes
 from contextlib import contextmanager
@@ -9,6 +10,7 @@ from functools import wraps
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, cast
 
+import agno.tools.google.drive as agno_google_drive
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
 from agno.utils.log import log_error
@@ -52,6 +54,36 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
+
+
+def _extract_docx_text_with_tables(content_bytes: bytes) -> str:
+    import docx  # noqa: PLC0415
+    from docx.table import Table  # noqa: PLC0415
+
+    lines: list[str] = []
+    for block in docx.Document(io.BytesIO(content_bytes)).iter_inner_content():
+        if isinstance(block, Table):
+            for row in block.rows:
+                cells = [cell.text for cell in row.cells]
+                if any(cells):
+                    lines.append("\t".join(cells))
+        else:
+            lines.append(block.text)
+    return "\n".join(lines)
+
+
+def _install_docx_table_extraction() -> None:
+    # AGNO_COMPAT: Drive .docx text extraction drops tables.
+    # Reason: Agno 3.0.9 `_extract_docx_text` reads only `document.paragraphs`, which excludes tables,
+    # so `read_file` returns a document's text without any of its table cells.
+    # Upstream issue: Tracking gap; no matching issue identified.
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10501, open.
+    # Remove when: The pinned Agno `_extract_docx_text` returns table rows in document order.
+    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_extracts_office_document_text.
+    agno_google_drive._extract_docx_text = _extract_docx_text_with_tables  # ty: ignore[invalid-assignment]
+
+
+_AGNO_DOWNLOAD_HINT = " Use download_file instead."
 
 _MODEL_FUNCTION_NAME_ALIASES = {
     "list_files": "google_drive_list_files",
@@ -214,6 +246,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             defer_to_original_auth=defer_to_original_auth,
             quota_project_id=quota_project_id,
         )
+        _install_docx_table_extraction()
         super().__init__(creds=creds, **kwargs)
         # Agno's async variants run Drive calls on the event loop's default executor, which the
         # gateway cannot track; synchronous bodies run on the caller's tool executor instead.
@@ -476,7 +509,13 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     # tests/test_google_drive_oauth_tool.py::test_google_drive_large_file_error_names_exposed_download_function.
     def read_file(self, file_id: str) -> str:
         """Read a Drive file and return its text content, including files in Shared Drives and Office documents."""
-        return super().read_file(file_id).replace(" Use download_file instead.", self._download_guidance())
+        result = super().read_file(file_id)
+        payload = json.loads(result)
+        error = payload.get("error")
+        if not isinstance(error, str) or not error.endswith(_AGNO_DOWNLOAD_HINT):
+            return result
+        payload["error"] = error.removesuffix(_AGNO_DOWNLOAD_HINT) + self._download_guidance()
+        return json.dumps(payload)
 
     @authenticate
     def download_file(self, file_id: str, export_format: str | None = None) -> str:

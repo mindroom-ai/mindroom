@@ -8839,7 +8839,7 @@ agents:
 | --- | --- |
 | `google_drive_list_files()` | Lists recently modified files. |
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Workspace files as text, and plain-text files up to `max_read_size`; PDFs and Office files need a download and a reader for that format. |
+| `google_drive_read_file(file_id)` | Returns Google Workspace files as text, and plain-text files and the text of `.docx`, `.xlsx`, and `.pptx` files up to `max_read_size`; PDFs, images, and other binary files need a download and a reader for that format. |
 | `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
 | `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
 | `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |

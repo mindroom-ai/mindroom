@@ -39,6 +39,7 @@ Paths are relative to `src/mindroom/`.
 | Async runs lack supported persistence hooks for synchronous storage owners. | [Issue #10149](https://github.com/agno-agi/agno/issues/10149), open; [PR #10148](https://github.com/agno-agi/agno/pull/10148), open and partial. | `agno_compat_session_persistence.py`; the PR only routes Agent startup through the awaitable read path. Agent/Team writes and owner dispatch remain. |
 | Tool schemas render `Any`, such as the values of `dict[str, Any]`, as an object that only accepts `{}`. | [Issue #10422](https://github.com/agno-agi/agno/issues/10422), [PR #10423](https://github.com/agno-agi/agno/pull/10423), both open (checked October 5, 2026). | `custom_tools/google_sheets.py` annotates the `batch_update_sheet` requests as `list[dict]`. |
 | OpenAI usage parsing omits cache-write input tokens. | [Issue #10314](https://github.com/agno-agi/agno/issues/10314), [PR #10313](https://github.com/agno-agi/agno/pull/10313), both open (checked October 6, 2026). | `agno_compat_openai_responses.py`, `agno_compat_openai_chat.py`; keep accepting payloads where the field is absent. |
+| Drive `.docx` text extraction drops tables. | [PR #10501](https://github.com/agno-agi/agno/pull/10501), open (checked October 6, 2026). | `custom_tools/google_drive.py` replaces `_extract_docx_text` with one that keeps table rows in document order. |
 
 [PR #9814](https://github.com/agno-agi/agno/pull/9814) is merged, and its typed embedding errors are present in the pinned Agno 3.0.9 embedder.
 The remaining embedder work concerns request/validation hooks and owner-controlled batch failure handling.
@@ -123,9 +124,8 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Adapter media capabilities must be inferred from a private module-name table. | Expose accurate supported-input capabilities independently of provider error learning. | The small documented table in `provider_media_fallback.py`. |
 | Claude history replays tool-search response blocks verbatim, so response-only fields and search uses without a result fail the next request. | Tracking gap: replay server-tool blocks in request shape and drop unpaired search uses; [PR #6879](https://github.com/agno-agi/agno/pull/6879) added the verbatim replay. | `_request_kwargs_with_replay_safe_tool_search_results` in `claude_prompt_cache.py`; `tests/test_extra_kwargs.py`. |
 | Google Drive read errors name `download_file` even when a toolkit renames or omits that function. | Tracking gap: build the hint from the registered function, or omit it. | `custom_tools/google_drive.py` rewrites the hint; `tests/test_google_drive_oauth_tool.py`. |
-| Agent and Team runs load their own session; callers cannot hand over one they already loaded. | Tracking gap: accept a session object on `arun`. | `history/session_context.py` loads the session before the run, so that copy is a snapshot and writes after the run re-read the row or use an idempotent store operation. |
-| Loaded run objects are shared across session reads, but the contract that they are immutable is undocumented. | Tracking gap: document the contract or return copies. | `save_runs` in `agent_storage.py` refuses run objects loaded from the session. |
-| Every stored run persists its system and prompt messages, with no opt-out beside `store_history_messages`. | Tracking gap: add a flag that skips prompt-role messages. | `_ConversationSqliteDb.upsert_run` in `agent_storage.py` strips prompt roles, which MindRoom rebuilds from config. |
+| Loaded run objects are shared across session reads, but the contract that they are immutable is undocumented. | Tracking gap: document the contract or return copies. | `save_runs` in `agent_storage.py` refuses run objects loaded from the session; `tests/test_agent_storage_runs.py`. |
+| Every stored run persists its system and prompt messages, with no opt-out beside `store_history_messages`. | Tracking gap: add a flag that skips prompt-role messages. | `_run_without_prompt_messages` in `agent_storage.py` strips prompt roles, which MindRoom rebuilds from config; `tests/test_agent_storage_runs.py`. |
 
 Module extraction does not close a tracking gap.
 The contribution is complete when the upstream behavior is available, the local regression passes without its workaround, and the obsolete adaptation is removed.
@@ -192,8 +192,8 @@ Small owner-adjacent boundaries use the same source records:
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
-| `claude_prompt_cache.py` | Request-shape repair of replayed tool-search result blocks and removal of unpaired search uses. | Removing references to tools absent from the current request, citation removal, and inline-media notes. |
-| `custom_tools/google_drive.py` (`read_file`) | Rewrites the download hint in inherited read errors. | Text extraction, binary refusal, and shared-drive reads come from Agno; downloads keep MindRoom's workspace confinement and size cap. |
+| `claude_prompt_cache.py` | Request-shape repair of replayed tool-search result blocks and removal of unpaired search uses. | Removing references to tools absent from the current request. |
+| `custom_tools/google_drive.py` | Rewrites the download hint in inherited read errors and replaces the `.docx` text extractor. | Binary refusal, Office extraction, and shared-drive reads come from Agno; downloads keep MindRoom's workspace confinement and size cap. |
 
 ## Installation and ownership
 

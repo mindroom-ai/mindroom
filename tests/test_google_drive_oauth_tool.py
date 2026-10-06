@@ -1116,6 +1116,11 @@ def test_google_drive_read_extracts_office_document_text(tmp_path: Path) -> None
     )
     document = docx.Document()
     document.add_paragraph("Quarterly numbers")
+    table = document.add_table(rows=2, cols=2)
+    for row, cells in zip(table.rows, (("Region", "Revenue"), ("EMEA", "120")), strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    document.add_paragraph("End of report")
     buffer = io.BytesIO()
     document.save(buffer)
     service = _FakeDriveService()
@@ -1130,11 +1135,29 @@ def test_google_drive_read_extracts_office_document_text(tmp_path: Path) -> None
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
     assert result["extractedFrom"] == "docx"
-    assert "Quarterly numbers" in result["content"]
+    assert result["content"] == "Quarterly numbers\nRegion\tRevenue\nEMEA\t120\nEnd of report"
     assert service.files_resource.get_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "supportsAllDrives": True,
     }
+
+
+def test_google_drive_read_keeps_file_text_that_mentions_the_agno_download_hint(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": "text/plain", "size": "40"}
+    tool.service = service
+    text = "Too big to read? Use download_file instead."
+    tool._download_bytes = lambda _request: text.encode()
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["content"] == text
 
 
 def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:
