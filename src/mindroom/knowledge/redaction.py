@@ -153,10 +153,14 @@ def redact_credentials_in_text(value: str) -> str:
         return f"Authorization: {scheme} ***"
 
     redacted: str = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_authorization_header, value)
-    unique_decoded_values = list(set(decoded_basic_values))
-    unique_decoded_values.sort(key=len, reverse=True)
-    for decoded_value in unique_decoded_values:
-        redacted = redacted.replace(decoded_value, "***")
+    if decoded_basic_values:
+        # One pass over the text however many distinct secrets the headers decode to;
+        # a ``str.replace`` per secret rescans the whole text each time. Longest
+        # first, so a secret that contains another is redacted whole.
+        decoded_values_pattern = "|".join(
+            re.escape(decoded_value) for decoded_value in sorted(set(decoded_basic_values), key=len, reverse=True)
+        )
+        redacted = re.sub(decoded_values_pattern, "***", redacted)
     return _URL_PATTERN.sub(lambda match: redact_url_credentials(match.group(0)), redacted)
 
 

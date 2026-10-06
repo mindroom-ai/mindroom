@@ -9953,6 +9953,35 @@ def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
     assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
 
 
+def test_redacting_basic_secrets_removes_every_decoded_value_from_the_text() -> None:
+    """Decoded Basic credentials are scrubbed wherever else they appear, including regex metacharacters."""
+    entries = [("alice", "p.ss*w|rd"), ("bob", "p.ss*w|rd+extra"), ("carol", "plain")]
+    headers = [
+        f"Authorization: Basic {base64.b64encode(f'{user}:{password}'.encode()).decode()}" for user, password in entries
+    ]
+    text = "\n".join(
+        [*headers, "echo p.ss*w|rd+extra and p.ss*w|rd and alice:plain and carol:plain"],
+    )
+
+    redacted = redact_credentials_in_text(text)
+
+    for _user, password in entries:
+        assert password not in redacted
+    assert "echo *** and *** and alice:*** and ***" in redacted
+    assert redacted.count("Authorization: Basic ***") == len(entries)
+
+
+def test_redacting_many_distinct_basic_secrets_scrubs_all_of_them() -> None:
+    """A text carrying many distinct Basic headers is redacted in full."""
+    secrets = [f"user{i}:secret{i}" for i in range(500)]
+    headers = [f"Authorization: Basic {base64.b64encode(secret.encode()).decode()}" for secret in secrets]
+    text = "\n".join([*headers, *[f"leaked {secret.split(':')[1]}" for secret in secrets]])
+
+    redacted = redact_credentials_in_text(text)
+
+    assert not any(secret.split(":")[1] in redacted for secret in secrets)
+
+
 @pytest.mark.asyncio
 async def test_refresh_subprocess_returns_exact_result(tmp_path: Path) -> None:
     """A real child returns the manual refresh result without rebuilding it from metadata."""
