@@ -573,7 +573,6 @@ class TestEditApprovalOwnership:
             assert "$source" not in (consumed.source_event_prompts or {})
         else:
             assert consumed.source_event_revisions == {"$source": (20, "$edit")}
-            assert consumed.revision_replay["$edit"].response_event_id == "$answer"
 
     @pytest.mark.parametrize("transport_fails", [False, True])
     async def test_stop_settles_paused_edit(self, approval_case: _ApprovalCase, transport_fails: bool) -> None:

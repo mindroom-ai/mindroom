@@ -1010,7 +1010,8 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
             team_mode="coordinate",
         )
 
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1072,7 +1073,8 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     assert storage.session is None
 
 
@@ -1144,7 +1146,8 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     assert storage.session is None
 
 
@@ -1526,7 +1529,8 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             team_mode="coordinate",
         )
 
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     assert model_prompts
     assert model_prompts[0][-1].content != "Hello"
     assert 'Current message:\n<msg event_id="$user_msg" from="@alice:localhost">' in model_prompts[0][-1].content
@@ -1620,7 +1624,8 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             team_mode="coordinate",
         )
 
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     assert sequence == [
         "team",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",

@@ -46,7 +46,6 @@ from mindroom.dispatch_source import (
     SILENT_SCHEDULE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import CompactionLifecycleStart, HistoryScope, HistoryScopeState
 from mindroom.hooks import (
@@ -87,7 +86,7 @@ from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_policy import PreparedDispatch
 from tests.ai_user_id_helpers import _prepared_prompt_result
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -101,7 +100,6 @@ from tests.bot_helpers import (
     _room_send_response,
     _runtime_bound_config,
     _set_knowledge_for_agent,
-    _set_turn_store_tracker,
     _stream_outcome,
     _visible_message,
     _visible_response_event_id,
@@ -1727,67 +1725,6 @@ class TestAgentBot(AgentBotTestBase):
         reply = await gateway.deps.outbox.replies.load(handle.reply_id)
         assert reply is not None
         assert reply.redaction_pending == ("$thinking",)
-
-    @pytest.mark.asyncio
-    async def test_execute_dispatch_action_does_not_mark_responded_when_cancelled_visible_note_survives(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Visible cancellation artifacts must not mark the source as handled."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        bot.logger = MagicMock()
-
-        room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=bot.matrix_id)
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=True,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[bot.matrix_id],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id=None,
-                    reply_to_event_id=event.event_id,
-                    thread_start_root_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-visible-cancel-note",
-            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
-        )
-
-        with (
-            patch.object(
-                bot._response_runner,
-                "generate_response",
-                new=AsyncMock(return_value="$cancelled"),
-            ),
-            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
-        ):
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                ResponseAction(kind="individual"),
-                DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
-                dispatch_started_at=0.0,
-                handled_turn=TurnRecord.create([event.event_id]),
-            )
-        tracker.record_handled_turn.assert_called_once_with(
-            replace(TurnRecord.create([event.event_id]), response_event_id="$cancelled"),
-        )
 
     @pytest.mark.asyncio
     async def test_streamed_regeneration_against_an_existing_visible_reply_preserves_linkage_when_no_new_body_lands(

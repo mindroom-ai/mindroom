@@ -115,6 +115,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
@@ -167,7 +168,6 @@ class _RecordingResponseRunner:
     """
 
     response_event_id: str | None = "$response:localhost"
-    visible_response_event_id: str | None = None
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
     suspend_source: bool = False
@@ -181,6 +181,8 @@ class _RecordingResponseRunner:
     terminal_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
     process_shutdown_started: bool = False
     admission_waiter: Callable[[], Awaitable[bool]] | None = None
+    # Records a turn answered, as a reply's records do when its answer settles its sources.
+    answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
@@ -245,17 +247,14 @@ class _RecordingResponseRunner:
             assert request.on_no_response_handled is not None
             await request.on_no_response_handled()
             return None
-        if self.visible_response_event_id is not None and request.on_visible_response is not None:
-            await request.on_visible_response(self.visible_response_event_id)
-        if self.deferred_sync_restart_error is not None:
-            assert self.response_event_id is not None
-            assert request.on_deferred_outcome_handled is not None
-            await request.on_deferred_outcome_handled(self.response_event_id)
-            raise self.deferred_sync_restart_error
         if self.suspend_source:
             assert request.source_handoff is not None
             request.source_handoff.set()
             return None
+        if self.response_event_id is not None and self.answered is not None:
+            await self.answered(request.sources.logical_source_event_ids)
+        if self.deferred_sync_restart_error is not None:
+            raise self.deferred_sync_restart_error
         return self.response_event_id
 
     async def generate_team_response_helper(
@@ -274,8 +273,8 @@ class _RecordingResponseRunner:
             if request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
             return None
-        if self.visible_response_event_id is not None and request.on_visible_response is not None:
-            await request.on_visible_response(self.visible_response_event_id)
+        if self.response_event_id is not None and self.answered is not None:
+            await self.answered(request.sources.logical_source_event_ids)
         return self.response_event_id
 
 
@@ -289,6 +288,8 @@ class _RecordingDeliveryGateway:
     # Whether a reply owns the event a dispatch failure names, as one owns every acknowledgement.
     replies_own_events: bool = False
     failed_dispatches: list[tuple[str, str]] = field(default_factory=list)
+    # Records a turn answered, as a reply's records do when its failure notice settles its sources.
+    answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
 
     async def supersede_replay(self, _source_event_ids: tuple[str, ...]) -> bool | None:
         """No reply has the sources in this recording-only delivery fixture."""
@@ -312,6 +313,9 @@ class _RecordingDeliveryGateway:
         if not self.replies_own_events:
             return False
         self.failed_dispatches.append((event_id, error_text))
+        sent = next(request for index, request in enumerate(self.sent, 1) if event_id == f"$sent-{index}:localhost")
+        if self.answered is not None and sent.reply_write is not None:
+            await self.answered(sent.reply_write.span.sources.logical)
         return True
 
 
@@ -546,8 +550,14 @@ def _build_harness(
             ),
         ),
     )
-    runner = _RecordingResponseRunner()
-    gateway = _RecordingDeliveryGateway()
+
+    async def _answered(logical_source_event_ids: tuple[str, ...]) -> None:
+        record = turn_store.get_turn_record(logical_source_event_ids[0])
+        assert record is not None
+        await turn_store.publish_completed_turn(canonicalize_turn_record(record, completed=True))
+
+    runner = _RecordingResponseRunner(answered=_answered)
+    gateway = _RecordingDeliveryGateway(answered=_answered)
     controller_ref: list[TurnController] = []
     gate_batches: list[PreparedTurn] = []
     ignored_dispatch_sources: list[tuple[str, ...]] = []
@@ -1025,26 +1035,6 @@ async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_p
         )
 
     assert recovered == "$relay:localhost"
-
-
-@pytest.mark.asyncio
-async def test_visible_response_identity_is_durable_before_generation_finishes(
-    config: Config,
-    tmp_path: Path,
-) -> None:
-    """The pending ledger must own the placeholder before a hard crash can lose it."""
-    harness = _build_harness(config, tmp_path)
-    harness.runner.visible_response_event_id = "$thinking:localhost"
-    harness.runner.response_event_id = None
-    room = _room_with_members(config, "general")
-    event = _text_event("please persist the visible response")
-
-    await harness.deliver(room, event)
-
-    record = harness.turn_store.get_turn_record(event.event_id)
-    assert record is not None
-    assert record.response_event_id == "$thinking:localhost"
-    assert record.completed is False
 
 
 @pytest.mark.asyncio
@@ -3955,7 +3945,7 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A turn whose interruption note reached Matrix must settle durably before rethrowing."""
+    """A turn its reply recorded answered stays handled when the interruption rethrows."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = _room_with_members(config, "general")
@@ -3966,9 +3956,6 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
 
     assert harness.runner.requests[0].sync_restart_retry_source_event_id is None
     assert harness.turn_store.is_handled(event.event_id) is True
-    record = harness.turn_store.get_turn_record(event.event_id)
-    assert record is not None
-    assert record.response_event_id == "$response:localhost"
 
 
 @pytest.mark.asyncio
@@ -4902,7 +4889,6 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     pending_turn = harness.turn_store.get_turn_record(selection.question_event_id)
     assert pending_turn is not None
     assert pending_turn.completed is False
-    assert pending_turn.response_event_id == "$sent-1:localhost"
 
     harness.runner.response_event_id = "$sent-1:localhost"
     await harness.controller._handle_interactive_selection(
@@ -5046,7 +5032,6 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
 
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
-    assert record.response_event_id == "$sent-1:localhost"
     assert record.completed is False
 
 
@@ -5091,7 +5076,6 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
     assert record.redacted_source_event_ids == (selection_event_id,)
-    assert record.response_event_id == "$ack:localhost"
     assert harness.turn_store.is_handled(selection_event_id) is True
     assert harness.turn_store.is_handled(selection.question_event_id) is False
 
@@ -5200,9 +5184,6 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
     assert harness.runner.requests == []
     assert len(harness.gateway.sent) == 1
     assert harness.gateway.failed_dispatches == [("$sent-1:localhost", "[general] ⚠️ Error: attachment lookup failed")]
-    handled_turn = harness.turn_store.get_turn_record(selection.question_event_id)
-    assert handled_turn is not None
-    assert handled_turn.response_event_id == "$sent-1:localhost"
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
 
@@ -5241,7 +5222,7 @@ async def test_interactive_selection_interruption_records_handled_selection(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A landed interruption must durably record the selection event as handled."""
+    """A selection its reply recorded answered stays handled when the interruption rethrows."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
@@ -5266,7 +5247,6 @@ async def test_interactive_selection_interruption_records_handled_selection(
 
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
-    assert record.response_event_id == "$response:localhost"
     assert record.completed is True
 
 

@@ -117,7 +117,6 @@ from mindroom.turn_origin import (
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
-from mindroom.turn_store import record_deferred_outcome_response
 from mindroom.voice_readiness import VoiceReadiness
 
 if TYPE_CHECKING:
@@ -1728,7 +1727,6 @@ class TurnController:
                 source_event_id=source_event_id,
             )
             raise self._interactive_selection_retry_error(source_event_id)
-        selection_handled_turn = canonicalize_turn_record(selection_handled_turn, response_event_id=ack_event_id)
         # A reaction or numeric answer identifies the selection but does not
         # carry the question's attachment context, so rebuild it from the
         # conversation that asked the question.
@@ -1747,16 +1745,10 @@ class TurnController:
             response_event_id = await self._finalize_dispatch_failure(
                 target=response_target,
                 error=error,
+                handled_turn=selection_handled_turn,
                 existing_event_id=ack_event_id,
-                on_visible_response=lambda event_id: self.deps.visible_responses.record_pending_visible_response(
-                    selection_handled_turn,
-                    event_id,
-                ),
             )
             if response_event_id is not None:
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
-                )
                 await self._require_durable_interactive_selection(source_event_id)
                 return False
             raise self._interactive_selection_retry_error(source_event_id) from error
@@ -1771,12 +1763,8 @@ class TurnController:
             attachment_ids=selection_attachment_ids,
         )
 
-        record_deferred_outcome = self._build_response_settlement_callbacks(
-            handled_turn=selection_handled_turn,
-        )
-
         source_handoff = asyncio.Event()
-        response_event_id = await self.deps.response_runner.generate_response(
+        await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
@@ -1803,16 +1791,11 @@ class TurnController:
                     terminal_source_event_ids=selection_handled_turn.source_event_ids,
                     thread_history=history,
                 ),
-                on_deferred_outcome_handled=record_deferred_outcome,
                 source_handoff=source_handoff,
             ),
         )
         if source_handoff.is_set():
             return True
-        if response_event_id is not None:
-            await self.deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
-            )
         await self._require_durable_interactive_selection(source_event_id)
         return False
 
@@ -1887,15 +1870,15 @@ class TurnController:
         *,
         target: MessageTarget,
         error: Exception,
+        handled_turn: TurnRecord,
         existing_event_id: str | None = None,
-        on_visible_response: Callable[[str], Awaitable[None]] | None = None,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message.
 
         A reply that owns ``existing_event_id`` shows the failure through its
-        records, which settle the journal sources and own the notice until it
-        is delivered. Otherwise nothing durable owns the notice, so it is sent
-        directly.
+        records, which settle the journal sources, record the turn answered,
+        and own the notice until it is delivered. Otherwise nothing durable owns
+        the notice, so it is sent directly and the turn records it as its answer.
         """
         error_text = get_user_friendly_error_message(
             error,
@@ -1914,27 +1897,11 @@ class TurnController:
                 extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
             ),
         )
-        if response_event_id is None:
-            return None
-        if on_visible_response is not None:
-            await on_visible_response(response_event_id)
-        return response_event_id
-
-    def _build_response_settlement_callbacks(
-        self,
-        *,
-        handled_turn: TurnRecord,
-    ) -> Callable[[str], Awaitable[None]]:
-        """Build the callback that records a deferred handled outcome."""
-
-        async def record_deferred_outcome(response_event_id: str) -> None:
-            await record_deferred_outcome_response(
-                self.deps.turn_store,
-                handled_turn,
-                response_event_id,
+        if response_event_id is not None:
+            await self.deps.turn_store.record_responded_turn(
+                canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
             )
-
-        return record_deferred_outcome
+        return response_event_id
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -2039,13 +2006,6 @@ class TurnController:
                         self.deps.runtime_paths,
                     )
 
-            record_deferred_outcome = self._build_response_settlement_callbacks(
-                handled_turn=handled_turn,
-            )
-
-            async def record_visible_response(response_event_id: str) -> None:
-                await self.deps.visible_responses.record_pending_visible_response(handled_turn, response_event_id)
-
             async def settle_redacted_sources() -> None:
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
 
@@ -2086,45 +2046,34 @@ class TurnController:
                         thread_history=history,
                     ),
                     on_source_turn_suppressed=settle_redacted_sources,
-                    on_deferred_outcome_handled=record_deferred_outcome,
                     on_no_response_handled=record_no_response,
-                    on_visible_response=record_visible_response,
                 )
+                # The reply's records settle the sources and record the turn answered.
                 if action.kind == "team":
                     assert action.form_team is not None
                     assert team_mode is not None
-                    response_event_id = await self.deps.response_runner.generate_team_response_helper(
+                    await self.deps.response_runner.generate_team_response_helper(
                         response_request,
                         team_agents=action.form_team.eligible_members,
                         team_mode=team_mode.value,
                     )
                 else:
-                    response_event_id = await self.deps.response_runner.generate_response(
-                        response_request,
-                    )
+                    await self.deps.response_runner.generate_response(response_request)
             except PostLockRequestPreparationError as error:
+                if error.reply_owned:
+                    # The reply's records settled the sources, recorded the turn answered, and owe the notice.
+                    return
                 failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
-                response_event_id = (
-                    # The reply's records already settled the sources and owe the notice.
-                    error.placeholder_event_id
-                    if error.reply_owned
-                    else await self._finalize_dispatch_failure(
-                        target=dispatch.target,
-                        error=failure,
-                        existing_event_id=error.placeholder_event_id,
-                        on_visible_response=record_visible_response,
-                    )
+                response_event_id = await self._finalize_dispatch_failure(
+                    target=dispatch.target,
+                    error=failure,
+                    handled_turn=handled_turn,
+                    existing_event_id=error.placeholder_event_id,
                 )
-                if response_event_id is not None or not error.reply_owned:
-                    # A reply's notice still owed to recovery completes nothing yet; its records hold the sources.
-                    await self.deps.turn_store.record_responded_turn(
-                        canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
-                    )
-                return
-            if response_event_id is not None:
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
-                )
+                if response_event_id is None:
+                    # Nothing answered the turn, so it stays pending for a retry.
+                    msg = "Dispatch failure notice was not delivered"
+                    raise RuntimeError(msg) from failure
 
     async def handle_prepared_turn(self, turn: PreparedTurn) -> None:
         """Dispatch one logical turn emitted directly by the coalescing gate."""

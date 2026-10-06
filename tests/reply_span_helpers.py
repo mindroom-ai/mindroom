@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -13,13 +14,30 @@ from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
     from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.turn_record import TurnRecord
+
+
+def _runtime(
+    principal: PrincipalStore,
+    *,
+    entity_name: str = "agent",
+    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
+) -> ReplyRuntime:
+    return ReplyRuntime(
+        store=principal,
+        entity_name=entity_name,
+        generation="gen-test",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=complete_turn or AsyncMock(),
+        clean_up_superseded=lambda _continuation: None,
+    )
 
 
 @asynccontextmanager
@@ -36,13 +54,15 @@ async def reply_span(
     placeholder_event_id: str | None = None,
     regenerated_event_id: str | None = None,
     edit_receipt_order: int | None = None,
+    prepared_edit: TurnRecord | None = None,
     runtime: ReplyRuntime | None = None,
 ) -> AsyncIterator[SpanHandle]:
     """Claim a reply span for one source, admitted as ingress admits it, and run the block in it.
 
     With ``placeholder_event_id``, the reply's placeholder is already in the
     room as that event, the way a turn shows it before its answer. With
-    ``regenerated_event_id``, the source is an edit regenerating that answer.
+    ``regenerated_event_id``, the source is an edit regenerating that answer,
+    and ``prepared_edit`` is the edit it selected.
     ``runtime`` claims as an existing bot instance instead of a fresh one.
     """
     if not await principal.is_pending(source_event_id):
@@ -59,14 +79,7 @@ async def reply_span(
             ),
         )
     if runtime is None:
-        runtime = ReplyRuntime(
-            store=principal,
-            entity_name=entity_name,
-            generation="gen-test",
-            retry_sources=lambda _room_id, _sources: None,
-            complete_turn=AsyncMock(),
-            clean_up_superseded=lambda _continuation: None,
-        )
+        runtime = _runtime(principal, entity_name=entity_name)
     await runtime.take_ownership()
     async with runtime.span_scope() as slot:
         handle = await runtime.claim(
@@ -83,6 +96,7 @@ async def reply_span(
             edit_receipt_order=edit_receipt_order,
             historical_event_id=regenerated_event_id,
             existing_event_id=regenerated_event_id,
+            prepared_edit=prepared_edit,
         )
         assert isinstance(handle, SpanHandle)
         slot.handle = handle
@@ -119,12 +133,18 @@ async def final_in_span(
     gateway: DeliveryGateway,
     principal: PrincipalStore,
     request: FinalDeliveryRequest,
+    *,
+    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> FinalDeliveryOutcome:
     """Deliver one final answer from inside the reply span its request names, as a locked response turn does.
 
     An edit regeneration regenerates the answer it names; any other request
     with an existing event shows that event as its placeholder.
+    ``complete_turn`` sees each turn the reply records answered, as the bot's
+    gateway runs its reply runtime's effects.
     """
+    runtime = _runtime(principal, complete_turn=complete_turn)
+    gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     sources = request.identity.sources
     regenerated = request.existing_event_id if request.prepared_edit_record is not None else None
     async with reply_span(
@@ -136,6 +156,8 @@ async def final_in_span(
         placeholder_event_id=None if regenerated is not None else request.existing_event_id,
         regenerated_event_id=regenerated,
         edit_receipt_order=sources.edit_receipt_order,
+        prepared_edit=request.prepared_edit_record,
+        runtime=runtime,
     ):
         return await gateway.deliver_final(request)
 

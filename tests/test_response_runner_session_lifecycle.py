@@ -1287,7 +1287,8 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1449,7 +1450,8 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1506,7 +1508,8 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
             )
 
     # The interruption note replaces the placeholder, which stays the turn's visible reply.
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     assert cancelled_seen == ["sync_restart_cancelled"]
 
 
@@ -1735,7 +1738,8 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
                     resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
                 )
 
-    assert resolution == "$thinking"
+    # An interruption whose note did not land leaves its turn to replay.
+    assert resolution is None
     assert storage.session is None
 
 

@@ -197,7 +197,7 @@ from tests.test_response_turn import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
     from typing import Literal
 
@@ -1396,15 +1396,6 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
         second_suppressed.assert_awaited_once_with()
 
 
-def _async_callback[**Args](callback: Callable[Args, object]) -> Callable[Args, Coroutine[Any, Any, None]]:
-    """Adapt a recording callback to the awaitable outcome-callback contract."""
-
-    async def invoke(*args: Args.args, **kwargs: Args.kwargs) -> None:
-        callback(*args, **kwargs)
-
-    return invoke
-
-
 @pytest.mark.asyncio
 async def test_begin_locked_turn_suppresses_source_redacted_before_response_registration(tmp_path: Path) -> None:
     """A durable tombstone observed under the lock must prevent every persistence side effect."""
@@ -2426,7 +2417,6 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     request_preparer.prepare = AsyncMock(side_effect=lambda request: replace(request, payload_preparation=None))
     delivery_gateway = MagicMock(spec=DeliveryGateway)
     delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
-    on_visible_response = AsyncMock()
     runner = ResponseRunner(
         replace(
             unwrap_extracted_collaborator(bot._response_runner).deps,
@@ -2445,7 +2435,6 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
         user_id="@user:localhost",
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
-        on_visible_response=on_visible_response,
     )
 
     await runner.deps.replies.take_ownership()
@@ -2469,7 +2458,6 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     assert prepared_request.thread_history.diagnostics == {"cache_status": "fresh"}
     assert prepared_request.existing_event_id == "$placeholder"
     assert prepared_request.existing_event_is_placeholder is True
-    on_visible_response.assert_awaited_once_with("$placeholder")
 
 
 @pytest.mark.asyncio
@@ -7581,14 +7569,11 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
 
 @pytest.mark.asyncio
 async def test_terminal_settlement_records_landed_interruption_before_rethrowing_cancel(tmp_path: Path) -> None:
-    """A deferred sync-restart cancel whose note landed should finalize once, record the turn handled, then re-raise."""
+    """A deferred sync-restart cancel whose note landed should finalize once, run post-response effects, then re-raise."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     order: list[str] = []
-    request = replace(
-        _plain_request(_target(thread_id="$thread")),
-        on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
-    )
+    request = _plain_request(_target(thread_id="$thread"))
     delivery_outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$response",
@@ -7630,7 +7615,7 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
 
-    assert order == ["post_effects", "handled:$response"]
+    assert order == ["post_effects"]
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -7746,10 +7731,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
     """Checkpoint replay must remain actionable when no terminal recovery note landed."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     order: list[str] = []
-    request = replace(
-        _plain_request(_target(thread_id="$thread")),
-        on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
-    )
+    request = _plain_request(_target(thread_id="$thread"))
     progress = response_runner._DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(
@@ -7795,11 +7777,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
 async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path) -> None:
     """A failed cancellation cleanup must preserve replay instead of deduping the stale placeholder."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    callbacks: list[str] = []
-    request = replace(
-        _plain_request(_target(thread_id="$thread")),
-        on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
-    )
+    request = _plain_request(_target(thread_id="$thread"))
     progress = response_runner._DeliveryProgress()
     progress.settle(
         FinalDeliveryOutcome(
@@ -7836,7 +7814,6 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
         )
 
     assert result is None
-    assert callbacks == []
 
 
 @pytest.mark.asyncio
@@ -7848,11 +7825,7 @@ async def test_terminal_send_cancellation_preserves_source_replay(
     """A restart cancel during a normal terminal edit must reach gateway and source settlement."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     target = _target(thread_id="$thread")
-    callbacks: list[str] = []
-    request = replace(
-        _plain_request(target),
-        on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
-    )
+    request = _plain_request(target)
     streaming = StreamingResponse(
         target=target,
         config=coordinator.deps.runtime.config,
@@ -7916,7 +7889,6 @@ async def test_terminal_send_cancellation_preserves_source_replay(
     assert transport_outcome.failure_reason == "sync_restart_cancelled"
     assert final_outcome.cancel_source == "sync_restart"
     assert result is None
-    assert callbacks == []
 
 
 @pytest.mark.asyncio
@@ -7924,11 +7896,7 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
     """A cancelled outcome needs a landed interruption note before dedup."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     target = _target(thread_id="$thread")
-    callbacks: list[str] = []
-    request = replace(
-        _plain_request(target),
-        on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
-    )
+    request = _plain_request(target)
     progress = response_runner._DeliveryProgress()
     progress.settle(
         FinalDeliveryOutcome(
@@ -7965,7 +7933,6 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
         )
 
     assert result is None
-    assert callbacks == []
 
 
 @pytest.mark.asyncio
@@ -7986,10 +7953,7 @@ async def test_landed_terminal_interruption_settles_the_turn(
     """A landed interruption is terminal, so the turn is handled."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    request = replace(
-        _plain_request(_target(thread_id=thread_id)),
-        on_deferred_outcome_handled=_async_callback(lambda _event_id: None),
-    )
+    request = _plain_request(_target(thread_id=thread_id))
     progress = response_runner._DeliveryProgress()
     progress.settle(
         FinalDeliveryOutcome(
@@ -8052,10 +8016,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     order: list[str] = []
-    request = replace(
-        _plain_request(_target()),
-        on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
-    )
+    request = _plain_request(_target())
     progress = response_runner._DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(delivery_outcome)
@@ -8088,7 +8049,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert order == ["post_effects", "handled:$response"]
+    assert order == ["post_effects"]
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()

@@ -252,7 +252,6 @@ class VisibleResponseReconciler:
         )
         if event_id is None:
             return None, None
-        await self.record_pending_visible_response(handled_turn, event_id)
         # The answer adopts the acknowledgement's span until some span has run it.
         reply = await replies.store.replies.for_event(event_id)
         if reply is None:

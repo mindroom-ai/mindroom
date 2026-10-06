@@ -1,4 +1,4 @@
-"""Consumed edit proof follows durable final delivery across process boundaries."""
+"""A regeneration's selected edit is consumed when its answer settles its sources, across process boundaries."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import FinalDeliveryRequest
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime, with_user_stop
+from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -196,7 +196,6 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
     persisted = reopened.get_turn_record(source_id)
     assert persisted is not None
     assert persisted.source_event_revisions == ({source_id: (20, edit_id)} if completed else None)
-    assert persisted.revision_replay[edit_id].response_event_id == (answer_id if completed else None)
     assert persisted.source_event_prompts == {source_id: "selected edit" if completed else "original"}
     assert persisted.response_event_id == answer_id
     assert persisted.source_event_ids == (source_id,)
@@ -210,12 +209,12 @@ class _ProcessLost(BaseException):
 @pytest.mark.asyncio
 @pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("anchor_event_id", ["$source", "$thread"])
-async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publication(
+async def test_stale_ledger_write_cannot_erase_consumption_before_publication(
     tmp_path: Path,
     journal_store: EventJournalStore,
     anchor_event_id: str,
 ) -> None:
-    """A cached pre-ACK mutation cannot overwrite proof before cache repair runs."""
+    """A ledger mutation derived before the answer settled cannot overwrite its consumed edit before publication."""
     store = await _store(journal_store)
     principal = journal_store.principal("agent@alice")
     await principal.admit(
@@ -237,7 +236,6 @@ async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publ
             completed=True,
             response_event_id="$answer",
             source_event_prompts={"$source": "original"},
-            latest_edit_receipt_order=1,
         ),
     )
     registered = await store.register_edit_revision("$source", (20, "$edit"))
@@ -257,17 +255,12 @@ async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publ
         await release_write.wait()
         return await upsert(owner, **kwargs)
 
-    async def publish(_turn_id: str, _event_id: str, _committed: TurnRecord | None) -> None:
+    async def publish(_committed: TurnRecord) -> None:
         publication_started.set()
         await lose_process.wait()
         raise _ProcessLost
 
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=publish,
-    )
+    gateway = _gateway(tmp_path, principal)
     gateway.deps.response_hooks._apply_before_response = _DeliveryTests._hooks()._apply_before_response
 
     async def send(
@@ -300,6 +293,7 @@ async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publ
                     extra_content=None,
                     prepared_edit_record=selected,
                 ),
+                complete_turn=publish,
             ),
         )
         try:
@@ -318,18 +312,21 @@ async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publ
     assert restarted is not None
     assert restarted.visible_echo_event_id == "$echo"
     assert restarted.source_event_revisions == {"$source": (20, "$edit")}
-    assert restarted.revision_replay["$edit"].response_event_id == "$answer"
 
 
 @pytest.mark.asyncio
 @pytest.mark.ledger_loads_from_disk
-@pytest.mark.parametrize("boundary", ["enqueue", "ack", "failed", "losing", "retired"])
-async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
+@pytest.mark.parametrize("boundary", ["enqueue", "failed", "retired"])
+async def test_edit_delivery_process_boundaries(
     tmp_path: Path,
     journal_store: EventJournalStore,
     boundary: str,
 ) -> None:
-    """Only the winning active acknowledgement can consume its frozen selected edit."""
+    """A completed regeneration consumes its selected edit when its answer is enqueued, whatever its send does.
+
+    The answer's enqueue settles its sources, so the edit counts as answered
+    from then on, even if the send is lost, fails, or its room is left.
+    """
     store = await _store(journal_store)
     principal = journal_store.principal("agent@alice")
     await principal.admit(
@@ -350,7 +347,6 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
         completed=True,
         response_event_id="$answer",
         source_event_prompts={"$source": "original"},
-        latest_edit_receipt_order=1,
     )
     await store.record_responded_turn(original)
     registered = await store.register_edit_revision("$source", (20, "$edit"))
@@ -361,17 +357,7 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
         source_event_revisions={"$source": (20, "$edit")},
     )
 
-    async def publish(turn_id: str, event_id: str, committed: TurnRecord | None) -> None:
-        if boundary == "ack":
-            raise _ProcessLost
-        await store.publish_committed_response(turn_id, event_id, committed)
-
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=publish,
-    )
+    gateway = _gateway(tmp_path, principal)
     gateway.deps.response_hooks._apply_before_response = _DeliveryTests._hooks()._apply_before_response
 
     async def send(
@@ -385,13 +371,6 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
         if boundary == "failed":
             msg = "send failed"
             raise RuntimeError(msg)
-        if boundary == "losing":
-            await principal.acknowledge_matrix_delivery(
-                delivery_id="$edit",
-                stage=DeliveryStage.FINAL,
-                event_id="$winner",
-                delivered_projections=(),
-            )
         if boundary == "retired":
             await admit_room_membership(principal, "!room:localhost", "leave")
         return DeliveredMatrixEvent("$physical-edit", content)
@@ -406,7 +385,7 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
         prepared_edit_record=selected,
     )
     with patch("mindroom.delivery_gateway.send_message_outcome", send):
-        if boundary in {"enqueue", "ack"}:
+        if boundary == "enqueue":
             with pytest.raises(_ProcessLost):
                 await final_in_span(gateway, principal, request)
         elif boundary == "failed":
@@ -421,22 +400,12 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
     delivery = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
     assert delivery is not None
     assert "selected edit" not in json.dumps(dict(delivery.payload))
-    assert delivery.result["prepared_edit_record"]["source_event_prompts"] == {"$source": "selected edit"}
-    if boundary == "ack":
-        assert owner.source_event_revisions == {"$source": (20, "$edit")}
-        assert owner.revision_replay["$edit"].response_event_id == "$answer"
-    else:
-        assert owner.source_event_revisions is None
-        assert owner.revision_replay["$edit"].response_event_id is None
+    assert owner.source_event_prompts == {"$source": "selected edit"}
+    assert owner.source_event_revisions == {"$source": (20, "$edit")}
     if boundary == "enqueue":
-        # Newer live registration cannot replace the claimed row's generated snapshot.
+        # A newer registration before the recovered send leaves the consumed edit alone.
         await reopened.register_edit_revision("$source", (30, "$newer"))
-        gateway = _gateway(
-            tmp_path,
-            principal,
-            terminal_turn_for=reopened.terminal_turn_record,
-            terminal_turn_committed=reopened.publish_committed_response,
-        )
+        gateway = _gateway(tmp_path, principal)
 
         async def recovered_send(
             _client: nio.AsyncClient,
@@ -451,22 +420,20 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
         _reset_handled_turn_ledger_runtime()
         final = (await _store(journal_store)).get_turn_record("$source")
         assert final.source_event_revisions == {"$source": (20, "$edit")}
-        assert final.revision_replay["$edit"].response_event_id == "$answer"
-        assert final.revision_replay["$newer"].response_event_id is None
         assert final.revision_watermark("$source") == (30, "$newer")
 
 
 @pytest.mark.asyncio
 @pytest.mark.ledger_loads_from_disk
-@pytest.mark.parametrize("mutation", ["revision_redaction", "source_redaction", "newer", "stop"])
-@pytest.mark.parametrize("timing", ["before_ack", "publication"])
-async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C901
+@pytest.mark.parametrize("mutation", ["revision_redaction", "source_redaction", "newer"])
+@pytest.mark.parametrize("timing", ["send", "publication"])
+async def test_edit_consumption_preserves_intervening_authority(
     tmp_path: Path,
     journal_store: EventJournalStore,
     mutation: str,
     timing: str,
 ) -> None:
-    """Durable acknowledgement and cache publication preserve current revision and STOP owners."""
+    """A consumed edit and its publication keep redactions and newer revisions recorded meanwhile."""
     store = await _store(journal_store)
     principal = journal_store.principal("agent@alice")
     await principal.admit(
@@ -488,7 +455,6 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
             completed=True,
             response_event_id="$answer",
             source_event_prompts={"$source": "original"},
-            latest_edit_receipt_order=1,
         ),
     )
     registered = await store.register_edit_revision("$source", (20, "$edit"))
@@ -503,24 +469,15 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
             await store.mark_source_redacted("$edit", room_id="!room:localhost")
         elif mutation == "source_redaction":
             await store.mark_source_redacted("$source", room_id="!room:localhost")
-        elif mutation == "newer":
-            await store.register_edit_revision("$source", (30, "$newer"))
         else:
-            stopped_turn = store.get_turn_record("$source")
-            assert stopped_turn is not None
-            await store.record_turn(with_user_stop(stopped_turn, "$answer", 2))
+            await store.register_edit_revision("$source", (30, "$newer"))
 
-    async def publish(turn_id: str, event_id: str, committed: TurnRecord | None) -> None:
+    async def publish(committed: TurnRecord) -> None:
         if timing == "publication":
             await mutate()
-        await store.publish_committed_response(turn_id, event_id, committed)
+        await store.publish_completed_turn(committed)
 
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=publish,
-    )
+    gateway = _gateway(tmp_path, principal)
     gateway.deps.response_hooks._apply_before_response = _DeliveryTests._hooks()._apply_before_response
 
     async def send(
@@ -529,7 +486,7 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
         content: dict[str, Any],
         **_kwargs: object,
     ) -> DeliveredMatrixEvent:
-        if timing == "before_ack":
+        if timing == "send":
             await mutate()
         return DeliveredMatrixEvent("$physical-edit", content)
 
@@ -549,6 +506,7 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
                 extra_content=None,
                 prepared_edit_record=selected,
             ),
+            complete_turn=publish,
         )
     _reset_handled_turn_ledger_runtime()
     owner = (await _store(journal_store)).get_turn_record("$source")
@@ -560,13 +518,6 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
     elif mutation == "source_redaction":
         assert owner.redacted_source_event_ids == ("$source",)
         assert "$source" not in (owner.source_event_prompts or {})
-    elif mutation == "newer":
+    else:
         assert owner.revision_watermark("$source") == (30, "$newer")
-        assert owner.revision_replay["$newer"].response_event_id is None
         assert owner.source_event_revisions == {"$source": (20, "$edit")}
-    else:
-        assert owner.user_stop_receipt_order == 2
-    if timing == "publication" or mutation in {"newer", "revision_redaction"}:
-        assert owner.revision_replay["$edit"].response_event_id == "$answer"
-    else:
-        assert owner.revision_replay["$edit"].response_event_id is None

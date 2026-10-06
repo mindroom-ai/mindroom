@@ -838,7 +838,6 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     expected_record = replace(
         TurnRecord.create(
             ["$voice_event"],
-            response_event_id="$response",
             source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
         ),
         response_owner="home",
@@ -854,11 +853,9 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         ),
     )
     turn_store.record_pending_turn.assert_called_once()
-    pending_input = turn_store.record_pending_turn.call_args.args[0]
-    assert replace(pending_input, response_event_id="$response") == expected_record
-    turn_store.record_turn.assert_called_once()
-    terminal_input = turn_store.record_turn.call_args.args[0]
-    assert replace(terminal_input, completed=True, timestamp=0.0) == expected_record
+    assert turn_store.record_pending_turn.call_args.args[0] == expected_record
+    # The reply's records record the turn answered; nothing else writes it terminal.
+    turn_store.record_turn.assert_not_called()
     persisted_record = turn_store.get_turn_record("$voice_event")
     assert persisted_record is not None
     assert persisted_record.completed is True

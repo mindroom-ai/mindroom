@@ -138,6 +138,7 @@ from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -2809,6 +2810,15 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
 
 
+async def record_turn_answered(bot: RuntimeBot, request: ResponseRequest) -> None:
+    """Settle a faked response's sources and record its turn answered, as a real reply's records do."""
+    await bot._journal_dispatcher.store.settle_many(request.sources.pending_event_ids)
+    turn_store = unwrap_extracted_collaborator(bot._turn_store)
+    record = turn_store.get_turn_record(request.sources.logical_source_event_ids[0])
+    if record is not None:
+        await turn_store.publish_completed_turn(canonicalize_turn_record(record, completed=True))
+
+
 def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock) -> None:
     """Route response execution through one envelope-explicit generate-response mock."""
     wrap_extracted_collaborators(bot, "_response_runner")
@@ -2842,7 +2852,10 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             correlation_id=request.correlation_id,
             matrix_run_metadata=request.matrix_run_metadata,
         )
-        return _resolved_event_id_from_test_result(result)
+        event_id = _resolved_event_id_from_test_result(result)
+        if event_id is not None:
+            await record_turn_answered(bot, request)
+        return event_id
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     replace_turn_controller_deps(bot, response_runner=bot._response_runner)

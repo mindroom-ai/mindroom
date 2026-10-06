@@ -75,15 +75,19 @@ def _runner_on(
     principal: PrincipalStore,
     turn_store: TurnStore,
 ) -> ResponseRunner:
-    """Return the bot's response runner, with its replies, deliveries, and turn ledger on the test's stores."""
+    """Return the bot's response runner, with its replies, deliveries, and turn ledger on the test's stores.
+
+    The runner's gateway runs its replies' effects, as the bot wires them.
+    """
     deps = unwrap_extracted_collaborator(bot._response_runner).deps
     assert deps.replies is not None
+    replies = replace(deps.replies, store=principal, complete_turn=turn_store.publish_completed_turn)
     return ResponseRunner(
         replace(
             deps,
-            delivery_gateway=gateway,
+            delivery_gateway=replace(gateway, deps=replace(gateway.deps, reply_effects=replies.run_effects)),
             approval_store=principal,
-            replies=replace(deps.replies, store=principal, complete_turn=turn_store.publish_completed_turn),
+            replies=replies,
         ),
     )
 
@@ -987,7 +991,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
                 EventClass.ACTIONABLE,
             )
         if scenario == "deleted_after_model":
-            assert store.get_turn_record(SOURCE).response_event_id == INITIAL
+            assert (await principal.replies.for_sources((SOURCE,))).event_id == INITIAL
             assert (await gateway.recover_deliveries()).complete
             assert visible == {}
             assert store.get_turn_record(SOURCE).response_event_id is None
@@ -999,7 +1003,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             assert isinstance(results[0], RevisionSnapshotChangedError)
             assert await principal.is_pending(SOURCE)
             assert await principal.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
-            assert store.get_turn_record(SOURCE).response_event_id == INITIAL
+            assert (await principal.replies.for_sources((SOURCE,))).event_id == INITIAL
             assert model_requests == []
             response_started.clear()
             await dispatcher.drain_once()

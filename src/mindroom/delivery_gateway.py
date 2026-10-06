@@ -1082,8 +1082,11 @@ class DeliveryGateway:
 
         The turn store produces the record and stops at its own boundary; this
         layer already owns the journal's types, so the conversion belongs here
-        rather than reaching across.
+        rather than reaching across. A reply's row commits nothing here: the
+        reply's records record its turn answered when they settle its sources.
         """
+        if delivery.reply_id is not None:
+            return None
         prepared = (delivery.result or {}).get("prepared_edit_record")
         if prepared is not None:
             assert isinstance(prepared, dict), "Corrupt prepared edit record"

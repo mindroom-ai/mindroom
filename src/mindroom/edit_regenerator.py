@@ -20,7 +20,6 @@ from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError, canonicalize_turn_record
-from mindroom.turn_store import record_deferred_outcome_response
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -412,8 +411,6 @@ class EditRegenerator:
             ),
         )
 
-        record_deferred_outcome = self._settlement_callbacks(record=record, applied=applied)
-
         stale_runs_removed = False
 
         async def prepare_snapshot(history: Sequence[ResolvedVisibleMessage]) -> bool | EditPreparation:
@@ -459,7 +456,6 @@ class EditRegenerator:
                 prepared_edit_record=record,
                 source_handoff=asyncio.Event(),
                 sync_restart_retry_source_event_id=retry_source_event_id,
-                on_deferred_outcome_handled=record_deferred_outcome,
             ),
             record,
             applied,
@@ -497,24 +493,6 @@ class EditRegenerator:
                 msg = "Canonical source revision changed during strict refill"
                 raise RevisionSnapshotChangedError(msg)
             record = updated
-
-    def _settlement_callbacks(
-        self,
-        *,
-        record: TurnRecord,
-        applied: dict[str, SourceEventRevision],
-    ) -> Callable[[str], Awaitable[None]]:
-        """Build the terminal-outcome callback that commits one regeneration's applied revisions."""
-
-        async def record_deferred_outcome(response_event_id: str) -> None:
-            if applied:
-                await record_deferred_outcome_response(
-                    self.deps.turn_store,
-                    record,
-                    response_event_id,
-                )
-
-        return record_deferred_outcome
 
     @staticmethod
     def _discard(mailbox: _Mailbox, revisions: dict[str, SourceEventRevision]) -> None:

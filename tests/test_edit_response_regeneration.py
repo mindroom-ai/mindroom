@@ -64,6 +64,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     make_matrix_client_mock,
     patch_response_runner_module,
+    record_turn_answered,
     replace_edit_regenerator_deps,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
@@ -359,6 +360,16 @@ def _generate_response_with_locked_callback(
         return response_event_id
 
     return _generate_response
+
+
+def _answering(bot: AgentBot, event_id: str) -> Callable[[ResponseRequest], Awaitable[str]]:
+    """Return a response stand-in whose answer records its turn answered, as its reply's records do."""
+
+    async def answer(request: ResponseRequest) -> str:
+        await record_turn_answered(bot, request)
+        return event_id
+
+    return answer
 
 
 def _delivery_resolution(response_event_id: str | None) -> str | None:
@@ -4163,16 +4174,14 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
+        mock_generate_response.side_effect = _answering(bot, "$response_event:example.com")
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         # Process the reaction event
         await dispatch_reaction_durably(bot, room, reaction_event)
         await bot._response_runner.drain_inbox_responses()
 
-        # Verify that the bot tracked the response correctly
         assert bot._turn_store.is_handled("$question:example.com")
-        assert _response_event_id(bot, "$question:example.com") == "$response_event:example.com"
 
         # Verify the methods were called with correct parameters
         claim_interactive.assert_awaited_once()
@@ -4278,7 +4287,6 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
 
         assert await bot._journal_dispatcher.store.is_pending(reaction_event.event_id)
         assert bot._turn_store.is_handled("$question:example.com") is False
-        assert _response_event_id(bot, "$question:example.com") == "$ack_event:example.com"
         request = mock_generate_response.await_args.args[0]
         assert request.existing_event_id == "$ack_event:example.com"
         assert request.existing_event_is_placeholder is True
@@ -4368,7 +4376,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             bot._response_runner,
             "generate_response",
             new_callable=AsyncMock,
-            return_value=_delivery_resolution("$response:example.com"),
+            side_effect=_answering(bot, "$response:example.com"),
         ) as mock_generate_response,
         patch.object(
             bot._conversation_resolver,
@@ -4400,9 +4408,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         ),
     }
     assert bot._turn_store.is_handled("$question:example.com")
-    assert _response_event_id(bot, "$question:example.com") == "$response:example.com"
     assert bot._turn_store.is_handled("$selection:example.com")
-    assert _response_event_id(bot, "$selection:example.com") == "$response:example.com"
 
 
 @pytest.mark.asyncio
@@ -4763,7 +4769,6 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
 
         # Verify that the bot tracked the response correctly
         assert bot._turn_store.is_handled("$voice:example.com")
-        assert _response_event_id(bot, "$voice:example.com") == "$response:example.com"
 
         # Verify the methods were called
         mock_handle_voice.assert_called_once()
@@ -4874,7 +4879,6 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
         # Verify that the bot marked as responded with the fallback relay.
         assert bot._turn_store.is_handled("$voice:example.com")
-        assert _response_event_id(bot, "$voice:example.com") == "$response:example.com"
 
         # Verify voice handler was called and the fallback relay ran.
         mock_handle_voice.assert_called_once()

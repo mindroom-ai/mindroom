@@ -570,10 +570,8 @@ class ResponseRequest:
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     sync_restart_retry_source_event_id: str | None = None
-    on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
     # Records and settles a turn that ended before any reply span existed to settle it.
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
-    on_visible_response: Callable[[str], Awaitable[None]] | None = None
     # Set only after another durable owner can finish the source.
     source_handoff: asyncio.Event | None = None
 
@@ -1612,8 +1610,6 @@ class ResponseRunner:
             if continuation is None or continuation.state != continuation_state:
                 msg = "Approval continuation lost its journal source ownership"
                 raise RuntimeError(msg)  # noqa: TRY301
-            if shown.delivery_kind == "sent" and request.on_visible_response is not None:
-                await request.on_visible_response(response_event_id)
 
             await self._approval_responses.publish_generation(
                 continuation,
@@ -4162,8 +4158,6 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("placeholder_sent")
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
-                if request.on_visible_response is not None:
-                    await request.on_visible_response(placeholder_event_id)
         request = await self._prepare_request_after_lock(
             request,
             exclude_history_event_id=placeholder_event_id,
@@ -4412,19 +4406,12 @@ class ResponseRunner:
         )
         if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
             request.source_handoff.set()
+        if deferred_error is not None:
+            raise deferred_error
         cancel_source = final_outcome.resolved_cancel_source
         source_handled = final_outcome.mark_handled and (
-            request.on_deferred_outcome_handled is None
-            or cancel_source is None
-            or cancel_source == "user_stop"
-            or _interruption_note_landed(current_span())
+            cancel_source is None or cancel_source == "user_stop" or _interruption_note_landed(current_span())
         )
-        if deferred_error is not None:
-            if source_handled and request.on_deferred_outcome_handled is not None:
-                response_event_id = final_outcome.final_visible_event_id
-                assert response_event_id is not None
-                await request.on_deferred_outcome_handled(response_event_id)
-            raise deferred_error
         return final_outcome.final_visible_event_id if source_handled else None
 
     async def _end_span_after_outcome(  # noqa: PLR0911

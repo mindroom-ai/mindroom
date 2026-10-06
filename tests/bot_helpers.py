@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 
 import nio
 
@@ -290,6 +290,8 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
     stored_records: dict[str, TurnRecord] = {}
     tracker.get_turn_record.return_value = None
+    # Records written through the tracker read back unless a test pins the read.
+    tracker.get_turn_record.side_effect = lambda event_id: stored_records.get(event_id, DEFAULT)
     tracker.has_responded.return_value = False
 
     async def update_handled_turn(
@@ -401,7 +403,7 @@ def _agent_response_handled_turn(
     agent_name: str,
     room_id: str,
     event_id: str,
-    response_event_id: str,
+    response_event_id: str | None = None,
     thread_id: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,

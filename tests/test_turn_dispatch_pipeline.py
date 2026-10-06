@@ -2244,12 +2244,8 @@ class TestAgentBot(AgentBotTestBase):
         assert team_request.existing_event_id is None
         assert team_request.existing_event_is_placeholder is False
         mock_send_response.assert_not_awaited()
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create(
-                ["$event"],
-                response_event_id="$team-response",
-            ),
-        )
+        # The reply's records record the turn answered; the controller writes nothing.
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_explicit_members_uses_ai_team_mode(
@@ -2488,12 +2484,8 @@ class TestAgentBot(AgentBotTestBase):
         mock_send_response.assert_not_awaited()
         assert mock_generate_response.await_args.kwargs["existing_event_id"] is None
         assert mock_generate_response.await_args.kwargs["existing_event_is_placeholder"] is False
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create(
-                ["$event"],
-                response_event_id="$response",
-            ),
-        )
+        # The reply's records record the turn answered; the controller writes nothing.
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_media_download_failure_sends_terminal_error_without_placeholder(
@@ -2597,10 +2589,12 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+        _set_turn_store_tracker(bot, MagicMock())
 
         resolution = await bot._turn_controller._finalize_dispatch_failure(
             target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
             error=RuntimeError("boom"),
+            handled_turn=TurnRecord.create(["$event"], completed=False),
         )
 
         assert resolution == "$error"
@@ -2626,10 +2620,12 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+        _set_turn_store_tracker(bot, MagicMock())
 
         resolution = await bot._turn_controller._finalize_dispatch_failure(
             target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
             error=RuntimeError("boom"),
+            handled_turn=TurnRecord.create(["$event"], completed=False),
             existing_event_id="$placeholder",
         )
 
@@ -2643,7 +2639,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A replacement error must be durable before dispatch finalization resumes."""
+        """A directly sent error is the turn's recorded answer before dispatch finalization resumes."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -2651,20 +2647,19 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         bot._delivery_gateway.send_text = AsyncMock(return_value="$fallback-error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
-        persisted_event_ids: list[str] = []
-
-        async def record_visible_response(event_id: str) -> None:
-            persisted_event_ids.append(event_id)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
 
         resolution = await bot._turn_controller._finalize_dispatch_failure(
             target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
             error=RuntimeError("boom"),
+            handled_turn=TurnRecord.create(["$event"], completed=False),
             existing_event_id="$placeholder",
-            on_visible_response=record_visible_response,
         )
 
-        assert persisted_event_ids == ["$fallback-error"]
         assert resolution == "$fallback-error"
+        tracker.record_handled_turn.assert_called_once_with(
+            TurnRecord.create(["$event"], response_event_id="$fallback-error"),
+        )
 
     @pytest.mark.asyncio
     async def test_finalize_dispatch_failure_uses_system_response_kind_for_team_bot(
@@ -2709,10 +2704,12 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         bot._delivery_gateway.send_text = AsyncMock(return_value="$team-error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+        _set_turn_store_tracker(bot, MagicMock())
 
         await bot._turn_controller._finalize_dispatch_failure(
             target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
             error=RuntimeError("boom"),
+            handled_turn=TurnRecord.create(["$event"], completed=False),
         )
 
         assert bot._delivery_gateway.send_text.await_args.args == (
@@ -2786,12 +2783,8 @@ class TestAgentBot(AgentBotTestBase):
             "Thinking...",
             "[calculator] ⚠️ Error: setup failed",
         ]
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create(
-                ["$event"],
-                response_event_id="$sent1",
-            ),
-        )
+        # The reply's records record the turn answered; the controller writes nothing.
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_handles_post_lock_request_preparation_error_without_unboundlocalerror(
@@ -2845,12 +2838,13 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
+        handled_turn = TurnRecord.create([event.event_id])
         with patch(
             "mindroom.bot.TurnController._finalize_dispatch_failure",
             new=AsyncMock(
                 return_value="$error",
             ),
-        ):
+        ) as finalize:
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
@@ -2859,15 +2853,12 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=TurnRecord.create([event.event_id]),
+                handled_turn=handled_turn,
             )
 
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create(
-                ["$event"],
-                response_event_id="$error",
-            ),
-        )
+        # The direct notice is the turn's answer, which the dispatch failure path records.
+        assert finalize.await_args.kwargs["handled_turn"] == handled_turn
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_post_lock_failure_delivery_uses_stable_dispatch_target(
@@ -2936,78 +2927,6 @@ class TestAgentBot(AgentBotTestBase):
         delivery_gateway.send_text.assert_awaited_once()
         request = delivery_gateway.send_text.await_args.args[0]
         assert request.target == stable_target
-
-    @pytest.mark.asyncio
-    async def test_execute_dispatch_action_records_visible_linkage_when_suppressed_cleanup_fails(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressed placeholder cleanup failures should still persist visible linkage."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        bot.logger = MagicMock()
-        wrap_extracted_collaborators(bot, "_response_runner")
-        replace_turn_controller_deps(
-            bot,
-            logger=bot.logger,
-            response_runner=bot._response_runner,
-        )
-
-        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=True,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[bot.matrix_id],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id=None,
-                    reply_to_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-suppress-cleanup-failed",
-            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
-        )
-
-        with (
-            patch.object(
-                bot._response_runner,
-                "generate_response",
-                new=AsyncMock(
-                    return_value="$thinking",
-                ),
-            ),
-            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
-        ):
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                ResponseAction(kind="individual"),
-                DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
-                dispatch_started_at=0.0,
-                handled_turn=TurnRecord.create([event.event_id]),
-            )
-
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create(
-                ["$event"],
-                response_event_id="$thinking",
-            ),
-        )
 
     @pytest.mark.asyncio
     async def test_deliver_final_suppression_preserves_existing_visible_response_linkage(

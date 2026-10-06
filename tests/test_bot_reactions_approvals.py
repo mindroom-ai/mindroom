@@ -80,6 +80,7 @@ from tests.conftest import (
     activate_interactive_prompt,
     install_relation_lookup,
     make_matrix_client_mock,
+    record_turn_answered,
     replace_interactive_selection_handlers,
     replace_reaction_dispatcher_deps,
     replace_turn_controller_deps,
@@ -1982,13 +1983,14 @@ class TestAgentBot(AgentBotTestBase):
 
         async def generate_locked(
             _self: ResponseRunner,
-            _request: ResponseRequest,
+            request: ResponseRequest,
             *,
             resolved_target: MessageTarget,
             early_placeholder_state: object,
         ) -> str:
             del early_placeholder_state
             resolved_targets.append(resolved_target)
+            await record_turn_answered(bot, request)
             return "$response"
 
         bot._conversation_resolver.fetch_thread_history = AsyncMock(

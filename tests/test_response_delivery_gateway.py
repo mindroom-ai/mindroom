@@ -1837,6 +1837,18 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         """Return one final delivery for the turn caused by `$cause`."""
         return TestTurnDeliveryGoesThroughTheOutbox._final_request(text)
 
+    @staticmethod
+    async def _send_final(gateway: DeliveryGateway, text: str) -> str | None:
+        """Send one answer that no reply owns, as a command's or a rejection's answer is sent."""
+        return await gateway.send_text(
+            SendTextRequest(
+                target=MessageTarget.resolve(_ROOM_ID, None, "$cause", room_mode=True),
+                response_text=text,
+                delivery_turn_id="$cause",
+                delivery_stage=DeliveryStage.FINAL,
+            ),
+        )
+
     async def test_a_final_acknowledgement_carries_the_bound_record(
         self,
         tmp_path: Path,
@@ -1851,13 +1863,11 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
             return replace(pending, response_event_id=event_id, completed=True)
 
         gateway = _gateway(tmp_path, alice, terminal_turn_for=bind)
-        gateway.deps.response_hooks._apply_before_response = (
-            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
-        )
+        await admit_room_event(alice, _ROOM_ID, "$cause")
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            await final_in_span(gateway, alice, self._final_request("answer"))
+            assert await self._send_final(gateway, "answer") == "$sent"
 
         ((index_event_ids, anchor_event_id, record_json),) = await journal_store.turn_records("agent").load_all()
         assert index_event_ids == "$cause"
@@ -1866,38 +1876,24 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         assert record["response_event_id"] == "$sent"
         assert record["completed"] is True
 
-    async def test_a_final_edit_acknowledgement_binds_the_edited_response(
+    async def test_a_replys_acknowledgement_binds_no_turn_record(
         self,
         tmp_path: Path,
-        journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """The replacement event acknowledges delivery, while the edited event remains the response owner."""
-        pending = TurnRecord.create(["$cause"], completed=False, response_owner="agent")
-        gateway = _gateway(
-            tmp_path,
-            alice,
-            terminal_turn_for=lambda _turn_id, event_id: replace(
-                pending,
-                response_event_id=event_id,
-                completed=True,
-            ),
-        )
+        """A reply's records own its answer, so its acknowledgement commits no turn record beside it."""
+        bind = MagicMock(return_value=None)
+        gateway = _gateway(tmp_path, alice, terminal_turn_for=bind)
         gateway.deps.response_hooks._apply_before_response = (
             TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
         )
-        delivered = DeliveredMatrixEvent("$replacement", {"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            outcome = await final_in_span(
-                gateway,
-                alice,
-                replace(self._final_request("answer"), existing_event_id="$waiting"),
-            )
+            outcome = await final_in_span(gateway, alice, self._final_request("answer"))
 
-        assert outcome.event_id == "$waiting"
-        ((_index, _anchor, record_json),) = await journal_store.turn_records("agent").load_all()
-        assert json.loads(record_json)["response_event_id"] == "$waiting"
+        assert outcome.event_id == "$sent"
+        bind.assert_not_called()
 
     async def test_a_placeholder_acknowledgement_carries_no_record(
         self,
@@ -1946,15 +1942,12 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         write beside it.
         """
         gateway = _gateway(tmp_path, alice, terminal_turn_for=lambda _turn_id, _event_id: None)
-        gateway.deps.response_hooks._apply_before_response = (
-            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
-        )
+        await admit_room_event(alice, _ROOM_ID, "$cause")
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            outcome = await final_in_span(gateway, alice, self._final_request("answer"))
+            assert await self._send_final(gateway, "answer") == "$sent"
 
-        assert outcome.event_id == "$sent"
         assert (await _turn_row(alice, DeliveryStage.FINAL)).acknowledged_event_id == "$sent"
         assert await journal_store.turn_records("agent").load_all() == ()
 

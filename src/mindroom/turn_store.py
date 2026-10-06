@@ -98,15 +98,6 @@ class _FinalizedVisibleEcho:
     is_fallback: bool
 
 
-async def record_deferred_outcome_response(
-    turn_store: TurnStore,
-    record: TurnRecord,
-    response_event_id: str,
-) -> None:
-    """Record one deferred visible outcome as the terminal responded turn."""
-    await turn_store.record_responded_turn(canonicalize_turn_record(record, response_event_id=response_event_id))
-
-
 @dataclass
 class TurnStore:
     """Own durable turn state and absent-record history import for one entity.

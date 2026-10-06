@@ -34,6 +34,7 @@ from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     make_pending_event,
     prepared_dispatch_result,
+    record_turn_answered,
     replace_interactive_selection_handlers,
     replace_turn_controller_deps,
     unwrap_extracted_collaborator,
@@ -1118,6 +1119,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
         if source_event_id == "$a0":
             first_locked.set()
             await release_first_response.wait()
+        await record_turn_answered(bot, request)
         return f"{source_event_id}-response"
 
     async def fake_prepare_dispatch(
