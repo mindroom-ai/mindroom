@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 ROOM = "!room:example.test"
 # Eight 642-character sections: 1,286 tokens, over a 1,000-token trigger.
 MEMORY = "# Memory\n" + "".join(f"## Topic {index}\n" + f"Detail {index} " * 70 + "\n" for index in range(8))
+# MEMORY with its last section moved to memory/topics.md behind a pointer, within the bounds.
+CONDENSED = MEMORY.split("## Topic 7\n")[0] + "## Topic 7\nSee memory/topics.md\n"
 # Noon UTC; the default 04:00 schedule in the config's timezone is next due within a day.
 NOON = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 DAY_LATER = NOON + timedelta(days=1)
@@ -222,7 +224,7 @@ async def test_a_run_within_the_bounds_resolves_its_thread(tmp_path: Path) -> No
     config, paths, runner, bot = _setup(tmp_path)
     set_tag = AsyncMock()
     with patch.object(runner_module, "set_thread_tag", set_tag):
-        await _finish_run(runner, config, paths, MEMORY.split("## Topic 7\n")[0] + "## Topic 7\nSee memory/topics.md\n")
+        await _finish_run(runner, config, paths, CONDENSED)
 
     assert bot.sent[1]["body"].startswith("✅ Prompt files condensed from 1286 to ")
     set_tag.assert_awaited_once_with(bot.client, ROOM, "$event1", "resolved", set_by="@mindroom_mind:example.test")
@@ -245,11 +247,15 @@ async def test_a_thread_the_bot_cannot_tag_still_gets_its_notice(tmp_path: Path)
     """A missing power level for thread tags is logged, not raised."""
     config, paths, runner, bot = _setup(tmp_path)
     set_tag = AsyncMock(side_effect=ThreadTagsError("power too low"))
-    with patch.object(runner_module, "set_thread_tag", set_tag):
-        await _finish_run(runner, config, paths, MEMORY.split("## Topic 7\n")[0] + "## Topic 7\nSee memory/topics.md\n")
+    with (
+        patch.object(runner_module, "set_thread_tag", set_tag),
+        patch.object(runner_module.logger, "warning") as warning,
+    ):
+        await _finish_run(runner, config, paths, CONDENSED)
 
     set_tag.assert_awaited_once()
     assert bot.sent[1]["body"].startswith("✅ ")
+    warning.assert_called_once_with("Automation could not resolve its thread", agent="mind", error="power too low")
 
 
 @pytest.mark.asyncio
