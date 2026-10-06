@@ -3173,6 +3173,19 @@
           "title": "Max Content Loss",
           "type": "number"
         },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model"
+        },
         "protected_files": {
           "default": [],
           "description": "Workspace-relative files the pass should leave unchanged",

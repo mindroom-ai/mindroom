@@ -278,7 +278,7 @@ agents:
     memory_backend: file
     automations:
       - prompt_curation          # the built-in with its defaults
-      # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000}
+      # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
 ```
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
@@ -322,6 +322,7 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 | `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
 | `max_file_shrink` | `0.25` | Largest shrink of any single file before verify asks for a re-check |
 | `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
+| `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
 | `protected_files` | `[]` | Workspace-relative paths the run should leave unchanged |
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
