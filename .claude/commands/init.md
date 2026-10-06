@@ -17,8 +17,8 @@ $ARGUMENTS
 
 ## Current Development Context
 - Current branch: !`git branch --show-current`
-- Changes from main: !`git diff origin/main --stat`
-- Full diff: !`git diff origin/main`
+- Changes from main: !`git diff --merge-base origin/main --stat`
+- Full diff: !`git diff --merge-base origin/main`
 
 **Note**: If there are no changes from main, we're starting fresh. Otherwise, understand the current feature being developed from the diff above.
 
@@ -99,4 +99,4 @@ Read and understand the MindRoom project structure:
    - Check `!thread_mode show` and configured `thread_mode` / `room_thread_modes`, then inspect replies and continue in the matching room or thread
    - The room override wins over configured modes; inspect actual event relations for per-turn and trusted automation exceptions
    - Use @mentions to get agent attention
-   - See AGENTS.md section 4 for detailed Matty usage
+   - See the `live-test` skill for detailed Matty usage

@@ -172,9 +172,14 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
     return replace(event, source={**event.source, "content": stripped_content})
 
 
+# Ingress treats only a human's router relay as a handoff, so the router's relay of a
+# task a bot account scheduled arrives as a notice and must keep its per-run settings too.
+_SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF, TurnIntent.ROUTER_NOTICE})
+
+
 def _scheduled_model_for_dispatch(event: DispatchEvent, origin_intent: TurnIntent) -> str | None:
-    """Accept a per-run model only from trusted scheduled fires or router handoffs."""
-    if origin_intent not in {TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF}:
+    """Accept a per-run model only from trusted scheduled fires or the router's relays of them."""
+    if origin_intent not in _SCHEDULED_RUN_INTENTS:
         return None
     content = event.source.get("content") if isinstance(event.source, dict) else None
     if not isinstance(content, dict):
@@ -188,7 +193,7 @@ def _scheduled_history_budget_for_dispatch(
     origin_intent: TurnIntent,
 ) -> ScheduledHistoryBudget | None:
     """Return the trusted history budget and prompt source for one scheduled dispatch."""
-    if origin_intent not in {TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF}:
+    if origin_intent not in _SCHEDULED_RUN_INTENTS:
         return None
     content = event.source.get("content") if isinstance(event.source, dict) else None
     if not isinstance(content, dict):

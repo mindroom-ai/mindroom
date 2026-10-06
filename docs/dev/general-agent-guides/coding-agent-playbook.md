@@ -15,7 +15,7 @@ Project-neutral version of `AGENTS.md`.
 2. Look up official docs before guessing.
 3. Install deps with the project tool (e.g., `uv sync --all-extras`), then activate the venv.
 4. Add packages via the approved command (e.g., `uv add`, `uv add --dev`).
-5. Inspect `git diff origin/main | cat` to understand recent work.
+5. Inspect `git diff --merge-base origin/main | cat` to understand this branch's work.
 6. Stage files individually; commits stay atomic and imperative.
 7. **CRITICAL**: run tests (e.g., `pytest`) and `pre-commit run --all-files` before claiming the task is done.
 

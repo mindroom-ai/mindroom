@@ -79,7 +79,7 @@ class _ThreadRoomScanBoundError(RuntimeError):
     """
 
 
-class UnresolvedOpaqueRoomHistoryError(RuntimeError):
+class _UnresolvedOpaqueRoomHistoryError(RuntimeError):
     """Raised when undecryptable events from a delivery's sender could hide the exact delivery a scan must prove."""
 
 
@@ -307,7 +307,7 @@ def _refuse_opaque_exact_delivery_candidate(
         return
     if is_opaque_encrypted_event_source(event_source):
         msg = f"exact delivery room scan for {room_id} contains undecryptable events from its sender"
-        raise UnresolvedOpaqueRoomHistoryError(msg)
+        raise _UnresolvedOpaqueRoomHistoryError(msg)
 
 
 async def find_outbox_delivery_event_id_via_room_messages(

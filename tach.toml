@@ -1244,6 +1244,7 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.approval_failure",
     "mindroom.approval_manager",
+    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
@@ -5943,7 +5944,6 @@ from = ["mindroom.matrix.client_visible_messages"]
 [[interfaces]]
 expose = [
     "RoomThreadsPageError",
-    "UnresolvedOpaqueRoomHistoryError",
     "bulk_scan_thread_event_sources",
     "bundled_replacement_source",
     "enumerate_room_thread_root_ids",
