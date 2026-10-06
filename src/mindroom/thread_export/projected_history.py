@@ -240,8 +240,8 @@ async def fetch_projected_thread_history(
         raise ThreadExportIncompleteError(msg)
 
     messages: list[ResolvedVisibleMessage] = []
-    # A memory guard, not a file cap: JSON at most doubles what YAML writes for a character, so every thread whose
-    # file fits the read cap passes, and larger threads keep exporting until what they hold passes twice that cap.
+    # A memory guard; storage separately refuses a thread file past twice the read cap. JSON at most doubles what
+    # YAML writes for a character, so every thread whose file fits the read cap passes both.
     max_retained_bytes = 2 * MAX_READ_BYTES
     retained_bytes = 0
     while True:

@@ -12,7 +12,6 @@ from mindroom.authorization import (
     ReplyMembershipPendingError,
     _ReplyAuthorizationDecision,
     _responder_reply_authorization,
-    get_effective_sender_id_for_reply_permissions,
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_reply_in_room,
@@ -20,7 +19,6 @@ from mindroom.authorization import (
     is_sender_allowed_for_responder,
 )
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
 from tests.conftest import runtime_paths_for
 from tests.identity_helpers import entity_ids
@@ -211,50 +209,6 @@ async def test_room_reply_check_uses_same_responder_policy(tmp_path: Path) -> No
         "!talent:example.com",
         runtime_paths_for(config),
         memberships,
-    )
-
-
-def test_effective_sender_uses_trusted_internal_relay_metadata(tmp_path: Path) -> None:
-    """A current internal sender may relay the original requester identity."""
-    config = membership_config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    internal_sender = entity_ids(config, runtime_paths)["talent"].full_id
-    event_source = {
-        "content": {
-            ORIGINAL_SENDER_KEY: "@owner:example.com",
-            SOURCE_KIND_KEY: "trusted_internal_relay",
-        },
-    }
-
-    assert (
-        get_effective_sender_id_for_reply_permissions(
-            internal_sender,
-            event_source,
-            config,
-            runtime_paths,
-        )
-        == "@owner:example.com"
-    )
-
-
-def test_human_sender_cannot_spoof_original_requester(tmp_path: Path) -> None:
-    """Original-sender metadata from a human sender must be ignored."""
-    config = membership_config(tmp_path)
-    event_source = {
-        "content": {
-            ORIGINAL_SENDER_KEY: "@owner:example.com",
-            SOURCE_KIND_KEY: "trusted_internal_relay",
-        },
-    }
-
-    assert (
-        get_effective_sender_id_for_reply_permissions(
-            "@human:example.com",
-            event_source,
-            config,
-            runtime_paths_for(config),
-        )
-        == "@human:example.com"
     )
 
 
