@@ -135,10 +135,10 @@ CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 _CODEX_CONTEXT_WINDOW = 258_000
 KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
-OPENAI_GPT_SOL = "gpt-6-sol"
+OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
 # Chat Completions sampling controls each model rejects: GPT-6 Astra always rejects
-# both, GPT-6 Sol and Luna reject both at their default (non-`none`) reasoning effort,
+# both, GPT-6.1 Sol and GPT-6 Luna reject both at their default (non-`none`) reasoning effort,
 # and GPT-5.6 Terra and Luna reject top_p.
 OPENAI_UNSUPPORTED_SAMPLING_CONTROLS: Mapping[str, frozenset[str]] = MappingProxyType(
     {

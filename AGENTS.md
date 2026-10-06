@@ -220,7 +220,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Anthropic | Flagship default | Claude Opus 5.5 | `claude-opus-5-5` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-6 Astra | `gpt-6-astra` |
-| OpenAI | Balanced | GPT-6 Sol | `gpt-6-sol` |
+| OpenAI | Balanced | GPT-6.1 Sol | `gpt-6.1-sol` |
 | OpenAI | Fast / cheap | GPT-6 Luna | `gpt-6-luna` |
 | OpenAI Codex ChatGPT login | Default via Codex CLI | GPT-6.1 Sol | `gpt-6.1-sol` |
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |

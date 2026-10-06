@@ -11,7 +11,7 @@ models:
     context_window: 1050000
   sol:
     provider: openrouter
-    id: openai/gpt-6-sol
+    id: openai/gpt-6.1-sol
     context_window: 1050000
   luna:
     provider: openrouter
