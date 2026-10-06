@@ -2647,6 +2647,110 @@ async def test_agent_accepts_invite_independently_of_conversation_access(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("listed_agent", "expect_notice"),
+    [("agent2", True), ("agent1", False), (None, False)],
+    ids=["unlisted-in-managed-room", "listed-in-managed-room", "ad-hoc-room"],
+)
+async def test_agent_explains_joining_a_managed_room_it_cannot_answer_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    listed_agent: str | None,
+    expect_notice: bool,
+) -> None:
+    """An invite into a managed room that does not list the agent ends with a one-time explanation."""
+    room_id = "!managed:localhost"
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(display_name="Agent 1", rooms=[room_id] if listed_agent == "agent1" else []),
+                "agent2": AgentConfig(display_name="Agent 2", rooms=[room_id] if listed_agent == "agent2" else []),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    send_response = AsyncMock(return_value="$notice")
+    install_send_response_mock(bot, send_response)
+    monkeypatch.setattr(
+        "mindroom.matrix.client_room_admin.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    room = MagicMock(room_id=room_id)
+    room.canonical_alias = None
+
+    await _handle_invite(bot, room, MagicMock(sender="@inviter:localhost"))
+
+    if not expect_notice:
+        send_response.assert_not_awaited()
+        return
+    send_response.assert_awaited_once()
+    kwargs = send_response.await_args.kwargs
+    assert kwargs["target"].room_id == room_id
+    assert kwargs["target"].resolved_thread_id is None
+    assert kwargs["response_text"] == (
+        "This room is managed in the MindRoom configuration, and I'm not one of its agents, so I can't answer here. "
+        "To talk to me, create a new room and invite me. In this room, you can ask Agent 2."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_managed_room_notice_stays_silent_for_inviters_the_agent_does_not_accept(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The join note speaks only to inviters who may address the agent."""
+    room_id = "!managed:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(display_name="Agent 1"),
+                "agent2": AgentConfig(display_name="Agent 2", rooms=[room_id]),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=AgentMatrixUser(
+            agent_name="agent1",
+            user_id="@mindroom_agent1:localhost",
+            display_name="Agent 1",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    send_response = AsyncMock(return_value="$notice")
+    install_send_response_mock(bot, send_response)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
+    room = MagicMock(room_id=room_id)
+    room.canonical_alias = None
+
+    await _handle_invite(bot, room, MagicMock(sender="@inviter:localhost"))
+
+    join_room.assert_awaited_once()
+    send_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize(
     ("policy", "access_users", "expected_join"),
