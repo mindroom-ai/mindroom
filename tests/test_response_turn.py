@@ -1521,30 +1521,33 @@ def test_streaming_turn_yields_chunks_and_filters_sentinel() -> None:
     assert log.finalized == 1
 
 
-def test_streaming_excluded_attempt_records_even_without_partial_output() -> None:
-    """An excluded attempt records even when no partial output exists."""
+def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
+    """A handled streaming error records the turn and publishes the metadata the attempt hands over."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
+    collector: dict[str, Any] = {}
+    error_metadata = {"io.mindroom.ai_run": {"status": "error"}}
 
     async def _attempt(
         _run: TurnRunState,
         _c: DynamicContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield "friendly error"
-        yield AttemptResolved(HandledAttempt())
+        yield AttemptResolved(HandledAttempt(metadata_content=error_metadata))
 
     chunks = asyncio.run(
         _collect(
             stream_response_turn(
                 _ctx(),
                 _streaming_adapter(log, _attempt),
-                TurnSinks(turn_recorder=cast("Any", recorder)),
+                TurnSinks(turn_recorder=cast("Any", recorder), run_metadata_collector=collector),
                 continuation=_continuation(),
             ),
         ),
     )
 
     assert chunks == ["friendly error"]
+    assert collector == error_metadata
     assert recorder.completed_calls == []
     assert len(recorder.interrupted_calls) == 1
     assert log.finalized == 1

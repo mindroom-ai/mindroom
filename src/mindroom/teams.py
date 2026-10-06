@@ -3649,6 +3649,24 @@ async def team_response_stream(  # noqa: C901, PLR0915
         paused_resolution: PausedAttempt | None = None
         usage = _TeamStreamUsage()
 
+        def _interrupted_metadata(
+            status: RunStatus,
+            event_run_id: str | None,
+            event_session_id: str | None,
+        ) -> dict[str, Any] | None:
+            if run_metadata_collector is None:
+                return None
+            return _build_streamed_team_run_metadata_content(
+                config=config,
+                prepared_execution=prepared_execution,
+                completed_run_event=None,
+                usage=usage,
+                run_id=event_run_id or attempt_run_id,
+                session_id=event_session_id or ctx.session_id,
+                status=status,
+                tool_count=len(completed_tool_executions),
+            )
+
         ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
         request_context = _team_request_log_context(
             ctx,
@@ -3831,20 +3849,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 )
                 yield AttemptResolved(
                     HandledAttempt(
-                        metadata_content=(
-                            _build_streamed_team_run_metadata_content(
-                                config=config,
-                                prepared_execution=prepared_execution,
-                                completed_run_event=None,
-                                usage=usage,
-                                run_id=event.run_id or attempt_run_id,
-                                session_id=event.session_id or ctx.session_id,
-                                status=RunStatus.error,
-                                tool_count=len(completed_tool_executions),
-                            )
-                            if run_metadata_collector is not None
-                            else None
-                        ),
+                        metadata_content=_interrupted_metadata(RunStatus.error, event.run_id, event.session_id),
                     ),
                 )
                 return
@@ -3852,25 +3857,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
             if isinstance(event, TeamRunCancelledEvent):
                 if event.team_id and event.team_id != bound_team_id:
                     continue
-                cancelled_metadata_content: dict[str, Any] | None = None
-                if run_metadata_collector is not None:
-                    cancelled_metadata_content = _build_streamed_team_run_metadata_content(
-                        config=config,
-                        prepared_execution=prepared_execution,
-                        completed_run_event=None,
-                        usage=usage,
-                        run_id=event.run_id or attempt_run_id,
-                        session_id=event.session_id or ctx.session_id,
-                        status=RunStatus.cancelled,
-                        tool_count=len(completed_tool_executions),
-                    )
                 yield AttemptResolved(
                     ExcludedAttempt(
                         reason=event.reason,
                         partial_text=_current_canonical_partial_text(),
                         completed_tools=tuple(completed_tools),
                         interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
-                        metadata_content=cancelled_metadata_content,
+                        metadata_content=_interrupted_metadata(RunStatus.cancelled, event.run_id, event.session_id),
                     ),
                 )
                 return
