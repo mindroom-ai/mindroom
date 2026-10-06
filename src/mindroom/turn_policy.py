@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.authorization import (
     ReplyMembershipPendingError,
     classify_responder_candidates_from_cached_room,
+    configured_responder_entities_for_room,
     is_sender_allowed_for_agent_reply_in_room,
 )
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
@@ -126,6 +127,11 @@ _ROUTER_ONLY_MENTION_GUIDANCE = (
     "adaptive participation, but teams do not form automatically. In a new untagged message, "
     "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
     "agent you can tag directly."
+)
+
+_NOT_CONFIGURED_FOR_ROOM_MESSAGE = (
+    "I'm not configured for this room, so I can't answer here. "
+    "Mention an agent that is configured for this room, or ask a MindRoom administrator to add this room to my `rooms`."
 )
 
 
@@ -904,7 +910,28 @@ class TurnPolicy:
             ):
                 return ResponseAction(kind="individual")
             self._log_multi_agent_thread_skip(context, agent_response_decision)
+        if rejection := self._unlisted_room_mention_rejection(context, room, agent_response_decision):
+            return rejection
         return ResponseAction(kind="individual" if agent_response_decision.should_respond else "skip")
+
+    def _unlisted_room_mention_rejection(
+        self,
+        context: MessageContext,
+        room: nio.MatrixRoom,
+        agent_response_decision: AgentResponseDecision,
+    ) -> ResponseAction | None:
+        """Explain a direct mention that the configured room's responder boundary excludes."""
+        if not context.am_i_mentioned or agent_response_decision.skip_reason != "agent_not_available":
+            return None
+        configured_responders = configured_responder_entities_for_room(
+            room,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        if configured_responders is None or self.deps.matrix_id in configured_responders:
+            return None
+        self.deps.logger.info("Rejecting mention: agent is not configured for this room", room_id=room.room_id)
+        return ResponseAction(kind="reject", rejection_message=_NOT_CONFIGURED_FOR_ROOM_MESSAGE)
 
     def _has_resolved_planning_candidates(
         self,
