@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import scheduling
 from mindroom.authorization import ResponderCandidatePermissions
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
@@ -521,6 +522,13 @@ class TestBotTaskRestoration:
                 mock_restore.return_value = 2  # 2 tasks restored
 
                 await bot.start()
+                try:
+                    # Runners that agents create run on the started router's client.
+                    assert scheduling._runner_owners == [
+                        scheduling.ScheduledTaskRunnerOwner(mock_client, bot._conversation_reader),
+                    ]
+                finally:
+                    scheduling.clear_scheduled_task_runner_owner(mock_client)
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 

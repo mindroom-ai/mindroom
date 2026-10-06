@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom import scheduling
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -402,6 +403,9 @@ class TestScheduledTaskRestoration:
         self._install_runtime_support(router_bot)
         drain_task = asyncio.create_task(asyncio.sleep(60))
         router_bot._deferred_overdue_task_drain_task = drain_task
+        scheduling.set_scheduled_task_runner_owner(
+            scheduling.ScheduledTaskRunnerOwner(router_bot.client, router_bot._conversation_reader),
+        )
 
         async def wait_for_background_tasks_side_effect(**kwargs: float) -> None:
             assert "timeout" in kwargs
@@ -423,6 +427,7 @@ class TestScheduledTaskRestoration:
             await router_bot.stop()
 
         assert drain_task.cancelled()
+        assert scheduling._runner_owners == []
         mock_clear.assert_called_once_with()
         mock_cancel.assert_awaited_once()
         router_bot.client.close.assert_awaited_once()

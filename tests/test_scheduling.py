@@ -511,6 +511,78 @@ async def test_task_scheduled_during_a_turn_does_not_inherit_the_turn_context(
     assert observed == [None]
 
 
+def _pending_once_workflow() -> ScheduledWorkflow:
+    return ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        message="reminder",
+        description="reminder",
+        room_id="!test:server",
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_created_by_an_agent_runs_on_the_router_runtime(tmp_path: Path) -> None:
+    """An agent's schedule keeps firing after that agent's bot is replaced and its client closes."""
+    router_client = AsyncMock()
+    router_reader = _conversation_reader()
+    scheduling.set_scheduled_task_runner_owner(scheduling.ScheduledTaskRunnerOwner(router_client, router_reader))
+    try:
+        with (
+            patch.object(scheduling, "_persist_scheduled_task_state", new=AsyncMock(return_value="revision")),
+            patch.object(scheduling, "_start_scheduled_task", return_value=True) as start,
+        ):
+            await scheduling._save_pending_scheduled_task(
+                client=AsyncMock(),
+                room_id="!test:server",
+                task_id="agent_task",
+                workflow=_pending_once_workflow(),
+                config=Config(),
+                runtime_paths=_test_runtime_paths(tmp_path),
+            )
+    finally:
+        scheduling.clear_scheduled_task_runner_owner(router_client)
+
+    start.assert_called_once()
+    assert start.call_args.args[0] is router_client
+    assert start.call_args.args[1] == "agent_task"
+    assert start.call_args.args[5] is router_reader
+
+
+@pytest.mark.asyncio
+async def test_schedule_created_without_a_running_router_waits_for_its_restore(tmp_path: Path) -> None:
+    """With no router running, the saved task starts when the router restores the room."""
+    with (
+        patch.object(scheduling, "_persist_scheduled_task_state", new=AsyncMock(return_value="revision")) as persist,
+        patch.object(scheduling, "_start_scheduled_task", return_value=True) as start,
+    ):
+        await scheduling._save_pending_scheduled_task(
+            client=AsyncMock(),
+            room_id="!test:server",
+            task_id="agent_task",
+            workflow=_pending_once_workflow(),
+            config=Config(),
+            runtime_paths=_test_runtime_paths(tmp_path),
+        )
+
+    persist.assert_awaited_once()
+    start.assert_not_called()
+
+
+def test_stopping_router_generation_keeps_its_replacement_as_runner_owner() -> None:
+    """Only the router that registered itself can stop being the runner owner."""
+    retired_client = AsyncMock()
+    replacement = scheduling.ScheduledTaskRunnerOwner(AsyncMock(), _conversation_reader())
+    scheduling.set_scheduled_task_runner_owner(replacement)
+    try:
+        scheduling.clear_scheduled_task_runner_owner(retired_client)
+        assert scheduling._runner_owners == [replacement]
+    finally:
+        scheduling.clear_scheduled_task_runner_owner(replacement.client)
+    assert scheduling._runner_owners == []
+
+
 @pytest.mark.asyncio
 async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure(tmp_path: Path) -> None:
     """One deferred task failure should not strand later queued tasks."""

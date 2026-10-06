@@ -94,6 +94,9 @@ _DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
 _running_tasks: dict[str, asyncio.Task] = {}
 _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
+# The router restores runners when it starts and cancels them all when it stops, so
+# runners run on its runtime; a runner on another bot's client outlives that client.
+_runner_owners: list[ScheduledTaskRunnerOwner] = []
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
 _schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
@@ -311,6 +314,24 @@ class SchedulingRuntime:
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     matrix_admin: HookMatrixAdmin | None = None
     config_provider: Callable[[], Config | None] | None = None
+
+
+@dataclass(frozen=True)
+class ScheduledTaskRunnerOwner:
+    """The router runtime every scheduled-task runner uses."""
+
+    client: nio.AsyncClient
+    conversation_reader: ConversationReader
+
+
+def set_scheduled_task_runner_owner(owner: ScheduledTaskRunnerOwner) -> None:
+    """Run scheduled tasks on a router that has started."""
+    _runner_owners[:] = [owner]
+
+
+def clear_scheduled_task_runner_owner(client: nio.AsyncClient) -> None:
+    """Stop starting runners on a router that is shutting down."""
+    _runner_owners[:] = [owner for owner in _runner_owners if owner.client is not client]
 
 
 @dataclass
@@ -601,6 +622,31 @@ def _start_scheduled_task(
         )
     _running_tasks[task_id] = task
     return True
+
+
+def _start_owned_scheduled_task(
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> bool:
+    """Start a runner created outside the router on the router's runtime."""
+    if not _runner_owners:
+        # The pending state is already saved, and the router restores it when it starts.
+        logger.info("scheduled_task_runner_deferred_to_router_start", task_id=task_id)
+        return False
+    owner = _runner_owners[0]
+    return _start_scheduled_task(
+        owner.client,
+        task_id,
+        workflow,
+        config,
+        runtime_paths,
+        owner.conversation_reader,
+        build_hook_matrix_admin(owner.client, runtime_paths),
+        config_provider=config_provider,
+    )
 
 
 def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> bool:
@@ -1104,7 +1150,6 @@ async def _save_pending_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     config_provider: Callable[[], Config | None] | None = None,
@@ -1121,16 +1166,7 @@ async def _save_pending_scheduled_task(
         created_at=created_at,
         matrix_admin=matrix_admin,
     )
-    _start_scheduled_task(
-        client,
-        task_id,
-        workflow,
-        config,
-        runtime_paths,
-        conversation_reader,
-        matrix_admin,
-        config_provider=config_provider,
-    )
+    _start_owned_scheduled_task(task_id, workflow, config, runtime_paths, config_provider=config_provider)
 
 
 async def _save_one_time_task_status(
@@ -1919,7 +1955,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 workflow=workflow_result,
                 config=config,
                 runtime_paths=runtime_paths,
-                conversation_reader=conversation_reader,
                 created_at=datetime.now(UTC).isoformat(),
                 matrix_admin=runtime.matrix_admin,
                 config_provider=runtime.config_provider,
@@ -2156,14 +2191,11 @@ async def schedule_approved_tool_call(
         if not task_published and card_reserved is not False:
             await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     scheduled_for = _format_scheduled_time(send_at, config.timezone)
-    _start_scheduled_task(
-        runtime.client,
+    _start_owned_scheduled_task(
         task_id,
         workflow,
         config,
         runtime.runtime_paths,
-        runtime.conversation_reader,
-        runtime.matrix_admin,
         config_provider=runtime.config_provider,
     )
     return (
