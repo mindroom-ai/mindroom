@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         JournalEvent,
         MatrixDelivery,
         PendingPage,
+        PermanentDeliveryFailure,
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
@@ -393,8 +394,8 @@ class MatrixDeliveryView(Protocol):
         delivery_id: str,
         stage: DeliveryStage,
         reason: str,
-    ) -> str | None:
-        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+    ) -> PermanentDeliveryFailure:
+        """Stop retrying one definitively refused immutable payload, or report its ACK."""
         ...
 
     async def retire_matrix_delivery(

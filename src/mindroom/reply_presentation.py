@@ -154,20 +154,6 @@ class RenderedReply:
     placeholder_only: bool
 
 
-def _segment_has_work(segment: Segment, placeholder: str) -> bool:
-    if segment.kind != "answer":
-        return False
-    if segment.tool_trace:
-        return True
-    text = segment.text.strip()
-    return bool(text) and text != placeholder and any(char.isalnum() for char in text)
-
-
-def visible_work(presentation: Presentation) -> bool:
-    """Return whether the reply shows anything a span produced: answer text or a tool call."""
-    return any(_segment_has_work(segment, presentation.placeholder) for segment in presentation.segments)
-
-
 def _combined(segments: Sequence[Segment], placeholder: str) -> tuple[str, tuple[ToolTraceEntry, ...]]:
     """Join segments into one body, numbering each segment's tool markers after the earlier ones."""
     parts: list[str] = []

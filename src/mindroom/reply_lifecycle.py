@@ -974,7 +974,9 @@ def stopped(
     now_ns: int,
 ) -> Transition:
     """End a span cancelled by its reply's Stop (DESIGN.md §6.4 ``stopped``)."""
-    reply = confirm_progress(reply, confirms)
+    # The write's own confirmation counts too: an acknowledged progress edit
+    # means a regeneration already changed what the room shows.
+    reply = confirm_progress(reply, confirms or (None if write is None else write.confirms))
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
@@ -1040,7 +1042,7 @@ def fail(  # noqa: C901, PLR0911
     if span.ended:
         # A terminal row already decided this span; a later error report is the same outcome.
         return _unchanged(Outcome.DUPLICATE, reply)
-    reply = confirm_progress(reply, confirms)
+    reply = confirm_progress(reply, confirms or (None if write is None else write.confirms))
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
@@ -1430,6 +1432,20 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
     """A dispatch failed before or after a claim: the reply shows the error (DESIGN.md §6.4)."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
+    if (
+        current is not None
+        and not current.ended
+        and current.kind is SpanKind.REGENERATION
+        and current.rollback is not None
+        and not had_acknowledged_write(reply, current)
+    ):
+        # The old answer stays as it was, as main leaves it.
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_restore(reply, current, now_ns),
+            spans=(_end(current, SpanOutcome.RESTORED, now_ns),),
+            effects=(SettleSources(current.span_id),),
+        )
     spans: tuple[Span, ...] = ()
     updated = reply
     stopped_first = reply.unapplied_stop

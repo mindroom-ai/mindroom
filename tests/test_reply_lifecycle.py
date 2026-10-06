@@ -461,6 +461,46 @@ def test_stopped_regeneration_before_its_first_acknowledged_write_restores_silen
     assert _span_after(transition, "span-2").outcome is SpanOutcome.RESTORED
 
 
+def _regenerating() -> tuple[Reply, Span]:
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    reply = replace(reply, state=ReplyState.COMPLETED, presentation="old", event_id="$reply")
+    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regen.reply is not None
+    assert regen.claimed is not None
+    return regen.reply, regen.claimed
+
+
+def test_stop_after_a_regenerations_progress_edit_landed_cancels_instead_of_restoring() -> None:
+    """The terminal write's confirmation of a landed edit means the room no longer shows the old answer."""
+    reply, span = _regenerating()
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    write = replace(
+        _write(stop.reply, ReplyState.CANCELLED, shown="new partial"),
+        confirms=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False),
+    )
+    ahead = rl.write_ahead(stop.reply, span, shown="new partial", previous=None, active_generation=GEN, now_ns=NOW)
+    assert ahead.reply is not None
+    transition = rl.stopped(ahead.reply, span, replace(write, prepared_revision=ahead.reply.revision), now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.CANCELLED
+    assert transition.row is not None
+    assert _span_after(transition, "span-2").outcome is SpanOutcome.CANCELLED
+
+
+def test_dispatch_failure_of_a_regeneration_before_its_first_write_keeps_the_old_answer() -> None:
+    """A regeneration that failed to start restores the old answer, with no error note over it."""
+    reply, span = _regenerating()
+    transition = rl.dispatch_failed(reply, span, error_text="setup failed", now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.COMPLETED
+    assert transition.reply.presentation == "old"
+    assert transition.reply.owed_write is None
+    assert _span_after(transition, "span-2").outcome is SpanOutcome.RESTORED
+    assert transition.effects == (SettleSources("span-2"),)
+
+
 def test_stopped_without_a_recorded_stop_is_invalid() -> None:
     """A span cannot report a Stop its reply never recorded."""
     reply, span = _turn()

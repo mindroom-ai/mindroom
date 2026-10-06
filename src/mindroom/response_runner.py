@@ -3088,6 +3088,13 @@ class ResponseRunner:
             # bot instance ends it as lost and replays its sources.
             if handle is not None and not handle.exited and not current_task_is_process_shutdown():
                 await run_coroutine_until_complete(self._exit_span_on_error(handle, error, target=resolved_target))
+            if handle is not None and isinstance(error, PostLockRequestPreparationError) and not error.reply_owned:
+                # The span's exit ended the reply with this error; the turn records the event that shows it.
+                reply = await handle.runtime.store.replies.load(handle.reply_id)
+                raise PostLockRequestPreparationError(
+                    placeholder_event_id=None if reply is None else reply.event_id,
+                    reply_owned=True,
+                ) from error.__cause__ or error
             raise
         handle = None if span_slot is None else span_slot.handle
         if handle is not None and not handle.exited:
@@ -4853,6 +4860,15 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
+        handle = current_span()
+        if handle is not None and not handle.exited:
+            # Nothing to answer: a placeholder goes, as a suppressed answer's does (PR-1.md §6.2).
+            confirms = handle.unconfirmed_progress
+            now_ns = time.time_ns()
+            await self.deps.delivery_gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.suppress(reply, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
+            )
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(request, response_kind=response_kind),
             request=request,

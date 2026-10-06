@@ -31,7 +31,7 @@ from mindroom.event_journal import (
     thread_root,
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY, UnreadableMatrixDelivery
-from mindroom.event_journal.replies import ReplyRowRequest, edit_delivery_id, row_new_text
+from mindroom.event_journal.replies import ReplyRowEnqueue, ReplyRowRequest, edit_delivery_id, row_new_text
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
@@ -222,6 +222,15 @@ def _refused_reply_outcome(
 
 # What a failed approval's note says (DESIGN.md §10).
 type ApprovalFailureNote = Literal["cancelled", "error", "interrupted", "restart"]
+
+
+def _owed_answer_outcome() -> FinalDeliveryOutcome:
+    """Return the outcome of an answer whose row is recorded but not yet in the room.
+
+    Its sources were handed over with the row, recovery sends it, and only a
+    permanent refusal changes the reply, as main's owed ``FINAL`` is suspended.
+    """
+    return FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed")
 
 
 def _with_note(shown: Presentation, note: Segment) -> Presentation:
@@ -1174,6 +1183,7 @@ class DeliveryGateway:
                 self.deps.response_recovery.cleanup if self.deps.response_recovery is not None else None
             ),
             reply_row_resolved=self.deps.reply_row_resolved,
+            run_reply_effects=self._run_reply_effects,
         )
 
     @asynccontextmanager
@@ -1398,6 +1408,9 @@ class DeliveryGateway:
                         self.deps.logger.exception("Deleted INITIAL cleanup failed", delivery_id=initial.delivery_id)
         outcome = await worker.recover()
         failed.update(outcome.failed_deliveries)
+        # Debt a crash or an earlier failure left: notes owed, events to redact.
+        for reply in await self.deps.outbox.replies.with_pending_work():
+            await self.settle_reply_debt(reply.reply_id)
         return RecoveryOutcome(recovered=outcome.recovered, failed=len(failed), failed_deliveries=frozenset(failed))
 
     async def _send_content(  # noqa: PLR0911
@@ -1565,6 +1578,11 @@ class DeliveryGateway:
                 ),
             )
 
+        def enqueued(row: ReplyRowEnqueue) -> None:
+            # Before any send can fail, so a retry knows the span moved on.
+            if write.handle is not None:
+                write.handle.note(row.applied)
+
         try:
             delivery = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver_reply_row(
                 ReplyRowRequest(
@@ -1573,21 +1591,21 @@ class DeliveryGateway:
                     decide=write.decide,
                     placeholder_only=write.placeholder_only,
                     create=write.create,
+                    stage=write.stage,
                 ),
                 room_id=target.room_id,
                 thread_id=target.resolved_thread_id,
                 prepare=prepare,
                 response_attempt=response_attempt,
                 enqueue=write.enqueue,
+                on_enqueued=enqueued,
             )
         except _DeliveryRefusedError:
             return None
         if delivery.enqueue is not None:
-            if write.handle is not None:
-                write.handle.note(delivery.enqueue.applied)
-            await self._run_reply_effects((*delivery.enqueue.applied.post_commit, *delivery.reply_effects))
+            await self._run_reply_effects(delivery.enqueue.applied.post_commit)
             if not delivery.enqueue.transition.applied and delivery.enqueue.delivery_id is None:
-                # A retried acknowledgement is not refused: it resolves its earlier row.
+                # A retried write is not refused: it resolves to the row already recorded.
                 raise ReplyWriteRefusedError(delivery.enqueue.transition)
         if delivery.event_id is None:
             return None
@@ -2326,8 +2344,8 @@ class DeliveryGateway:
                         extra_content=delivery_extra_content,
                     ),
                 )
-            # A reply's answer row stays owed when Matrix did not take it now;
-            # recovery resends it, and only a permanent refusal changes the reply.
+            if handle is not None and handle.exited:
+                return _owed_answer_outcome()
             return FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id=request.existing_event_id,
@@ -2357,6 +2375,8 @@ class DeliveryGateway:
             )
         except ReplyWriteRefusedError as refused:
             return _refused_reply_outcome(refused, request, draft)
+        if event_id is None and handle is not None and handle.exited:
+            return _owed_answer_outcome()
         if event_id is None:
             return FinalDeliveryOutcome(
                 terminal_status="error",
@@ -2712,7 +2732,7 @@ class DeliveryGateway:
             reply_to_event_id=request.target.reply_to_event_id,
             existing_event_id=request.existing_event_id,
         )
-        handle = current_span()
+        handle = self._live_span()
         reply_hooks: dict[str, Any] = (
             {}
             if handle is None

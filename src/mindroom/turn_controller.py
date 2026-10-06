@@ -2197,9 +2197,11 @@ class TurnController:
                         delivery_turn_id=handled_turn.anchor_event_id,
                     )
                 )
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
-                )
+                if response_event_id is not None or not error.reply_owned:
+                    # A reply's notice still owed to recovery completes nothing yet; its records hold the sources.
+                    await self.deps.turn_store.record_responded_turn(
+                        canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
+                    )
                 return
             if response_event_id is not None:
                 await self.deps.turn_store.record_responded_turn(

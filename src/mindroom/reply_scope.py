@@ -28,8 +28,8 @@ from mindroom.reply_presentation import (
     continued_by,
     decode_presentation,
     encode_presentation,
+    render_body,
     shown_work,
-    visible_work,
     with_answer,
 )
 from mindroom.streaming import UnfinishedStreamedReply
@@ -62,8 +62,11 @@ class SpanHandle:
     # The span's last direct progress edit that Matrix accepted and no durable
     # write has recorded yet.
     unconfirmed_progress: rl.ProgressConfirmation | None = None
-    # Set by the span's terminal transition or exit.
-    exited: bool = False
+
+    @property
+    def exited(self) -> bool:
+        """Return whether a committed transition ended the span, as this task knows it."""
+        return self.span.ended
 
     @property
     def span_id(self) -> str:
@@ -385,8 +388,6 @@ class ReplyRuntime:
         """Apply one span exit in its own transaction and remember what it left."""
         applied = await self.store.replies.decide(reply_id=handle.reply_id, span_id=handle.span_id, decide=decide)
         handle.note(applied)
-        if handle.span.ended:
-            handle.exited = True
         return applied
 
     async def write_ahead(self, handle: SpanHandle, presentation: Presentation) -> bool:
@@ -590,7 +591,8 @@ def terminal_write(
         handle=handle,
         stage=rl.WriteStage.FINAL,
         shown=shown,
-        placeholder_only=not visible_work(shown),
+        # A note is not a placeholder: a later suppression must not redact it.
+        placeholder_only=render_body(shown)[0] == shown.placeholder,
         decide=decide,
     )
 

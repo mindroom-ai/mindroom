@@ -94,6 +94,8 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
     store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
     gateway = MagicMock(spec=DeliveryGateway)
     gateway.edit_text = AsyncMock(return_value=True)
+    # A continuation older than reply records: main's failure edit shows the note.
+    gateway.write_approval_failure_note = AsyncMock(return_value=None)
     coordinator = ApprovalResponseCoordinator(
         config=Config,
         runtime_paths=test_runtime_paths(tmp_path),
@@ -135,6 +137,8 @@ async def test_failure_reply_is_marked_interrupted(
     store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
     gateway = MagicMock(spec=DeliveryGateway)
     gateway.edit_text = AsyncMock(return_value=True)
+    # A continuation older than reply records: main's failure edit shows the note.
+    gateway.write_approval_failure_note = AsyncMock(return_value=None)
     coordinator = ApprovalResponseCoordinator(
         config=Config,
         runtime_paths=test_runtime_paths(tmp_path),

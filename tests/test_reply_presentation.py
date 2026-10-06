@@ -29,7 +29,6 @@ from mindroom.reply_presentation import (
     render,
     render_body,
     stream_status_for,
-    visible_work,
     with_answer,
     with_trailing_note,
 )
@@ -140,16 +139,6 @@ def test_restart_of_a_placeholder_replaces_it() -> None:
     assert after_restart(Presentation()) == Presentation()
     assert after_restart(Presentation(segments=(_answer(AGENT_PLACEHOLDER),))).segments == ()
     assert build_restart_interrupted_body(AGENT_PLACEHOLDER).startswith("**[")
-
-
-def test_visible_work_matches_main_read_back() -> None:
-    """Visible work is answer text or a tool call, never a placeholder or a note."""
-    assert not visible_work(Presentation())
-    assert not visible_work(Presentation(segments=(_answer(AGENT_PLACEHOLDER),)))
-    assert not visible_work(Presentation(segments=(note_segment(NoteKind.RESTART),)))
-    assert not visible_work(Presentation(segments=(_answer("---"),)))
-    assert visible_work(Presentation(segments=(_answer("x"),)))
-    assert visible_work(Presentation(segments=(_answer("", _trace("search")),)))
 
 
 def test_approval_wait_note_shows_only_without_an_answer() -> None:

@@ -6351,14 +6351,14 @@ class TestOutbox:
         )
         await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
 
-        acknowledged_event_id = await alice.record_permanent_matrix_delivery_failure(
+        failure = await alice.record_permanent_matrix_delivery_failure(
             delivery_id="turn-1",
             stage=DeliveryStage.FINAL,
             reason="matrix event exceeds the hard size limit",
         )
 
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-        assert acknowledged_event_id is None
+        assert failure.acknowledged_event_id is None
         assert stored is not None
         assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
         assert await alice.unacknowledged_matrix_deliveries() == ()

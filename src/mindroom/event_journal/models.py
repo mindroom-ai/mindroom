@@ -494,6 +494,16 @@ class DeliveryAcknowledgement:
 
 
 @dataclass(frozen=True, slots=True)
+class PermanentDeliveryFailure:
+    """What recording one definitive refusal of a delivery decided."""
+
+    # The event a concurrent acknowledgement bound, which wins over the refusal.
+    acknowledged_event_id: str | None = None
+    # Work refused reply rows left for after the commit.
+    reply_effects: tuple[CancelSpan | WakeApproval, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class TerminalTurnWrite:
     """One agent's terminal turn record, committed with a delivery acknowledgement.
 

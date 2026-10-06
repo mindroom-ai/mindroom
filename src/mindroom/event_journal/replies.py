@@ -284,6 +284,9 @@ class ReplyRowRequest:
     # Whether the row shows only the reply's placeholder.
     placeholder_only: bool = False
     create: ReplyCreation | None = None
+    # The stage the caller rendered for; a span's INITIAL or FINAL is written
+    # once, and a retry of either resolves to the row already recorded.
+    stage: rl.WriteStage | None = None
 
     def __post_init__(self) -> None:
         """Require exactly one of a rule for an existing reply and a reply to create."""
@@ -302,6 +305,8 @@ class ReplyRowEnqueue:
     stage: rl.WriteStage | None = None
     transaction_id: str | None = None
     settled_event_ids: tuple[str, ...] = ()
+    # The row's place in the reply's write sequence.
+    sequence: int | None = None
 
     @property
     def transition(self) -> Transition:
@@ -514,6 +519,12 @@ class ReplyStore:
                 receipt_order=receipt_order,
                 newer_edit=newer_edit,
             ),
+        )
+
+    async def with_pending_work(self) -> tuple[Reply, ...]:
+        """Return replies owing a redaction or a note not yet enqueued."""
+        return await self._backend.read(
+            lambda transaction: reply_messages.with_pending_work(transaction, self._principal_id),
         )
 
     async def has_unresolved_rows(self, reply_id: str) -> bool:

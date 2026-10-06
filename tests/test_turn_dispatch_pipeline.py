@@ -2870,9 +2870,15 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Incomplete placeholder cleanup should leave the source event retryable."""
+        """Incomplete placeholder cleanup should leave the source event retryable.
+
+        This is the path of a placeholder no reply records own; a reply's own
+        dispatch failure is settled by its records instead.
+        """
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        runner.deps = replace(runner.deps, replies=None)
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()

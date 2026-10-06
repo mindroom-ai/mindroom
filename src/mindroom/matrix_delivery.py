@@ -109,8 +109,6 @@ class ReplyRowDelivery:
     enqueue: ReplyRowEnqueue | None
     # The event the row resolved to, when it was decided, sent, and acknowledged.
     event_id: str | None = None
-    # Work the acknowledgement left for after the commit.
-    reply_effects: tuple[PostCommitEffect, ...] = ()
 
 
 def reply_lock_key(reply_id: str) -> str:
@@ -167,6 +165,8 @@ class MatrixDeliveryWorker:
     # Told the reply whose row just stopped being unknown, so claims that
     # waited for that reply's earlier writes run again.
     reply_row_resolved: Callable[[str], None] | None = None
+    # Runs what a reply row's acknowledgement or failure left for after its commit.
+    run_reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
     delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
@@ -243,18 +243,21 @@ class MatrixDeliveryWorker:
         prepare: Callable[[], Awaitable[PreparedReplyRow]],
         response_attempt: ResponseAttempt | None = None,
         enqueue: ReplyRowEnqueuer | None = None,
+        on_enqueued: Callable[[ReplyRowEnqueue], None] | None = None,
     ) -> ReplyRowDelivery:
-        """Decide, record, and send one row of a reply, after every earlier row of that reply.
+        """Decide and record one row of a reply, then send the reply's rows in write order.
 
-        One sending lock per reply orders the rows of all of its spans and
-        delivery ids: earlier rows whose outcome is unknown are resolved first,
-        then the payload is prepared, so it can target the event an earlier
-        create bound, and the lifecycle rule decides the row inside the
-        enqueue transaction. A rule that refuses (a Stop committed meanwhile)
-        enqueues nothing and the caller re-renders.
+        The lifecycle rule decides the row inside its enqueue transaction, before
+        anything is sent, so a send that fails leaves the row owed to recovery
+        rather than lost. One sending lock per reply orders the rows of all of
+        its spans and delivery ids: earlier rows whose outcome is unknown are
+        sent first, because a later row must never overtake one; an edit whose
+        target the reply's create has not bound yet is aimed at it when claimed.
+        A rule that refuses (a Stop committed meanwhile) enqueues nothing and
+        the caller re-renders. ``on_enqueued`` hears what committed before any
+        send can fail.
         """
         async with self._delivery_lock(reply_lock_key(request.reply_id)):
-            await self._flush_reply_rows(request.reply_id)
             prepared = await prepare()
             enqueue_row = self.store.enqueue_reply_row if enqueue is None else enqueue
             enqueued = await enqueue_row(
@@ -268,15 +271,20 @@ class MatrixDeliveryWorker:
                 permanent_failure_reason=prepared.permanent_failure_reason,
                 new_text=prepared.new_text,
             )
+            if enqueued is not None and on_enqueued is not None:
+                on_enqueued(enqueued)
             if enqueued is None or enqueued.delivery_id is None or enqueued.stage is None:
                 return ReplyRowDelivery(enqueue=enqueued)
             if self.handoff is not None and enqueued.settled_event_ids:
                 self.handoff.released(enqueued.settled_event_ids)
+            if not await self._flush_reply_rows(request.reply_id, before_sequence=enqueued.sequence):
+                # An earlier row cannot be sent yet; recovery sends both in order.
+                return ReplyRowDelivery(enqueue=enqueued)
             outcome = await run_coroutine_until_complete(
                 self._flush(delivery_id=enqueued.delivery_id, stage=DeliveryStage(enqueued.stage.value)),
             )
         event_id = await self._finish_flush(enqueued.delivery_id, outcome)
-        return ReplyRowDelivery(enqueue=enqueued, event_id=event_id, reply_effects=outcome.reply_effects)
+        return ReplyRowDelivery(enqueue=enqueued, event_id=event_id)
 
     async def _flush_reply_rows(self, reply_id: str, *, before_sequence: int | None = None) -> bool:
         """Resolve a reply's earlier rows in write order; return whether none is left unknown.
@@ -628,12 +636,12 @@ class MatrixDeliveryWorker:
         try:
             event_id = await self.send(claimed)
         except PermanentDeliveryError as error:
-            acknowledged_event_id = await self.store.record_permanent_matrix_delivery_failure(
+            failure = await self.store.record_permanent_matrix_delivery_failure(
                 delivery_id=claimed.delivery_id,
                 stage=claimed.stage,
                 reason=str(error),
             )
-            return _FlushOutcome(event_id=acknowledged_event_id)
+            return _FlushOutcome(event_id=failure.acknowledged_event_id, reply_effects=failure.reply_effects)
         return await self._acknowledge(claimed, event_id)
 
     async def _acknowledge(self, claimed: MatrixDelivery, event_id: str) -> _FlushOutcome:
@@ -709,6 +717,8 @@ class MatrixDeliveryWorker:
     async def _finish_flush(self, delivery_id: str, outcome: _FlushOutcome) -> str | None:
         """Run post-lock bookkeeping and return the visible event."""
         event_id = outcome.event_id
+        if outcome.reply_effects and self.run_reply_effects is not None:
+            await self.run_reply_effects(outcome.reply_effects)
         if (
             outcome.publish_committed_terminal
             and outcome.terminal_response_event_id is not None

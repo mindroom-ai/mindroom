@@ -680,7 +680,7 @@ class AgentBot:
                     record,
                 ),
                 reply_effects=self._run_reply_effects,
-                reply_row_resolved=self._reply_runtime.rows_resolved,
+                reply_row_resolved=self._reply_row_resolved,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -944,6 +944,17 @@ class AgentBot:
                 room_id=room_id,
             )
             == "room"
+        )
+
+    def _reply_row_resolved(self, reply_id: str) -> None:
+        """Wake claims that waited for this reply's rows, and settle any debt its rows left."""
+        self._reply_runtime.rows_resolved(reply_id)
+        create_background_task(
+            self._delivery_gateway.settle_reply_debt(reply_id),
+            name=f"reply_debt_{reply_id}",
+            owner=self._runtime_view,
+            # Outside any span the resolving task runs: debt belongs to the reply.
+            context=Context(),
         )
 
     async def _run_reply_effects(self, effects: tuple[object, ...]) -> None:

@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         DeliveryAcknowledgement,
         MatrixDelivery,
         MatrixDeliveryView,
+        PermanentDeliveryFailure,
         ProjectedEvent,
         TerminalTurnWrite,
     )
@@ -221,8 +222,8 @@ class _WatchedOutbox:
         delivery_id: str,
         stage: DeliveryStage,
         reason: str,
-    ) -> str | None:
-        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+    ) -> PermanentDeliveryFailure:
+        """Stop retrying one definitively refused immutable payload, or report its ACK."""
         return await self.inner.record_permanent_matrix_delivery_failure(
             delivery_id=delivery_id,
             stage=stage,

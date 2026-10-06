@@ -83,6 +83,7 @@ from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
     PendingTurnView,
+    PermanentDeliveryFailure,
     PrincipalStore,
     ProjectedEvent,
     RelationView,
@@ -1334,6 +1335,22 @@ def serve_conversation_reader(
     reader.read_strict.return_value = page
 
 
+class _NoReplyRecords:
+    """Reply records of an outbox that never writes a reply row."""
+
+    async def with_pending_work(self) -> tuple[object, ...]:
+        return ()
+
+    async def for_event(self, _event_id: str) -> None:
+        return None
+
+    async def for_sources(self, _event_ids: tuple[str, ...]) -> None:
+        return None
+
+    async def load(self, _reply_id: str) -> None:
+        return None
+
+
 class FakeOutbox:
     """An in-memory outbox with the real claim-before-send semantics.
 
@@ -1361,6 +1378,11 @@ class FakeOutbox:
     def principal_id(self) -> str:
         """Return the principal this in-memory delivery store represents."""
         return "agent@alice"
+
+    @property
+    def replies(self) -> _NoReplyRecords:
+        """Return the reply records this outbox never writes."""
+        return _NoReplyRecords()
 
     async def membership_epoch(self, room_id: str) -> int:
         """Return the fake room's current membership epoch."""
@@ -1525,18 +1547,18 @@ class FakeOutbox:
         delivery_id: str,
         stage: DeliveryStage,
         reason: str,
-    ) -> str | None:
-        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+    ) -> PermanentDeliveryFailure:
+        """Stop retrying one definitively refused immutable payload, or report its ACK."""
         if not reason:
             msg = "A permanent Matrix delivery failure requires a reason"
             raise ValueError(msg)
         key = (delivery_id, stage.value)
         row = self.rows.get(key)
         if row is None or row.acknowledged_event_id is not None:
-            return None if row is None else row.acknowledged_event_id
+            return PermanentDeliveryFailure(acknowledged_event_id=None if row is None else row.acknowledged_event_id)
         if not row.retired and not row.permanently_failed:
             self.rows[key] = replace(row, permanent_failure_reason=reason)
-        return None
+        return PermanentDeliveryFailure()
 
     async def retire_matrix_delivery(
         self,
@@ -1757,8 +1779,8 @@ class DiesAfterAcknowledgement:
         delivery_id: str,
         stage: DeliveryStage,
         reason: str,
-    ) -> str | None:
-        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+    ) -> PermanentDeliveryFailure:
+        """Stop retrying one definitively refused immutable payload, or report its ACK."""
         return await self.inner.record_permanent_matrix_delivery_failure(
             delivery_id=delivery_id,
             stage=stage,

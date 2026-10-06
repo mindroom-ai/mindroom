@@ -63,6 +63,7 @@ from .models import (
     DeliveryStage,
     IngestionConsumer,
     IngestionConsumerBindingError,
+    PermanentDeliveryFailure,
     ResponseRecoveryState,
 )
 from .projection import (
@@ -922,22 +923,37 @@ class PrincipalStore:
         delivery_id: str,
         stage: DeliveryStage,
         reason: str,
-    ) -> str | None:
-        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+    ) -> PermanentDeliveryFailure:
+        """Stop retrying one definitively refused immutable payload, or report its ACK.
 
-        def record(transaction: Transaction) -> str | None:
-            failed_now, acknowledged = outbox.record_permanent_failure(
+        Reply rows this refusal fails, including rows waiting on a refused
+        create, apply their reply's rule in the same transaction.
+        """
+
+        def record(transaction: Transaction) -> PermanentDeliveryFailure:
+            failed_rows, acknowledged = outbox.record_permanent_failure(
                 transaction,
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
                 reason=reason,
             )
-            if failed_now:
-                delivery = outbox.load(transaction, self._principal_id, delivery_id=delivery_id, stage=stage)
-                if delivery is not None:
-                    replies.fail_row(transaction, self._principal_id, delivery, reason=reason)
-            return acknowledged
+            effects: list[replies.PostCommitEffect] = []
+            for failed_id, failed_stage in failed_rows:
+                delivery = outbox.load(transaction, self._principal_id, delivery_id=failed_id, stage=failed_stage)
+                applied = (
+                    None
+                    if delivery is None
+                    else replies.fail_row(
+                        transaction,
+                        self._principal_id,
+                        delivery,
+                        reason=delivery.permanent_failure_reason or reason,
+                    )
+                )
+                if applied is not None:
+                    effects.extend(applied.post_commit)
+            return PermanentDeliveryFailure(acknowledged_event_id=acknowledged, reply_effects=tuple(effects))
 
         return await self._backend.write(record)
 
@@ -2093,6 +2109,47 @@ def _pause_for_approval(
     return enqueued
 
 
+def _decide_reply_row(
+    transaction: Transaction,
+    principal_id: str,
+    request: ReplyRowRequest,
+) -> ReplyRowEnqueue | tuple[rl.Reply, rl.Span, rl.Transition]:
+    """Return the row a retried write resolves to, or the reply, span, and transition the rule decided."""
+    if request.create is not None:
+        claim = request.create.claim
+        earlier = reply_spans.latest_for_delivery(transaction, principal_id, claim.delivery_id)
+        if earlier is not None:
+            # A retried acknowledgement finds the reply its first attempt created,
+            # and resolves that attempt's row instead of writing another.
+            created = reply_messages.lock(transaction, principal_id, earlier.reply_id)
+            assert created is not None
+            reused = _span_row(transaction, principal_id, created, earlier, rl.WriteStage.INITIAL)
+            assert reused is not None, "an acknowledgement's reply is created with its INITIAL row"
+            return replace(
+                reused,
+                applied=replies.AppliedTransition(
+                    transition=rl.Transition(outcome=rl.Outcome.DUPLICATE, reply=created, spans=(earlier,)),
+                    post_commit=(),
+                ),
+            )
+        transition = rl.interactive_acknowledgement(claim, shown=request.create.shown)
+        assert transition.reply is not None
+        reply, span = transition.reply, transition.spans[0]
+    else:
+        assert request.decide is not None
+        locked = reply_messages.lock(transaction, principal_id, request.reply_id)
+        loaded = reply_spans.load(transaction, principal_id, request.span_id)
+        if locked is None or loaded is None:
+            msg = f"Reply {request.reply_id} or span {request.span_id} does not exist"
+            raise RuntimeError(msg)
+        reply, span = locked, loaded
+        earlier = _span_row(transaction, principal_id, reply, span, request.stage)
+        if earlier is not None:
+            return earlier
+        transition = request.decide(reply, span)
+    return reply, span, transition
+
+
 def _enqueue_reply_row(
     transaction: Transaction,
     principal_id: str,
@@ -2114,34 +2171,10 @@ def _enqueue_reply_row(
     than written (``Outcome.RECOMPUTE``). Sources the rule settles are settled
     here, replacing the turn handoff a plain ``FINAL`` carries.
     """
-    if request.create is not None:
-        claim = request.create.claim
-        earlier = reply_spans.latest_for_delivery(transaction, principal_id, claim.delivery_id)
-        if earlier is not None:
-            # A retried acknowledgement finds the reply its first attempt created,
-            # and resolves that attempt's row instead of writing another.
-            created = reply_messages.lock(transaction, principal_id, earlier.reply_id)
-            assert created is not None
-            return ReplyRowEnqueue(
-                applied=replies.AppliedTransition(
-                    transition=rl.Transition(outcome=rl.Outcome.DUPLICATE, reply=created, spans=(earlier,)),
-                    post_commit=(),
-                ),
-                delivery_id=earlier.delivery_id,
-                stage=rl.WriteStage.INITIAL,
-            )
-        transition = rl.interactive_acknowledgement(claim, shown=request.create.shown)
-        assert transition.reply is not None
-        reply, span = transition.reply, transition.spans[0]
-    else:
-        assert request.decide is not None
-        locked = reply_messages.lock(transaction, principal_id, request.reply_id)
-        loaded = reply_spans.load(transaction, principal_id, request.span_id)
-        if locked is None or loaded is None:
-            msg = f"Reply {request.reply_id} or span {request.span_id} does not exist"
-            raise RuntimeError(msg)
-        reply, span = locked, loaded
-        transition = request.decide(reply, span)
+    decided = _decide_reply_row(transaction, principal_id, request)
+    if isinstance(decided, ReplyRowEnqueue):
+        return decided
+    reply, span, transition = decided
     if not transition.applied or transition.row is None:
         return ReplyRowEnqueue(
             applied=replies.apply(transaction, principal_id, transition),
@@ -2207,12 +2240,56 @@ def _enqueue_reply_row(
         )
     if transaction_id is None:
         raise _ReplyRowRefusedError
+    applied = replies.apply(transaction, principal_id, transition)
+    if permanent_failure_reason is not None:
+        # A payload refused before any send fails its row now, as a refusal from Matrix would.
+        refused = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=stage)
+        assert refused is not None
+        failed = replies.fail_row(transaction, principal_id, refused, reason=permanent_failure_reason)
+        if failed is not None:
+            applied = replies.AppliedTransition(
+                transition=transition,
+                post_commit=(*applied.post_commit, *failed.post_commit),
+            )
     return ReplyRowEnqueue(
-        applied=replies.apply(transaction, principal_id, transition),
+        applied=applied,
         delivery_id=delivery_id,
         stage=row.stage,
         transaction_id=transaction_id,
         settled_event_ids=replies.settled_event_ids(transaction, principal_id, transition),
+        sequence=row.sequence,
+    )
+
+
+def _span_row(
+    transaction: Transaction,
+    principal_id: str,
+    reply: rl.Reply,
+    span: rl.Span,
+    stage: rl.WriteStage | None,
+) -> ReplyRowEnqueue | None:
+    """Return the span's INITIAL or FINAL row already recorded, which a retried write resolves to.
+
+    A send that failed after its row was recorded leaves the row owed; writing
+    it again would decide a second time against a span that has moved on. The
+    stored row keeps its payload, as main's re-enqueue of an attempted row does.
+    """
+    if stage not in {rl.WriteStage.INITIAL, rl.WriteStage.FINAL}:
+        return None
+    stored = outbox.load(transaction, principal_id, delivery_id=span.delivery_id, stage=DeliveryStage(stage.value))
+    if stored is None or stored.reply_id != reply.reply_id:
+        return None
+    if stage is rl.WriteStage.FINAL and stored.span_id != span.span_id:
+        return None
+    return ReplyRowEnqueue(
+        applied=replies.AppliedTransition(
+            transition=rl.Transition(outcome=rl.Outcome.DUPLICATE, reply=reply),
+            post_commit=(),
+        ),
+        delivery_id=stored.delivery_id,
+        stage=stage,
+        transaction_id=stored.transaction_id,
+        sequence=stored.reply_sequence,
     )
 
 

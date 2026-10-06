@@ -12,6 +12,7 @@ import pytest
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.hooks import FinalResponseDraft
+from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
@@ -556,3 +557,79 @@ async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: 
     assert render_body(decode_presentation(reply.frozen_display))[0] == "HELLO!"
     assert reply.possibly_shown == reply.frozen_display
     assert _sent_bodies(bot)[-1] == "HELLO!"
+
+
+class _FlakyHomeserver:
+    """Fails the first sends, then lets the real transport through."""
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.real = send_message_outcome
+
+    async def send(self, *args: object, **kwargs: object) -> object:
+        if self.failures > 0:
+            self.failures -= 1
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup")
+        return await self.real(*args, **kwargs)
+
+
+async def test_an_answer_is_recorded_before_an_earlier_row_that_cannot_be_sent_yet(tmp_path: Path) -> None:
+    """A placeholder Matrix refused twice does not cost the answer: both rows are owed and sent in order."""
+    bot = await _streaming_bot(tmp_path)
+    flaky = _FlakyHomeserver(failures=2)
+    with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer.")) is None
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.event_id is None
+    assert bot.client.room_send.await_count == 0
+    # The answer handed its sources over with its row; recovery delivers both rows in order.
+    assert not await bot._reply_runtime.store.is_pending("$event")
+    assert (await bot._delivery_gateway.recover_deliveries()).complete
+
+    reply = await _reply(bot)
+    assert reply.event_id == "$sent1"
+    assert reply.confirmed_seq == reply.reply_sequence
+    assert _sent_bodies(bot) == ["Thinking...", "A complete answer."]
+
+
+async def test_a_retried_terminal_edit_resolves_to_the_row_it_recorded(tmp_path: Path) -> None:
+    """A final edit Matrix refused once is retried as the same row, and the answer completes."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Hello there."
+
+    flaky = _FlakyHomeserver(failures=0)
+    real_send = flaky.real
+
+    async def fail_terminal_once(*args: object, **kwargs: object) -> object:
+        content = args[2] if len(args) > 2 else kwargs.get("content")
+        if (
+            isinstance(content, dict)
+            and content.get("io.mindroom.stream_status") == "completed"
+            and flaky.failures == 0
+        ):
+            flaky.failures = -1
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup")
+        return await real_send(*args, **kwargs)
+
+    with (
+        patch("mindroom.delivery_gateway.send_message_outcome", new=fail_terminal_once),
+        patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await runner.generate_response(_plain_request(_target()))
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED]
+    assert (await bot._delivery_gateway.recover_deliveries()).complete
+    reply = await _reply(bot)
+    assert reply.confirmed_seq == reply.reply_sequence
+    assert _sent_bodies(bot)[-1] == "Hello there."

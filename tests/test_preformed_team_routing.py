@@ -43,6 +43,7 @@ from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+    from contextvars import Context
     from pathlib import Path
 
     from mindroom.final_delivery import FinalDeliveryOutcome
@@ -254,9 +255,10 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         name: str | None = None,
         error_handler: object | None = None,  # noqa: ARG001
         owner: object | None = None,  # noqa: ARG001
+        context: Context | None = None,
     ) -> asyncio.Task[Any]:
         assert asyncio.iscoroutine(coro)
-        task = asyncio.create_task(coro, name=name)
+        task = asyncio.create_task(coro, name=name, context=context)
         scheduled_tasks.append(task)
         return task
 

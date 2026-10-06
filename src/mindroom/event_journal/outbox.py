@@ -490,8 +490,12 @@ def record_permanent_failure(
     delivery_id: str,
     stage: DeliveryStage,
     reason: str,
-) -> tuple[bool, str | None]:
-    """Stop retrying one refused immutable payload; return whether this call failed it, and any concurrent ACK."""
+) -> tuple[tuple[tuple[str, DeliveryStage], ...], str | None]:
+    """Stop retrying one refused immutable payload.
+
+    Returns the rows this call failed (the row itself, then the rows waiting
+    on a refused create), and any concurrent ACK.
+    """
     if not reason:
         msg = "A permanent Matrix delivery failure requires a reason"
         raise ValueError(msg)
@@ -505,14 +509,18 @@ def record_permanent_failure(
         """,
         (reason, principal_id, delivery_id, stage.value),
     )
+    failed_rows: list[tuple[str, DeliveryStage]] = []
+    if failed is not None:
+        failed_rows.append((delivery_id, stage))
     if failed is not None and stage is DeliveryStage.INITIAL:
-        transaction.execute(
+        cascaded_final = transaction.fetchall(
             """
             UPDATE matrix_delivery_outbox
             SET permanent_failure_reason = ?
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND acknowledged_event_id IS NULL AND retired = 0
               AND edit_target_pending = 1 AND permanent_failure_reason IS NULL
+            RETURNING delivery_id
             """,
             (
                 f"required edit target was permanently refused: {reason}",
@@ -521,8 +529,9 @@ def record_permanent_failure(
                 DeliveryStage.FINAL.value,
             ),
         )
+        failed_rows.extend((str(row["delivery_id"]), DeliveryStage.FINAL) for row in cascaded_final)
         # The reply's non-terminal rows waiting on this create can never land either.
-        transaction.execute(
+        cascaded_edits = transaction.fetchall(
             """
             UPDATE matrix_delivery_outbox
             SET permanent_failure_reason = ?
@@ -532,6 +541,7 @@ def record_permanent_failure(
                 SELECT reply_id FROM matrix_delivery_outbox
                 WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               )
+            RETURNING delivery_id
             """,
             (
                 f"required edit target was permanently refused: {reason}",
@@ -542,6 +552,7 @@ def record_permanent_failure(
                 DeliveryStage.INITIAL.value,
             ),
         )
+        failed_rows.extend((str(row["delivery_id"]), DeliveryStage.EDIT) for row in cascaded_edits)
     row = transaction.fetchone(
         """
         SELECT acknowledged_event_id FROM matrix_delivery_outbox
@@ -550,8 +561,8 @@ def record_permanent_failure(
         (principal_id, delivery_id, stage.value),
     )
     if row is None or row["acknowledged_event_id"] is None:
-        return failed is not None, None
-    return failed is not None, str(row["acknowledged_event_id"])
+        return tuple(failed_rows), None
+    return tuple(failed_rows), str(row["acknowledged_event_id"])
 
 
 def delivery_ownership(
