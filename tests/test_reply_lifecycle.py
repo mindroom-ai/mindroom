@@ -1265,6 +1265,21 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     removed = rl.sources_deleted(shown, regeneration.claimed, now_ns=NOW)
     assert removed.reply is not None
     assert removed.reply.state is ReplyState.GONE
+    # A restart that lost the regeneration before it wrote leaves it waiting for replay, still holding the answer.
+    lost = rl.owner_lost(
+        regeneration.reply,
+        regeneration.claimed,
+        rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True),
+        now_ns=NOW,
+    )
+    assert lost.reply is not None
+    waiting = _span_after(lost, "span-2")
+    assert waiting.outcome is SpanOutcome.LOST
+    after_restart = rl.sources_deleted(lost.reply, waiting, now_ns=NOW)
+    assert after_restart.reply is not None
+    assert after_restart.reply.state is ReplyState.COMPLETED
+    assert after_restart.reply.redaction_pending == ()
+    assert after_restart.effects == (SettleSources("span-2"),)
 
 
 def test_deleting_sources_keeps_paused_and_completed_replies() -> None:

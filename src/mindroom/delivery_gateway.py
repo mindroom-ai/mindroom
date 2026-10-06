@@ -1677,6 +1677,7 @@ class DeliveryGateway:
                     placeholder_only=write.placeholder_only,
                     create=write.create,
                     stage=write.stage,
+                    author_generation=None if write.handle is None else write.handle.runtime.generation,
                 ),
                 room_id=target.room_id,
                 thread_id=target.resolved_thread_id,
@@ -1830,7 +1831,7 @@ class DeliveryGateway:
             reply_id=reply.reply_id,
             span_id=reply.last_span_id,
             decide=lambda current, span: (
-                rl.sources_deleted(current, None, now_ns=now_ns)
+                rl.sources_deleted(current, span, now_ns=now_ns)
                 if source_deleted
                 else rl.sources_settled_without_reply(current, span, now_ns=now_ns)
             ),
@@ -1849,7 +1850,12 @@ class DeliveryGateway:
     ) -> bool:
         """Pause a reply whose create already showed the pause, with the continuation; return whether it paused."""
         enqueued = await enqueue(
-            request=ReplyRowRequest(reply_id=handle.reply_id, span_id=handle.span_id, decide=decide),
+            request=ReplyRowRequest(
+                reply_id=handle.reply_id,
+                span_id=handle.span_id,
+                decide=decide,
+                author_generation=handle.runtime.generation,
+            ),
             room_id=target.room_id,
             thread_id=target.resolved_thread_id,
             payload={},

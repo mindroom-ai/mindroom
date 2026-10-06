@@ -675,7 +675,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     @rule()
     def delete_sources(self) -> None:
         """Delete sources."""
-        self._apply(rl.sources_deleted(self.model.reply, self._current(), now_ns=self._now()))  # type: ignore[arg-type]
+        span = self._current() or self._last()
+        self._apply(rl.sources_deleted(self.model.reply, span, now_ns=self._now()))  # type: ignore[arg-type]
 
     @precondition(lambda self: self.model.reply is not None)
     @rule()

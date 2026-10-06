@@ -182,10 +182,18 @@ async def test_pending_stops_keep_the_newest_and_are_taken_once(journal_store: E
     assert await record(5)
     assert not await record(4)
     assert await record(6)
-    taken = await journal_store.backend.write(lambda tx: reply_messages.take_pending_stop(tx, PRINCIPAL, "$created"))
-    assert taken == (6, ROOM)
     assert (
-        await journal_store.backend.write(lambda tx: reply_messages.take_pending_stop(tx, PRINCIPAL, "$created"))
+        await journal_store.backend.write(
+            lambda tx: reply_messages.take_pending_stop(tx, PRINCIPAL, "$created", "!elsewhere:localhost"),
+        )
+        is None
+    )
+    taken = await journal_store.backend.write(
+        lambda tx: reply_messages.take_pending_stop(tx, PRINCIPAL, "$created", ROOM),
+    )
+    assert taken == 6
+    assert (
+        await journal_store.backend.write(lambda tx: reply_messages.take_pending_stop(tx, PRINCIPAL, "$created", ROOM))
         is None
     )
 
@@ -476,6 +484,50 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     assert await principal.replies.ended_by_deletion("$second") == (gone,)
 
 
+async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_answer(
+    journal_store: EventJournalStore,
+) -> None:
+    """An edit regeneration a restart stopped before it wrote anything still leaves the answer it would replace."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$answer",
+        delivered_projections=(),
+    )
+    answered = await principal.replies.load("reply-1")
+    assert answered is not None
+    assert answered.state is ReplyState.COMPLETED
+    await admit(principal, "$edit")
+    regeneration = replace(
+        _request("span-2", source="$edit"),
+        sources=SpanSources(pending=("$edit",), logical=("$source",)),
+        driving_edit_id="$edit",
+    )
+    claimed = (await principal.replies.claim(regeneration, ClaimLookup(existing_event_id="$answer"))).transition
+    assert claimed.claimed is not None
+    assert claimed.claimed.kind is rl.SpanKind.REGENERATION
+    await principal.replies.write_generation("gen-2", now_ns=60)
+    assert len(await principal.replies.owner_lost("gen-2", now_ns=70)) == 1
+
+    await _delete(principal, "$source")
+
+    kept = await principal.replies.load("reply-1")
+    assert kept is not None
+    assert kept.state is ReplyState.COMPLETED
+    assert kept.presentation == answered.presentation
+    assert kept.redaction_pending == ()
+    assert not await principal.is_pending("$edit")
+
+
 async def test_deleted_initial_cleanup_waits_until_the_reply_ends(journal_store: EventJournalStore) -> None:
     """A running reply's rows stay its span's; once deletion ends the reply, the cleanup also detaches its turn."""
     principal = journal_store.principal(PRINCIPAL)
@@ -599,6 +651,65 @@ async def test_a_retired_instance_neither_claims_nor_writes(journal_store: Event
     assert await principal.replies.load(reply.reply_id) == reply
 
 
+async def test_a_retired_instance_resume_writes_nothing_while_the_owner_may_end_it(
+    journal_store: EventJournalStore,
+) -> None:
+    """A retired instance's own approval resume is refused; the owner's recovery still ends the resume it left."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.replies.write_generation("gen-1", now_ns=1)
+    claim = _first_claim()
+    assert claim.reply is not None
+    assert claim.claimed is not None
+    resume = replace(claim.claimed, kind=rl.SpanKind.APPROVAL_RESUME, approval_id="approval-1")
+    await _apply(journal_store, replace(claim, spans=(resume,), claimed=resume))
+    reply = await principal.replies.load(claim.reply.reply_id)
+    assert reply is not None
+    assert reply.current_span_id == resume.span_id
+    await principal.replies.write_generation("gen-2", now_ns=70)
+
+    progress = await principal.replies.write_ahead(
+        reply_id=reply.reply_id,
+        span_id=resume.span_id,
+        shown="more",
+        previous=None,
+        active_generation="gen-1",
+        now_ns=80,
+    )
+    assert progress.transition.outcome is rl.Outcome.STALE
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=resume.span_id,
+            decide=_finish(),
+            author_generation="gen-1",
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert enqueued is not None
+    assert enqueued.applied.transition.outcome is rl.Outcome.STALE
+    exited = await principal.replies.decide(
+        reply_id=reply.reply_id,
+        span_id=resume.span_id,
+        decide=lambda current, live: rl.release(current, live, now_ns=85),
+        author_generation="gen-1",
+    )
+    assert exited.transition.outcome is rl.Outcome.STALE
+    assert await principal.replies.load(reply.reply_id) == reply
+
+    ended = await principal.replies.decide(
+        reply_id=reply.reply_id,
+        span_id=resume.span_id,
+        decide=lambda current, left: rl.span_left_behind(current, left, active_generation="gen-2", now_ns=90),
+    )
+    assert ended.transition.applied
+    lost = await principal.replies.span(resume.span_id)
+    assert lost is not None
+    assert lost.outcome is rl.SpanOutcome.LOST
+
+
 async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_store: EventJournalStore) -> None:
     """Retention drops an old finished reply and its spans; one still owing Matrix a note is kept."""
     principal = journal_store.principal(PRINCIPAL)
@@ -618,8 +729,11 @@ async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_
     assert await principal.replies.for_sources(("$source",)) is None
 
 
-async def _stop_waiting_for_the_create(journal_store: EventJournalStore) -> PrincipalStore:
-    """Record a Stop on ``$reply`` while the reply's create, which Matrix gives that event, is still unacknowledged."""
+async def _stop_waiting_for_the_create(journal_store: EventJournalStore, stop_room: str = ROOM) -> PrincipalStore:
+    """Record a Stop on ``$reply`` while the reply's create, which Matrix gives that event, is still unacknowledged.
+
+    The Stop is a reaction in ``stop_room``.
+    """
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     turns = journal_store.turn_records("agent")
@@ -654,7 +768,7 @@ async def _stop_waiting_for_the_create(journal_store: EventJournalStore) -> Prin
             PRINCIPAL,
             target_event_id="$reply",
             receipt_order=9,
-            room_id=ROOM,
+            room_id=stop_room,
             now_ns=1,
         ),
     )
@@ -693,6 +807,38 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
     assert stored is not None
     assert stored.stop_receipt_order == 9
     await _assert_the_turn_learned_the_stop(journal_store)
+
+
+@pytest.mark.parametrize("own_room_stop", [False, True])
+async def test_a_pending_stop_from_another_room_never_reaches_the_reply(
+    journal_store: EventJournalStore,
+    own_room_stop: bool,
+) -> None:
+    """A Stop reaction in another room naming the reply's event neither stops it nor displaces its own room's Stop."""
+    elsewhere = "!elsewhere:example.org"
+    principal = await _stop_waiting_for_the_create(journal_store, stop_room=ROOM if own_room_stop else elsewhere)
+    if own_room_stop:
+        await journal_store.backend.write(
+            lambda tx: reply_messages.record_pending_stop(
+                tx,
+                PRINCIPAL,
+                target_event_id="$reply",
+                receipt_order=20,
+                room_id=elsewhere,
+                now_ns=1,
+            ),
+        )
+
+    effects = await _acknowledge_the_create(principal)
+
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    if own_room_stop:
+        assert effects == (rl.CancelSpan("span-1", by_stop=True), rl.TransferStop(9, "$reply", turn_id="$source"))
+        assert stored.stop_receipt_order == 9
+    else:
+        assert effects == ()
+        assert stored.stop_receipt_order is None
 
 
 async def test_a_pending_stop_no_create_binds_is_forgotten(journal_store: EventJournalStore) -> None:

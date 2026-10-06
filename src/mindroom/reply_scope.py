@@ -478,7 +478,12 @@ class ReplyRuntime:
     async def decide(self, handle: SpanHandle, decide: Decide) -> AppliedTransition:
         """Apply one span exit in its own transaction and remember what it left."""
         return await self.committed(
-            await self.store.replies.decide(reply_id=handle.reply_id, span_id=handle.span_id, decide=decide),
+            await self.store.replies.decide(
+                reply_id=handle.reply_id,
+                span_id=handle.span_id,
+                decide=decide,
+                author_generation=self.generation,
+            ),
             handle,
         )
 

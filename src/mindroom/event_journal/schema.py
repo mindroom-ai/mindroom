@@ -557,13 +557,13 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS pending_reply_stops (
         -- A Stop on an event no reply is bound to yet; the create
-        -- acknowledgement that binds the event applies it.
+        -- acknowledgement that binds the event in the same room applies it.
         principal_id TEXT NOT NULL,
         target_event_id TEXT NOT NULL,
         receipt_order BIGINT NOT NULL,
         room_id TEXT NOT NULL,
         created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, target_event_id)
+        PRIMARY KEY (principal_id, room_id, target_event_id)
     )
     """,
     """

@@ -2198,7 +2198,7 @@ def _decide_reply_row(
             return earlier
         transition = (
             rl.Transition(outcome=rl.Outcome.STALE, reply=reply)
-            if replies.retired(transaction, principal_id, span)
+            if replies.retired(transaction, principal_id, span, author_generation=request.author_generation)
             else request.decide(reply, span)
         )
     return reply, span, transition

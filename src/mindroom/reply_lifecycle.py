@@ -1636,35 +1636,43 @@ def replay_dropped(reply: Reply, last: Span, *, sources_pending: bool, now_ns: i
     return sources_settled_without_reply(reply, last, now_ns=now_ns)
 
 
-def sources_deleted(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
+def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transition:
     """Every logical source of the reply's current work was deleted.
 
+    ``span`` is the reply's current span, or its last one when none runs.
     A reply an approval holds, paused, resuming, or settling a resume that
     ended, is its approval's: the card stays the consent surface, and the
     approval's settlement ends the reply and settles its sources.
     """
     if reply.terminal or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)
+    live = span is not None and span.span_id == reply.current_span_id and not span.ended
+    current = span if live else None
+    # A regeneration a restart or retry left waiting for its replay still holds the answer it would replace.
+    waiting = span if not live and span is not None and span.outcome in _SOURCES_PENDING_OUTCOMES else None
+    regeneration = current or waiting
     if (
-        current is not None
-        and not current.ended
-        and current.kind is SpanKind.REGENERATION
-        and current.rollback is not None
-        and current.rollback.state in _TERMINAL_STATES
-        and not _wrote_anything(reply, current)
+        regeneration is not None
+        and regeneration.kind is SpanKind.REGENERATION
+        and regeneration.rollback is not None
+        and regeneration.rollback.state in _TERMINAL_STATES
+        and not _wrote_anything(reply, regeneration)
     ):
         # The answer an edit was regenerating stands, as when the regeneration
         # fails before showing anything: a finished answer is kept.
+        restored = _restore(reply, regeneration, now_ns)
+        if regeneration is waiting:
+            return Transition(outcome=Outcome.APPLIED, reply=restored, effects=(SettleSources(regeneration.span_id),))
         return Transition(
             outcome=Outcome.APPLIED,
-            reply=_restore(reply, current, now_ns),
-            spans=(_end(current, SpanOutcome.RESTORED, now_ns),),
-            effects=(CancelSpan(current.span_id), SettleSources(current.span_id)),
+            reply=restored,
+            spans=(_end(regeneration, SpanOutcome.RESTORED, now_ns),),
+            effects=(CancelSpan(regeneration.span_id), SettleSources(regeneration.span_id)),
         )
     effects: list[Effect] = []
     spans: tuple[Span, ...] = ()
     updated = reply
-    if current is not None and not current.ended:
+    if current is not None:
         effects.append(CancelSpan(current.span_id))
         effects.append(SettleSources(current.span_id))
         spans = (_end(current, SpanOutcome.CANCELLED, now_ns),)

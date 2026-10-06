@@ -233,7 +233,7 @@ def delete_sources(
             continue
         if not all(deleted(event_id) for event_id in span.sources.logical):
             continue
-        transition = sources_deleted(reply, span if reply.current_span_id is not None else None, now_ns=now_ns)
+        transition = sources_deleted(reply, span, now_ns=now_ns)
         if not transition.applied:
             continue
         persist(transaction, principal_id, transition)
@@ -504,7 +504,7 @@ def record_pending_stop(
         """
         INSERT INTO pending_reply_stops (principal_id, target_event_id, receipt_order, room_id, created_at_ns)
         VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (principal_id, target_event_id) DO UPDATE SET receipt_order = excluded.receipt_order
+        ON CONFLICT (principal_id, room_id, target_event_id) DO UPDATE SET receipt_order = excluded.receipt_order
         WHERE pending_reply_stops.receipt_order < excluded.receipt_order
         RETURNING receipt_order
         """,
@@ -523,16 +523,16 @@ def drop_unbindable_stops(transaction: Transaction, principal_id: str, room_id: 
     )
 
 
-def take_pending_stop(transaction: Transaction, principal_id: str, event_id: str) -> tuple[int, str] | None:
-    """Remove and return the pending Stop for one event, as its receipt order and room."""
+def take_pending_stop(transaction: Transaction, principal_id: str, event_id: str, room_id: str) -> int | None:
+    """Remove and return the receipt order of the pending Stop a reaction in the event's own room left."""
     row = transaction.fetchone(
         """
-        DELETE FROM pending_reply_stops WHERE principal_id = ? AND target_event_id = ?
-        RETURNING receipt_order, room_id
+        DELETE FROM pending_reply_stops WHERE principal_id = ? AND room_id = ? AND target_event_id = ?
+        RETURNING receipt_order
         """,
-        (principal_id, event_id),
+        (principal_id, room_id, event_id),
     )
-    return None if row is None else (int(row["receipt_order"]), str(row["room_id"]))
+    return None if row is None else int(row["receipt_order"])
 
 
 def write_generation(transaction: Transaction, principal_id: str, *, generation: str, now_ns: int) -> None:

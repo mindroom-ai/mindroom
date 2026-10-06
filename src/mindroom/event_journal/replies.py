@@ -110,18 +110,23 @@ def _run(
             raise NotImplementedError(msg)
 
 
-def retired(transaction: Transaction, principal_id: str, span: Span) -> bool:
-    """Return whether a running span belongs to a bot instance that no longer owns the principal's replies.
+def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None = None) -> bool:
+    """Return whether a write on a running span comes from a bot instance that no longer owns the principal's replies.
 
     Such a span writes nothing more: the instance that took over replays its
-    sources, and the retired one shuts down once it notices. A resume an older
-    instance left running is the exception: the owner's approval recovery
-    ends it, and once ended it refuses the old instance's writes too.
+    sources, and the retired one shuts down once it notices. A write the
+    span's own task makes names its instance as ``author_generation``, so a
+    retired instance's resume is refused too. A resume an older instance left
+    running stays open to the owner's approval recovery, which ends it.
     """
-    if span.ended or span.kind is rl.SpanKind.APPROVAL_RESUME:
+    if span.ended:
         return False
     active = reply_messages.active_generation(transaction, principal_id)
-    return active is not None and span.bot_generation != active
+    if active is None:
+        return False
+    if author_generation is not None and author_generation != active:
+        return True
+    return span.kind is not rl.SpanKind.APPROVAL_RESUME and span.bot_generation != active
 
 
 def decide_on_span(
@@ -131,14 +136,18 @@ def decide_on_span(
     reply_id: str,
     span_id: str,
     decide: Decide,
+    author_generation: str | None = None,
 ) -> AppliedTransition:
-    """Lock one reply, read the named span, apply the rule, and write what it decided."""
+    """Lock one reply, read the named span, apply the rule, and write what it decided.
+
+    ``author_generation`` names the bot instance of the span's own task, when it writes.
+    """
     reply = reply_messages.lock(transaction, principal_id, reply_id)
     span = reply_spans.load(transaction, principal_id, span_id)
     if reply is None or span is None:
         msg = f"Reply {reply_id} or span {span_id} does not exist"
         raise RuntimeError(msg)
-    if retired(transaction, principal_id, span):
+    if retired(transaction, principal_id, span, author_generation=author_generation):
         return AppliedTransition(transition=rl.Transition(outcome=rl.Outcome.STALE, reply=reply), post_commit=())
     return with_ended_span(apply(transaction, principal_id, decide(reply, span)), span)
 
@@ -496,6 +505,8 @@ class ReplyRowRequest:
     # The stage the caller rendered for; a span's INITIAL or FINAL is written
     # once, and a retry of either resolves to the row already recorded.
     stage: rl.WriteStage | None = None
+    # The bot instance of the span's own task, when it writes the row.
+    author_generation: str | None = None
 
     def __post_init__(self) -> None:
         """Require exactly one of a rule for an existing reply and a reply to create."""
@@ -588,13 +599,15 @@ def acknowledge_row(
     bound = applied.transition.reply or reply
     if delivery.edits_event_id is not None:
         return applied
-    pending_stop = (
-        reply_messages.take_pending_stop(transaction, principal_id, event_id) if bound.event_id == event_id else None
+    # A Stop reaction in another room never reaches this reply, whatever event it names.
+    receipt_order = (
+        reply_messages.take_pending_stop(transaction, principal_id, event_id, bound.room_id)
+        if bound.event_id == event_id
+        else None
     )
     reply_messages.drop_unbindable_stops(transaction, principal_id, bound.room_id)
-    if pending_stop is None:
+    if receipt_order is None:
         return applied
-    receipt_order, _room_id = pending_stop
     # An interactive selection's acknowledgement span is not current yet, but the Stop ends it too.
     current = reply_spans.load(transaction, principal_id, bound.current_span_id or bound.last_span_id)
     if current is not None and current.ended:
@@ -704,7 +717,14 @@ class ReplyStore:
             lambda transaction: claim(transaction, self._principal_id, request, lookup),
         )
 
-    async def decide(self, *, reply_id: str, span_id: str, decide: Decide) -> AppliedTransition:
+    async def decide(
+        self,
+        *,
+        reply_id: str,
+        span_id: str,
+        decide: Decide,
+        author_generation: str | None = None,
+    ) -> AppliedTransition:
         """Apply one rule to a locked reply and its span, in a transaction of its own."""
         return await self._backend.write(
             lambda transaction: decide_on_span(
@@ -713,6 +733,7 @@ class ReplyStore:
                 reply_id=reply_id,
                 span_id=span_id,
                 decide=decide,
+                author_generation=author_generation,
             ),
         )
 
@@ -733,6 +754,7 @@ class ReplyStore:
                 self._principal_id,
                 reply_id=reply_id,
                 span_id=span_id,
+                author_generation=active_generation,
                 decide=lambda reply, span: rl.write_ahead(
                     reply,
                     span,
