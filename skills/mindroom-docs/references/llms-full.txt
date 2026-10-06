@@ -18554,6 +18554,7 @@ Aggregate output never includes identities.
 
 `--wait SECONDS` polls every 5 seconds while busy and exits as soon as the runtime is idle.
 If work is still active at the deadline, it exits `1` with the last busy snapshot, and an unavailable result ends the wait immediately with exit `2`.
+A request that times out is retried until the deadline and exits `2` only if the last request also times out.
 Only the final snapshot is printed, and the total runtime can exceed `--wait` by up to one request timeout.
 
 The CLI reads the unauthenticated `GET /api/responses/activity` endpoint, or `GET /api/responses/activity/details` with a bearer token for `--details`.

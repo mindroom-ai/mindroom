@@ -63,16 +63,23 @@ def _wait_for_idle(
     details: bool,
     wait: float,
 ) -> ResponseActivity | DetailedResponseActivity:
-    """Poll while busy; idle, unavailable, or the deadline ends the wait with that snapshot."""
+    """Poll while busy or timed out; idle, unavailable, or the deadline ends the wait with that result."""
     if not math.isfinite(wait):
         msg = "--wait must be finite."
         raise ValueError(msg)
     deadline = monotonic() + wait
     while True:
-        snapshot = _request_activity(runtime_paths, url, timeout, details=details)
-        remaining = deadline - monotonic()
-        if snapshot.status != "busy" or remaining <= 0:
-            return snapshot
+        try:
+            snapshot = _request_activity(runtime_paths, url, timeout, details=details)
+        except TimeoutError:
+            # A busy runtime can be slow to answer, so only a timeout at the deadline is unavailable.
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise
+        else:
+            remaining = deadline - monotonic()
+            if snapshot.status != "busy" or remaining <= 0:
+                return snapshot
         sleep(min(_WAIT_POLL_INTERVAL_SECONDS, remaining))
 
 
@@ -116,7 +123,7 @@ def check_active_responses(
         0.0,
         "--wait",
         min=0,
-        help="Poll up to this many seconds while busy; unavailable ends the wait.",
+        help="Poll up to this many seconds while busy or timed out; unavailable ends the wait.",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
     details: bool = typer.Option(False, "--details", help="Show authenticated responder and requester details."),
