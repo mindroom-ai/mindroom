@@ -756,8 +756,8 @@ class ConversationHydrator:
         in the room for as long as the key stays missing -- an export of every
         thread included, not only the thread the event belongs to. A new
         encrypted room routinely holds such an event: the router encrypts its
-        welcome before it has seen the agent's device. Live sync drops an
-        undecryptable event without refusing anything either.
+        welcome before it has seen the agent's device. Live sync admits an
+        undecryptable event without failing any read either.
 
         What the walk cannot always say is which thread the event belonged to:
         an unreadable edit names only its target and a malformed event names

@@ -576,10 +576,10 @@ async def test_unreadable_server_exhaustion_settles_the_repair(
     """A missing room key leaves the room readable but no longer complete, for every caller.
 
     Reaching the start of the room fetched everything the gap skipped. The
-    event nobody could read is missing from the room conversation, the same as
-    live sync would have left it, and refusing over it would fail every read in
-    the room for as long as the key stays missing. An export refuses in each
-    thread's own walk instead, for the threads that hold such an event.
+    event nobody could read is missing from the room conversation, and refusing
+    over it would fail every read in the room for as long as the key stays
+    missing. An export refuses in each thread's own walk instead, for the
+    threads that hold such an event.
     """
     client = PagedClient(pages=[([raw("$readable", "readable", ts=2_000), UNDECRYPTABLE], "older"), ([], None)])
     await principal.record_room_history_recovery(ROOM)
@@ -1014,6 +1014,26 @@ async def test_unreadable_room_repair_revokes_every_marker_in_the_room(principal
     assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
     assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+
+
+async def test_truncated_settlement_keeps_markers_despite_unreadable_events(principal: PrincipalStore) -> None:
+    """A truncated obligation already withholds completeness, so its bounded context stays readable."""
+    thread_id = "$thread"
+    await mark_complete(principal, thread_id)
+    recovery = await principal.record_room_history_recovery(ROOM)
+    assert recovery is not None
+
+    outcome = await principal.settle_room_history_recovery(
+        recovery,
+        exhausted_server=False,
+        unreadable=True,
+        attempted_policy_rank=1,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
+
+    assert outcome is HistoryRecoveryOutcome.TRUNCATED
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+    assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=thread_id)
 
 
 async def test_exact_object_mismatch_publishes_nothing(principal: PrincipalStore) -> None:

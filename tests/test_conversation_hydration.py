@@ -2299,10 +2299,10 @@ class TestEncryptedRelations:
         the whole room, welcome included, and refusing at that one event failed
         every threaded follow-up in the room for as long as the key was missing.
 
-        Live sync drops an undecryptable event and claims nothing about it, so
-        the repair does the same: it settles, and only the room conversation,
-        which holds the unreadable event, stops calling itself complete. An
-        export still refuses it.
+        Live sync admits an undecryptable event without failing any read, so
+        the repair settles too, and the room conversation, which holds the
+        unreadable event, stops calling itself complete. An export still
+        refuses it.
         """
         client = self._readable_thread_beside_an_unreadable_welcome()
         await alice.record_room_history_recovery(ROOM)
