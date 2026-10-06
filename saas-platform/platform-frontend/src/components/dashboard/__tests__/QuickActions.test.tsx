@@ -27,7 +27,7 @@ function subscription(tier: Subscription['tier']): Subscription {
 
 describe('QuickActions', () => {
   it('asks an account without a plan to choose one and lists no plan limits', () => {
-    render(<QuickActions instance={null} subscription={subscription('free')} />)
+    render(<QuickActions subscription={subscription('free')} />)
 
     expect(screen.getByText('Choose a plan to run a hosted instance')).toBeInTheDocument()
     expect(screen.queryByText('Plan Limits')).not.toBeInTheDocument()
@@ -35,19 +35,19 @@ describe('QuickActions', () => {
   })
 
   it('asks a lapsed plan holder to restore billing', () => {
-    render(<QuickActions instance={null} subscription={{ ...subscription('hobby'), status: 'cancelled', can_run_instances: false }} />)
+    render(<QuickActions subscription={{ ...subscription('hobby'), status: 'cancelled', can_run_instances: false }} />)
 
     expect(screen.getByText('Restore billing for your hobby plan')).toBeInTheDocument()
   })
 
   it('names the current paid plan', () => {
-    render(<QuickActions instance={null} subscription={subscription('hobby')} />)
+    render(<QuickActions subscription={subscription('hobby')} />)
 
     expect(screen.getByText('Current: hobby plan')).toBeInTheDocument()
   })
 
   it('links the documentation to the docs site', () => {
-    render(<QuickActions instance={null} subscription={subscription('hobby')} />)
+    render(<QuickActions subscription={subscription('hobby')} />)
 
     expect(screen.getByRole('link', { name: /Documentation/ })).toHaveAttribute('href', 'https://docs.mindroom.chat/')
   })

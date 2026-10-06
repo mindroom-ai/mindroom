@@ -28,9 +28,11 @@ function subscriptionAccessMessage(subscription: Subscription | null | undefined
 export function InstanceCard({
   instance,
   subscription,
+  subscriptionLoading = false,
 }: {
   instance: Instance | null
   subscription?: Subscription | null
+  subscriptionLoading?: boolean
 }) {
   const [isProvisioning, setIsProvisioning] = useState(false)
   const copyToClipboard = async (text: string) => {
@@ -102,6 +104,17 @@ export function InstanceCard({
   // Tenant access is handled by the configured instance auth layer; open via plain link.
 
   // No instance yet - show provision card
+  if (!instance && subscriptionLoading && !subscription) {
+    return (
+      <Card>
+        <CardHeader>MindRoom Instance</CardHeader>
+        <div className="flex justify-center py-8">
+          <Loader2 className="w-8 h-8 animate-spin text-orange-500" aria-label="Loading subscription" />
+        </div>
+      </Card>
+    )
+  }
+
   if (!instance) {
     const state = planState(subscription)
     const accessMessage = subscriptionAccessMessage(subscription)
@@ -140,7 +153,7 @@ export function InstanceCard({
                 <p className="text-gray-600 dark:text-gray-400 mb-6">
                   {state === 'lapsed'
                     ? 'Add or restore billing to run your hosted instance.'
-                    : 'Choose a plan to run a hosted instance; your first plan starts with a free trial.'}
+                    : 'Choose a plan to run a hosted instance.'}
                 </p>
               )}
               <Link

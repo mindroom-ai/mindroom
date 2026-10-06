@@ -68,9 +68,10 @@ export default function BillingPage() {
   }
 
   const currentTier = (subscription?.tier || 'free') as PlanId
-  const hasPlan = currentTier !== 'free'
+  const state = planState(subscription)
+  const hasPlan = state !== 'none'
   // Only a plan that runs is current in the plan list; a lapsed plan may be chosen again.
-  const activePlanTier = planState(subscription) === 'active' ? currentTier : null
+  const activePlanTier = state === 'active' ? currentTier : null
   const currentPlan = pricingConfig.plans[currentTier]
   const features = currentPlan?.features || []
   const tierInfo = {

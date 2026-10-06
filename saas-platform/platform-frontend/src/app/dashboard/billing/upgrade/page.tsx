@@ -26,12 +26,12 @@ export default function UpgradePage() {
   }, [])
 
   useEffect(() => {
-    // Pre-select the recommended plan for an account without a running plan
+    // Pre-select the recommended plan for an account without a running plan, keeping any plan already chosen
     if (!loading && planState(subscription) !== 'active' && pricingConfig) {
       const recommendedPlan = Object.entries(pricingConfig.plans)
         .find(([_, plan]) => plan.recommended)?.[0]
       if (recommendedPlan) {
-        setSelectedPlan(recommendedPlan)
+        setSelectedPlan(current => current ?? recommendedPlan)
       }
     }
   }, [subscription, loading, pricingConfig])

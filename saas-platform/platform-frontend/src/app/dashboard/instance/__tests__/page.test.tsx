@@ -98,6 +98,7 @@ describe('InstancePage', () => {
 
     expect(await screen.findByRole('button', { name: 'Open billing' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Start Instance/ })).not.toBeInTheDocument()
+    expect(screen.getByText('Instance is stopped. Add or restore billing to start it again.')).toBeInTheDocument()
   })
 
   it('offers reprovisioning a deprovisioned instance while the plan runs', async () => {
@@ -117,7 +118,7 @@ describe('InstancePage', () => {
     render(<InstancePage />)
 
     expect(await screen.findByRole('button', { name: 'Choose a plan' })).toBeInTheDocument()
-    expect(screen.getByText(/your first plan starts with a free trial/)).toBeInTheDocument()
+    expect(screen.getByText(/Choose a plan to get your own instance\./)).toBeInTheDocument()
   })
 
   it('does not stringify a missing subdomain in instance details or support mailto body', async () => {

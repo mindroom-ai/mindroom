@@ -159,6 +159,13 @@ describe('InstanceCard', () => {
       )
     })
 
+    it('should wait for the subscription before offering a plan', () => {
+      render(<InstanceCard instance={null} subscription={null} subscriptionLoading />)
+
+      expect(screen.getByLabelText('Loading subscription')).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: 'Choose a plan' })).not.toBeInTheDocument()
+    })
+
     it('should send a lapsed plan holder to billing instead of offering a trial', () => {
       render(
         <InstanceCard

@@ -154,13 +154,17 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
       case 'restarting':
         return 'Restarting your instance... This will take a moment.'
       case 'stopped':
-        return 'Instance is stopped. Start it to access your MindRoom.'
+        return canRunInstances
+          ? 'Instance is stopped. Start it to access your MindRoom.'
+          : 'Instance is stopped. Add or restore billing to start it again.'
       case 'failed':
         return 'Instance provisioning failed. Please contact support.'
       case 'error':
         return 'Instance not found in cluster. It may have been removed during maintenance. Please contact support to reprovision your instance.'
       case 'deprovisioned':
-        return 'Instance has been removed. Click "Reprovision Instance" to restore it.'
+        return canRunInstances
+          ? 'Instance has been removed. Click "Reprovision Instance" to set it up again.'
+          : 'Instance has been removed. Add or restore billing to set it up again.'
       default:
         return 'Unknown status'
     }
@@ -184,7 +188,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
             {canRunInstances
               ? "You don't have a MindRoom instance yet. Create it from the dashboard."
               : hasNoPlan
-                ? "You don't have a MindRoom instance yet. Choose a plan to get your own instance; your first plan starts with a free trial."
+                ? "You don't have a MindRoom instance yet. Choose a plan to get your own instance."
                 : "You don't have a MindRoom instance yet. Add or restore billing to run your instance."}
           </p>
           <button

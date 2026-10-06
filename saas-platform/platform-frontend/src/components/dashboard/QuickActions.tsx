@@ -3,20 +3,17 @@ import {
   BookOpen,
   Settings,
   CreditCard,
-  RefreshCw,
   HelpCircle
 } from 'lucide-react'
-import type { Instance } from '@/hooks/useInstance'
 import type { Subscription } from '@/hooks/useSubscription'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { planState } from '@/lib/plan-state'
 
 interface QuickActionsProps {
-  instance: Instance | null
   subscription: Subscription | null
 }
 
-export function QuickActions({ instance, subscription }: QuickActionsProps) {
+export function QuickActions({ subscription }: QuickActionsProps) {
   const actions = [
     {
       name: 'Documentation',
@@ -98,22 +95,6 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
           )
         })}
 
-        {/* Restart Instance Button (if instance is failed or stopped) */}
-        {instance && (instance.status === 'failed' || instance.status === 'error' || instance.status === 'stopped') && (
-          <button
-            className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors w-full text-left"
-          >
-            <div className="flex-shrink-0">
-              <div className="w-10 h-10 bg-red-100 dark:bg-red-900/30 rounded-lg flex items-center justify-center">
-                <RefreshCw className="w-5 h-5 text-red-600 dark:text-red-400" />
-              </div>
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Restart Instance</p>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Get your MindRoom back online</p>
-            </div>
-          </button>
-        )}
       </div>
 
     </Card>
