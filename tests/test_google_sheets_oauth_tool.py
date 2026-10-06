@@ -5,9 +5,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -16,6 +20,7 @@ from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -88,6 +93,11 @@ def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_
     assert result["provider"] == "google_sheets"
     assert "/api/oauth/google_sheets/authorize?connect_token=" in result["connect_url"]
 
+    result = json.loads(writable_tool.batch_update_sheet("sheet-id", []))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_sheets"
+
 
 def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     credentials_manager = CredentialsManager(tmp_path / "credentials")
@@ -136,6 +146,21 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
         "create_sheet",
         "update_sheet",
     ]
+    assert "batch_update_sheet" in tool.functions
+
+
+def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> None:
+    tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"update": False},
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleSheetsTools)
+    assert "batch_update_sheet" not in tool.functions
 
 
 def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: Path) -> None:
@@ -153,6 +178,92 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
         "create_sheet",
         "update_sheet",
     }
+    assert "batch_update_sheet" in tool.functions
+
+
+class _FakeSheetsRequest:
+    def __init__(self, response: dict[str, object]) -> None:
+        self._response = response
+
+    def execute(self) -> dict[str, object]:
+        return self._response
+
+
+class _FakeSpreadsheetsResource:
+    def __init__(self) -> None:
+        self.batch_update_kwargs: dict[str, object] | None = None
+        self.batch_update_error: HttpError | None = None
+
+    def batchUpdate(self, **kwargs: object) -> _FakeSheetsRequest:  # noqa: N802
+        self.batch_update_kwargs = kwargs
+        if self.batch_update_error is not None:
+            raise self.batch_update_error
+        return _FakeSheetsRequest({"spreadsheetId": kwargs["spreadsheetId"], "replies": [{}]})
+
+
+class _FakeSheetsService:
+    def __init__(self) -> None:
+        self.spreadsheets_resource = _FakeSpreadsheetsResource()
+
+    def spreadsheets(self) -> _FakeSpreadsheetsResource:
+        return self.spreadsheets_resource
+
+
+def _connected_sheets_tool(tmp_path: Path) -> tuple[GoogleSheetsTools, _FakeSheetsService]:
+    tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=GoogleOAuthCredentials(
+            token="valid-access-token",  # noqa: S106
+            refresh_token="valid-refresh-token",  # noqa: S106
+            token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+            client_id="client-id",
+            client_secret="client-secret",  # noqa: S106
+            scopes=("https://www.googleapis.com/auth/spreadsheets",),
+            expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+        ),
+    )
+    service = _FakeSheetsService()
+    tool.service = service
+    return tool, service
+
+
+_FORMAT_REQUESTS: list[dict[str, object]] = [
+    {
+        "updateSheetProperties": {
+            "properties": {"sheetId": 0, "gridProperties": {"frozenRowCount": 1}},
+            "fields": "gridProperties.frozenRowCount",
+        },
+    },
+    {
+        "repeatCell": {
+            "range": {"sheetId": 0, "endRowIndex": 1},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.textFormat.bold",
+        },
+    },
+]
+
+
+def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> None:
+    tool, service = _connected_sheets_tool(tmp_path)
+
+    result = json.loads(tool.batch_update_sheet("sheet-id", _FORMAT_REQUESTS))
+
+    assert result == {"spreadsheetId": "sheet-id", "replies": [{}]}
+    assert service.spreadsheets_resource.batch_update_kwargs == {
+        "spreadsheetId": "sheet-id",
+        "body": {"requests": _FORMAT_REQUESTS},
+    }
+
+
+def test_google_sheets_batch_update_schema_accepts_sheets_api_requests(tmp_path: Path) -> None:
+    tool, _service = _connected_sheets_tool(tmp_path)
+
+    validate_tool_arguments(
+        function_schema(tool.functions["batch_update_sheet"]),
+        {"spreadsheet_id": "sheet-id", "requests": _FORMAT_REQUESTS},
+    )
 
 
 def test_google_sheets_provider_uses_sheets_scope_without_drive_scope() -> None:
@@ -174,3 +285,15 @@ def test_google_sheets_service_account_env_uses_upstream_auth(tmp_path: Path) ->
     )
 
     assert tool._should_fallback_to_original_auth() is True
+
+
+def test_google_sheets_batch_update_returns_sanitized_http_error(tmp_path: Path) -> None:
+    tool, service = _connected_sheets_tool(tmp_path)
+    service.spreadsheets_resource.batch_update_error = HttpError(
+        Response({"status": "400", "reason": "Bad Request"}),
+        b'{"error":{"message":"provider detail"}}',
+    )
+
+    result = json.loads(tool.batch_update_sheet("sheet-id", [{"deleteSheet": {"sheetId": 7}}]))
+
+    assert result == {"error": "Google Sheets request failed (HTTP 400)"}
