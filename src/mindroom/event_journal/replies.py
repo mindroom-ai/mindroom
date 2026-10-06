@@ -227,14 +227,33 @@ def edit_delivery_id(span_delivery_id: str, sequence: int) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyCreation:
+    """A reply whose first row creates it: an interactive selection's acknowledgement (PR-1.md §6.1)."""
+
+    claim: rl.ClaimRequest
+    # The encoded presentation the acknowledgement shows.
+    shown: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReplyRowRequest:
-    """A durable write of a reply, decided by a lifecycle rule inside its enqueue transaction."""
+    """A durable write of a reply, decided by a lifecycle rule inside its enqueue transaction.
+
+    A row that creates its reply carries ``create`` instead of ``decide``.
+    """
 
     reply_id: str
     span_id: str
-    decide: Decide
+    decide: Decide | None
     # Whether the row shows only the reply's placeholder.
     placeholder_only: bool = False
+    create: ReplyCreation | None = None
+
+    def __post_init__(self) -> None:
+        """Require exactly one of a rule for an existing reply and a reply to create."""
+        if (self.decide is None) == (self.create is None):
+            msg = "A reply row either decides on an existing reply or creates one"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)

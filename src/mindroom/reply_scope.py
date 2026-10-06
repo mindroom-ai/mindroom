@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import request_task_cancel
-from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide
+from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     Presentation,
@@ -221,22 +221,17 @@ class ReplyRuntime:
         interactive_span_id: str | None = None,
     ) -> SpanHandle | None:
         """Claim the reply one span answers; ``None`` when the claim must wait for earlier writes."""
-        now_ns = self.clock()
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
-        request = rl.ClaimRequest(
-            span_id=_new_id(),
-            delivery_id=delivery_id,
-            sources=sources,
-            bot_generation=self.generation,
-            now_ns=now_ns,
-            new_reply_id=_new_id(),
-            entity_name=self.entity_name,
-            room_id=room_id,
-            thread_id=thread_id,
-            membership_epoch=await self.store.membership_epoch(room_id),
-            requester_id=requester_id,
-            visibility_policy=visibility_policy,
-            empty_presentation=encode_presentation(empty),
+        request = replace(
+            await self.claim_request(
+                delivery_id=delivery_id,
+                sources=sources,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                visibility_policy=visibility_policy,
+                empty=empty,
+            ),
             driving_edit_id=driving_edit_id,
             approval_id=approval_id,
             approval_generation=approval_generation,
@@ -258,6 +253,58 @@ class ReplyRuntime:
             self.retry_sources(room_id, sources.pending)
             return None
         return _handle_for(self, transition.reply, transition.claimed, empty)
+
+    async def claim_request(
+        self,
+        *,
+        delivery_id: str,
+        sources: rl.SpanSources,
+        room_id: str,
+        thread_id: str | None,
+        requester_id: str,
+        visibility_policy: rl.VisibilityPolicy,
+        empty: Presentation,
+    ) -> rl.ClaimRequest:
+        """Return a claim by this bot instance, with fresh identities for the span and any reply it creates."""
+        return rl.ClaimRequest(
+            span_id=_new_id(),
+            delivery_id=delivery_id,
+            sources=sources,
+            bot_generation=self.generation,
+            now_ns=self.clock(),
+            new_reply_id=_new_id(),
+            entity_name=self.entity_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            membership_epoch=await self.store.membership_epoch(room_id),
+            requester_id=requester_id,
+            visibility_policy=visibility_policy,
+            empty_presentation=encode_presentation(empty),
+        )
+
+    async def acknowledgement(
+        self,
+        *,
+        delivery_id: str,
+        pending: tuple[str, ...],
+        logical: tuple[str, ...],
+        discovery: tuple[str, ...],
+        room_id: str,
+        thread_id: str | None,
+        requester_id: str,
+        text: str,
+    ) -> ReplyWrite:
+        """Return an interactive selection's acknowledgement, the row that creates its reply (PR-1.md §6.1)."""
+        claim = await self.claim_request(
+            delivery_id=delivery_id,
+            sources=rl.SpanSources(pending=pending, logical=logical, discovery=discovery),
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            visibility_policy=rl.VisibilityPolicy.NORMAL,
+            empty=Presentation(),
+        )
+        return _acknowledgement_write(claim, Presentation(placeholder=text))
 
     async def decide(self, handle: SpanHandle, decide: Decide) -> AppliedTransition:
         """Apply one span exit in its own transaction and remember what it left."""
@@ -339,16 +386,34 @@ class ReplyWrite:
     span: rl.Span
     stage: rl.WriteStage
     shown: Presentation
-    # Applied inside the enqueue transaction against the reply as it is then.
-    decide: Callable[[rl.Reply, rl.Span], rl.Transition]
+    # Applied inside the enqueue transaction against the reply as it is then;
+    # ``None`` for a row that creates its reply.
+    decide: Callable[[rl.Reply, rl.Span], rl.Transition] | None
     placeholder_only: bool = False
     # The running span that renders this write, which learns what it committed.
     handle: SpanHandle | None = None
+    create: ReplyCreation | None = None
 
     @property
     def shown_json(self) -> str:
         """Return the encoded presentation this write may show."""
         return encode_presentation(self.shown)
+
+
+def _acknowledgement_write(claim: rl.ClaimRequest, shown: Presentation) -> ReplyWrite:
+    """Return an interactive selection's acknowledgement, the row that creates its reply (PR-1.md §6.1)."""
+    encoded = encode_presentation(shown)
+    # Pure: names the reply and the not-yet-current span the row creates.
+    created = rl.interactive_acknowledgement(claim, shown=encoded)
+    return ReplyWrite(
+        reply_id=claim.new_reply_id,
+        span=created.spans[0],
+        stage=rl.WriteStage.INITIAL,
+        shown=shown,
+        decide=None,
+        placeholder_only=True,
+        create=ReplyCreation(claim=claim, shown=encoded),
+    )
 
 
 def initial_write(handle: SpanHandle, shown: Presentation, *, placeholder_only: bool) -> ReplyWrite:

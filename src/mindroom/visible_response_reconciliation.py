@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.handled_turns import TurnRecord
     from mindroom.message_target import MessageTarget
+    from mindroom.reply_scope import ReplyRuntime
     from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_store import TurnStore
 
@@ -35,6 +36,7 @@ class VisibleResponseReconcilerDeps:
     turn_store: TurnStore
     delivery_gateway: DeliveryGateway
     settle_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]]
+    replies: ReplyRuntime | None = None
 
 
 @dataclass
@@ -213,6 +215,62 @@ class VisibleResponseReconciler:
         if response_event_id is not None:
             await self.record_pending_visible_response(handled_turn, response_event_id)
         return response_event_id
+
+    async def deliver_selection_acknowledgement(
+        self,
+        handled_turn: TurnRecord,
+        *,
+        target: MessageTarget,
+        requester_id: str,
+        response_text: str,
+        recovered_response_event_id: str | None,
+        delivery_turn_id: str,
+    ) -> tuple[str | None, str | None]:
+        """Send an interactive selection's acknowledgement, which its answer then edits.
+
+        Returns the acknowledgement's event and, with reply records, the span
+        the acknowledgement created for the answer to adopt (PR-1.md §6.1).
+        """
+        replies = self.deps.replies
+        if replies is None:
+            event_id = await self.deliver_recoverable_text(
+                handled_turn,
+                target=target,
+                response_text=response_text,
+                recovered_response_event_id=recovered_response_event_id,
+                delivery_turn_id=delivery_turn_id,
+                as_placeholder=True,
+            )
+            return event_id, None
+        event_id = recovered_response_event_id
+        if event_id is None:
+            event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text=response_text,
+                    delivery_turn_id=delivery_turn_id,
+                    delivery_stage=DeliveryStage.INITIAL,
+                    reply_write=await replies.acknowledgement(
+                        delivery_id=delivery_turn_id,
+                        pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),
+                        logical=handled_turn.source_event_ids,
+                        discovery=handled_turn.discovery_event_ids,
+                        room_id=target.room_id,
+                        thread_id=target.resolved_thread_id,
+                        requester_id=requester_id,
+                        text=response_text,
+                    ),
+                ),
+            )
+            if event_id is None:
+                return None, None
+            await self.record_pending_visible_response(handled_turn, event_id)
+        # The answer adopts the acknowledgement's span until some span has run it.
+        reply = await replies.store.replies.for_event(event_id)
+        if reply is None:
+            return event_id, None
+        span = await replies.store.replies.span(reply.last_span_id)
+        return event_id, span.span_id if span is not None and span.outcome is None else None
 
     async def prepare_visible_delivery_turn(
         self,

@@ -299,6 +299,10 @@ class _RecordingDeliveryGateway:
         self.edited.append(request)
         return self.edit_succeeds
 
+    async def fail_reply_dispatch(self, _event_id: str, _error_text: str) -> bool:
+        """No reply records exist in this recording-only delivery fixture."""
+        return False
+
 
 @dataclass
 class _SpyTurnPolicy:

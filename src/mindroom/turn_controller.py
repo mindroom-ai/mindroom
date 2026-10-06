@@ -1711,22 +1711,22 @@ class TurnController:
             if reconcile_visible_response
             else None
         )
-        ack_event_id = await self.deps.visible_responses.deliver_recoverable_text(
+        # This acknowledgement is the placeholder the selection's answer then
+        # edits, which is what `existing_event_is_placeholder` below says, so it
+        # is the turn's initial delivery and not its answer. Staging it that way
+        # also keeps it from settling the journal source: a placeholder
+        # discharges nothing, and a crash before the model finished would
+        # otherwise leave "Processing your response..." in the room with
+        # nothing pending to replay.
+        ack_event_id, interactive_span_id = await self.deps.visible_responses.deliver_selection_acknowledgement(
             selection_handled_turn,
             target=response_target,
+            requester_id=requester_user_id,
             response_text=(
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
             recovered_response_event_id=recovered_ack_event_id,
             delivery_turn_id=source_event_id,
-            # This acknowledgement is the placeholder the selection's answer
-            # then edits, which is what `existing_event_is_placeholder` below
-            # says, so it is the turn's initial delivery and not its answer.
-            # Staging it that way also keeps it from settling the journal
-            # source: a placeholder discharges nothing, and a crash before the
-            # model finished would otherwise leave "Processing your
-            # response..." in the room with nothing pending to replay.
-            as_placeholder=True,
         )
         if not ack_event_id:
             self.deps.logger.error(
@@ -1800,6 +1800,7 @@ class TurnController:
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
                 existing_event_is_recovered=recovered_ack_event_id is not None,
+                interactive_span_id=interactive_span_id,
                 user_id=requester_user_id,
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
@@ -1939,6 +1940,12 @@ class TurnController:
             runtime_paths=self.deps.runtime_paths,
         )
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+        if existing_event_id is not None and await self.deps.delivery_gateway.fail_reply_dispatch(
+            existing_event_id,
+            error_text,
+        ):
+            # The reply's records show the failure and settle its sources.
+            return existing_event_id
         if existing_event_id is not None:
             edited = await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(

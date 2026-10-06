@@ -1510,18 +1510,18 @@ class DeliveryGateway:
 
         async def prepare() -> PreparedReplyRow:
             reply = await self.deps.outbox.replies.load(write.reply_id)
-            assert reply is not None, "a reply exists while its rows are written"
+            assert reply is not None or write.create is not None, "a reply exists while its rows are written"
+            event_id = None if reply is None else reply.event_id
             stage = DeliveryStage(write.stage.value)
-            delivery_id = (
-                edit_delivery_id(write.span.delivery_id, reply.reply_sequence + 1)
-                if stage is DeliveryStage.EDIT
-                else write.span.delivery_id
-            )
+            delivery_id = write.span.delivery_id
+            if stage is DeliveryStage.EDIT:
+                assert reply is not None
+                delivery_id = edit_delivery_id(delivery_id, reply.reply_sequence + 1)
             predicted["delivery_id"] = delivery_id
-            edits = stage is not DeliveryStage.INITIAL and reply.event_id is not None
+            edits = stage is not DeliveryStage.INITIAL and event_id is not None
             payload: dict[str, Any] = (
-                build_edit_event_content(event_id=reply.event_id, new_content=content, new_text=new_text or "")
-                if edits and reply.event_id is not None
+                build_edit_event_content(event_id=event_id, new_content=content, new_text=new_text or "")
+                if edits and event_id is not None
                 else content
             )
             prepared = await self._prepared_for_the_wire(
@@ -1530,7 +1530,7 @@ class DeliveryGateway:
                 turn_id=delivery_id,
                 stage=stage,
                 continuation_thread_id=target.resolved_thread_id,
-                continuation_reply_to_event_id=reply.event_id if edits else target.reply_to_event_id,
+                continuation_reply_to_event_id=event_id if edits else target.reply_to_event_id,
             )
             failure_reason = None
             if isinstance(prepared, MatrixDeliveryFailure):
@@ -1555,6 +1555,7 @@ class DeliveryGateway:
                     span_id=write.span.span_id,
                     decide=write.decide,
                     placeholder_only=write.placeholder_only,
+                    create=write.create,
                 ),
                 room_id=target.room_id,
                 thread_id=target.resolved_thread_id,
@@ -1567,7 +1568,8 @@ class DeliveryGateway:
             if write.handle is not None:
                 write.handle.note(delivery.enqueue.applied)
             await self._run_reply_effects((*delivery.enqueue.applied.post_commit, *delivery.reply_effects))
-            if not delivery.enqueue.transition.applied:
+            if not delivery.enqueue.transition.applied and delivery.enqueue.delivery_id is None:
+                # A retried acknowledgement is not refused: it resolves its earlier row.
                 raise ReplyWriteRefusedError(delivery.enqueue.transition)
         if delivery.event_id is None:
             return None
@@ -1672,6 +1674,30 @@ class DeliveryGateway:
             ),
         )
         return event_id if edited else None
+
+    async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
+        """Show a dispatch failure on the reply bound to one event before a span ran it.
+
+        Returns whether a reply owns the event; its records then settle the
+        sources and deliver the error (DESIGN.md §6.4 ``dispatch_failed``).
+        """
+        reply = await self.deps.outbox.replies.for_event(event_id)
+        if reply is None:
+            return False
+        now_ns = time.time_ns()
+        applied = await self.deps.outbox.replies.decide(
+            reply_id=reply.reply_id,
+            span_id=reply.last_span_id,
+            decide=lambda current, span: rl.dispatch_failed(
+                current,
+                None if span.ended else span,
+                error_text=error_text,
+                now_ns=now_ns,
+            ),
+        )
+        await self._run_reply_effects(applied.post_commit)
+        await self.settle_reply_debt(reply.reply_id)
+        return True
 
     async def record_reply_stop(self, event_id: str, receipt_order: int, *, newer_edit: bool) -> bool:
         """Record a Stop on the reply bound to one event; return whether a reply owns that event.

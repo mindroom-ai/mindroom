@@ -1981,7 +1981,7 @@ class TestAgentBot(AgentBotTestBase):
             return_value=thread_history_result([], is_full_history=True),
         )
         bot._visible_responses.recovered_response_event_id = AsyncMock(return_value=None)
-        bot._visible_responses.deliver_recoverable_text = AsyncMock(return_value="$ack")
+        bot._visible_responses.deliver_selection_acknowledgement = AsyncMock(return_value=("$ack", None))
         try:
             with (
                 _mock_interactive_claim(bot, selection),
@@ -2037,7 +2037,7 @@ class TestAgentBot(AgentBotTestBase):
             return_value=thread_history_result([], is_full_history=True),
         )
         bot._visible_responses.recovered_response_event_id = AsyncMock(return_value=None)
-        bot._visible_responses.deliver_recoverable_text = AsyncMock(return_value="$ack")
+        bot._visible_responses.deliver_selection_acknowledgement = AsyncMock(return_value=("$ack", None))
         try:
             with (
                 _mock_interactive_claim(bot, selection),

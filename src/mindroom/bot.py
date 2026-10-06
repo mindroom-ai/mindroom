@@ -832,6 +832,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 delivery_gateway=self._delivery_gateway,
                 settle_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+                replies=self._reply_runtime,
             ),
         )
         self._command_turn_executor = CommandTurnExecutor(

@@ -14,6 +14,7 @@ from itertools import batched
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
+from mindroom import reply_lifecycle as rl
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
     RoomHistoryRecovery,
@@ -1953,12 +1954,34 @@ def _enqueue_reply_row(
     than written (``Outcome.RECOMPUTE``). Sources the rule settles are settled
     here, replacing the turn handoff a plain ``FINAL`` carries.
     """
-    reply = reply_messages.lock(transaction, principal_id, request.reply_id)
-    span = reply_spans.load(transaction, principal_id, request.span_id)
-    if reply is None or span is None:
-        msg = f"Reply {request.reply_id} or span {request.span_id} does not exist"
-        raise RuntimeError(msg)
-    transition = request.decide(reply, span)
+    if request.create is not None:
+        claim = request.create.claim
+        earlier = reply_spans.latest_for_delivery(transaction, principal_id, claim.delivery_id)
+        if earlier is not None:
+            # A retried acknowledgement finds the reply its first attempt created,
+            # and resolves that attempt's row instead of writing another.
+            created = reply_messages.lock(transaction, principal_id, earlier.reply_id)
+            assert created is not None
+            return ReplyRowEnqueue(
+                applied=replies.AppliedTransition(
+                    transition=rl.Transition(outcome=rl.Outcome.DUPLICATE, reply=created, spans=(earlier,)),
+                    post_commit=(),
+                ),
+                delivery_id=earlier.delivery_id,
+                stage=rl.WriteStage.INITIAL,
+            )
+        transition = rl.interactive_acknowledgement(claim, shown=request.create.shown)
+        assert transition.reply is not None
+        reply, span = transition.reply, transition.spans[0]
+    else:
+        assert request.decide is not None
+        locked = reply_messages.lock(transaction, principal_id, request.reply_id)
+        loaded = reply_spans.load(transaction, principal_id, request.span_id)
+        if locked is None or loaded is None:
+            msg = f"Reply {request.reply_id} or span {request.span_id} does not exist"
+            raise RuntimeError(msg)
+        reply, span = locked, loaded
+        transition = request.decide(reply, span)
     if not transition.applied or transition.row is None:
         return ReplyRowEnqueue(
             applied=replies.apply(transaction, principal_id, transition),

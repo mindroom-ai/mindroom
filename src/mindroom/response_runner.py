@@ -556,6 +556,8 @@ class ResponseRequest:
     existing_event_is_recovered: bool = False
     # What the stopped attempt at the adopted reply showed; this attempt streams below it.
     resumed_reply: UnfinishedStreamedReply | None = None
+    # The span an interactive selection's acknowledgement created, which this answer adopts.
+    interactive_span_id: str | None = None
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -3203,6 +3205,7 @@ class ResponseRunner:
             edit_receipt_order=request.sources.edit_receipt_order if regeneration else None,
             historical_event_id=request.existing_event_id if regeneration else None,
             existing_event_id=request.existing_event_id,
+            interactive_span_id=request.interactive_span_id,
         )
 
     async def _settle_unauthorized_approval_continuation(

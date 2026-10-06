@@ -384,3 +384,63 @@ async def test_regenerating_an_answer_older_than_the_records_adopts_it(tmp_path:
     edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
     assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$older"}
     assert edit["m.new_content"]["body"] == "New answer."
+
+
+async def _acknowledge_selection(bot: AgentBot) -> tuple[str | None, str | None]:
+    return await bot._visible_responses.deliver_selection_acknowledgement(
+        TurnRecord.create(["$event"], requester_id="@user:localhost"),
+        target=_target(),
+        requester_id="@user:localhost",
+        response_text="You selected: 1 Yes\n\nProcessing your response...",
+        recovered_response_event_id=None,
+        delivery_turn_id="$event",
+    )
+
+
+async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_path: Path) -> None:
+    """The acknowledgement creates the reply; the answer runs in that same span and edits the acknowledgement."""
+    bot = await _streaming_bot(tmp_path)
+    ack_event_id, span_id = await _acknowledge_selection(bot)
+    assert ack_event_id == "$sent1"
+    assert span_id is not None
+    acknowledged = await _reply(bot)
+    assert acknowledged.placeholder_only
+    assert acknowledged.current_span_id is None
+
+    request = replace(
+        _plain_request(_target()),
+        existing_event_id=ack_event_id,
+        existing_event_is_placeholder=True,
+        interactive_span_id=span_id,
+    )
+    assert await _answer(bot, request, AsyncMock(return_value="Selected answer.")) == ack_event_id
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
+    assert [(span.span_id, span.outcome) for span in spans] == [(span_id, rl.SpanOutcome.COMPLETED)]
+    assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response...", "Selected answer."]
+
+
+async def test_a_retried_acknowledgement_finds_the_reply_its_first_attempt_created(tmp_path: Path) -> None:
+    """Sending the acknowledgement again resolves the first attempt's row; no second reply or message appears."""
+    bot = await _streaming_bot(tmp_path)
+    first = await _acknowledge_selection(bot)
+
+    assert await _acknowledge_selection(bot) == first
+    assert len(_sent_bodies(bot)) == 1
+
+
+async def test_a_dispatch_failure_before_the_answer_ends_the_selection_reply(tmp_path: Path) -> None:
+    """A failure before any span ran the selection shows the error on its acknowledgement and settles it."""
+    bot = await _streaming_bot(tmp_path)
+    ack_event_id, _span_id = await _acknowledge_selection(bot)
+    assert ack_event_id is not None
+
+    assert await bot._delivery_gateway.fail_reply_dispatch(ack_event_id, "[general] ⚠️ Error: lookup failed")
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.FAILED
+    assert reply.owed_write is None
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
+    assert _sent_bodies(bot)[-1] == "[general] ⚠️ Error: lookup failed"
