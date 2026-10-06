@@ -3116,6 +3116,7 @@ depends_on = [
     "mindroom.memory_scope_ids",
     "mindroom.path_confinement",
     "mindroom.timing",
+    "mindroom.token_budget",
 ]
 visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
 
