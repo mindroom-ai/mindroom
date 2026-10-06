@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     icon_color="text-violet-500",
     dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/chat-ui/",
-    function_names=("show_computer", "open_settings", "open_panel", "show_canvas"),
+    function_names=("show_computer", "open_settings", "open_panel", "show_canvas", "read_canvas_state"),
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
 )
 def chat_ui_tools() -> type[ChatUITools]:

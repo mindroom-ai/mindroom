@@ -43,6 +43,7 @@ _EXPORTED_AT_SLACK_BYTES = 64
 _MAX_THREAD_FILE_BYTES = 2 * MAX_READ_BYTES
 # Worker code can replace index.json, and decoded JSON can take forty times its size in memory, so the drift check
 # reads at most this much and rebuilds a larger index; thousands of indexed threads take far less.
+# Worker-planted thread values can also serialize to far more than their file size, so a rebuild stops adding entries here.
 _MAX_ROOM_INDEX_JSON_BYTES = 8 << 20
 # Worker code can add thread files to a room directory, and a rebuild parses each one under the process-wide export lock,
 # so one rebuild reads at most this much; four files at the read cap is far beyond an ordinary room.
@@ -599,6 +600,7 @@ def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) 
     indexed: list[tuple[int, dict[str, object]]] = []
     unindexed: list[str] = []
     read_bytes = 0
+    index_bytes = 0
     for position, filename in enumerate(newest_first):
         try:
             # One byte past the cap shows whether the file was cut there.
@@ -607,7 +609,10 @@ def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) 
             continue
         # Each file is charged before it is parsed, so files that fail to parse spend the budget too.
         read_bytes += len(data)
-        if read_bytes > _MAX_ROOM_INDEX_BYTES:
+        indexed_entry = _thread_index_entry(filename, data) if read_bytes <= _MAX_ROOM_INDEX_BYTES else None
+        if indexed_entry is not None:
+            index_bytes += len(json.dumps(indexed_entry[1], indent=2))
+        if read_bytes > _MAX_ROOM_INDEX_BYTES or index_bytes > _MAX_ROOM_INDEX_JSON_BYTES:
             logger.warning(
                 "Thread export files exceed the room index budget; leaving older threads out",
                 output_dir=str(output_dir),
@@ -615,7 +620,7 @@ def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) 
             )
             unindexed = sorted(newest_first[position:])
             break
-        if (indexed_entry := _thread_index_entry(filename, data)) is not None:
+        if indexed_entry is not None:
             indexed.append(indexed_entry)
     indexed.sort(key=lambda item: item[0], reverse=True)
     entries = [entry for _, entry in indexed]

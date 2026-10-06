@@ -136,8 +136,10 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
         _ContractCase("show_canvas", "", "show_canvas"),
         _ContractCase("show_canvas/update", "", "show_canvas", "update"),
         _ContractCase("show_canvas/document", "", "show_canvas", "document"),
+        _ContractCase("show_canvas/shared", "", "show_canvas", "shared"),
     )
-    registered_actions = set(ChatUITools(enable_show_canvas=True).get_async_functions())
+    # read_canvas_state only reads, so it sends no UI action for Chat to handle.
+    registered_actions = set(ChatUITools(enable_show_canvas=True).get_async_functions()) - {"read_canvas_state"}
     exported_actions = {case.action for case in actions}
     if registered_actions != exported_actions:
         msg = (
@@ -159,7 +161,7 @@ async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
         return await tool.open_settings(section=case.argument)  # type: ignore[arg-type]
     if case.action == "show_canvas":
         html = CONTRACT_CANVAS_DOCUMENT_HTML if case.argument == "document" else CONTRACT_CANVAS_HTML
-        return await tool.show_canvas(title=CONTRACT_CANVAS_TITLE, html=html)
+        return await tool.show_canvas(title=CONTRACT_CANVAS_TITLE, html=html, share_state=case.argument == "shared")
     return await tool.open_panel(panel=case.argument)  # type: ignore[arg-type]
 
 
@@ -216,7 +218,7 @@ async def build_chat_ui_contract(tmp_path: Path) -> dict[str, object]:
             msg = f"Chat UI contract case {case_id!r} failed to emit: {result!r}"
             raise RuntimeError(msg)
         exported: dict[str, object] = {"id": case_id, "event": _contract_event(context, event_id)}
-        if case.argument == "update":
+        if case.argument in {"update", "shared"}:
             edit_id = f"{event_id}-edit"
             update = json.loads(await _update_contract_canvas(context, exported["event"], edit_id))  # type: ignore[arg-type]
             if update.get("status") != "ok" or update.get("revision_event_id") != edit_id:

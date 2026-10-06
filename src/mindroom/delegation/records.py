@@ -258,7 +258,7 @@ class DelegationRecordOwner:
         error: object | None = None,
         usage: object | None = None,
     ) -> None:
-        """Settle one record with its exact terminal outcome."""
+        """Settle one record; a record that is already settled keeps its first outcome."""
         await run_blocking_until_complete(
             partial(
                 self._finish,

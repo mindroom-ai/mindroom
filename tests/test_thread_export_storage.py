@@ -765,6 +765,38 @@ def test_room_index_rebuild_reads_its_newest_threads_within_a_budget(
         assert indexed() == (["$thread-1:localhost", "$thread-2:localhost"], [])
 
 
+def test_room_index_rebuild_bounds_the_index_planted_thread_values_serialize_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted thread values that serialize to far more than their files cannot grow the index past its budget."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    payload = {"version": 1, "thread": {"id": "$real:localhost", "source": "matrix"}, "messages": []}
+    write_thread_payload(output_dir, room, "$real:localhost", payload)
+    room_dir = output_dir / "lobby"
+    # Indented JSON puts each leaf of a nested id on its own deeply indented line, about forty times its YAML size.
+    nested_id = "[" * 60 + ",".join(["0"] * 3_000) + "]" * 60
+    planted = [room_dir / _thread_filename(f"$planted-{index}:localhost") for index in range(4)]
+    for index, path in enumerate(planted):
+        path.write_text(f"thread:\n  id: {nested_id}\nmessages: []\n", encoding="utf-8")
+        os.utime(path, ns=(index * 1_000_000_000, index * 1_000_000_000))
+    budget = 1 << 20
+    monkeypatch.setattr(thread_export_storage, "_MAX_ROOM_INDEX_JSON_BYTES", budget)
+
+    write_room_index(output_dir, room)
+
+    index_path = room_dir / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert [entry["file"] for entry in index["threads"]] == [
+        _thread_filename("$real:localhost"),
+        planted[3].name,
+        planted[2].name,
+    ]
+    assert index["unindexed_files"] == [planted[0].name, planted[1].name]
+    assert index_path.stat().st_size < budget + (64 << 10)
+
+
 @pytest.mark.parametrize("planted", ["oversized", "deeply-nested"])
 def test_planted_room_index_too_costly_to_decode_is_rebuilt(tmp_path: Path, planted: str) -> None:
     """Worker code can replace index.json, so one too large or too deep to decode cheaply is rebuilt instead of trusted."""

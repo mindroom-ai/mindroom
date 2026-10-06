@@ -35,7 +35,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 
 ### 🧠 MEMORY.md - Your Long-Term Memory
 
-- With file memory enabled, MindRoom automatically preloads `MEMORY.md` from the effective memory scope on every turn, up to the configured line limit.
+- With file memory enabled, MindRoom automatically preloads `MEMORY.md` from the effective memory scope on every turn, up to the configured line and token limits.
 - Authorized group-room turns receive this scoped context too, and can produce responses visible in that room or thread.
 - Requester-private storage separates users' files; it does not restrict automatic preload to direct chats.
 - **Keep personal context confidential in shared conversations**; its presence in your prompt is not permission to disclose it.

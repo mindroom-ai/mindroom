@@ -255,22 +255,14 @@ Each message is cut to 2,000 characters.
 Starting a call from a room's main timeline gives the agent the newest unthreaded messages of that room instead.
 
 The snapshot is taken once, when the agent joins; messages sent during the call are not added.
-It works with all three call profiles:
+It works with all three call profiles; with `live`, the voice model skips it when the agent's prompt leaves too little room, but the delegated agent always gets it.
 
-| Backend | Where the snapshot goes |
-|---------|-------------------------|
-| `realtime` | Appended to the agent's instructions. |
-| `live` | Placed between the agent's prompt and the voice guidance, inside the 16,000 token instruction limit, and skipped when too little room is left. The delegated agent always gets it. |
-| `cascaded` | Given to each agent turn as call context. |
-
-The snapshot is used only when the call can safely see it.
-The caller must pass the normal reply permissions for the origin room and still be a member of it, the agent must have joined it, and a thread origin must point at the thread's first message.
-The origin must also be written by the call's only caller, for this agent, and name a room other than the call room.
-If any check fails, or reading the conversation takes longer than 5 seconds, the call proceeds without it.
+The agent gets the snapshot only when you are a member of the room the call came from, the agent's `access` admits you there, and the agent has joined it.
+Otherwise, or when reading the conversation takes longer than 5 seconds, the call starts without it.
 
 When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
 The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, so later replies in the thread know what was said.
-Calls shorter than 10 seconds, calls in which the caller said nothing, calls whose conversation snapshot was skipped, and calls cut off by a MindRoom restart post nothing.
+Calls shorter than 10 seconds, calls in which the caller said nothing, calls that started without a conversation snapshot, and calls cut off by a MindRoom restart post nothing.
 The transcript holds only what was said; tool use is left out.
 Before posting, the agent checks the caller's access to the origin room again, and posts nothing if the caller lost that access during the call.
 If the agent's media connection drops and it rejoins the same call, each part of the call posts its own message.
@@ -278,9 +270,8 @@ If the agent's media connection drops and it rejoins the same call, each part of
 An agent with the `matrix_message` tool is also told how to start longer work during a call.
 It sends a self-contained task to the thread or room the call came from, and names itself or another agent as `recipient`, so the work runs there while you keep talking.
 A call without an origin makes it ask you which room to use.
-It is told never to post in the call room.
 
-Clients ask for this with the `origin` field of the call room's `io.mindroom.agent_call` state event:
+Other Matrix clients ask for a conversation snapshot with the `origin` field of the call room's `io.mindroom.agent_call` state event:
 
 ```json
 {
@@ -293,7 +284,8 @@ Clients ask for this with the `origin` field of the call room's `io.mindroom.age
 ```
 
 `thread_id` is `null` when the call starts from the room's main timeline, and `origin` may be left out entirely.
-MindRoom Chat keeps one call room per caller and agent and re-writes `origin` before every call, so an origin always describes the current call.
+The agent uses `origin` only when the caller sent the event with an empty state key and `version: 1`, with `creator_user_id` and `agent_user_id` naming the caller and this agent, `thread_id` is the thread's root event, and `room_id` is not the call room.
+Write `origin` before each call, because the agent reads it when it joins.
 
 ## Transcripts and memory
 

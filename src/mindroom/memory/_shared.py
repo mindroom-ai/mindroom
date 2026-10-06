@@ -97,7 +97,7 @@ class MemoryEntrypointContext:
 
     The line counts make the preload self-describing: the prompt layer can tell
     the model that its `MEMORY.md` is already inlined, and how much of the file
-    the ``memory.file.max_entrypoint_lines`` cap withheld.
+    the ``memory.file.max_entrypoint_lines`` and ``max_entrypoint_tokens`` caps withheld.
     """
 
     text: str = ""
@@ -107,7 +107,7 @@ class MemoryEntrypointContext:
 
     @property
     def omitted_lines(self) -> int:
-        """Return how many entrypoint lines the preload cap withheld."""
+        """Return how many entrypoint lines the preload caps withheld."""
         return max(0, self.total_lines - self.included_lines)
 
 

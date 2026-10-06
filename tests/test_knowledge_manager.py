@@ -7850,8 +7850,10 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     scheduler.schedule_refresh.assert_called_once()
 
 
-def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
+def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Private index, lock, and refresh-cooldown registries should be pruned."""
+    # Hundreds of private identities each fsync their records; disk flush latency on a busy host is not under test.
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(

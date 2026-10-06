@@ -2467,6 +2467,7 @@ def _agent_call_state_event(*, sender: str = "@alice:example.org") -> dict:
 
 _ORIGIN_CONTEXT = CallOriginContext(
     origin=CallOrigin(room_id="!origin:example.org", thread_id="$root"),
+    caller_id="@alice:example.org",
     room_name="Lobby",
     thread_title="Trip planning",
     messages=(_CallBriefMessage(label="Alice", body="Book the 9am train"),),
@@ -2788,6 +2789,7 @@ def test_live_instructions_include_origin_brief_within_limit() -> None:
     assert 9_000 < approximate_o200k_tokens(large_prompt) < 14_000
     long_context = CallOriginContext(
         origin=_ORIGIN_CONTEXT.origin,
+        caller_id=_ORIGIN_CONTEXT.caller_id,
         room_name="Lobby",
         thread_title=None,
         messages=tuple(
@@ -2881,10 +2883,10 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert bridge.closed is True
     post.assert_awaited_once()
     assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
-    body = post.await_args.kwargs["body"]
+    body = post.await_args.kwargs["writeback"].body
     assert body.startswith("📞 Voice call · 2 min")
-    assert "**Alice**: Book the train" in body
-    assert "**Helper**: Booked" in body
+    assert "@alice:example.org (Alice): Book the train" in body
+    assert "Helper: Booked" in body
     await manager.shutdown()
 
 

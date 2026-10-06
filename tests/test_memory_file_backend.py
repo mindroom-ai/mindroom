@@ -1612,6 +1612,72 @@ async def test_file_backend_entrypoint_reports_truncation_when_preloaded_head_is
 
 
 @pytest.mark.asyncio
+async def test_file_backend_entrypoint_token_cap_keeps_whole_lines(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A few very long lines must not slip past the line cap: the token cap bounds the preload size."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_tokens = 250
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    lines = [f"fact {index} " + "x" * 392 for index in range(10)]
+    memory_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+
+    assert lines[1] in prompt_parts.session_preamble
+    assert lines[2] not in prompt_parts.session_preamble
+    assert "[Memory entrypoint truncated - showing the first 2 of 10 lines" in prompt_parts.session_preamble
+    assert "memory.file.max_entrypoint_tokens=250" in prompt_parts.session_preamble
+    assert str(memory_path) in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_token_cap_counts_newlines_across_many_short_lines(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The cap measures the joined text, so many short lines cannot each round down past it."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 200
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("abcdef\n" * 200, encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+
+    # 114 lines join to 797 characters (199 tokens); 115 would be 804 (201 tokens).
+    assert "[Memory entrypoint truncated - showing the first 114 of 200 lines" in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_token_cap_reports_an_oversized_first_line(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A first line larger than the token cap is withheld and still reported, never silently cut."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_tokens = 10
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("y" * 400 + "\nshort\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+
+    assert "y" * 400 not in prompt_parts.session_preamble
+    assert "[Memory entrypoint truncated - showing the first 0 of 2 lines" in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
 async def test_file_backend_search_skips_structured_line_duplicates(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")

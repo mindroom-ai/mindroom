@@ -82,6 +82,7 @@ agents:
 | `learning_mode` | string | `null` | `always` learns after every turn; `agentic` lets the agent decide through a tool call |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory but not `learning`. See [Memory](../memory.md) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](../memory.md#searching-file-memory) |
+| `automations` | list | `null` | Built-in automations such as `prompt_curation`; `null` inherits `defaults.automations` for shared file-memory agents and `[]` turns them off. See [Built-in Automations](../scheduling.md#built-in-automations) |
 | `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](../knowledge.md) |
 | `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
 | `private` | object | `null` | Give each requester a separate copy of the agent's state; see [Private Instances](#private-instances) |
@@ -212,6 +213,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `worker_scope` | `null` |
 | `file_access` | `workspace` |
 | `allow_self_config` | `false` |
+| `automations` | `[]`; private and non-file-memory agents never inherit them. See [Built-in Automations](../scheduling.md#built-in-automations) |
 
 `defaults.tools` (default `[scheduler]`) is added to every agent with `include_default_tools: true`; set it to `[]` to add nothing.
 It accepts the same per-tool overrides as `agents.<name>.tools`.

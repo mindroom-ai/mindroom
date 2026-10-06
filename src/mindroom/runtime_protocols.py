@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.automations.runner import AutomationRunner
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -59,6 +60,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def skill_reviews(self) -> SkillReviewRunner: ...  # noqa: D102
+
+    @property
+    def automations(self) -> AutomationRunner: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102

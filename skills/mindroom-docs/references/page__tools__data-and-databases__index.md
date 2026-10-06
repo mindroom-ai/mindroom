@@ -17,7 +17,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud credentials |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
 | [`google_docs`](#google_docs) | Creating, reading, and editing Google Docs | Google Docs OAuth |
-| [`google_sheets`](#google_sheets) | Reading, creating, and updating spreadsheets | Google Sheets OAuth |
+| [`google_sheets`](#google_sheets) | Reading, creating, updating, and formatting spreadsheets | Google Sheets OAuth |
 | [`openbb`](#openbb) | Stock quotes, symbol search, news, profiles, and price targets from switchable providers | Optional OpenBB PAT |
 | [`yfinance`](#yfinance) | Yahoo Finance quotes, fundamentals, statements, news, and history | None |
 | [`financial_datasets_api`](#financial_datasets_api) | Financial statements, filings, ownership, earnings, and crypto prices | API key |
@@ -319,10 +319,12 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 
 ## [`google_sheets`]
 
-`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, and `update_sheet(data, spreadsheet_id=None, range_name=None)`.
+`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, `update_sheet(data, spreadsheet_id=None, range_name=None)`, and `batch_update_sheet(spreadsheet_id, requests)`.
 When `spreadsheet_id` or `spreadsheet_range` is configured, `read_sheet()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
 `update_sheet()` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
 `update_sheet()` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
+`batch_update_sheet()` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
+`batch_update_sheet()` can also delete sheets, rows, and ranges, and a [Tool Approval](https://docs.mindroom.chat/tool-approval/) rule for `update_sheet` does not match it; a `*update_sheet` rule matches both, including the prefixed names of additional Google workspace accounts.
 The tool is available only once the stored Google Sheets connection includes the Sheets scope; if the account is not connected, calls return an `OAuthConnectionRequired` result with a connect link.
 
 | Option | Type | Default | Notes |
@@ -331,7 +333,7 @@ The tool is available only once the stored Google Sheets connection includes the
 | `spreadsheet_range` | `text` | `null` | Range used by every `read_sheet()` call, such as `Sheet1!A1:Z100`. |
 | `read` | `boolean` | `true` | Enable `read_sheet()`. |
 | `create` | `boolean` | `true` | Enable `create_sheet()`. |
-| `update` | `boolean` | `true` | Enable `update_sheet()`. |
+| `update` | `boolean` | `true` | Enable `update_sheet()` and `batch_update_sheet()`. |
 
 ```yaml
 agents:

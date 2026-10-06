@@ -200,6 +200,109 @@ async def test_mention_of_other_agent_is_ignored(config: Config) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("sender_allowed", [True, False])
+async def test_mentioned_agent_not_configured_for_room_rejects_only_allowed_senders(
+    tmp_path: Path,
+    sender_allowed: bool,
+) -> None:
+    """A joined agent that a configured room does not list explains itself only to senders it accepts."""
+    config = bind_runtime_paths(
+        with_responder_access(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="General"),
+                    "research": AgentConfig(display_name="Research", rooms=[_ROOM_ID]),
+                },
+            ),
+            "general",
+            users=[_SENDER if sender_allowed else "@owner:localhost"],
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    config.agents["research"].access = ResponderAccessConfig(users=[_SENDER])
+    policy = _policy_for(config, "general")
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    context = _context(mentioned=[_entity_id(config, "general")], am_i_mentioned=True)
+
+    plan = await _plan(policy, room, _dispatch(context, agent_name="general"))
+
+    if not sender_allowed:
+        assert plan.kind == "ignore"
+        return
+    assert plan.kind == "respond"
+    assert plan.response_action is not None
+    assert plan.response_action.kind == "reject"
+    assert plan.response_action.rejection_message == (
+        "This room is managed in the MindRoom configuration, and I'm not one of its agents, so I can't answer here. "
+        "To talk to me, create a new room and invite me. In this room, you can ask Research."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("case", ["explained", "sender_denied", "not_joined"])
+async def test_team_mention_with_agent_not_configured_for_room_explains_it(tmp_path: Path, case: str) -> None:
+    """Only a team request rejected solely by the configured room's boundary gets the room explanation."""
+    general_users = ["@owner:localhost"] if case == "sender_denied" else [_SENDER]
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", access=ResponderAccessConfig(users=general_users)),
+                "research": AgentConfig(
+                    display_name="Research",
+                    rooms=[_ROOM_ID],
+                    access=ResponderAccessConfig(users=[_SENDER]),
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    members = [_SENDER, _entity_id(config, "research").full_id]
+    if case != "not_joined":
+        members.append(_entity_id(config, "general").full_id)
+    room = _room_with_members(*members)
+    mentioned = [_entity_id(config, "general"), _entity_id(config, "research")]
+
+    owner_plan = await _plan(
+        _policy_for(config, "research"),
+        room,
+        _dispatch(_context(mentioned=mentioned, am_i_mentioned=True), agent_name="research"),
+    )
+    other_plan = await _plan(
+        _policy_for(config, "general"),
+        room,
+        _dispatch(_context(mentioned=mentioned, am_i_mentioned=True), agent_name="general"),
+    )
+
+    assert owner_plan.kind == "respond"
+    assert owner_plan.response_action is not None
+    assert owner_plan.response_action.kind == "reject"
+    if case == "explained":
+        assert owner_plan.response_action.rejection_message == (
+            "This room is managed in the MindRoom configuration, and General isn't one of its agents, so it can't "
+            "answer here. To talk to General, create a new room and invite it. In this room, you can ask Research."
+        )
+    else:
+        assert owner_plan.response_action.rejection_message == owner_plan.response_action.form_team.reason
+    assert other_plan.kind == "ignore"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mention_research", [False, True])
+async def test_unmentioned_agent_not_configured_for_room_stays_silent(config: Config, mention_research: bool) -> None:
+    """An agent that a configured room does not list never volunteers the rejection."""
+    config.agents["research"].rooms = [_ROOM_ID]
+    policy = _policy_for(config, "general")
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    context = _context(mentioned=[_entity_id(config, "research")] if mention_research else None)
+
+    plan = await _plan(policy, room, _dispatch(context, agent_name="general"))
+
+    assert plan.kind == "ignore"
+
+
+@pytest.mark.asyncio
 async def test_unmentioned_room_message_with_multiple_responders_is_ignored(config: Config) -> None:
     """With several visible responders, no agent self-selects for an untagged room message."""
     policy = _policy_for(config, "general")

@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.access_policy import resolve_responder_access
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     configured_routable_entity_ids_for_room,
@@ -31,7 +29,7 @@ from mindroom.requester_identity import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     import nio
 
@@ -281,37 +279,6 @@ def is_platform_administrator(sender_id: str, config: Config, runtime_paths: Run
     return resolved_sender in config.administrators
 
 
-def get_effective_sender_id_for_reply_permissions(
-    sender_id: str,
-    event_source: Mapping[str, Any] | None,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Return the sender ID used for per-agent reply permission checks.
-
-    Internal MindRoom senders may relay user-originated messages (voice
-    transcriptions, scheduled task fires, etc.) and include the original sender
-    in event content. For trusted internal senders and trusted source kinds, use
-    that embedded sender.
-    """
-    is_internal_mindroom_sender = sender_id in current_internal_sender_ids(config, runtime_paths)
-    if not is_internal_mindroom_sender:
-        return sender_id
-    if not event_source:
-        return sender_id
-
-    content = event_source.get("content")
-    if not isinstance(content, Mapping):
-        return sender_id
-    if not source_kind_allows_trusted_original_sender(source_kind_from_content(content)):
-        return sender_id
-
-    original_sender = content.get(ORIGINAL_SENDER_KEY)
-    if isinstance(original_sender, str) and original_sender:
-        return original_sender
-    return sender_id
-
-
 def filter_responders_by_sender_permissions(
     responders: Sequence[MatrixID],
     sender_id: str,
@@ -451,7 +418,7 @@ def classify_responder_candidates_from_cached_room(
 
     A proven grant remains usable when an ad-hoc member snapshot is partial.
     """
-    responders = _configured_responder_entities_for_room(room, config, runtime_paths)
+    responders = configured_responder_entities_for_room(room, config, runtime_paths)
     discovery_complete = responders is not None or room_membership_is_complete(room)
     if responders is None:
         responders = get_available_responders_in_room(room, config, runtime_paths)
@@ -496,7 +463,7 @@ def responder_candidate_entities_from_cached_room(
     ).allowed
 
 
-def _configured_responder_entities_for_room(
+def configured_responder_entities_for_room(
     room: nio.MatrixRoom,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -524,7 +491,7 @@ async def responder_candidate_entities_with_membership_refresh(
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return candidates, refreshing unsynced ad-hoc room membership when possible."""
-    configured_entities = _configured_responder_entities_for_room(room, config, runtime_paths)
+    configured_entities = configured_responder_entities_for_room(room, config, runtime_paths)
     if configured_entities is not None:
         return filter_responders_by_sender_permissions(
             configured_entities,
