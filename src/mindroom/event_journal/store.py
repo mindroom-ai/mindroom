@@ -1541,10 +1541,9 @@ class PrincipalStore:
         self,
         approval_id: str,
         *,
-        runtime_generation: str,
         claim: rl.ClaimRequest,
     ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
-        """Claim one ready paused run and its reply's resume span together.
+        """Claim one ready paused run with its reply's resume span.
 
         Returns neither when the continuation is not ready. A reply with
         unresolved durable writes refuses the resume, and the continuation
@@ -1555,7 +1554,6 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
-                runtime_generation=runtime_generation,
                 claim=claim,
             ),
         )
@@ -1575,13 +1573,8 @@ class PrincipalStore:
         """
 
         def claim(transaction: Transaction) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
-            claimed = approval_continuations.claim(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                runtime_generation=runtime_generation,
-            )
-            if claimed is None:
+            current = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
+            if current is None or current.state != "ready":
                 return None, None
             resumed = replies.decide_on_span(
                 transaction,
@@ -1598,7 +1591,14 @@ class PrincipalStore:
             )
             if not resumed.transition.applied:
                 raise _InPlaceResumeRefusedError(resumed)
-            return claimed, resumed
+            claimed = approval_continuations.claim(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                span_id=span_id,
+            )
+            assert claimed, "the reply resumed in place for a continuation no other span claimed"
+            return approval_continuations.get(transaction, self._principal_id, approval_id=approval_id), resumed
 
         try:
             return await self._backend.write(claim)
@@ -1919,10 +1919,9 @@ def _claim_approval_resume(
     principal_id: str,
     *,
     approval_id: str,
-    runtime_generation: str,
     claim: rl.ClaimRequest,
 ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
-    """Claim the continuation and the resume span of its paused reply in one transaction."""
+    """Claim a ready continuation with its paused reply's resume span, in one transaction."""
     current = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if current is None or current.state != "ready":
         return None, None
@@ -1940,10 +1939,10 @@ def _claim_approval_resume(
         transaction,
         principal_id,
         approval_id=approval_id,
-        runtime_generation=runtime_generation,
+        span_id=applied.transition.claimed.span_id,
     )
-    assert claimed is not None, "a ready continuation is claimed in the transaction that read it"
-    return claimed, applied
+    assert claimed, "a ready continuation is claimed in the transaction that read it"
+    return approval_continuations.get(transaction, principal_id, approval_id=approval_id), applied
 
 
 def _finish_approval_continuation(

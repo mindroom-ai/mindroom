@@ -16,7 +16,6 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
-from tests.approval_continuation_helpers import claim_continuation
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import unwrap_extracted_collaborator
 from tests.legacy_reply_helpers import read_after_sync, store_main_continuation
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
 
 @pytest_asyncio.fixture
 async def approval(tmp_path: Path) -> tuple[AgentBot, ApprovalContinuation]:
-    """Create real journal ownership, an acknowledged visible INITIAL, and a claim by the current runtime."""
+    """Create real journal ownership, an acknowledged visible INITIAL, and a claim main's stopped instance left."""
     bot = _bot(tmp_path)
     initialize_approval_store(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -64,17 +63,14 @@ async def approval(tmp_path: Path) -> tuple[AgentBot, ApprovalContinuation]:
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
-        state="ready",
+        state="claimed",
     )
     await store_main_continuation(store, continuation)
-    claimed = await claim_continuation(
-        store,
-        continuation.approval_id,
-        runtime_generation=runner.deps.approval_runtime_generation,
-    )
-    assert claimed is not None
     # This start adopts the reply main left running its approved resume.
     await bot._reply_runtime.start()
+    claimed = await store.approval_continuation(continuation.approval_id)
+    assert claimed is not None
+    assert claimed.state == "claimed"
     unique_room_send_responses(bot.client)
     return bot, claimed
 

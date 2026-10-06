@@ -3443,7 +3443,6 @@ class ResponseRunner:
         """Claim a ready continuation together with its reply's resume span."""
         claimed, handle = await self.deps.replies.claim_approval_resume(
             owned,
-            runtime_generation=self.deps.approval_runtime_generation,
             placeholder=TEAM_PLACEHOLDER if owned.entity_kind == "team" else AGENT_PLACEHOLDER,
         )
         slot.handle = handle

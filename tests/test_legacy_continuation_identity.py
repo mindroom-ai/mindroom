@@ -116,6 +116,30 @@ async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legac
     assert legacy_database.query(_table_query(legacy_database.postgres, "response_attempt_sources")) == []
 
 
+@pytest.mark.asyncio
+async def test_a_claimed_continuation_keeps_its_claim_across_the_upgrade(legacy_database: _LegacyDatabase) -> None:
+    """A claim v2026.10.178 stored on the continuation reads as claimed by no running instance until classification."""
+    legacy_database.execute(_ATTEMPT_OWNER)
+    legacy_database.execute(
+        "UPDATE approval_continuations SET state = 'claimed', runtime_generation = 'old-runtime' "
+        "WHERE approval_id = 'approval'",
+    )
+    for _ in range(2):
+        store = legacy_database.open()
+        try:
+            approval = await store.principal("@bot:example.org").approval_continuation("approval")
+            pending = await store.principal("@bot:example.org").pending(runtime_generation="new-runtime")
+        finally:
+            await store.close()
+        assert approval is not None
+        assert (approval.state, approval.runtime_generation, approval.claim_span_id) == ("claimed", None, None)
+        # Recovery owns a claim the stopped instance left.
+        assert [event.event_id for event in pending] == ["$first"]
+    assert legacy_database.query(
+        "SELECT state, runtime_generation FROM approval_continuations WHERE approval_id = 'approval'",
+    ) == [("ready", None)]
+
+
 def test_the_adoption_pages_through_every_continuation(
     legacy_database: _LegacyDatabase,
     monkeypatch: pytest.MonkeyPatch,

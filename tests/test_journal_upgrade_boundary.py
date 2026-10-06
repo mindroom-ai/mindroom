@@ -341,7 +341,16 @@ async def test_approval_toolkit_upgrade_fences_unresumable_calls(
         assert loaded.failure_reason is not None
         assert "older version" in loaded.failure_reason
         assert "new request" in loaded.failure_reason
-        assert replace(loaded, state=original.state, failure_reason=original.failure_reason) == original
+        # A fenced claim no longer runs: its claimant is the paused reply's, not the failing continuation's.
+        assert (
+            replace(
+                loaded,
+                state=original.state,
+                failure_reason=original.failure_reason,
+                runtime_generation=original.runtime_generation,
+            )
+            == original
+        )
         assert await store.approval_continuations() == (("agent@alice", loaded),)
         assert [event.event_id for event in await principal.pending(runtime_generation="runtime-a")] == ["$source-1"]
         assert legacy_database.query("SELECT toolkit_name FROM approval_continuation_calls") == [(None,)]

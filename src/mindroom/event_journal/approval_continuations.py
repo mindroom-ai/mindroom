@@ -26,17 +26,19 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
 
+# ``claimed`` is never stored: a ready continuation is claimed by the span its
+# ``claim_span_id`` names, which the span's records own.
 type ApprovalContinuationState = Literal["waiting", "ready", "claimed", "failing"]
 
 _CONTINUATION_COLUMNS = """
-    approval_id, entity_name, span_id, state, generation,
+    approval_id, entity_name, span_id, claim_span_id, state, generation,
     runtime_generation, failure_reason, context_json
 """
 
 
 # The failure reason of an approval an edit superseded.
 SUPERSEDED_FAILURE_REASON = "superseded"
-_FENCEABLE = ("waiting", "ready", "claimed")
+_FENCEABLE = ("waiting", "ready")
 # The failure reason of a resume a shutdown cut short, which the next instance
 # hands back to replay.
 INTERRUPTED_FAILURE_REASON = "Tool approval continuation was interrupted before final delivery and denied safely."
@@ -191,6 +193,8 @@ class ApprovalContinuation:
     memory_prompt: str | None = None
     memory_thread_history: tuple[ApprovalMemoryTurn, ...] = ()
     thread_summary_message_count_hint: int | None = None
+    # The bot instance publishing a waiting generation's cards, or the one
+    # whose span runs a claimed continuation.
     runtime_generation: str | None = None
     failure_reason: str | None = None
     generation: int = 0
@@ -202,6 +206,9 @@ class ApprovalContinuation:
     # A pointer to where those facts live rather than a fact of the run, so it
     # takes no part in comparing two continuations.
     span_id: str | None = field(default=None, compare=False)
+    # The span that runs a claimed continuation: its reply's resume, or the
+    # response that waited in place. A pointer to the claim, like ``span_id``.
+    claim_span_id: str | None = field(default=None, compare=False)
 
     @property
     def source_event_ids(self) -> tuple[str, ...]:
@@ -289,8 +296,8 @@ def get(
 
 
 @dataclass(frozen=True, slots=True)
-class _ReplyIdentity:
-    """The reply a continuation answers, as the reply's records name it."""
+class _PausedReply:
+    """What a continuation reads from the reply it paused."""
 
     entity_name: str
     room_id: str
@@ -302,6 +309,8 @@ class _ReplyIdentity:
     show_tool_calls: bool
     show_tool_calls_is_frozen: bool
     prepared_edit_record: TurnRecord | None
+    # A claim an earlier release left running, until reply classification names its span.
+    claimed: bool
 
 
 def _shows_tool_calls(presentation: str) -> bool:
@@ -313,22 +322,22 @@ def _shows_tool_calls(presentation: str) -> bool:
     return json.loads(presentation)["show_tool_calls"] is True
 
 
-def _identity(
+def _paused_reply(
     transaction: Transaction,
     principal_id: str,
     row: Row,
     stored: Mapping[str, object],
-) -> _ReplyIdentity:
-    """Return the reply identity a continuation answers: its paused span's reply, or the identity it was adopted with."""
+) -> _PausedReply:
+    """Return what a continuation reads from its paused span's reply, or what it was adopted with."""
     span_id = cast("str | None", row["span_id"])
     if span_id is None:
-        return _ReplyIdentity(**legacy_identity(stored, approval_id=str(row["approval_id"])))
+        return _PausedReply(**legacy_identity(stored, approval_id=str(row["approval_id"])))
     span = reply_spans.load(transaction, principal_id, span_id)
     reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
     if span is None or reply is None or reply.event_id is None:
         message = f"Approval continuation {row['approval_id']!r} lost the reply it paused"
         raise ValueError(message)
-    return _ReplyIdentity(
+    return _PausedReply(
         entity_name=reply.entity_name,
         room_id=reply.room_id,
         thread_id=reply.thread_id,
@@ -343,6 +352,7 @@ def _identity(
             if span.prepared_edit is None
             else turn_records.decode_prepared_edit(span.prepared_edit, span.sources.logical[0])
         ),
+        claimed=False,
     )
 
 
@@ -359,7 +369,10 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
-    identity = _identity(transaction, principal_id, row, stored)
+    identity = _paused_reply(transaction, principal_id, row, stored)
+    claim_span_id = cast("str | None", row["claim_span_id"])
+    claimed = row["state"] == "ready" and (claim_span_id is not None or identity.claimed)
+    claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
     sources = ResponseSources(
         pending,
         identity.logical_source_event_ids,
@@ -396,7 +409,7 @@ def _from_rows(
         response_event_id=identity.response_event_id,
         sources=sources,
         calls=calls,
-        state=cast("ApprovalContinuationState", row["state"]),
+        state="claimed" if claimed else cast("ApprovalContinuationState", row["state"]),
         delegation_storage_bindings=cast(
             "dict[str, dict[str, object]]",
             stored.get("delegation_storage_bindings", {}),
@@ -432,11 +445,16 @@ def _from_rows(
             for turn in cast("list[dict[str, object]]", stored.get("memory_thread_history", []))
         ),
         thread_summary_message_count_hint=cast("int | None", stored.get("thread_summary_message_count_hint")),
-        runtime_generation=cast("str | None", row["runtime_generation"]),
+        runtime_generation=(
+            (None if claim_span is None else claim_span.bot_generation)
+            if claimed
+            else cast("str | None", row["runtime_generation"])
+        ),
         failure_reason=cast("str | None", row["failure_reason"]),
         generation=int(row["generation"]),
         prepared_edit_record=identity.prepared_edit_record,
         span_id=cast("str | None", row["span_id"]),
+        claim_span_id=claim_span_id,
     )
 
 
@@ -681,24 +699,17 @@ def all_owners(
     return _load_owners(transaction, rows)
 
 
-def claim(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    approval_id: str,
-    runtime_generation: str,
-) -> ApprovalContinuation | None:
-    """Move one ready paused run into its single execution attempt."""
+def claim(transaction: Transaction, principal_id: str, *, approval_id: str, span_id: str) -> bool:
+    """Name the span that runs a ready continuation; only one span claims each generation."""
     claimed = transaction.fetchone(
         """
-        UPDATE approval_continuations
-        SET state = 'claimed', runtime_generation = ?
-        WHERE principal_id = ? AND approval_id = ? AND state = 'ready'
+        UPDATE approval_continuations SET claim_span_id = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = 'ready' AND claim_span_id IS NULL
         RETURNING approval_id
         """,
-        (runtime_generation, principal_id, approval_id),
+        (span_id, principal_id, approval_id),
     )
-    return None if claimed is None else get(transaction, principal_id, approval_id=approval_id)
+    return claimed is not None
 
 
 def _advance(
@@ -744,10 +755,10 @@ def _advance(
     updated = transaction.fetchone(
         """
         UPDATE approval_continuations
-        SET state = ?, generation = ?, runtime_generation = ?,
+        SET state = ?, generation = ?, runtime_generation = ?, claim_span_id = NULL,
             failure_reason = NULL, context_json = ?
         WHERE principal_id = ? AND approval_id = ?
-          AND state = 'claimed' AND generation = ?
+          AND state = 'ready' AND claim_span_id IS NOT NULL AND generation = ?
         RETURNING approval_id
         """,
         (
@@ -836,13 +847,21 @@ def request_failure(
     expected_generation: int,
     expected_runtime_generation: str | None,
 ) -> ApprovalContinuation | None:
-    """Fence one observed continuation state against any later execution."""
+    """Fence one observed continuation state against any later execution.
+
+    A claim's bot instance is its span's, so the observed claim is compared
+    here and the row's stored state in the update.
+    """
+    current = get(transaction, principal_id, approval_id=approval_id)
+    if current is None or (current.state, current.runtime_generation) != (expected_state, expected_runtime_generation):
+        return None
+    claimed = expected_state == "claimed"
     updated = transaction.fetchone(
         """
         UPDATE approval_continuations
         SET state = 'failing', failure_reason = ?
         WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
-          AND runtime_generation IS NOT DISTINCT FROM ?
+          AND runtime_generation IS NOT DISTINCT FROM ? AND claim_span_id IS NOT DISTINCT FROM ?
           AND NOT EXISTS (
             SELECT 1 FROM matrix_delivery_outbox AS final
             WHERE final.principal_id = approval_continuations.principal_id
@@ -861,9 +880,10 @@ def request_failure(
             reason,
             principal_id,
             approval_id,
-            expected_state,
+            "ready" if claimed else expected_state,
             expected_generation,
-            expected_runtime_generation,
+            None if claimed else expected_runtime_generation,
+            current.claim_span_id,
         ),
     )
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
@@ -883,7 +903,7 @@ def fence(
     also replaces a failure still settling: the regeneration owns the reply, so
     the old approval's cleanup publishes nothing.
     """
-    states = ("waiting", "ready", "claimed", "failing") if reason == SUPERSEDED_FAILURE_REASON else _FENCEABLE
+    states = (*_FENCEABLE, "failing") if reason == SUPERSEDED_FAILURE_REASON else _FENCEABLE
     placeholders = ", ".join("?" for _ in states)
     updated = transaction.fetchone(
         f"""

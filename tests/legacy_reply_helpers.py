@@ -174,8 +174,10 @@ async def resumed_main_left_approval(
 async def store_main_continuation(store: PrincipalStore, continuation: ApprovalContinuation) -> None:
     """Store a continuation as an earlier release left it, after the upgrade adopted its reply identity.
 
-    It names no paused span: reply classification gives it one.
+    It names no paused span: reply classification gives it one. A claimed one
+    is stored as the upgrade leaves it: ready, with its claim in the adopted identity.
     """
+    claimed = continuation.state == "claimed"
 
     def write(transaction: Transaction) -> None:
         context = approval_continuations._context(continuation)
@@ -190,9 +192,9 @@ async def store_main_continuation(store: PrincipalStore, continuation: ApprovalC
                 store._principal_id,
                 continuation.approval_id,
                 continuation.entity_name,
-                continuation.state,
+                "ready" if claimed else continuation.state,
                 continuation.generation,
-                continuation.runtime_generation,
+                None if claimed else continuation.runtime_generation,
                 continuation.failure_reason,
                 approval_continuations._json(context),
                 len(continuation.approval_id),

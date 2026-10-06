@@ -1078,24 +1078,29 @@ def _pending_rows(
         LEFT JOIN approval_continuations AS continuations
          ON continuations.principal_id = approval_sources.principal_id
          AND continuations.approval_id = approval_sources.approval_id
+        LEFT JOIN reply_spans AS claim_span
+          ON claim_span.principal_id = continuations.principal_id
+         AND claim_span.span_id = continuations.claim_span_id
     """
+    # A claim this instance's span holds keeps its sources until its FINAL
+    # exists; one an older instance left goes to recovery.
     continuation_clause = """
           AND (
             approval_sources.approval_id IS NULL
             OR (
               approval_sources.source_ordinal = 0
               AND (
-                continuations.state IN ('ready', 'failing')
+                continuations.state = 'failing'
                 OR (
                   continuations.state = 'waiting'
                   AND continuations.runtime_generation IS NOT NULL
                   AND continuations.runtime_generation <> ?
                 )
                 OR (
-                  continuations.state = 'claimed'
+                  continuations.state = 'ready'
                   AND (
-                    continuations.runtime_generation IS NULL
-                    OR continuations.runtime_generation <> ?
+                    continuations.claim_span_id IS NULL
+                    OR claim_span.bot_generation <> ?
                     OR EXISTS (
                       SELECT 1 FROM matrix_delivery_outbox AS approval_final
                       WHERE approval_final.principal_id = events.principal_id

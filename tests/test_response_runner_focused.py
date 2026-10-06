@@ -1943,19 +1943,16 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
-        state="ready",
+        state="claimed",
     )
     await store_main_continuation(store, continuation)
-    claimed = await claim_continuation(
-        store,
-        continuation.approval_id,
-        runtime_generation="current-runtime",
-    )
-    assert claimed is not None
 
     # This start adopts the reply of the resume a stopped instance left running, and reads what it showed.
     bot = runner_bot
     await bot._reply_runtime.start()
+    claimed = await store.approval_continuation(continuation.approval_id)
+    assert claimed is not None
+    assert claimed.state == "claimed"
     unique_room_send_responses(bot.client)
     await read_after_sync(
         bot,

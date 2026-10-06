@@ -26,6 +26,17 @@ if TYPE_CHECKING:
 # response attempt tables; such a continuation is read from that copy until reply classification names its span.
 # Coverage: tests/test_legacy_continuation_identity.py.
 
+# LEGACY_COMPAT: Approval continuations that stored their claim.
+# Legacy format: approval_continuations rows in state 'claimed' with the claimant's runtime_generation; the upgrade that
+# adds span_id selects them.
+# Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages keep a claimed continuation
+# ready and name the span that runs it in approval_continuations.claim_span_id.
+# Handling: the upgrade stores such a row as ready with no runtime generation and marks the claim in its adopted
+# identity, so it reads as claimed until reply classification adopts its reply with the resume the stopped instance
+# left running and names that span; the CHECK constraint of an upgraded database still admits 'claimed', which nothing
+# writes.
+# Coverage: tests/test_legacy_continuation_identity.py::test_a_claimed_continuation_keeps_its_claim_across_the_upgrade.
+
 _IDENTITY_KEY = "legacy_identity"
 
 
@@ -42,6 +53,8 @@ class LegacyIdentity(TypedDict):
     show_tool_calls: bool
     show_tool_calls_is_frozen: bool
     prepared_edit_record: TurnRecord | None
+    # The earlier release had claimed it: the instance that stopped left its resume running.
+    claimed: bool
 
 
 _PAGE_SIZE = 128
@@ -136,18 +149,19 @@ def upgrade_continuation_identity(
     if "approval_continuations" not in existing_tables or "span_id" in continuation_columns:
         return
     transaction.execute("ALTER TABLE approval_continuations ADD COLUMN span_id TEXT")
+    transaction.execute("ALTER TABLE approval_continuations ADD COLUMN claim_span_id TEXT")
     attempts = "response_attempts" in existing_tables
     cursor: tuple[str, str] | None = None
     while True:
         rows = (
             transaction.fetchall(
-                """SELECT principal_id, approval_id, entity_name, context_json FROM approval_continuations
+                """SELECT principal_id, approval_id, entity_name, state, context_json FROM approval_continuations
                 ORDER BY principal_id, approval_id LIMIT ?""",
                 (_PAGE_SIZE,),
             )
             if cursor is None
             else transaction.fetchall(
-                """SELECT principal_id, approval_id, entity_name, context_json FROM approval_continuations
+                """SELECT principal_id, approval_id, entity_name, state, context_json FROM approval_continuations
                 WHERE (principal_id, approval_id) > (?, ?)
                 ORDER BY principal_id, approval_id LIMIT ?""",
                 (*cursor, _PAGE_SIZE),
@@ -174,7 +188,8 @@ def upgrade_continuation_identity(
                 pending,
                 stored,
             )
-            stored[_IDENTITY_KEY] = {**identity, "thread_id": stored.get("thread_id")}
+            claimed = row["state"] == "claimed"
+            stored[_IDENTITY_KEY] = {**identity, "thread_id": stored.get("thread_id"), "claimed": claimed}
             transaction.execute(
                 "UPDATE approval_continuations SET context_json = ? WHERE principal_id = ? AND approval_id = ?",
                 (
@@ -186,6 +201,9 @@ def upgrade_continuation_identity(
         if len(rows) < _PAGE_SIZE:
             break
         cursor = str(rows[-1]["principal_id"]), str(rows[-1]["approval_id"])
+    transaction.execute(
+        "UPDATE approval_continuations SET state = 'ready', runtime_generation = NULL WHERE state = 'claimed'",
+    )
     if attempts:
         transaction.execute("DROP TABLE IF EXISTS response_attempt_sources")
         transaction.execute("DROP TABLE IF EXISTS response_attempts")
@@ -215,6 +233,7 @@ def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, obj
             "logical_source_event_ids": list(continuation.sources.logical_source_event_ids),
             "discovery_event_ids": list(continuation.sources.discovery_event_ids),
             "edit_receipt_order": continuation.sources.edit_receipt_order,
+            "claimed": continuation.state == "claimed",
         },
     }
 
@@ -237,6 +256,7 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> Legac
         "show_tool_calls": context.get("show_tool_calls", True) is not False,
         "show_tool_calls_is_frozen": "show_tool_calls" in context,
         "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
+        "claimed": identity.get("claimed") is True,
     }
 
 

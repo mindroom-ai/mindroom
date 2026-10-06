@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -13,10 +14,12 @@ import pytest
 import pytest_asyncio
 from agno.models.response import ToolExecution
 
+from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
+from mindroom.event_journal.replies import ReplyRowRequest
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime, with_user_stop
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
@@ -84,6 +87,15 @@ class _ApprovalCase:
             assert result.consumed
 
     async def pause_newer(self) -> ApprovalContinuation:
+        await self.dispatch_newer()
+        newer = await self.principal.approval_continuation_for_source("$newer-edit")
+        assert newer is not None
+        assert newer.prepared_edit_record.latest_edit_receipt_order == 6
+        assert await self.principal.approval_continuation_for_source("$edit") is not None
+        return newer
+
+    async def dispatch_newer(self) -> None:
+        """Dispatch a newer edit whose regeneration pauses for its own approval."""
         event = nio.RoomMessageText.from_dict({**self.event.source, "event_id": "$newer-edit", "origin_server_ts": 30})
         await self.principal.admit(
             _inbound_event(self.room.room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
@@ -132,11 +144,6 @@ class _ApprovalCase:
         ):
             assert await self.controller.handle_text_event(self.room, event) is TurnDispatchOutcome.DEFERRED
             await self.runner.wait_for_source_owned_inbox_responses()
-        newer = await self.principal.approval_continuation_for_source("$newer-edit")
-        assert newer is not None
-        assert newer.prepared_edit_record.latest_edit_receipt_order == 6
-        assert await self.principal.approval_continuation_for_source("$edit") is not None
-        return newer
 
     async def stop(self, order: int = 4) -> None:
         reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.gateway))
@@ -183,13 +190,28 @@ class _ApprovalCase:
         )
         assert claimed is not None
         assert claimed.prepared_edit_record is not None
-        await self.principal.enqueue_matrix_delivery(
-            delivery_id="$edit",
-            stage=DeliveryStage.FINAL,
+        assert claimed.claim_span_id is not None
+        resume = await self.principal.replies.span(claimed.claim_span_id)
+        assert resume is not None
+        # The resume's answer ends its span, as a resumed run's FINAL does.
+        await self.principal.enqueue_reply_row(
+            request=ReplyRowRequest(
+                reply_id=resume.reply_id,
+                span_id=resume.span_id,
+                decide=lambda reply, span: rl.finish(
+                    reply,
+                    span,
+                    rl.TerminalWrite(
+                        shown=reply.presentation,
+                        prepared_revision=reply.revision,
+                        state=rl.ReplyState.COMPLETED,
+                    ),
+                    now_ns=time.time_ns(),
+                ),
+            ),
             room_id=self.room.room_id,
             thread_id=None,
             payload={"body": "Edited answer", "formatted_body": "Edited answer"},
-            edits_event_id="$answer",
             result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(claimed.prepared_edit_record)},
         )
         assert await self.principal.claim_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL) is not None
@@ -516,12 +538,13 @@ class TestEditApprovalOwnership:
         assert not await case.principal.is_pending("$edit")
         assert await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL) is None
 
-    async def test_newer_answer_preserves_frozen_success(self, approval_case: _ApprovalCase) -> None:
-        """A result-bearing frozen FINAL remains owed even after a later edit answers."""
+    async def test_newer_edit_waits_for_a_frozen_success(self, approval_case: _ApprovalCase) -> None:
+        """A newer edit cannot take the reply while the approved run's frozen FINAL is owed, which still delivers."""
         case = approval_case
         claimed = await case.freeze_final()
-        await case.pause_newer()
-        await case.resume("$newer-edit")
+        await case.dispatch_newer()
+        assert await case.principal.approval_continuation_for_source("$newer-edit") is None
+        assert await case.principal.is_pending("$newer-edit")
         assert not await case.runner._approval_responses.settle_failure(claimed, "Paused run is no longer available")
         final = await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
         assert final is not None

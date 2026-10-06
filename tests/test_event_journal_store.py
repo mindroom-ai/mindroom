@@ -6750,7 +6750,9 @@ class TestApprovalContinuations:
             thread_id="$thread",
             payload=text("Waiting for approval"),
         )
-        await paused_for_approval(alice, self.continuation(state=state))
+        await paused_for_approval(alice, self.continuation(state="ready" if state == "claimed" else state))
+        if state == "claimed":
+            assert await claim_continuation(alice, "approval-1", runtime_generation="runtime-a") is not None
         for index in (1, 2):
             await admit(alice, f"$redact-{index}", redacts=f"$source-{index}", kind=EventKind.REDACTION)
 

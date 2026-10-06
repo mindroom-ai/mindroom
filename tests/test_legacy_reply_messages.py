@@ -527,6 +527,14 @@ async def test_a_claimed_resume_is_left_running_for_approval_recovery(
     resume = await principal.replies.span(reply.current_span_id or "")
     assert resume is not None
     assert resume.approval_id == "approval-1"
+    adopted = await principal.approval_continuation("approval-1")
+    assert adopted is not None
+    if state == "claimed":
+        # The resume is the claim; the instance that stopped ran it.
+        assert adopted.claim_span_id == resume.span_id
+        assert (adopted.state, adopted.runtime_generation) == ("claimed", resume.bot_generation)
+    else:
+        assert adopted.claim_span_id is None
     assert await principal.replies.owner_lost("gen-new", now_ns=NOW) == ()
 
 

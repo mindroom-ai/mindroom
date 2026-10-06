@@ -389,7 +389,10 @@ _TABLES = (
         -- The span whose pause created the continuation; null only for one
         -- adopted from an earlier release until reply classification names it.
         span_id TEXT,
-        state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'claimed', 'failing')),
+        -- The span that runs a ready continuation once claimed; its records own
+        -- the claim's bot instance and outcome.
+        claim_span_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'failing')),
         generation BIGINT NOT NULL DEFAULT 0,
         runtime_generation TEXT,
         failure_reason TEXT,

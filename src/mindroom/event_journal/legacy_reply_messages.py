@@ -110,6 +110,8 @@ class _Adoption:
     row_placeholder_only: bool = False
     # The continuation whose pause the reply's first span is.
     approval_id: str | None = None
+    # The resume an earlier release's claim left running, which claims the continuation.
+    claim_span_id: str | None = None
 
 
 def _classified(transaction: Transaction, principal_id: str) -> bool:
@@ -206,10 +208,11 @@ def _write(transaction: Transaction, principal_id: str, adoption: _Adoption) -> 
         rl.Transition(outcome=rl.Outcome.APPLIED, reply=adoption.reply, spans=adoption.spans),
     )
     if adoption.approval_id is not None:
-        # The continuation names the span that paused its reply, as one paused now does.
+        # The continuation names the span that paused its reply and any resume that claims it, as one paused now does.
         transaction.execute(
-            "UPDATE approval_continuations SET span_id = ? WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL",
-            (adoption.spans[0].span_id, principal_id, adoption.approval_id),
+            """UPDATE approval_continuations SET span_id = ?, claim_span_id = ?
+            WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL""",
+            (adoption.spans[0].span_id, adoption.claim_span_id, principal_id, adoption.approval_id),
         )
     row = adoption.row
     if row is not None:
@@ -400,6 +403,7 @@ def _paused_reply(
         outcome=None,
         approval_id=continuation.approval_id,
     )
+    claim_span_id = resume.span_id if continuation.state == "claimed" else None
     if final is not None and (final.acknowledged_event_id is not None or _owed_final(final)):
         # The resume froze its answer: the reply ends as that row says, and
         # Frozen-final recovery still finishes the continuation.
@@ -423,10 +427,16 @@ def _paused_reply(
             reply=answered,
             spans=(paused, ended),
             row=final if owed else None,
+            claim_span_id=claim_span_id,
         )
     # Approval recovery owns a resume a stopped instance left running.
     running = replace(reply, state=rl.ReplyState.ACTIVE, current_span_id=resume.span_id, last_span_id=resume.span_id)
-    return _Adoption(approval_id=continuation.approval_id, reply=running, spans=(paused, resume))
+    return _Adoption(
+        approval_id=continuation.approval_id,
+        reply=running,
+        spans=(paused, resume),
+        claim_span_id=claim_span_id,
+    )
 
 
 def _unowned_row_delivery_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:

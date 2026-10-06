@@ -422,10 +422,9 @@ class ReplyRuntime:
         self,
         continuation: ApprovalContinuation,
         *,
-        runtime_generation: str,
         placeholder: str,
     ) -> tuple[ApprovalContinuation | None, SpanHandle | None]:
-        """Claim a ready continuation and its paused reply's resume span together.
+        """Claim a ready continuation with its paused reply's resume span.
 
         Returns neither when the continuation is not ready, or when the reply's
         earlier writes are unresolved, which retry the sources once they resolve.
@@ -446,7 +445,6 @@ class ReplyRuntime:
         try:
             claimed, applied = await self.store.claim_approval_resume(
                 continuation.approval_id,
-                runtime_generation=runtime_generation,
                 claim=claim,
             )
             if applied is None:

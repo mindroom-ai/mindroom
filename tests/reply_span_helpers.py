@@ -14,6 +14,7 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind, Inbound
 from mindroom.event_journal.replies import ClaimLookup, ReplyRowRequest
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
+from tests.approval_continuation_helpers import claim_continuation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -298,7 +299,18 @@ async def paused_for_approval(
     """Pause a reply for ``continuation`` the way a response does, and return the continuation the pause created.
 
     ``None`` means the pause could not take the sources, as
-    ``PrincipalStore.pause_for_approval`` reports it.
+    ``PrincipalStore.pause_for_approval`` reports it. A claimed continuation
+    is paused ready and then claimed by its ``runtime_generation``'s resume.
     """
+    claimed, claimant = continuation.state == "claimed", continuation.runtime_generation
+    if claimed:
+        continuation = replace(continuation, state="ready", runtime_generation=None)
     span = await reply_shown_for_approval(principal, continuation)
-    return None if span is None else await pause_shown_reply(principal, continuation, span)
+    paused = None if span is None else await pause_shown_reply(principal, continuation, span)
+    if paused is None or not claimed:
+        return paused
+    return await claim_continuation(
+        principal,
+        continuation.approval_id,
+        runtime_generation=claimant or "gen-test",
+    )
