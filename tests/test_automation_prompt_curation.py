@@ -349,6 +349,20 @@ def test_a_topic_file_the_scan_skipped_is_not_treated_as_deleted(
     assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "- Dentist on Friday.\n"
 
 
+def test_a_topic_file_the_scan_cut_short_is_still_restored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The file where the scan's byte budget runs out is read directly, so an overwritten archive is still restored."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").write_text("# Projects\n" + SECTIONS[3], encoding="utf-8")
+    memory = MEMORY.replace(SECTIONS[3], POINTER)
+    (root / "MEMORY.md").write_text(memory, encoding="utf-8")
+    monkeypatch.setattr("mindroom.memory._file_backend._MAX_MEMORY_SCAN_BYTES", len(memory) + len("Daily note.\n") + 20)
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "# Projects\n" + SECTIONS[3]
+
+
 def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
     """Moving detail out of a context file that lives under memory/ is a move, not a deletion."""
     config, automation, root = _setup(tmp_path)

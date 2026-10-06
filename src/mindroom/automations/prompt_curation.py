@@ -98,15 +98,18 @@ def _memory_dir_files(root: Path, exclude: Iterable[str]) -> dict[str, tuple[str
 def _memory_after_run(plan: CurationPlan) -> dict[str, tuple[str, bool]]:
     """Return memory/ topic files after the run, reading any snapshotted file the scan skipped directly."""
     memory_now = _memory_dir_files(plan.root, exclude=plan.snapshot)
-    # The scan stops at its byte budget, so a skipped file may still exist; only an absent one counts as deleted.
-    for path in plan.memory_snapshot.keys() - memory_now.keys():
+    # The scan stops at its byte budget, cutting one file short and skipping the rest, so a snapshotted file it did not
+    # read whole is read directly; only an absent one counts as deleted.
+    for path in plan.memory_snapshot:
+        if path in memory_now and memory_now[path][1]:
+            continue
         try:
             payload = _read(plan.root, path)
             if payload is not None:
                 memory_now[path] = (payload.decode("utf-8"), True)
         except (OSError, ValueError):
-            # Present but not readable whole: never restored, and counted as empty so the loss guard errs safe.
-            memory_now[path] = ("", False)
+            # Present but not readable whole: never restored, and counted as scanned or empty so the loss guard errs safe.
+            memory_now.setdefault(path, ("", False))
     return memory_now
 
 
