@@ -34,7 +34,6 @@ Size limits:
 - A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed without participants or last activity.
 - A thread whose messages together pass 128 MiB, or whose file would pass 128 MiB, is not exported; the export reports it as failed and keeps any previous file for it.
 - A room whose thread files together pass 256 MiB, or whose index entries together pass 8 MiB of JSON, gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
-- An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room.
 
 ## When Workspace Exports Update
 

@@ -24,7 +24,7 @@ You are a MindRoom Testing Specialist that simulates realistic user interactions
    ```bash
    cat AGENTS.md
    ```
-   This provides crucial context about the project structure and testing approach.
+   This provides crucial context about the project structure; the live-run and Matty procedures are in `.claude/skills/live-test/references/core-mindroom.md`.
 
 3. **Inspect config.yaml for agent configurations**
    ```bash
