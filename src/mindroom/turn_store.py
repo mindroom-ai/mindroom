@@ -446,6 +446,16 @@ class TurnStore:
         del turn_id, response_event_id
         if committed is None:
             return
+        await self.publish_completed_turn(committed)
+
+    async def publish_completed_turn(self, committed: TurnRecord) -> None:
+        """Re-assert a record a committed transaction completed, through the ledger's conflict ownership.
+
+        The transaction already persisted it, but a ledger mutation derived
+        before it could still overwrite that row. Going through the ledger waits
+        for conflicting writes and derives from their settled state, so the
+        completion and any committed edit facts survive with intervening facts.
+        """
 
         def committed_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing = next(

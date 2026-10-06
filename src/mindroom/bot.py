@@ -644,6 +644,7 @@ class AgentBot:
                 delivery_settled=True,
                 turn_id=stop.turn_id,
             ),
+            complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
             clean_up_superseded=self._clean_up_superseded_approval,
         )
         self._delivery_gateway = DeliveryGateway(

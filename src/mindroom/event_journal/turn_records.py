@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.handled_turns import TurnRecordCodec, resolve_turn_record, with_user_stop
 from mindroom.turn_record import (
+    TurnRecord,
     canonicalize_turn_record,
     completed_response_record,
     merge_committed_response,
@@ -41,8 +42,6 @@ from mindroom.turn_record import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from mindroom.turn_record import TurnRecord
 
     from .backend import Transaction
     from .models import TerminalTurnWrite
@@ -219,6 +218,57 @@ def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> Te
         record_json=write.record_json,
     )
     return write
+
+
+def complete_turn(
+    transaction: Transaction,
+    agent_name: str,
+    *,
+    logical_event_ids: tuple[str, ...],
+    prepared_edit: TurnRecord | None,
+) -> TurnRecord | None:
+    """Record that this agent answered the turn these sources name, committing an answered regeneration's edit.
+
+    Returns the record written, or ``None`` when nothing changed: the turn was
+    already answered, or it has no record, which only the crash window before
+    ingress persisted it leaves, and which run-metadata recovery restores.
+    """
+    candidate = prepared_edit if prepared_edit is not None else TurnRecord.create(list(logical_event_ids))
+    records = _claim_turn_records(transaction, agent_name, candidate)
+    current = next((records[event_id] for event_id in logical_event_ids if event_id in records), None)
+    if current is None:
+        if prepared_edit is None:
+            return None
+        completed = canonicalize_turn_record(prepared_edit, completed=True)
+    else:
+        tombstones = tuple(
+            event_id
+            for event_id, record in records.items()
+            if record is not None and event_id in record.redacted_source_event_ids
+        )
+        merged = (
+            None
+            if prepared_edit is None
+            else merge_committed_response(
+                current,
+                canonicalize_turn_record(prepared_edit, completed=True),
+                tombstoned_event_ids=tombstones,
+            )
+        )
+        if merged is None:
+            if current.completed:
+                return None
+            merged = canonicalize_turn_record(current, completed=True)
+        completed = merged
+    assert completed.anchor_event_id is not None
+    upsert(
+        transaction,
+        agent_name,
+        index_event_ids=completed.indexed_event_ids,
+        anchor_event_id=completed.anchor_event_id,
+        record_json=json.dumps(TurnRecordCodec._to_ledger_record(completed)),
+    )
+    return completed
 
 
 def stop_turn(

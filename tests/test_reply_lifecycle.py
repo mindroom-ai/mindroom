@@ -433,7 +433,7 @@ def test_finish_completes_and_settles() -> None:
     assert transition.reply.current_span_id is None
     assert transition.row is not None
     assert transition.row.stage is WriteStage.FINAL
-    assert SettleSources(span.span_id) in transition.effects
+    assert SettleSources(span.span_id, answered=True) in transition.effects
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.COMPLETED
 
 
@@ -903,7 +903,7 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
         _write(regeneration.reply, ReplyState.COMPLETED),
         now_ns=NOW,
     )
-    assert rl.SettleSources(regeneration.claimed.span_id) in answer.effects
+    assert rl.SettleSources(regeneration.claimed.span_id, answered=True) in answer.effects
 
 
 def test_a_regeneration_claimed_before_the_stopped_wait_settles_owns_its_sources() -> None:

@@ -65,6 +65,7 @@ async def reply_span(
             generation="gen-test",
             retry_sources=lambda _room_id, _sources: None,
             record_stop=AsyncMock(),
+            complete_turn=AsyncMock(),
             clean_up_superseded=lambda _continuation: None,
         )
     await runtime.take_ownership()

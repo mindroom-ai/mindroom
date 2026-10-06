@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
-from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation
+from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation, TurnCompleted
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.replies import PostCommitEffect
     from mindroom.matrix_delivery import ReplyRowEnqueuer
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.turn_record import TurnRecord
 
 
 @dataclass
@@ -188,6 +189,8 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Tells the turn ledger's cache about a Stop an acknowledgement already wrote.
     record_stop: Callable[[rl.TransferStop], Awaitable[object]]
+    # Tells the turn ledger about a turn a reply's settlement already recorded answered.
+    complete_turn: Callable[[TurnRecord], Awaitable[object]]
     # Starts the cleanup of an approval an edit superseded, outside any conversation.
     clean_up_superseded: Callable[[ApprovalContinuation], None]
     clock: Callable[[], int] = field(default=time.time_ns)
@@ -209,6 +212,8 @@ class ReplyRuntime:
         for effect in effects:
             if isinstance(effect, rl.TransferStop):
                 await self.record_stop(effect)
+            elif isinstance(effect, TurnCompleted):
+                await self.complete_turn(effect.record)
             elif isinstance(effect, rl.WakeApproval):
                 await self._wake_fenced_approval(effect.approval_id)
         for effect in effects:

@@ -263,6 +263,7 @@ def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnSto
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         record_stop=AsyncMock(),
+        complete_turn=AsyncMock(),
         clean_up_superseded=lambda _continuation: None,
     )
     return bot

@@ -240,9 +240,11 @@ class Reply:
 
 @dataclass(frozen=True, slots=True)
 class SettleSources:
-    """In the transaction: settle every pending source of the span in the journal."""
+    """In the transaction: settle every pending source of the span, which records its turn answered."""
 
     span_id: str
+    # Whether the span ended with its answer, which consumes a regeneration's selected edit.
+    answered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -990,7 +992,9 @@ def _terminal_row(
     )
     shown = write.shown if write.frozen_display is None else write.frozen_display
     updated, row = _row(updated, span, stage, shown=shown)
-    effects: tuple[Effect, ...] = (SettleSources(span.span_id),) if settles else ()
+    effects: tuple[Effect, ...] = (
+        (SettleSources(span.span_id, answered=write.state is ReplyState.COMPLETED),) if settles else ()
+    )
     return Transition(
         outcome=Outcome.APPLIED,
         reply=updated,

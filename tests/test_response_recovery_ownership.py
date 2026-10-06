@@ -70,8 +70,13 @@ SOURCE = "$deleted"
 INITIAL = "$initial"
 
 
-def _runner_on(bot: AgentBot, gateway: DeliveryGateway, principal: PrincipalStore) -> ResponseRunner:
-    """Return the bot's response runner, with its replies and deliveries on one test principal."""
+def _runner_on(
+    bot: AgentBot,
+    gateway: DeliveryGateway,
+    principal: PrincipalStore,
+    turn_store: TurnStore,
+) -> ResponseRunner:
+    """Return the bot's response runner, with its replies, deliveries, and turn ledger on the test's stores."""
     deps = unwrap_extracted_collaborator(bot._response_runner).deps
     assert deps.replies is not None
     return ResponseRunner(
@@ -79,7 +84,7 @@ def _runner_on(bot: AgentBot, gateway: DeliveryGateway, principal: PrincipalStor
             deps,
             delivery_gateway=gateway,
             approval_store=principal,
-            replies=replace(deps.replies, store=principal),
+            replies=replace(deps.replies, store=principal, complete_turn=turn_store.publish_completed_turn),
         ),
     )
 
@@ -199,7 +204,7 @@ async def test_a_newer_requester_message_supersedes_the_recovered_reply(  # noqa
     assert store.get_turn_record(source_id).response_event_id is None
     if debt == "adopted":
         await store.record_pending_turn(replace(original, response_event_id=original_initial_id))
-    runner = _runner_on(bot, gateway, principal)
+    runner = _runner_on(bot, gateway, principal, store)
     runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=history)
     # This start adopts the reply main left, then reads what its event showed.
     await runner.deps.replies.start()
@@ -728,7 +733,7 @@ async def test_source_redaction_at_second_preparation_gate_suppresses_visible_in
             ),
         ),
     )
-    runner = _runner_on(bot, gateway, principal)
+    runner = _runner_on(bot, gateway, principal, store)
     target = MessageTarget.resolve(ROOM_ID, "$thread", SOURCE)
     await store.record_pending_turn(
         TurnRecord.create([SOURCE], completed=False, response_event_id=INITIAL, conversation_target=target),
@@ -849,7 +854,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             ),
         ),
     )
-    runner = _runner_on(bot, gateway, principal)
+    runner = _runner_on(bot, gateway, principal, store)
     controller = unwrap_extracted_collaborator(bot._turn_controller)
     gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
 

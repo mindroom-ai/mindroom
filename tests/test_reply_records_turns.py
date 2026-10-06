@@ -23,6 +23,7 @@ from mindroom.response_runner import PostLockRequestPreparationError, ResponseRe
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
+from mindroom.turn_store import TurnStore
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import message_origin, patch_response_runner_module, unwrap_extracted_collaborator
 from tests.journal_membership_helpers import admit_room_membership
@@ -162,6 +163,28 @@ async def test_blocking_answer_completes_its_reply(tmp_path: Path) -> None:
     assert render_body(decode_presentation(reply.presentation))[0] == "A complete answer."
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED]
     assert not await bot._reply_runtime.store.is_pending("$event")
+
+
+async def test_the_replys_settlement_alone_records_its_turn_answered(tmp_path: Path) -> None:
+    """Settling the reply's sources records the turn answered in the ledger and its cache, with no acknowledgement path."""
+    bot = await _streaming_bot(tmp_path)
+    await _pending_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with (
+        patch.object(TurnStore, "terminal_turn_record", return_value=None),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="A complete answer."),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await runner.generate_response(_plain_request(_target()))
+
+    record = bot._turn_store.get_turn_record("$event")
+    assert record is not None
+    assert record.completed
+    assert record.response_event_id is None
+    assert bot._turn_store.is_handled("$event")
 
 
 async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: Path) -> None:

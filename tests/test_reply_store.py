@@ -11,7 +11,15 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
-from mindroom.event_journal import DeliveryStage, DepartureSource, EventKind, replies, reply_messages, reply_spans
+from mindroom.event_journal import (
+    DeliveryStage,
+    DepartureSource,
+    EventKind,
+    replies,
+    reply_messages,
+    reply_spans,
+    turn_records,
+)
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyRowRequest
 from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
@@ -236,6 +244,42 @@ async def test_applying_a_terminal_transition_settles_the_span_sources(journal_s
     span = await principal.replies.span("span-1")
     assert span is not None
     assert span.outcome is SpanOutcome.COMPLETED
+
+
+async def test_settling_a_spans_sources_records_its_turn_answered(journal_store: EventJournalStore) -> None:
+    """The reply rule that settles a turn's sources is what records the turn answered, in the same transaction."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    pending = TurnRecord.create(["$source"], completed=False)
+    await journal_store.backend.write(
+        lambda tx: turn_records.write_record(
+            tx,
+            "agent",
+            index_event_ids=pending.indexed_event_ids,
+            anchor_event_id="$source",
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
+        ),
+    )
+    claim = _first_claim()
+    await _apply(journal_store, claim)
+    assert claim.reply is not None
+    assert claim.claimed is not None
+
+    applied = await _apply(
+        journal_store,
+        rl.finish(
+            claim.reply,
+            claim.claimed,
+            rl.TerminalWrite(shown="answer", prepared_revision=claim.reply.revision, state=ReplyState.COMPLETED),
+            now_ns=30,
+        ),
+    )
+
+    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
+    assert record is not None
+    assert record.completed
+    assert record.response_event_id is None
+    assert [effect.record for effect in applied.post_commit if isinstance(effect, replies.TurnCompleted)] == [record]
 
 
 async def test_post_commit_effects_are_returned(journal_store: EventJournalStore) -> None:

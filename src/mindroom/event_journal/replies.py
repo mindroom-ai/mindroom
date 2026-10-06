@@ -30,11 +30,21 @@ from . import approval_continuations, journal, outbox, reply_messages, reply_spa
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.turn_record import TurnRecord
+
     from .backend import Backend, Transaction
     from .models import MatrixDelivery
 
+
+@dataclass(frozen=True, slots=True)
+class TurnCompleted:
+    """After commit: the turn ledger learns a turn a reply's settlement recorded answered."""
+
+    record: TurnRecord
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | TransferStop
+type PostCommitEffect = CancelSpan | WakeApproval | TransferStop | TurnCompleted
 type Decide = Callable[[Reply, Span], Transition]
 
 
@@ -87,6 +97,17 @@ def _run(
         case SettleSources(span_id=span_id):
             span = _span_for(transaction, principal_id, transition, span_id)
             journal.settle_many(transaction, principal_id, span.sources.pending)
+            reply = transition.reply
+            assert reply is not None, "a settlement belongs to a reply's transition"
+            completed = turn_records.complete_turn(
+                transaction,
+                reply.entity_name,
+                logical_event_ids=span.sources.logical,
+                prepared_edit=None,
+            )
+            if completed is not None:
+                # The ledger's write ordering and cache learn it after the commit.
+                post_commit.append(TurnCompleted(completed))
         case FenceApproval(approval_id=approval_id, disposition=disposition):
             approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
         case CancelSpan() | WakeApproval():
