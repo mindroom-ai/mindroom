@@ -95,8 +95,8 @@ _running_tasks: dict[str, asyncio.Task] = {}
 _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
 # The router restores runners when it starts and cancels them all when it stops, so new runners
-# use its runtime in rooms where it can write schedule state; a runner on another bot's client
-# outlives that client when the bot is replaced.
+# use its runtime in rooms it can serve (write schedule state and send the trigger); a runner on
+# another bot's client outlives that client when the bot is replaced.
 _runner_owner: ScheduledTaskRunnerOwner | None = None
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
@@ -319,7 +319,7 @@ class SchedulingRuntime:
 
 @dataclass(frozen=True)
 class ScheduledTaskRunnerOwner:
-    """The started router's runtime, used for new runners in rooms where it can write schedule state."""
+    """The started router's runtime, used for new runners in rooms it can serve."""
 
     client: nio.AsyncClient
     conversation_reader: ConversationReader
@@ -629,8 +629,9 @@ def _start_scheduled_task(
 
 def _router_runtime_for_room(workflow: ScheduledWorkflow) -> ScheduledTaskRunnerOwner | None:
     """Return the router runtime when the router has joined the room and may write its state and triggers."""
+    assert workflow.room_id is not None  # Callers save the schedule in its room first.
     owner = _runner_owner
-    if owner is None or workflow.room_id is None:
+    if owner is None:
         return None
     room = owner.client.rooms.get(workflow.room_id)
     if room is None:

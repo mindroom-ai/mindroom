@@ -557,7 +557,7 @@ async def _save_agent_schedule(tmp_path: Path, agent_client: AsyncMock, agent_re
 
 @pytest.mark.asyncio
 async def test_schedule_created_by_an_agent_runs_on_the_router_runtime(tmp_path: Path) -> None:
-    """An agent's schedule keeps firing after that agent's bot is replaced and its client closes."""
+    """An agent's schedule starts on the router's runtime, so replacing the agent's bot cannot strand it."""
     router = _router_runtime(room_power_level=100)
     scheduling.set_scheduled_task_runner_owner(router)
 
