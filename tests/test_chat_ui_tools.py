@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from nio.api import RelationshipType
 from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
@@ -35,7 +36,7 @@ from tests.chat_ui_contract_fixture import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -56,13 +57,19 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     metadata = TOOL_METADATA["chat_ui"]
 
     assert metadata.requires_room_context
-    assert metadata.function_names == ("show_computer", "open_settings", "open_panel", "show_canvas")
+    assert metadata.function_names == (
+        "show_computer",
+        "open_settings",
+        "open_panel",
+        "show_canvas",
+        "read_canvas_state",
+    )
     assert [(field.name, field.default) for field in metadata.config_fields] == [
         ("enable_show_canvas", False),
         ("enable_canvas_libraries", False),
     ]
     assert sorted(ChatUITools().async_functions) == ["open_panel", "open_settings", "show_computer"]
-    assert "show_canvas" in ChatUITools(enable_show_canvas=True).async_functions
+    assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).async_functions)
     assert isinstance(get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None), ChatUITools)
     assert tuple(inspect.signature(ChatUITools.show_computer).parameters) == ("self",)
     assert tuple(inspect.signature(ChatUITools.open_settings).parameters) == ("self", "section")
@@ -73,7 +80,9 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         "html",
         "path",
         "canvas_event_id",
+        "share_state",
     )
+    assert tuple(inspect.signature(ChatUITools.read_canvas_state).parameters) == ("self", "canvas_event_id")
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
     function = ChatUITools().get_async_functions()["open_panel"]
     function.process_entrypoint(strict=True)
@@ -1152,3 +1161,205 @@ async def test_large_update_of_a_foreign_canvas_uploads_nothing(tmp_path: Path) 
     assert "Only your own canvases" in result["message"]
     context.client.upload.assert_not_awaited()
     context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_canvas_that_shares_its_state_says_so_from_the_start(tmp_path: Path) -> None:
+    """Sharing is an authority field of the request, so Chat can tell the user before anything is shared."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        await ChatUITools().show_canvas(title="Plans", html=CANVAS_HTML, share_state=True)
+
+    assert _sent_content(context)["io.mindroom.ui_action"]["share_state"] is True
+
+
+@pytest.mark.asyncio
+async def test_updates_keep_a_canvas_sharing_and_cannot_start_it(tmp_path: Path) -> None:
+    """An edit must repeat the original's sharing, and cannot turn sharing on behind the user's back."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+    await _update(context)
+    assert _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]["share_state"] is True
+
+    unshared = _context(tmp_path)
+    _serve_event(unshared, _canvas_source(unshared))
+    with tool_runtime_context(unshared):
+        result = json.loads(
+            await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas", share_state=True),
+        )
+    assert result["status"] == "error"
+    assert "decided when a canvas is first shown" in result["message"]
+    unshared.client.room_send.assert_not_awaited()
+
+
+def _state_copy(
+    *,
+    sender: str = REQUESTER_ID,
+    event_type: str = "io.mindroom.canvas_state",
+    ts: int = 2_000,
+    **content: object,
+) -> nio.Event:
+    return nio.Event.parse_event(
+        {
+            "type": event_type,
+            "event_id": f"$copy-{ts}",
+            "sender": sender,
+            "origin_server_ts": ts,
+            "content": {
+                "version": 1,
+                "m.relates_to": {"rel_type": "m.reference", "event_id": "$canvas"},
+                **content,
+            },
+        },
+    )
+
+
+def _serve_relations(context: ToolRuntimeContext, *events: object) -> MagicMock:
+    async def newest_first() -> AsyncIterator[object]:
+        for event in events:
+            yield event
+
+    relations = MagicMock(side_effect=lambda *_args, **_kwargs: newest_first())
+    context.client.room_get_event_relations = relations
+    return relations
+
+
+async def _read(context: ToolRuntimeContext, canvas_event_id: str = "$canvas") -> dict[str, object]:
+    with tool_runtime_context(context):
+        return json.loads(await ChatUITools(enable_show_canvas=True).read_canvas_state(canvas_event_id))
+
+
+@pytest.mark.asyncio
+async def test_reading_a_canvas_state_returns_the_requesters_newest_copy(tmp_path: Path) -> None:
+    """Copies from anyone else, and other references to the canvas, are skipped."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    relations = _serve_relations(
+        context,
+        _state_copy(sender="@mallory:example.org", ts=4_000, json='{"done":["forged"]}'),
+        _state_copy(event_type="m.room.message", ts=3_500, msgtype="m.text", body="a reply"),
+        _state_copy(ts=3_000, json='{"done":["tent"]}', inputs='{"#rate":"7"}'),
+        _state_copy(ts=2_000, json='{"done":[]}'),
+    )
+
+    result = await _read(context)
+
+    assert result["status"] == "ok"
+    assert result["state"] == {"done": ["tent"]}
+    assert result["inputs"] == {"#rate": "7"}
+    assert result["shared_at"] == "1970-01-01T00:00:03+00:00"
+    assert relations.call_args.args[:3] == (ROOM_ID, "$canvas", RelationshipType.reference)
+    assert relations.call_args.kwargs["direction"] == nio.MessageDirection.back
+
+
+@pytest.mark.asyncio
+async def test_reading_a_canvas_state_decrypts_copies_in_encrypted_rooms(tmp_path: Path) -> None:
+    """The server sees only m.room.encrypted, so the type is checked after decrypting."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    encrypted = MagicMock(spec=nio.MegolmEvent)
+    encrypted.sender = REQUESTER_ID
+    encrypted.server_timestamp = 5_000
+    _serve_relations(context, encrypted)
+    context.client.olm = MagicMock()
+    context.client.decrypt_event = MagicMock(return_value=_state_copy(json='{"done":["map"]}'))
+
+    result = await _read(context)
+
+    assert result["state"] == {"done": ["map"]}
+    context.client.decrypt_event.assert_called_once_with(encrypted)
+
+
+@pytest.mark.asyncio
+async def test_reading_a_large_canvas_state_follows_its_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State too large for one event arrives as a long-text sidecar."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    _serve_relations(context, _state_copy(msgtype="m.file", url="mxc://example.org/state"))
+
+    async def resolved(source: dict[str, object], _client: object) -> dict[str, object]:
+        return {**source, "content": {"version": 1, "json": '{"notes":"long"}'}}
+
+    monkeypatch.setattr("mindroom.custom_tools.chat_ui.resolve_event_source_content", resolved)
+
+    assert (await _read(context))["state"] == {"notes": "long"}
+
+
+@pytest.mark.asyncio
+async def test_reading_a_canvas_state_reports_nothing_shared_and_unshared_canvases(tmp_path: Path) -> None:
+    """The agent learns why there is no state, and only its own shared canvases can be read."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    _serve_relations(context)
+    nothing = await _read(context)
+    assert nothing["status"] == "ok"
+    assert "Nothing shared yet" in nothing["message"]
+
+    unshared = _context(tmp_path)
+    _serve_event(unshared, _canvas_source(unshared))
+    result = await _read(unshared)
+    assert result["status"] == "error"
+    assert "does not share its state" in result["message"]
+
+    foreign = _context(tmp_path)
+    _serve_event(foreign, _canvas_source(foreign, share_state=True), sender="@mindroom_other:example.org")
+    result = await _read(foreign)
+    assert result["action"] == "read_canvas_state"
+    assert "Only your own canvases can be read." in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_newest_copy_is_reported_never_replaced_by_an_older_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent acting on superseded choices is worse than one told to try again."""
+    older = _state_copy(ts=1_000, json='{"done":[]}')
+
+    undecryptable = _context(tmp_path)
+    _serve_event(undecryptable, _canvas_source(undecryptable, share_state=True))
+    encrypted = MagicMock(spec=nio.MegolmEvent)
+    encrypted.sender = REQUESTER_ID
+    _serve_relations(undecryptable, encrypted, older)
+    undecryptable.client.olm = MagicMock()
+    undecryptable.client.decrypt_event = MagicMock(side_effect=nio.EncryptionError("no key"))
+    result = await _read(undecryptable)
+    assert result["status"] == "error"
+    assert "could not be decrypted" in result["message"]
+
+    # A deleted copy is gone (servers drop it from the relations), so the one before it is current.
+    deleted = _context(tmp_path)
+    _serve_event(deleted, _canvas_source(deleted, share_state=True))
+    redacted = MagicMock(spec=nio.RedactedEvent)
+    redacted.sender = REQUESTER_ID
+    _serve_relations(deleted, redacted, older)
+    assert (await _read(deleted))["state"] == {"done": []}
+
+    unread = _context(tmp_path)
+    _serve_event(unread, _canvas_source(unread, share_state=True))
+    _serve_relations(unread, _state_copy(ts=3_000, msgtype="m.file", url="mxc://example.org/state"), older)
+
+    async def download_failed(source: dict[str, object], _client: object) -> dict[str, object]:
+        return {**source, "content": {"msgtype": "m.file", "url": "mxc://example.org/state"}}
+
+    monkeypatch.setattr("mindroom.custom_tools.chat_ui.resolve_event_source_content", download_failed)
+    assert "could not be read" in (await _read(unread))["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_buried_under_other_references_is_not_reported_as_nothing_shared(tmp_path: Path) -> None:
+    """Other members' references to the canvas cannot make the user's choices look absent."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    noise = [_state_copy(sender="@mallory:example.org", ts=10_000 + index) for index in range(50)]
+    _serve_relations(context, *noise, _state_copy(json='{"done":["tent"]}'))
+
+    result = await _read(context)
+
+    assert result["status"] == "error"
+    assert "not among the newest references" in result["message"]

@@ -1443,7 +1443,7 @@ def test_homegrown_load_tool_makes_toolkit_instructions_available(
 @pytest.mark.parametrize(
     ("tool_entry", "excluded"),
     [
-        ("chat_ui", ("show_canvas",)),
+        ("chat_ui", ("show_canvas", "read_canvas_state")),
         ({"chat_ui": {"enable_show_canvas": True}}, ()),
         ({"chat_ui": {"enable_show_canvas": True, "exclude_tools": ["open_settings"]}}, ("open_settings",)),
     ],

@@ -2081,6 +2081,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.identity",
     "mindroom.matrix.message_builder",
+    "mindroom.matrix.message_content",
     "mindroom.path_confinement",
     "mindroom.tool_system.runtime_context",
 ]

@@ -159,6 +159,20 @@ Uncaught ReferenceError: drawChart is not defined (line 12)
 Blocked https://unpkg.com/chart.js (script-src-elem)
 ```
 
+### Let the agent read the page without a Send button
+
+For a page whose choices the agent needs later, such as a checklist ticked over a few days, the agent shows the canvas with `share_state=True`.
+Chat then keeps a copy of what the page saved (its saved state and kept inputs) in the room, once the user has worked in the page and pauses for a moment, and when the panel closes or the tab is hidden.
+The copy never starts the agent's turn and never enters its conversation; the agent reads the newest copy when it wants, for example from a scheduled task:
+
+```python
+chat_ui.read_canvas_state(canvas_event_id="$canvas-event")
+```
+
+It returns the state, the inputs, and when the user's Chat shared them, or says nothing was shared yet; when the newest copy in the room cannot be read, it returns an error rather than an older copy.
+Sharing is decided when a canvas is first shown, and its updates keep it; the panel tells the user "Saved in this room: *agent* and others here can read what you enter."
+Each copy stays in the room's history like a message, and logging out does not remove it.
+
 ## Update a canvas
 
 `show_canvas` returns the canvas `event_id`.
@@ -205,7 +219,7 @@ chat_ui.show_canvas(
 - **Saved state:** to keep anything else the user did in the page, call `window.mindroom.saveState(value)` on every change; Chat batches the writes, and a value over 256K characters of JSON throws.
   Later loads of the canvas, after a reload, an update, or a switch to another version, start with it in `window.mindroom.state`, which is `undefined` when nothing is saved.
   Read it defensively, since an earlier version of the page may have saved it in another shape.
-  It stays in that browser and never reaches the agent, so anything the agent needs belongs in the answer.
+  It stays in that browser and reaches the agent only through an answer, or [when the canvas shares it](#let-the-agent-read-the-page-without-a-send-button).
   The browser keeps it for the 100 most recently saved canvases and deletes it when the user logs out.
 - **Checking a page:** an agent with the [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
   Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
@@ -230,7 +244,9 @@ For choices the variables cannot make, such as a chart palette, `window.mindroom
 ## Privacy and safety
 
 - The page cannot read the user's Matrix account, messages, cookies, or storage, and it cannot open pop-ups or navigate away; a page that tries is stopped, and Chat shows "This panel tried to leave its sandbox and was stopped." with a **Reload panel** button.
-- In an encrypted room, the page and the answer are end-to-end encrypted like other messages.
+- In an encrypted room, the page, the answer, and a shared copy of the page's state are end-to-end encrypted like other messages.
+- A canvas shared with `share_state=True` lets its agent, and anyone else in the room, read what the page saved without asking each time; Chat says so in the panel.
+  Passwords and fields with `autocomplete="off"` are never kept automatically, but whatever the page passes to `saveState` is shared, so pages must keep secrets out of it.
 - A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries can put data in the addresses it requests, so a malicious page could leak what the user types into it.
   Chat therefore names the agent that made each canvas and reminds the user that what they enter may leave the panel.
 - Agents should show only pages they wrote, never downloaded or untrusted pages, because every canvas appears as the agent's own.
