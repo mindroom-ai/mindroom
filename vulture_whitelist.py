@@ -4,7 +4,6 @@ _.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.
 _.validate_template  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_cron  # Pydantic field validator (src/mindroom/config/automations.py)
-_.validate_protected_files  # Pydantic field validator (src/mindroom/config/automations.py)
 _.validate_reductions  # Pydantic model validator (src/mindroom/config/automations.py)
 _.validate_agent_automations  # Pydantic model validator (src/mindroom/config/main.py)
 _.unique_services  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)

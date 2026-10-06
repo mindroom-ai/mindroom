@@ -8,7 +8,6 @@ from typing import Annotated, Literal, Self
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.validation import duplicate_items
-from mindroom.tool_system.worker_routing import agent_workspace_relative_path
 
 _CRON_FIELDS = 5
 
@@ -41,12 +40,6 @@ class PromptCurationAutomation(BaseModel):
         lt=1,
         description="Largest fraction of the files' size one pass may remove before verify asks for a re-check",
     )
-    max_file_shrink: float = Field(
-        default=0.25,
-        gt=0,
-        le=1,
-        description="Largest fraction any single file may shrink in one pass before verify asks for a re-check",
-    )
     max_content_loss: float = Field(
         default=0.05,
         ge=0,
@@ -59,10 +52,6 @@ class PromptCurationAutomation(BaseModel):
     model: str | None = Field(
         default=None,
         description="Model for the prompt's runs, a key of models; defaults to the agent's own model",
-    )
-    protected_files: list[str] = Field(
-        default_factory=list,
-        description="Workspace-relative files the pass should leave unchanged",
     )
 
     @field_validator("cron")
@@ -80,12 +69,6 @@ class PromptCurationAutomation(BaseModel):
             msg = f"Automation cron must be a five-field expression that can fire: {value!r}"
             raise ValueError(msg) from exc
         return value
-
-    @field_validator("protected_files")
-    @classmethod
-    def validate_protected_files(cls, values: list[str]) -> list[str]:
-        """Normalize protected paths and reject paths outside the workspace."""
-        return [agent_workspace_relative_path(value).as_posix() for value in values]
 
     @model_validator(mode="after")
     def validate_reductions(self) -> Self:

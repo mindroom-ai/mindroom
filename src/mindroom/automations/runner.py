@@ -76,7 +76,6 @@ class AutomationRunner:
     # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
     _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
     _firing: set[str] = field(default_factory=set, init=False)
-    _verifying: set[str] = field(default_factory=set, init=False)
     _pending: dict[str, _PendingVerify] = field(default_factory=dict, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -128,17 +127,11 @@ class AutomationRunner:
                 self._start_verify(pending)
 
     def _start_verify(self, pending: _PendingVerify) -> None:
-        # The automation stays busy until verify ends, so a new pass never starts before the last one is reported.
-        self._verifying.add(pending.key)
         create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
 
     def _busy(self, key: str) -> bool:
-        """Return whether this automation is checking, waiting on its last prompt's run, or verifying it."""
-        return (
-            key in self._firing
-            or key in self._verifying
-            or any(pending.key == key for pending in self._pending.values())
-        )
+        """Return whether this automation is checking or waiting on its last prompt's run."""
+        return key in self._firing or any(pending.key == key for pending in self._pending.values())
 
     async def _run(self) -> None:
         while True:
@@ -194,14 +187,6 @@ class AutomationRunner:
             self._firing.discard(key)
 
     async def _verify(self, pending: _PendingVerify) -> None:
-        try:
-            await self._verify_and_notify(pending)
-        finally:
-            self._verifying.discard(pending.key)
-            # A held automation may be due again now.
-            self._wake.set()
-
-    async def _verify_and_notify(self, pending: _PendingVerify) -> None:
         plan = pending.plan
         result = await asyncio.to_thread(verify_curation, plan)
         logger.info(
