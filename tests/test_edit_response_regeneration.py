@@ -3357,7 +3357,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
 async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_run_metadata(
     tmp_path: Path,
 ) -> None:
-    """Persisted run response context should recover the current-runtime ledger crash window."""
+    """Persisted run response context recovers a missing ledger row for an answer recorded before reply records."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -3507,8 +3507,13 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     assert persisted_metadata is not None
     assert persisted_metadata["matrix_response_event_id"] == "$response:example.com"
 
+    # The answer predates reply records, so only the recovered turn names it.
     mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    replace_edit_regenerator_deps(
+        bot,
+        generate_response=mock_generate_response,
+        reply_for_sources=AsyncMock(return_value=None),
+    )
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -3873,7 +3878,7 @@ def _persisted_run_metadata(bot: AgentBot, session_id: str) -> dict[str, object]
 async def test_handle_message_edit_uses_journal_response_event_id_after_restart(
     tmp_path: Path,
 ) -> None:
-    """A newer saved response ID must not replace current journal linkage after restart."""
+    """A newer response ID saved in run metadata must not replace the turn's answer recorded before reply records."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -4039,8 +4044,13 @@ async def test_handle_message_edit_uses_journal_response_event_id_after_restart(
         "sender": "@user:example.com",
     }
 
+    # The answer predates reply records, so only the turn record names it.
     mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
-    replace_edit_regenerator_deps(restarted_bot, generate_response=mock_generate_response)
+    replace_edit_regenerator_deps(
+        restarted_bot,
+        generate_response=mock_generate_response,
+        reply_for_sources=AsyncMock(return_value=None),
+    )
     with (
         patch.object(
             restarted_bot._conversation_resolver,

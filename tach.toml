@@ -2255,6 +2255,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
+    "mindroom.reply_lifecycle",
     "mindroom.response_runner",
     "mindroom.response_sources",
     "mindroom.runtime_protocols",

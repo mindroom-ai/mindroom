@@ -505,7 +505,6 @@ async def test_response_preparation_does_not_sanitize_unrelated_turns(
             suppressed = await store.prepare_edit_snapshot(
                 record=current,
                 driving_revision_id="$edit",
-                edit_receipt_order=1,
             )
         else:
             suppressed = await store.prepare_pending_response_source(
@@ -724,47 +723,6 @@ async def _prepare_redaction(
         store.deps.state_writer.create_storage(None, scope=HistoryScope(kind="agent", scope_id="agent")),
     )
     return should_suppress
-
-
-@pytest.mark.asyncio
-async def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery(
-    journal_store: EventJournalStore,
-) -> None:
-    """Only later edits run, and they durably supersede an older STOP delivery."""
-    store = await _store(journal_store)
-    target = MessageTarget.resolve("!room:example.org", None, "$source")
-    await store.record_turn(
-        TurnRecord.create(
-            ["$source"],
-            response_event_id="$reply",
-            response_owner="agent",
-            requester_id="@user:example.org",
-            conversation_target=target,
-            user_stop_receipt_order=2,
-        ),
-    )
-
-    assert await store._prepare_edit_response_source(
-        target=target,
-        source_event_ids=("$source",),
-        response_event_id="$reply",
-        edit_receipt_order=1,
-    )
-    stopped = store.get_turn_record("$source")
-    assert stopped is not None
-    assert stopped.latest_edit_receipt_order is None
-    assert stopped.user_stop_settled_receipt_order is None
-
-    assert not await store._prepare_edit_response_source(
-        target=target,
-        source_event_ids=("$source",),
-        response_event_id="$reply",
-        edit_receipt_order=3,
-    )
-    reopened = store.get_turn_record("$source")
-    assert reopened is not None
-    assert reopened.latest_edit_receipt_order == 3
-    assert reopened.user_stop_settled_receipt_order == 2
 
 
 @pytest.mark.asyncio
@@ -3910,7 +3868,6 @@ async def test_newer_registration_during_refill_invalidates_older_selected_snaps
     result = await store.prepare_edit_snapshot(
         record=snapshot,
         driving_revision_id="$older",
-        edit_receipt_order=1,
     )
     assert result is EditPreparation.REBUILD
 
@@ -3933,16 +3890,16 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
     await store.record_responded_turn(record)
     preparation_started = asyncio.Event()
     preparation_release = asyncio.Event()
-    original_prepare = store._prepare_edit_response_source
+    original_prepare = store._prepare_response_for_redactions
 
     async def delayed_prepare(**kwargs: object) -> bool:
         preparation_started.set()
         await preparation_release.wait()
         return await original_prepare(**kwargs)
 
-    with patch.object(store, "_prepare_edit_response_source", delayed_prepare):
+    with patch.object(store, "_prepare_response_for_redactions", delayed_prepare):
         task = asyncio.create_task(
-            store.prepare_edit_snapshot(record=record, driving_revision_id="$driving-edit", edit_receipt_order=1),
+            store.prepare_edit_snapshot(record=record, driving_revision_id="$driving-edit"),
         )
         await preparation_started.wait()
         if mutation == "newer":

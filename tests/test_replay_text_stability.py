@@ -166,6 +166,7 @@ async def _regeneration_prompt(record: TurnRecord) -> str:
             wait_for_turn_settled=AsyncMock(),
             receipt_order=AsyncMock(return_value=1),
             timestamp_formatter=_timestamp_formatter,
+            reply_for_sources=AsyncMock(return_value=None),
         ),
     )
     request, _record, _applied = await regenerator._build_request(

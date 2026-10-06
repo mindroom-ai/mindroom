@@ -14,6 +14,7 @@ from mindroom.hooks import hook_ingress_policy
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
+from mindroom.reply_lifecycle import ReplyState
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
+    from mindroom.reply_lifecycle import Reply
     from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
 
@@ -63,6 +65,8 @@ class EditRegeneratorDeps:
     wait_for_turn_settled: Callable[[tuple[str, ...]], Awaitable[None]]
     receipt_order: Callable[[], Awaitable[int]]
     timestamp_formatter: Callable[[float | None], str | None]
+    # The newest reply answering any of these sources, from the reply records.
+    reply_for_sources: Callable[[tuple[str, ...]], Awaitable[Reply | None]]
 
 
 @dataclass(frozen=True)
@@ -77,18 +81,37 @@ class _Edit:
 
 
 def _edit_remains_active(
-    record: TurnRecord,
+    stop_cutoff: int | None,
     edit: _Edit,
     source_event_id: str,
     suppressed_revisions: dict[str, SourceEventRevision],
 ) -> bool:
-    """Update suppression state and reject revisions covered by a durable STOP."""
+    """Update suppression state and reject revisions covered by the reply's Stop."""
     if edit.suppressed:
         suppressed_revisions[source_event_id] = edit.revision
         return False
     suppressed_revisions.pop(source_event_id, None)
-    cutoff = record.user_stop_receipt_order
-    return cutoff is None or edit.receipt_order > cutoff
+    return stop_cutoff is None or edit.receipt_order > stop_cutoff
+
+
+def _answer_to_regenerate(record: TurnRecord, reply: Reply | None) -> tuple[str | None, int | None]:
+    """Return the event an edit regenerates and the Stop it must be newer than, or no event when there is none.
+
+    A reply that showed something is what an edit regenerates; one that never
+    showed anything, or whose answer is gone, has no answer to replace.
+    """
+    if reply is not None:
+        return (None if reply.state is ReplyState.GONE else reply.event_id), reply.stop_receipt_order
+    # LEGACY_COMPAT: Answers written before reply records, named only by the turn record.
+    # Legacy format: a completed turn record whose response_event_id and user-Stop fields an earlier release wrote,
+    # with no reply record for its sources.
+    # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record the answer and its
+    # Stop on the reply.
+    # Handling: the edit regenerates that event as a historical answer, ignoring edits older than the recorded Stop.
+    # Coverage: tests/test_edit_response_regeneration.py::test_handle_message_edit_uses_journal_response_event_id_after_restart,
+    # tests/test_edit_response_regeneration.py::test_handle_message_edit_recovers_missing_ledger_row_from_persisted_run_metadata,
+    # tests/test_reply_records_turns.py::test_regenerating_an_answer_older_than_the_records_adopts_it.
+    return record.response_event_id, record.user_stop_receipt_order
 
 
 @dataclass
@@ -293,8 +316,13 @@ class EditRegenerator:
             or record.conversation_target is None
             or record.history_scope is None
             or record.response_owner != self.deps.agent_name
-            or record.response_event_id is None
         ):
+            return None, None, {}
+        answer_event_id, stop_cutoff = _answer_to_regenerate(
+            record,
+            await self.deps.reply_for_sources(record.source_event_ids),
+        )
+        if answer_event_id is None:
             return None, None, {}
         revisions = dict(record.source_event_revisions or {})
         suppressed_revisions = dict(record.suppressed_source_event_revisions or {})
@@ -316,7 +344,7 @@ class EditRegenerator:
             revisions[source_event_id] = edit.revision
             applied[source_event_id] = edit.revision
             prompt_map[record.prompt_source_event_id(source_event_id)] = edit.body
-            if _edit_remains_active(record, edit, source_event_id, suppressed_revisions):
+            if _edit_remains_active(stop_cutoff, edit, source_event_id, suppressed_revisions):
                 active[source_event_id] = edit
                 retrying &= edit.revision == committed
         if not active:
@@ -393,7 +421,6 @@ class EditRegenerator:
             result = await self.deps.turn_store.prepare_edit_snapshot(
                 record=record,
                 driving_revision_id=driving_edit.revision[1],
-                edit_receipt_order=active_receipt_order,
                 consumed_revision_ids=tuple(message.latest_event_id for message in history),
                 thread_history=history,
             )
@@ -422,7 +449,7 @@ class EditRegenerator:
                     discovery_event_ids=record.discovery_event_ids,
                     edit_receipt_order=active_receipt_order,
                 ),
-                existing_event_id=record.response_event_id,
+                existing_event_id=answer_event_id,
                 user_id=requester_id,
                 correlation_id=driving_edit.revision[1],
                 matrix_run_metadata=metadata,

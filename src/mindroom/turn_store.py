@@ -825,18 +825,15 @@ class TurnStore:
         *,
         record: TurnRecord,
         driving_revision_id: str,
-        edit_receipt_order: int,
         consumed_revision_ids: tuple[str, ...] = (),
         thread_history: Sequence[ResolvedVisibleMessage] = (),
     ) -> bool | EditPreparation:
         """Check an immutable edit snapshot after tombstone reconciliation under the response lock."""
         assert record.conversation_target is not None
         await self._register_context_revisions(record.source_event_ids[0], thread_history)
-        if await self._prepare_edit_response_source(
+        if await self._prepare_response_for_redactions(
             target=record.conversation_target,
             source_event_ids=record.replay_source_event_ids,
-            response_event_id=record.response_event_id,
-            edit_receipt_order=edit_receipt_order,
         ):
             return True
         current = self.get_turn_record(record.source_event_ids[0])
@@ -909,46 +906,6 @@ class TurnStore:
             )
 
         await self._ledger.update_handled_turn(record.indexed_event_ids, detached)
-
-    async def _prepare_edit_response_source(
-        self,
-        *,
-        target: MessageTarget,
-        source_event_ids: tuple[str, ...],
-        response_event_id: str | None,
-        edit_receipt_order: int,
-    ) -> bool:
-        """Suppress pre-STOP edits or durably open later edits for visible delivery."""
-        if isinstance(edit_receipt_order, bool) or edit_receipt_order <= 0:
-            msg = "Edit receipt order must be positive"
-            raise ValueError(msg)
-        if await self._prepare_response_for_redactions(target=target, source_event_ids=source_event_ids):
-            return True
-        if response_event_id is None:
-            return False
-
-        def prepared_record(current: TurnRecord) -> TurnRecord:
-            cutoff = current.user_stop_receipt_order
-            if cutoff is not None and edit_receipt_order <= cutoff:
-                return current
-            return canonicalize_turn_record(
-                current,
-                latest_edit_receipt_order=max(
-                    current.latest_edit_receipt_order or 0,
-                    edit_receipt_order,
-                ),
-                user_stop_settled_receipt_order=max(
-                    current.user_stop_settled_receipt_order or 0,
-                    cutoff or 0,
-                )
-                or None,
-                timestamp=0.0,
-            )
-
-        prepared = await self._update_response_turn(response_event_id, prepared_record)
-        return prepared is None or (
-            prepared.user_stop_receipt_order is not None and edit_receipt_order <= prepared.user_stop_receipt_order
-        )
 
     def response_history_scope(
         self,

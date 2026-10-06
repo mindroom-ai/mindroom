@@ -624,11 +624,9 @@ class TestEditApprovalOwnership:
             _inbound_event(case.room.room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
             _projected_event(case.room.room_id, event, EventKind.MESSAGE, self_sender=case.bot.matrix_id.full_id),
         )
-        assert not await case.store._prepare_edit_response_source(
+        assert not await case.store._prepare_response_for_redactions(
             target=case.target,
             source_event_ids=case.approval.sources.logical_source_event_ids,
-            response_event_id="$answer",
-            edit_receipt_order=6,
         )
 
         # Ownership must remain available without reading historical snapshot routing fields.
