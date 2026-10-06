@@ -4,26 +4,22 @@ product:
   metadata:
     platform: mindroom
 plans:
+  # Accounts without a paid subscription; not offered as a plan and cannot run a hosted instance.
   free:
-    name: Free
+    name: No plan
     price_monthly: 0
     price_yearly: 0
-    description: Get started with basic features
+    description: Choose a plan to run a hosted MindRoom instance
     included_ai_budget_usd: 0
     requires_customer_provider_keys: true
     resource_profile: small
-    features:
-    - 1 AI Agent
-    - 100 messages per day
-    - 1GB storage
-    - Community support
-    - Basic integrations
+    features: []
     limits:
-      max_agents: 1
-      max_messages_per_day: 100
-      storage_gb: 1
+      max_agents: 0
+      max_messages_per_day: 0
+      storage_gb: 0
       support: Community
-      integrations: Basic
+      integrations: None
       workflows: false
       analytics: basic
       sla: false
@@ -45,17 +41,14 @@ plans:
     requires_customer_provider_keys: true
     resource_profile: small
     features:
-    - 100 AI Agents
-    - Unlimited messages
-    - 5GB storage
-    - Bring your own model provider keys
-    - All integrations
-    - Custom workflows
-    - Analytics dashboard
+    - Hosted MindRoom instance
+    - Your own model provider keys
+    - 10 GB storage
+    - Email support
     limits:
       max_agents: 100
       max_messages_per_day: unlimited
-      storage_gb: 5
+      storage_gb: 10
       support: Email
       integrations: All integrations
       workflows: true
@@ -78,17 +71,14 @@ plans:
     resource_profile: small
     recommended: true
     features:
-    - 100 AI Agents
-    - Unlimited messages
-    - 5GB storage
-    - $15 included monthly AI usage
-    - All integrations
-    - Custom workflows
-    - Analytics dashboard
+    - Hosted MindRoom instance
+    - $15 of AI credit every month
+    - 10 GB storage
+    - Email support
     limits:
       max_agents: 100
       max_messages_per_day: unlimited
-      storage_gb: 5
+      storage_gb: 10
       support: Email
       integrations: All integrations
       workflows: true
@@ -112,14 +102,10 @@ plans:
     requires_customer_provider_keys: false
     resource_profile: pro
     features:
-    - Unlimited AI Agents
-    - Unlimited messages
-    - 25GB storage
-    - $150 included monthly AI usage
+    - Larger hosted MindRoom instance
+    - $150 of AI credit every month
+    - 25 GB storage
     - Priority support
-    - Advanced analytics
-    - Larger hosted resource profile
-    - SLA guarantee
     limits:
       max_agents: unlimited
       max_messages_per_day: unlimited
@@ -145,14 +131,10 @@ plans:
     requires_customer_provider_keys: false
     resource_profile: pro
     features:
-    - Unlimited everything
-    - Custom limits
+    - Custom limits and AI budget
     - Dedicated infrastructure
-    - White-glove support
-    - Custom development
-    - On-premise option
-    - Compliance certifications
-    - Dedicated account manager
+    - On-premises deployment
+    - Dedicated support
     limits:
       max_agents: unlimited
       max_messages_per_day: unlimited

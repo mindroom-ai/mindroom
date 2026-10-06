@@ -6,18 +6,8 @@ import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib
 import { logger } from '@/lib/logger'
 import { PLAN_GRADIENTS, type PlanId } from '@/lib/pricing-config'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
-import { Loader2, CreditCard, TrendingUp, Check, RefreshCw } from 'lucide-react'
+import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
 
-function formatLimit(value: number | string | undefined): string {
-  if (!value) return 'N/A'
-  if (value === 'unlimited' || value === -1) return 'Unlimited'
-  if (typeof value === 'number') {
-    if (value >= 1000000) return `${value / 1000000}M`
-    if (value >= 1000) return `${value / 1000}K`
-    return value.toString()
-  }
-  return value
-}
 
 function formatMonthlyPrice(price: string): string {
   if (price === 'custom') return 'Custom'
@@ -80,7 +70,7 @@ export default function BillingPage() {
   const currentPlan = pricingConfig.plans[currentTier]
   const features = currentPlan?.features || []
   const tierInfo = {
-    name: currentPlan?.name || 'Free',
+    name: currentPlan?.name || 'No plan',
     price: currentPlan ?
       formatMonthlyPrice(currentPlan.price_monthly) :
       '$0/month',
@@ -119,7 +109,7 @@ export default function BillingPage() {
                   : subscription?.current_period_end
                   ? new Date(subscription.current_period_end).toLocaleDateString()
                   : 'the end of your billing period'}</strong></p>
-                <p className="mt-1">After this date, your account will revert to the Free plan.</p>
+                <p className="mt-1">After this date, your hosted instance stops until you choose a plan again.</p>
               </div>
               <div className="mt-3">
                 <button
@@ -246,7 +236,7 @@ export default function BillingPage() {
         </div>
 
         {/* Plan Details */}
-        <div className="mt-6 pt-6 border-t">
+        {features.length > 0 && <div className="mt-6 pt-6 border-t">
           <h3 className="font-semibold mb-3">Plan Includes:</h3>
           <div className="grid md:grid-cols-2 gap-3">
             {features.map((feature, index) => (
@@ -256,37 +246,7 @@ export default function BillingPage() {
               </div>
             ))}
           </div>
-        </div>
-
-        {/* Usage Limits */}
-        <div className="mt-6 pt-6 border-t">
-          <h3 className="font-semibold mb-3">Usage Limits:</h3>
-          <div className="grid md:grid-cols-3 gap-4">
-            <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
-              <div>
-                <p className="text-sm text-gray-600 dark:text-gray-400">AI Agents</p>
-                <p className="font-semibold">{formatLimit(currentPlan?.limits?.max_agents)}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
-              <div>
-                <p className="text-sm text-gray-600 dark:text-gray-400">Messages/Day</p>
-                <p className="font-semibold">{formatLimit(currentPlan?.limits?.max_messages_per_day)}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
-              <div>
-                <p className="text-sm text-gray-600 dark:text-gray-400">Storage</p>
-                <p className="font-semibold">
-                  {formatLimit(currentPlan?.limits?.storage_gb) === 'Unlimited' ? 'Unlimited' : `${formatLimit(currentPlan?.limits?.storage_gb)}GB`}
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
+        </div>}
 
       </div>
 

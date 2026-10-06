@@ -27,7 +27,7 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
     },
     {
       name: 'Manage Subscription',
-      description: `Current: ${subscription?.tier || 'Free'} plan`,
+      description: subscription && subscription.tier !== 'free' ? `Current: ${subscription.tier} plan` : 'Choose a plan to run MindRoom',
       href: '/dashboard/billing',
       icon: CreditCard,
       external: false,

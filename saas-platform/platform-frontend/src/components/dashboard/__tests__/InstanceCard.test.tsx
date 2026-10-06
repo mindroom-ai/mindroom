@@ -431,7 +431,7 @@ describe('InstanceCard', () => {
       render(<InstanceCard instance={minimalInstance} />)
 
       expect(screen.getByText('MindRoom Instance')).toBeInTheDocument()
-      expect(screen.getByText('Free')).toBeInTheDocument() // Default tier
+      expect(screen.getByText('No plan')).toBeInTheDocument() // Default tier
       expect(screen.queryByText('Domain')).not.toBeInTheDocument()
       expect(screen.queryByText('Frontend')).not.toBeInTheDocument()
       expect(screen.queryByText('API')).not.toBeInTheDocument()

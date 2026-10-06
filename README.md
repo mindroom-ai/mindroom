@@ -34,7 +34,7 @@ uvx mindroom run
 ```
 
 Needs [uv](https://docs.astral.sh/uv/getting-started/installation/) and a model: an API key, a subscription login such as Codex, or a local model.
-It installs and starts MindRoom with a starter agent, then pairs it with your [MindRoom Chat](https://chat.mindroom.chat) account.
+It installs MindRoom with a starter agent, pairs it with your [MindRoom Chat](https://chat.mindroom.chat) account, and starts it.
 
 **Or use the macOS app**
 
@@ -144,7 +144,7 @@ Agents keep what matters from every conversation, get better as more people use 
 <td valign="top">
 
 **🛡️ [Safe to give real access](https://docs.mindroom.chat/#safe-to-give-real-access)**<br />
-One-tap approval for the actions you choose, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.
+One-tap approval for the actions you choose, plus opt-in sandboxed code execution and end-to-end encryption on Matrix, the open standard governments use for secure messaging.
 
 </td>
 </tr>

@@ -175,7 +175,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           <Server className="w-20 h-20 text-gray-400 dark:text-gray-500 mx-auto mb-6" />
           <CardHeader className="mb-3">No Instance Found</CardHeader>
           <p className="text-gray-600 dark:text-gray-400 mb-8 text-lg">
-            You don't have a MindRoom instance yet. Upgrade to a paid plan to get your own instance.
+            You don't have a MindRoom instance yet. Choose a plan, which starts with a 3-day free trial, to get your own instance.
           </p>
           <button
             onClick={() => router.push('/dashboard/billing/upgrade')}

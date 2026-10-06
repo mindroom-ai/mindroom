@@ -31,8 +31,11 @@ describe('LandingPage', () => {
     expect(screen.getByText('$10')).toBeInTheDocument()
     expect(screen.getByText('$20')).toBeInTheDocument()
     expect(screen.getByText('$200')).toBeInTheDocument()
-    expect(screen.getByText('$15 included monthly AI usage')).toBeInTheDocument()
-    expect(screen.getByText('$150 included monthly AI usage')).toBeInTheDocument()
+    expect(screen.getByText('$15 of AI credit every month')).toBeInTheDocument()
+    expect(screen.getByText('$150 of AI credit every month')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Free' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: 'Start 3-day trial' })).toHaveLength(3)
+    expect(screen.getByRole('link', { name: 'Email sales@mindroom.chat' })).toHaveAttribute('href', 'mailto:sales@mindroom.chat')
     expect(screen.queryByRole('heading', { name: 'Teams' })).not.toBeInTheDocument()
   })
 

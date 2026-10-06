@@ -78,8 +78,8 @@ const installOptions: InstallOption[] = [
       </>
     ),
     steps: [
-      ['Run MindRoom on your computer', 'One command installs and starts it, with a starter agent.'],
-      ['Approve the pairing link', 'Sign in to MindRoom Chat in your browser and approve it.'],
+      ['Run MindRoom on your computer', 'One command installs it with a starter agent.'],
+      ['Approve the pairing link', 'Sign in to MindRoom Chat in your browser and approve it, and MindRoom starts your agents.'],
     ],
     guide: { href: installGuideUrl, label: 'Read the install guide' },
   },
@@ -159,7 +159,7 @@ const reasons: IconItem[] = [
   },
   {
     title: 'Safe to give real access',
-    body: 'One-tap approval for the actions you choose, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
+    body: 'One-tap approval for the actions you choose, plus opt-in sandboxed code execution and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
     icon: Shield,
     href: `${docsUrl}#safe-to-give-real-access`,
   },
@@ -194,7 +194,7 @@ const setups: (IconItem & { cta: string })[] = [
   },
   {
     title: 'Hosted MindRoom',
-    body: 'Let us run it for you, from a free plan to a larger workspace.',
+    body: 'Let us run it for you, from your own keys to a larger workspace.',
     icon: Cloud,
     href: '#hosted',
     cta: 'See hosted plans',
@@ -203,35 +203,27 @@ const setups: (IconItem & { cta: string })[] = [
 
 const plans: PricePlan[] = [
   {
-    name: 'Free',
-    price: '$0',
-    description: 'Try one agent in a hosted room.',
-    features: ['1 agent', '100 messages per day', 'Community support'],
-    cta: 'Start free',
-    href: '/auth/signup',
-  },
-  {
     name: 'Your own keys',
     price: '$10',
     description: 'Hosted MindRoom that uses your model API keys, so AI usage is billed by your provider.',
-    features: ['Hosted instance', 'Your own model API keys', 'All integrations'],
-    cta: 'Create account',
+    features: ['Hosted instance', 'Your own model API keys', '10 GB storage'],
+    cta: 'Start 3-day trial',
     href: '/auth/signup?plan=byok',
   },
   {
     name: 'Hobby',
     price: '$20',
-    description: 'Hosted MindRoom with included monthly AI usage.',
-    features: ['Hosted instance', '$15 included monthly AI usage', 'All integrations'],
-    cta: 'Create account',
+    description: 'Hosted MindRoom with AI usage included, so no API keys needed.',
+    features: ['Hosted instance', '$15 of AI credit every month', '10 GB storage'],
+    cta: 'Start 3-day trial',
     href: '/auth/signup?plan=hobby',
   },
   {
     name: 'Pro',
     price: '$200',
-    description: 'Larger hosted workspace with a higher included AI budget.',
-    features: ['Larger instance', '$150 included monthly AI usage', 'Priority support'],
-    cta: 'Create account',
+    description: 'Larger hosted workspace with ten times the included AI usage.',
+    features: ['Larger instance', '$150 of AI credit every month', 'Priority support'],
+    cta: 'Start 3-day trial',
     href: '/auth/signup?plan=pro',
   },
 ]
@@ -688,7 +680,7 @@ export default function LandingPage() {
           <SectionHeading
             eyebrow="Hosted"
             title="Prefer us to host it?"
-            body="Nothing to install: start free, bring your own model keys, or include AI usage in your plan."
+            body="Nothing to install: bring your own model keys or include AI usage in your plan, and try any plan free for 3 days."
           />
           <div className="mt-10 overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
             {plans.map((plan) => (
@@ -702,7 +694,7 @@ export default function LandingPage() {
                 </div>
                 <div className="flex items-baseline gap-2">
                   <span className="text-3xl font-semibold text-gray-950 dark:text-white">{plan.price}</span>
-                  {plan.price !== '$0' && <span className="text-sm text-gray-500 dark:text-gray-400">monthly</span>}
+                  <span className="text-sm text-gray-500 dark:text-gray-400">monthly</span>
                 </div>
                 <ul className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
                   {plan.features.map((feature) => (
@@ -721,6 +713,12 @@ export default function LandingPage() {
               </article>
             ))}
           </div>
+          <p className="mt-5 text-sm text-gray-600 dark:text-gray-300">
+            Need custom limits, dedicated infrastructure, or an on-premises deployment?{' '}
+            <a href="mailto:sales@mindroom.chat" className="font-semibold text-gray-950 underline decoration-gray-400 underline-offset-2 hover:decoration-gray-950 dark:text-white dark:hover:decoration-white">
+              Email sales@mindroom.chat
+            </a>
+          </p>
         </div>
       </section>
 

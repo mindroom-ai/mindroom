@@ -233,7 +233,7 @@ class TestAccountsEndpoints:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["subscription"]["max_storage_gb"] == 1
+        assert data["subscription"]["max_storage_gb"] == 0
         inserted_subscription = mock_supabase.table().insert.call_args.args[0]
         assert "max_storage_gb" not in inserted_subscription
 

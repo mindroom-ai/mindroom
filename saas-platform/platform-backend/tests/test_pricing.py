@@ -73,7 +73,7 @@ class TestPricingConfig:
         """Test that plan prices are correct."""
         model = load_pricing_config_model()
 
-        # Free plan
+        # No-plan state for accounts without a subscription
         assert model.plans["free"].price_monthly == 0
         assert model.plans["free"].price_yearly == 0
 
@@ -127,21 +127,21 @@ class TestPricingConfig:
 
         # BYOK plan
         byok = model.plans["byok"]
-        assert len(byok.features) == 7
+        assert len(byok.features) == 4
         assert byok.limits.max_agents == 100
         assert byok.limits.max_messages_per_day == "unlimited"
-        assert byok.limits.storage_gb == 5
+        assert byok.limits.storage_gb == 10
         assert byok.limits.workflows is True
 
         # Hobby plan
         hobby = model.plans["hobby"]
         assert hobby.recommended is True
-        assert "$15 included monthly AI usage" in hobby.features
-        assert hobby.limits.storage_gb == 5
+        assert "$15 of AI credit every month" in hobby.features
+        assert hobby.limits.storage_gb == 10
 
         # Pro plan
         pro = model.plans["pro"]
-        assert "$150 included monthly AI usage" in pro.features
+        assert "$150 of AI credit every month" in pro.features
         assert pro.limits.max_agents == "unlimited"
         assert pro.limits.storage_gb == 25
         assert pro.limits.sla is True
@@ -187,7 +187,7 @@ class TestPricingHelperFunctions:
         # BYOK yearly
         assert get_stripe_price_id("byok", "yearly") == "price_1TZQNK3GVsrZHuzXqbwHwhph"
 
-        # Free plan (no Stripe IDs)
+        # No-plan state (no Stripe IDs)
         assert get_stripe_price_id("free", "monthly") is None
         assert get_stripe_price_id("free", "yearly") is None
 
@@ -261,7 +261,7 @@ class TestPricingHelperFunctions:
         assert byok.name == "Bring Your Own Keys"
         assert byok.price_monthly == 1000
         assert byok.price_yearly == 9600
-        assert len(byok.features) == 7
+        assert len(byok.features) == 4
 
         # Hobby plan
         hobby = get_plan_details("hobby")

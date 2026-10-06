@@ -169,7 +169,7 @@ describe('InstanceCard - Simplified Tests', () => {
       const noTierInstance = { ...mockInstance, tier: null }
       render(<InstanceCard instance={noTierInstance} />)
 
-      expect(screen.getByText('Free')).toBeInTheDocument()
+      expect(screen.getByText('No plan')).toBeInTheDocument()
     })
   })
 

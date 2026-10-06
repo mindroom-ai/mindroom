@@ -99,7 +99,7 @@ def _entitlement_failure_detail(subscription: dict[str, Any], action: str) -> st
     status = str(subscription.get("status") or "unknown")
 
     if tier == "free":
-        return f"Upgrade to a paid plan or start a trial before you {action} a hosted MindRoom instance."
+        return f"Choose a plan, which starts with a free trial, before you {action} a hosted MindRoom instance."
 
     if status == "trialing":
         return "Your MindRoom trial has expired. Add billing or choose a paid plan to continue using the instance."
