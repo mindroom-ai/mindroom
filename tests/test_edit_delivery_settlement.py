@@ -116,7 +116,14 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    runner.deps = replace(runner.deps, delivery_gateway=gateway)
+    assert runner.deps.replies is not None
+    # Replies are recorded where their rows are delivered.
+    runner.deps = replace(
+        runner.deps,
+        delivery_gateway=gateway,
+        approval_store=principal,
+        replies=replace(runner.deps.replies, store=principal),
+    )
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
         regenerator.deps,

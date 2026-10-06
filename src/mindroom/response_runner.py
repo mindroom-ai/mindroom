@@ -3120,14 +3120,6 @@ class ResponseRunner:
             lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
         )
 
-    def _claims_reply_records(self, request: ResponseRequest) -> bool:
-        """Return whether this response path writes its reply through durable records.
-
-        Paths move to records as every write on them is ported; the rest keep
-        main's behavior with no span claimed.
-        """
-        return self.deps.replies is not None and request.prepared_edit_record is None
-
     async def _claim_reply_span(
         self,
         request: ResponseRequest,
@@ -3141,7 +3133,7 @@ class ResponseRunner:
         """
         replies = self.deps.replies
         slot = current_slot()
-        if replies is None or slot is None or not self._claims_reply_records(request):
+        if replies is None or slot is None:
             return request
         legacy_initial = await self.deps.approval_store.load_matrix_delivery(
             delivery_id=request.response_envelope.source_event_id,
@@ -3151,11 +3143,15 @@ class ResponseRunner:
             # A reply started before durable records exist keeps main's path
             # until the startup migration adopts it.
             return request
+        # An edit regenerates the reply its turn record names; with no record
+        # of that reply, it is a historical answer with an unknown presentation.
+        regeneration = request.prepared_edit_record is not None
         if (
-            request.existing_event_id is not None
+            not regeneration
+            and request.existing_event_id is not None
             and await replies.store.replies.for_event(request.existing_event_id) is None
         ):
-            # So does an answer written before durable records exist.
+            # An answer written before durable records exist keeps main's path too.
             return request
         try:
             handle = await self._claim_reply(replies, request, history_scope=history_scope)
@@ -3167,11 +3163,12 @@ class ResponseRunner:
         if handle is None:
             return None
         slot.handle = handle
-        event_id = handle.reply.event_id
+        reply = handle.reply
         return replace(
             request,
-            existing_event_id=event_id,
-            existing_event_is_placeholder=event_id is not None,
+            existing_event_id=reply.event_id,
+            # A regeneration replaces an answer, not a placeholder, unless the reply shows only one.
+            existing_event_is_placeholder=reply.event_id is not None and (not regeneration or reply.placeholder_only),
             # Records decide what a stopped attempt showed; Matrix is not read back.
             existing_event_is_recovered=False,
             resumed_reply=handle.resumed,
@@ -3184,6 +3181,7 @@ class ResponseRunner:
         *,
         history_scope: HistoryScope,
     ) -> SpanHandle | None:
+        regeneration = request.prepared_edit_record is not None
         return await replies.claim(
             delivery_id=request.response_envelope.source_event_id,
             sources=rl.SpanSources(
@@ -3201,6 +3199,9 @@ class ResponseRunner:
             ),
             placeholder=TEAM_PLACEHOLDER if history_scope.kind == "team" else AGENT_PLACEHOLDER,
             show_tool_calls=self._show_tool_calls(),
+            driving_edit_id=request.response_envelope.source_event_id if regeneration else None,
+            edit_receipt_order=request.sources.edit_receipt_order if regeneration else None,
+            historical_event_id=request.existing_event_id if regeneration else None,
             existing_event_id=request.existing_event_id,
         )
 
