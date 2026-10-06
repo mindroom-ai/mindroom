@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.thread_tags import ThreadTagsError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
 ROOM = "!room:example.test"
 # Eight 642-character sections: 1,286 tokens, over a 1,000-token trigger.
 MEMORY = "# Memory\n" + "".join(f"## Topic {index}\n" + f"Detail {index} " * 70 + "\n" for index in range(8))
+# MEMORY with its last section moved to memory/topics.md behind a pointer, within the bounds.
+CONDENSED = MEMORY.split("## Topic 7\n")[0] + "## Topic 7\nSee memory/topics.md\n"
 # Noon UTC; the default 04:00 schedule in the config's timezone is next due within a day.
 NOON = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 DAY_LATER = NOON + timedelta(days=1)
@@ -40,6 +43,7 @@ class _Bot:
     """The agent bot as the runner sees it, recording every hook message it sends."""
 
     sent: list[dict[str, Any]] = field(default_factory=list)
+    client: Any = field(default_factory=lambda: MagicMock(user_id="@mindroom_mind:example.test"))
 
     async def _hook_send_message(
         self,
@@ -197,6 +201,61 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
     assert recheck["thread_id"] == "$event1"
     assert recheck["trigger_dispatch"] is True
     assert recheck["extra_content"] == {ORIGINAL_SENDER_KEY: "@mindroom_user:example.test"}
+
+
+async def _finish_run(runner: AutomationRunner, config: Config, paths: RuntimePaths, memory: str | None) -> None:
+    """Post the prompt, let the run rewrite MEMORY.md (or leave it), and verify."""
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    if memory is not None:
+        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        assert root is not None
+        (root / "memory").mkdir(exist_ok=True)
+        moved = MEMORY.split("## Topic 7\n")[1]
+        (root / "memory" / "topics.md").write_text(moved, encoding="utf-8")
+        (root / "MEMORY.md").write_text(memory, encoding="utf-8")
+    runner.response_finished(["$event1"])
+    assert await wait_for_background_tasks(5)
+
+
+@pytest.mark.asyncio
+async def test_a_run_within_the_bounds_resolves_its_thread(tmp_path: Path) -> None:
+    """The bot tags the prompt's thread resolved after the plain notice."""
+    config, paths, runner, bot = _setup(tmp_path)
+    set_tag = AsyncMock()
+    with patch.object(runner_module, "set_thread_tag", set_tag):
+        await _finish_run(runner, config, paths, CONDENSED)
+
+    assert bot.sent[1]["body"].startswith("✅ Prompt files condensed from 1286 to ")
+    set_tag.assert_awaited_once_with(bot.client, ROOM, "$event1", "resolved", set_by="@mindroom_mind:example.test")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory", [None, "# Memory\n"], ids=["unchanged", "recheck"])
+async def test_an_unchanged_run_or_a_recheck_leaves_the_thread_open(tmp_path: Path, memory: str | None) -> None:
+    """Only a run that changed the files within the bounds resolves its thread."""
+    config, paths, runner, _bot = _setup(tmp_path)
+    set_tag = AsyncMock()
+    with patch.object(runner_module, "set_thread_tag", set_tag):
+        await _finish_run(runner, config, paths, memory)
+
+    set_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_thread_the_bot_cannot_tag_still_gets_its_notice(tmp_path: Path) -> None:
+    """A missing power level for thread tags is logged, not raised."""
+    config, paths, runner, bot = _setup(tmp_path)
+    set_tag = AsyncMock(side_effect=ThreadTagsError("power too low"))
+    with (
+        patch.object(runner_module, "set_thread_tag", set_tag),
+        patch.object(runner_module.logger, "warning") as warning,
+    ):
+        await _finish_run(runner, config, paths, CONDENSED)
+
+    set_tag.assert_awaited_once()
+    assert bot.sent[1]["body"].startswith("✅ ")
+    warning.assert_called_once_with("Automation could not resolve its thread", agent="mind", error="power too low")
 
 
 @pytest.mark.asyncio
