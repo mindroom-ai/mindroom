@@ -768,7 +768,7 @@ When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
 With the default `fixed`, both Jobs keep stable names and the access-grant Job is a Helm `post-install,post-upgrade` hook, so `helm install` and `helm upgrade` replace and rerun it.
 The bootstrap Job is not a hook, so changing its pod template requires deleting the finished Job first, even with `helm upgrade`.
 Workflows that apply rendered manifests, such as `kubectl kustomize --enable-helm` followed by `kubectl apply`, ignore Helm hook annotations, and Job pod templates are immutable.
-With `fixed`, those workflows do not rerun an existing access-grant Job for a changed grant list, and they fail to apply a changed pod template until the old Job is deleted.
+With `fixed`, those workflows fail to apply a changed grant list or pod template until the old Job is deleted, and do not rerun an existing Job otherwise.
 Set `jobNaming: contentHash` for those workflows.
 The chart then drops the hook and appends a hash of each Job's rendered pod spec to the Job name.
 The access-grant Job's pod spec includes its grant config, so each access-grant Job applies the grants it was created for.
@@ -776,6 +776,7 @@ Applying changed inputs creates a new Job, and applying unchanged inputs leaves 
 In either mode, a chart upgrade that changes only the chart or app version keeps both Job names and pod templates, while changed inputs still get a new `contentHash` name.
 Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
 To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
+To remove grants ConfigMaps that older chart versions left in the namespace, run `kubectl delete configmap -l app.kubernetes.io/component=agent-vault-access-grants` once.
 
 ## Background Script Gateway
 
