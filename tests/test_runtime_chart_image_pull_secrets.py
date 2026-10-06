@@ -51,7 +51,7 @@ def _pod_specs(tmp_path: Path, *values: dict[str, Any]) -> dict[str, dict[str, A
 
 
 def test_every_runtime_chart_pod_uses_the_image_pull_secrets(tmp_path: Path) -> None:
-    """Pods pulling from a private registry need the credentials, not only the primary Deployment."""
+    """Every chart-rendered pod gets the configured pull secrets, and none renders the field when unset."""
     pull_secrets = [{"name": "private-registry-pull"}]
     pod_specs = _pod_specs(tmp_path, {"imagePullSecrets": pull_secrets})
 
@@ -67,8 +67,4 @@ def test_every_runtime_chart_pod_uses_the_image_pull_secrets(tmp_path: Path) -> 
         pod_specs,
         pull_secrets,
     )
-
-
-def test_runtime_chart_pods_omit_image_pull_secrets_by_default(tmp_path: Path) -> None:
-    """Without configured pull secrets, no pod spec renders an empty imagePullSecrets field."""
     assert not [name for name, spec in _pod_specs(tmp_path).items() if "imagePullSecrets" in spec]
