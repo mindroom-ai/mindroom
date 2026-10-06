@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from agno.tools import Toolkit
 from google_auth_httplib2 import AuthorizedHttp
@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
+
+_ClientT = TypeVar("_ClientT")
 
 _SANITIZED_GOOGLE_AUTHORIZATION_REJECTION = b'{"error":{"code":401,"message":"Google authorization rejected"}}'
 
@@ -165,11 +167,8 @@ class ThreadLocalGoogleServiceMixin:
         self._google_service_state().user_email = value
 
 
-class GoogleApiToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
-    """Native Google API toolkit with scoped OAuth credentials and optional service-account fallback."""
-
-    _google_api_name: str
-    _google_api_version: str
+class GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
+    """Google toolkit with scoped OAuth credentials and optional service-account fallback."""
 
     def __init__(
         self,
@@ -179,7 +178,7 @@ class GoogleApiToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, To
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
-        runtime_config: Config | None,
+        runtime_config: Config | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         provided_creds = kwargs.pop("creds", None)
@@ -205,7 +204,7 @@ class GoogleApiToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, To
             defer_to_original_auth=defer_to_original_auth,
         )
         super().__init__(name=name, tools=tools)
-        self._set_original_auth(GoogleApiToolkit._service_account_auth)
+        self._set_original_auth(GoogleOAuthToolkit._service_account_auth)
         self._wrap_oauth_function_entrypoints()
 
     def _should_fallback_to_original_auth(self) -> bool:
@@ -229,6 +228,13 @@ class GoogleApiToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, To
             creds = creds.with_subject(self.delegated_user)
         return creds
 
+
+class GoogleApiToolkit(GoogleOAuthToolkit):
+    """Native Google API toolkit built on googleapiclient discovery services."""
+
+    _google_api_name: str
+    _google_api_version: str
+
     def _google_api_service(self) -> Any:  # noqa: ANN401
         """Return the per-thread authenticated Google API service."""
         self._authenticate()
@@ -240,3 +246,42 @@ class GoogleApiToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, To
                 cache_discovery=False,
             )
         return self.service
+
+
+class GoogleCloudToolkit(GoogleOAuthToolkit):
+    """Google toolkit for google-cloud client libraries on scoped Google Cloud credentials."""
+
+    def _google_cloud_credentials(self) -> Any:  # noqa: ANN401
+        """Return refresh-tracked credentials for the current requester or service account."""
+        self._authenticate()
+        return self.creds
+
+    def _google_cloud_client(self, name: str, factory: Callable[[Any], _ClientT]) -> _ClientT:
+        """Return one client per worker thread, rebuilt whenever the credentials change."""
+        credentials = self._google_cloud_credentials()
+        clients = self.service
+        if not isinstance(clients, dict):
+            clients = {}
+            self.service = clients
+        if name not in clients:
+            clients[name] = factory(credentials)
+        return cast("_ClientT", clients[name])
+
+    def _google_cloud_error_result(self, service_name: str, operation: str, exc: Exception) -> str:
+        """Return a tool error exposing only the HTTP status, and flag a final 401 for reconnect."""
+        status = getattr(exc, "code", None)
+        if isinstance(status, bool) or not isinstance(status, int):
+            status = None
+        if status == 401:
+            self._mark_google_authorization_rejected()
+        logger.warning(
+            "google_cloud_request_failed",
+            service=service_name,
+            operation=operation,
+            error_type=type(exc).__name__,
+            status=status,
+        )
+        message = f"{service_name} request failed"
+        if status is not None:
+            message = f"{message} (HTTP {status})"
+        return json.dumps({"error": message})
