@@ -117,6 +117,7 @@ class _WatchedOutbox:
         response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         permanent_failure_reason: str | None = None,
+        new_text: str | None = None,
     ) -> ReplyRowEnqueue | None:
         """Record one reply write, noting the stage its rule chose on the timeline."""
         enqueued = await self.inner.enqueue_reply_row(
@@ -128,6 +129,7 @@ class _WatchedOutbox:
             response_attempt=response_attempt,
             event_type=event_type,
             permanent_failure_reason=permanent_failure_reason,
+            new_text=new_text,
         )
         if enqueued is not None and enqueued.stage is not None:
             self.timeline.append(f"enqueue:{enqueued.stage.value}")

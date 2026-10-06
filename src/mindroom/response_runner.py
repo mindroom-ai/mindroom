@@ -52,6 +52,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.event_journal import (
+    ApprovalAdvance,
     ApprovalContinuation,
     ApprovalMemoryTurn,
     MatrixDelivery,
@@ -103,6 +104,7 @@ from mindroom.reply_presentation import (
     note_segment,
 )
 from mindroom.reply_scope import (
+    ReplyWriteRefusedError,
     SpanHandle,
     SpanSlot,
     current_slot,
@@ -794,6 +796,16 @@ class PostLockRequestPreparationError(RuntimeError):
         self.placeholder_event_id = placeholder_event_id
         # The reply's records already own the visible failure notice.
         self.reply_owned = reply_owned
+
+
+def _paused_presentation(handle: SpanHandle, paused: PausedAttempt, *, waiting_text: str | None) -> Presentation:
+    """Return what a span's reply shows while it waits for approval."""
+    return handle.presentation(
+        paused.response_text or "",
+        tuple(paused.tool_trace),
+        team_state=paused.response_presentation_state or None,
+        trailing_note=None if waiting_text is None else note_segment(NoteKind.APPROVAL_WAIT, waiting_text),
+    )
 
 
 @dataclass(frozen=True)
@@ -1621,12 +1633,7 @@ class ResponseRunner:
         handle = current_span()
         if handle is not None and not handle.exited:
             # The reply's records show the pause; its row is written with the continuation.
-            reply_pause = handle.presentation(
-                paused.response_text or "",
-                tuple(paused.tool_trace),
-                team_state=paused.response_presentation_state or None,
-                trailing_note=None if waiting_text is None else note_segment(NoteKind.APPROVAL_WAIT, waiting_text),
-            )
+            reply_pause = _paused_presentation(handle, paused, waiting_text=waiting_text)
             reply = await handle.runtime.store.replies.load(handle.reply_id)
             assert reply is not None, "a span's reply exists while it pauses"
             if reply.event_id is None:
@@ -1660,6 +1667,47 @@ class ResponseRunner:
             ),
         )
         return _ShownPause(response_event_id if edited else None, "edited", visible_text)
+
+    async def _advance_reply_pause(
+        self,
+        handle: SpanHandle,
+        target: MessageTarget,
+        advance: ApprovalAdvance,
+        paused: PausedAttempt,
+        *,
+        visible_text: str,
+        stream_status: str,
+        tool_trace: tuple[ToolTraceEntry, ...],
+        waiting_text: str | None,
+    ) -> tuple[ApprovalContinuation | None, bool]:
+        """Advance the continuation and pause the resume span's reply with the pause row, in one transaction."""
+        reply = await handle.runtime.store.replies.load(handle.reply_id)
+        assert reply is not None
+        assert reply.event_id is not None, "a resumed reply shows its paused event"
+        try:
+            shown = await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=reply.event_id,
+                    new_text=visible_text,
+                    extra_content={STREAM_STATUS_KEY: stream_status},
+                    tool_trace=list(tool_trace) or None,
+                    reply_write=pause_write(
+                        handle,
+                        _paused_presentation(handle, paused, waiting_text=waiting_text),
+                        approval_id=advance.approval_id,
+                        in_place=False,
+                        enqueue=partial(self.deps.approval_store.pause_for_approval, advance),
+                    ),
+                ),
+            )
+        except ReplyWriteRefusedError:
+            # A Stop committed while the pause was prepared; neither was written.
+            return None, False
+        current = await self.deps.approval_store.approval_continuation(advance.approval_id)
+        if current is None or current.generation != advance.claimant_generation + 1:
+            return None, False
+        return current, shown
 
     async def _pause_reply(
         self,
@@ -1871,11 +1919,15 @@ class ResponseRunner:
                 ),
                 current,
             )
+        handle = current_span()
         presentation = await self._approval_responses.advance_pause(
             current,
             result,
             target=target,
             pending_text=PROGRESS_PLACEHOLDER,
+            reply_pause=(
+                None if handle is None or handle.exited else partial(self._advance_reply_pause, handle, target)
+            ),
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
@@ -2101,6 +2153,16 @@ class ResponseRunner:
         if initial is not None and initial.retired:
             # The legacy approval-recovery boundary proves deletion during settlement.
             return await self._approval_responses.settle_failure(failing, reason)
+        if (
+            self.deps.replies is not None
+            and await self.deps.replies.store.replies.for_event(failing.response_event_id) is not None
+        ):
+            # The reply's records know what it showed; Matrix is not read back.
+            return await self._approval_responses.settle_failure(
+                failing,
+                reason,
+                interruption="restart" if cancel_source == "sync_restart" else "interrupted",
+            )
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
@@ -3157,14 +3219,12 @@ class ResponseRunner:
                 require_resolved_membership=True,
             ):
                 return await self._settle_unauthorized_approval_continuation(owned)
-            claimed = await self.deps.approval_store.claim_approval_continuation(
-                owned.approval_id,
-                runtime_generation=self.deps.approval_runtime_generation,
-                legacy_show_tool_calls=self._show_tool_calls(owned.entity_name),
-            )
-            if claimed is None:
-                return None
-            event_id = await self._run_owned_approval_continuation(claimed, target=target)
+            # Each claimed generation runs in its own resume span (PR-1.md §5.2).
+            async with self._reply_span_scope() as resume_slot:
+                claimed = await self._claim_owned_approval(owned, slot=resume_slot)
+                if claimed is None:
+                    return None
+                event_id = await self._run_owned_approval_continuation(claimed, target=target)
             owned = await self.deps.approval_store.approval_continuation_for_source(
                 request.response_envelope.source_event_id,
             )
@@ -3357,6 +3417,7 @@ class ResponseRunner:
                 if current_task_is_process_shutdown()
                 else cancel_failure_reason(classify_cancel_source(error))
             )
+            await run_coroutine_until_complete(self._end_live_resume_span())
             owns_final, event_id, _failing = await run_coroutine_until_complete(
                 self._recover_or_request_claimed_failure(
                     claimed,
@@ -3369,6 +3430,7 @@ class ResponseRunner:
             raise
         except Exception as error:
             reason = str(error) or "Tool approval continuation failed safely."
+            await self._end_live_resume_span()
             owns_final, event_id, failing = await self._recover_or_request_claimed_failure(
                 claimed,
                 target=target,
@@ -3389,6 +3451,50 @@ class ResponseRunner:
             retained = await self.deps.approval_store.approval_continuation(claimed.approval_id)
             event_id = outcome.event_id if outcome.terminal_status != "suspended" and retained is None else None
         return event_id
+
+    async def _end_live_resume_span(self) -> None:
+        """End a resume span its lifecycle left running, before the continuation's failure settles the reply."""
+        handle = current_span()
+        if (
+            handle is None
+            or handle.exited
+            or handle.span.kind is not rl.SpanKind.APPROVAL_RESUME
+            or current_task_is_process_shutdown()
+        ):
+            # A process stop leaves the span as a crash would, for the next instance to end.
+            return
+        now_ns = time.time_ns()
+        await self.deps.delivery_gateway.end_reply_span(
+            handle,
+            lambda reply, span: (
+                rl.stopped(reply, span, None, now_ns=now_ns)
+                if reply.unapplied_stop
+                else rl.fail(reply, span, None, phase="delivery", now_ns=now_ns)
+            ),
+        )
+
+    async def _claim_owned_approval(
+        self,
+        owned: ApprovalContinuation,
+        *,
+        slot: SpanSlot | None,
+    ) -> ApprovalContinuation | None:
+        """Claim a ready continuation, with its reply's resume span when reply records own the reply."""
+        legacy_show_tool_calls = self._show_tool_calls(owned.entity_name)
+        if self.deps.replies is None or slot is None:
+            return await self.deps.approval_store.claim_approval_continuation(
+                owned.approval_id,
+                runtime_generation=self.deps.approval_runtime_generation,
+                legacy_show_tool_calls=legacy_show_tool_calls,
+            )
+        claimed, handle = await self.deps.replies.claim_approval_resume(
+            owned,
+            runtime_generation=self.deps.approval_runtime_generation,
+            legacy_show_tool_calls=legacy_show_tool_calls,
+            placeholder=TEAM_PLACEHOLDER if owned.entity_kind == "team" else AGENT_PLACEHOLDER,
+        )
+        slot.handle = handle
+        return claimed
 
     async def _resume_approval_source(self, source_event_id: str) -> None:
         """Resume journal-owned approval work before normal ingress can reinterpret its source."""

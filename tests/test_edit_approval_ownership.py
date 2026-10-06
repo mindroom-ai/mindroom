@@ -25,6 +25,7 @@ from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
@@ -115,6 +116,7 @@ class _ApprovalCase:
             ),
             patch("mindroom.approval_response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))),
             # Inspect the durable checkpoint before the test claims resumed execution.
+            patch.object(ReplyRuntime, "claim_approval_resume", AsyncMock(return_value=(None, None))),
             patch.object(
                 self.runner,
                 "deps",
@@ -391,6 +393,7 @@ async def _paused_case(  # noqa: PLR0915
             ),
             patch("mindroom.approval_response.evaluate_tool_approval", approval_evaluation),
             # Inspect the durable checkpoint before the test claims resumed execution.
+            patch.object(ReplyRuntime, "claim_approval_resume", AsyncMock(return_value=(None, None))),
             patch.object(
                 runner,
                 "deps",

@@ -133,7 +133,7 @@ from .matrix.room_member_joins import (
 )
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
-from .reply_lifecycle import CancelSpan
+from .reply_lifecycle import CancelSpan, WakeApproval
 from .reply_scope import ReplyRuntime
 from .response_admission import admitted_response_decision
 from .response_delivery_recovery import ResponseDeliveryRecovery
@@ -680,6 +680,7 @@ class AgentBot:
                     record,
                 ),
                 reply_effects=self._run_reply_effects,
+                reply_row_resolved=self._reply_runtime.rows_resolved,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -950,6 +951,11 @@ class AgentBot:
         for effect in effects:
             if isinstance(effect, CancelSpan):
                 self._reply_runtime.cancel_span(effect.span_id, cancel_source="user_stop")
+            elif isinstance(effect, WakeApproval):
+                # The continuation's source worker runs its failure settlement, as on main.
+                continuation = await self._reply_runtime.store.approval_continuation(effect.approval_id)
+                if continuation is not None:
+                    self._journal_dispatcher.retry_turn_sources(continuation.room_id, continuation.source_event_ids)
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""

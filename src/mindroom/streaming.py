@@ -2517,6 +2517,8 @@ async def stream_progress_edits(
     extra_content: dict[str, Any] | None = None,
     visible_progress_callback: Callable[[str], None] | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
+    progress_write_ahead: ProgressWriteAhead | None = None,
+    progress_delivered: Callable[[ProgressState, str], None] | None = None,
 ) -> AsyncIterator[ProgressPublisher]:
     """Stream progress into one existing reply whose terminal update belongs to the caller.
 
@@ -2546,6 +2548,8 @@ async def stream_progress_edits(
         extra_content=extra_content,
         visible_progress_callback=visible_progress_callback,
         transport_is_current=transport_is_current,
+        progress_write_ahead=progress_write_ahead,
+        progress_delivered=progress_delivered,
     )
     published = False
 

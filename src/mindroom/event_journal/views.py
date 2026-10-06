@@ -441,6 +441,7 @@ class MatrixDeliveryView(Protocol):
         response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         permanent_failure_reason: str | None = None,
+        new_text: str | None = None,
     ) -> ReplyRowEnqueue | None:
         """Decide and record one durable write of an agent or team reply, or refuse both."""
         ...

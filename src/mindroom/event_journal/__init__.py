@@ -16,6 +16,7 @@ from mindroom.interactive_models import InteractiveSelection
 
 from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
 from .approval_continuations import (
+    ApprovalAdvance,
     ApprovalCall,
     ApprovalContinuation,
     ApprovalDecision,
@@ -94,6 +95,7 @@ __all__ = [
     "AdmissionFacts",
     "AdmissionResult",
     "AdmissionView",
+    "ApprovalAdvance",
     "ApprovalCall",
     "ApprovalCardReservation",
     "ApprovalContinuation",

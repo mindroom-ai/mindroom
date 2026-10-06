@@ -84,6 +84,9 @@ OUTBOX_TABLE = """
         reply_id TEXT,
         span_id TEXT,
         reply_sequence BIGINT,
+        -- What a reply row's acknowledgement and late edit target need, kept
+        -- apart from result_json, which main's readers treat as an answer.
+        reply_row_json TEXT,
         PRIMARY KEY (principal_id, delivery_id, stage)
     )
 """

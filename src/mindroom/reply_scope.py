@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
 
     from mindroom.cancellation import TaskCancelSource
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.matrix_delivery import ReplyRowEnqueuer
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -171,6 +171,26 @@ class ReplyRuntime:
     _tasks: dict[str, asyncio.Task[object]] = field(default_factory=dict, init=False, repr=False)
     # Cancellations of live spans whose task had not started yet (DESIGN.md §8 registration recheck).
     _cancel_on_start: dict[str, TaskCancelSource] = field(default_factory=dict, init=False, repr=False)
+    # Sources whose claim waited for a reply's earlier writes, by reply.
+    _waiting_for_rows: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    async def _wait_for_rows(self, reply_id: str, room_id: str, sources: tuple[str, ...]) -> None:
+        """Retry sources once the reply's earlier writes resolve, instead of retrying at once."""
+        self._waiting_for_rows.setdefault(reply_id, []).append((room_id, sources))
+        reply = await self.store.replies.load(reply_id)
+        if reply is None or (reply.owed_write is None and not await self.store.replies.has_unresolved_rows(reply_id)):
+            # They resolved before this claim registered its wait. A note still
+            # owed and not yet enqueued wakes it when its row resolves.
+            self.rows_resolved(reply_id)
+
+    def rows_resolved(self, reply_id: str) -> None:
+        """Retry the claims that waited for this reply's earlier writes."""
+        for room_id, sources in self._waiting_for_rows.pop(reply_id, ()):
+            self.retry_sources(room_id, sources)
 
     def register_task(self, handle: SpanHandle, task: asyncio.Task[object]) -> None:
         """Remember the task that executes one span, cancelling it at once if a Stop already reached the span."""
@@ -260,7 +280,8 @@ class ReplyRuntime:
         if transition.claimed is None or transition.reply is None:
             # Earlier writes of this reply are unresolved; their resolution
             # wakes these sources instead of waiting under the conversation lock.
-            self.retry_sources(room_id, sources.pending)
+            assert transition.reply is not None, "only a reply with earlier writes defers a claim"
+            await self._wait_for_rows(transition.reply.reply_id, room_id, sources.pending)
             return None
         return _handle_for(self, transition.reply, transition.claimed, empty)
 
@@ -291,6 +312,50 @@ class ReplyRuntime:
             visibility_policy=visibility_policy,
             empty_presentation=encode_presentation(empty),
         )
+
+    async def claim_approval_resume(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        runtime_generation: str,
+        legacy_show_tool_calls: bool | None,
+        placeholder: str,
+    ) -> tuple[ApprovalContinuation | None, SpanHandle | None]:
+        """Claim a ready continuation and its paused reply's resume span together.
+
+        Returns no handle for a continuation no reply records own; returns
+        neither when the reply's earlier writes are unresolved, which retry the
+        sources once they resolve.
+        """
+        empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
+        sources = continuation.sources
+        claim = await self.claim_request(
+            delivery_id=continuation.source_event_ids[0],
+            sources=rl.SpanSources(
+                pending=sources.pending_event_ids,
+                logical=sources.logical_source_event_ids,
+                discovery=sources.discovery_event_ids,
+            ),
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            requester_id=continuation.requester_id,
+            visibility_policy=rl.VisibilityPolicy.NORMAL,
+            empty=empty,
+        )
+        claimed, applied = await self.store.claim_approval_resume(
+            continuation.approval_id,
+            runtime_generation=runtime_generation,
+            claim=claim,
+            legacy_show_tool_calls=legacy_show_tool_calls,
+        )
+        if applied is None:
+            return claimed, None
+        transition = applied.transition
+        if claimed is None or transition.claimed is None or transition.reply is None:
+            assert transition.reply is not None, "only a reply with earlier writes defers a resume"
+            await self._wait_for_rows(transition.reply.reply_id, continuation.room_id, sources.pending_event_ids)
+            return None, None
+        return claimed, _handle_for(self, transition.reply, transition.claimed, empty)
 
     async def acknowledgement(
         self,
@@ -542,6 +607,34 @@ def owed_note_write(reply: rl.Reply, span: rl.Span, shown: Presentation, *, span
         decide=lambda current, owner: rl.flush_owed_write(
             current,
             owner,
+            shown=encoded,
+            prepared_revision=revision,
+            span_has_final=span_has_final,
+            now_ns=time.time_ns(),
+        ),
+    )
+
+
+def approval_note_write(
+    reply: rl.Reply,
+    span: rl.Span,
+    shown: Presentation,
+    *,
+    approval_id: str,
+    span_has_final: bool,
+) -> ReplyWrite:
+    """Return the note a failed approval shows on the reply it paused, before its finish ends the reply."""
+    encoded = encode_presentation(shown)
+    revision = reply.revision
+    return ReplyWrite(
+        reply_id=reply.reply_id,
+        span=span,
+        stage=rl.WriteStage.EDIT if span_has_final else rl.WriteStage.FINAL,
+        shown=shown,
+        decide=lambda current, owner: rl.approval_failure_note(
+            current,
+            owner,
+            approval_id=approval_id,
             shown=encoded,
             prepared_revision=revision,
             span_has_final=span_has_final,

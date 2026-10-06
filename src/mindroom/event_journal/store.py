@@ -9,7 +9,7 @@ rather than something it is trusted not to do.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import batched
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
@@ -44,7 +44,8 @@ from .approval_card_state import (  # noqa: TC001 - part of this module's runtim
     ApprovalDecisionMetadata,
     RecordedApprovalDecision,
 )
-from .approval_continuations import (  # noqa: TC001 - runtime return and input types
+from .approval_continuations import (
+    ApprovalAdvance,
     ApprovalCall,
     ApprovalContinuation,
     ApprovalContinuationState,
@@ -796,6 +797,7 @@ class PrincipalStore:
         response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         permanent_failure_reason: str | None = None,
+        new_text: str | None = None,
     ) -> ReplyRowEnqueue | None:
         """Decide and record one durable write of an agent or team reply.
 
@@ -815,6 +817,7 @@ class PrincipalStore:
                     result=result,
                     response_attempt=response_attempt,
                     permanent_failure_reason=permanent_failure_reason,
+                    new_text=new_text,
                 ),
             )
         except _ReplyRowRefusedError:
@@ -1564,7 +1567,7 @@ class PrincipalStore:
 
     async def pause_for_approval(
         self,
-        continuation: ApprovalContinuation,
+        hold: ApprovalContinuation | ApprovalAdvance,
         *,
         request: ReplyRowRequest,
         room_id: str,
@@ -1574,19 +1577,20 @@ class PrincipalStore:
         response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         permanent_failure_reason: str | None = None,
+        new_text: str | None = None,
     ) -> ReplyRowEnqueue | None:
-        """Create a paused run's owner and pause its reply with the pause row, in one transaction.
+        """Create or advance a paused run's owner and pause its reply with the pause row, in one transaction.
 
-        ``None`` means the continuation could not take its sources or the outbox
-        refused the row; a pause the reply's rule refuses (a Stop committed
-        meanwhile) comes back unapplied. Either way nothing is written.
+        ``None`` means the continuation could not take its sources or advance,
+        or the outbox refused the row; a pause the reply's rule refuses (a Stop
+        committed meanwhile) comes back unapplied. Either way nothing is written.
         """
         try:
             return await self._backend.write(
                 lambda transaction: _pause_for_approval(
                     transaction,
                     self._principal_id,
-                    continuation,
+                    hold,
                     request=request,
                     event_type=event_type,
                     room_id=room_id,
@@ -1595,6 +1599,7 @@ class PrincipalStore:
                     result=result,
                     response_attempt=response_attempt,
                     permanent_failure_reason=permanent_failure_reason,
+                    new_text=new_text,
                 ),
             )
         except _ReplyRowRefusedError:
@@ -1663,6 +1668,31 @@ class PrincipalStore:
             ),
         )
 
+    async def claim_approval_resume(
+        self,
+        approval_id: str,
+        *,
+        runtime_generation: str,
+        claim: rl.ClaimRequest,
+        legacy_show_tool_calls: bool | None = None,
+    ) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
+        """Claim one ready paused run and its reply's resume span together (PR-1.md §4.3).
+
+        A reply with unresolved durable writes refuses the resume, and the
+        continuation stays ready; a continuation whose response no reply
+        records own is claimed alone, as on main.
+        """
+        return await self._backend.write(
+            lambda transaction: _claim_approval_resume(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                runtime_generation=runtime_generation,
+                claim=claim,
+                legacy_show_tool_calls=legacy_show_tool_calls,
+            ),
+        )
+
     async def advance_approval_continuation(
         self,
         approval_id: str,
@@ -1680,24 +1710,21 @@ class PrincipalStore:
         continuation_count: int | None = None,
     ) -> ApprovalContinuation | None:
         """Replace one claimed generation with the next exact Agno pause."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.advance(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                claimant_generation=claimant_generation,
-                run_id=run_id,
-                session_id=session_id,
-                calls=calls,
-                runtime_model_name=runtime_model_name,
-                response_text=response_text,
-                response_tool_trace=response_tool_trace,
-                response_presentation_state=response_presentation_state,
-                delegation_storage_bindings=delegation_storage_bindings,
-                cli_call=cli_call,
-                continuation_count=continuation_count,
-            ),
+        advance = ApprovalAdvance(
+            approval_id=approval_id,
+            claimant_generation=claimant_generation,
+            run_id=run_id,
+            session_id=session_id,
+            calls=calls,
+            runtime_model_name=runtime_model_name,
+            response_text=response_text,
+            response_tool_trace=response_tool_trace,
+            response_presentation_state=response_presentation_state,
+            delegation_storage_bindings=delegation_storage_bindings,
+            cli_call=cli_call,
+            continuation_count=continuation_count,
         )
+        return await self._backend.write(lambda transaction: advance.apply(transaction, self._principal_id))
 
     async def activate_approval_continuation(
         self,
@@ -1749,13 +1776,9 @@ class PrincipalStore:
         )
 
     async def finish_approval_continuation(self, approval_id: str) -> bool:
-        """Settle one paused run after its FINAL delivery reaches a terminal outcome."""
+        """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply."""
         return await self._backend.write(
-            lambda transaction: approval_continuations.finish(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-            ),
+            lambda transaction: _finish_approval_continuation(transaction, self._principal_id, approval_id),
         )
 
     async def enqueue_unavailable_approval_notice(
@@ -1859,6 +1882,7 @@ def _enqueue_matrix_delivery(
     reply_id: str | None = None,
     span_id: str | None = None,
     reply_sequence: int | None = None,
+    reply_row: Mapping[str, object] | None = None,
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
@@ -1937,6 +1961,7 @@ def _enqueue_matrix_delivery(
         reply_id=reply_id,
         span_id=span_id,
         reply_sequence=reply_sequence,
+        reply_row=reply_row,
     )
     if transaction_id is None:
         return None
@@ -1970,6 +1995,51 @@ def _enqueue_matrix_delivery(
     return transaction_id
 
 
+def _claim_approval_resume(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    runtime_generation: str,
+    claim: rl.ClaimRequest,
+    legacy_show_tool_calls: bool | None,
+) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
+    """Claim the continuation and the resume span of its paused reply in one transaction."""
+    current = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
+    if current is None or current.state != "ready":
+        return None, None
+    applied = None
+    if reply_messages.for_event(transaction, principal_id, current.response_event_id) is not None:
+        applied = replies.claim(
+            transaction,
+            principal_id,
+            replace(claim, approval_id=current.approval_id, approval_generation=current.generation),
+            replies.ClaimLookup(existing_event_id=current.response_event_id),
+        )
+        if applied.transition.claimed is None:
+            # The reply's earlier writes are unresolved; their resolution wakes the sources.
+            return None, applied
+    claimed = approval_continuations.claim(
+        transaction,
+        principal_id,
+        approval_id=approval_id,
+        runtime_generation=runtime_generation,
+        legacy_show_tool_calls=legacy_show_tool_calls,
+    )
+    assert claimed is not None, "a ready continuation is claimed in the transaction that read it"
+    return claimed, applied
+
+
+def _finish_approval_continuation(transaction: Transaction, principal_id: str, approval_id: str) -> bool:
+    """Finish a continuation and apply the outcome to the reply it paused, in one transaction."""
+    continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
+    if not approval_continuations.finish(transaction, principal_id, approval_id=approval_id):
+        return False
+    if continuation is not None:
+        replies.approval_finished(transaction, principal_id, continuation)
+    return True
+
+
 class _ReplyRowRefusedError(Exception):
     """The outbox refused a reply row the lifecycle had already decided; roll both back."""
 
@@ -1985,7 +2055,7 @@ class _PauseRefusedError(Exception):
 def _pause_for_approval(
     transaction: Transaction,
     principal_id: str,
-    continuation: ApprovalContinuation,
+    hold: ApprovalContinuation | ApprovalAdvance,
     *,
     request: ReplyRowRequest,
     event_type: str,
@@ -1995,9 +2065,15 @@ def _pause_for_approval(
     result: Mapping[str, object] | None,
     response_attempt: ResponseAttempt | None,
     permanent_failure_reason: str | None,
+    new_text: str | None,
 ) -> ReplyRowEnqueue:
-    """Create the continuation, then pause its reply, so neither exists without the other (DESIGN.md §6.4)."""
-    if approval_continuations.create(transaction, principal_id, continuation) is None:
+    """Create or advance the continuation, then pause its reply, so neither exists without the other (DESIGN.md §6.4)."""
+    held = (
+        hold.apply(transaction, principal_id)
+        if isinstance(hold, ApprovalAdvance)
+        else approval_continuations.create(transaction, principal_id, hold)
+    )
+    if held is None:
         raise _ReplyRowRefusedError
     enqueued = _enqueue_reply_row(
         transaction,
@@ -2010,6 +2086,7 @@ def _pause_for_approval(
         result=result,
         response_attempt=response_attempt,
         permanent_failure_reason=permanent_failure_reason,
+        new_text=new_text,
     )
     if not enqueued.transition.applied:
         raise _PauseRefusedError(enqueued)
@@ -2028,6 +2105,7 @@ def _enqueue_reply_row(
     result: Mapping[str, object] | None,
     response_attempt: ResponseAttempt | None,
     permanent_failure_reason: str | None,
+    new_text: str | None = None,
 ) -> ReplyRowEnqueue:
     """Decide one reply write with its lifecycle rule and record the row it chose, in one transaction.
 
@@ -2081,8 +2159,8 @@ def _enqueue_reply_row(
         "reply_id": reply.reply_id,
         "span_id": span.span_id,
         "reply_sequence": row.sequence,
+        "reply_row": replies.row_facts(placeholder_only=request.placeholder_only, new_text=new_text),
     }
-    stored_result = replies.row_result(result, placeholder_only=request.placeholder_only)
     if stage is DeliveryStage.EDIT:
         delivery_id = replies.edit_delivery_id(span.delivery_id, row.sequence)
         if not reads.claim_membership_epoch(
@@ -2102,7 +2180,7 @@ def _enqueue_reply_row(
             membership_epoch=reply.membership_epoch,
             thread_id=thread_id,
             payload=payload,
-            result=stored_result,
+            result=result,
             edits_event_id=edits_event_id,
             edit_target_pending=edit_target_pending,
             permanent_failure_reason=permanent_failure_reason,
@@ -2119,7 +2197,7 @@ def _enqueue_reply_row(
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
-            result=stored_result,
+            result=result,
             response_attempt=response_attempt if stage is DeliveryStage.FINAL else None,
             edits_event_id=edits_event_id,
             settle_source_event_ids=(),

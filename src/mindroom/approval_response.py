@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom import approval_manager
 from mindroom.approval_failure import prepare_approval_failure
@@ -20,7 +20,7 @@ from mindroom.constants import (
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
+from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
@@ -45,7 +45,7 @@ def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
 _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from agno.models.response import ToolExecution
 
@@ -55,6 +55,11 @@ if TYPE_CHECKING:
     from mindroom.event_journal import MatrixDelivery, PrincipalStore
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_system.events import ToolTraceEntry
+
+
+# Records a chained pause's advance with the reply's pause row; returns the
+# advanced continuation and whether the row reached Matrix.
+type ReplyPause = Callable[..., Awaitable[tuple[ApprovalContinuation | None, bool]]]
 
 
 @dataclass(frozen=True)
@@ -364,8 +369,14 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         pending_text: str,
+        reply_pause: ReplyPause | None = None,
     ) -> _ApprovalPausePresentation:
-        """Replace one claim with Agno's next exact pause generation."""
+        """Replace one claim with Agno's next exact pause generation.
+
+        ``reply_pause`` records the advance with the reply's pause row, when
+        reply records own the reply; it returns the advanced continuation and
+        whether its pause row reached Matrix.
+        """
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(
@@ -377,8 +388,8 @@ class ApprovalResponseCoordinator:
         visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
         visible_text = paused.response_text or plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-        publishing = await self.store.advance_approval_continuation(
-            current.approval_id,
+        advance = ApprovalAdvance(
+            approval_id=current.approval_id,
             claimant_generation=current.generation,
             run_id=paused.run_id,
             session_id=paused.session_id,
@@ -391,21 +402,47 @@ class ApprovalResponseCoordinator:
             delegation_storage_bindings=paused.delegation_storage_bindings,
             cli_call=paused.cli_call,
         )
+        shown_with_pause: bool | None = None
+        if reply_pause is None:
+            publishing = await self.store.advance_approval_continuation(
+                advance.approval_id,
+                claimant_generation=advance.claimant_generation,
+                run_id=advance.run_id,
+                session_id=advance.session_id,
+                calls=advance.calls,
+                runtime_model_name=advance.runtime_model_name,
+                continuation_count=advance.continuation_count,
+                response_text=advance.response_text,
+                response_tool_trace=advance.response_tool_trace,
+                response_presentation_state=advance.response_presentation_state,
+                delegation_storage_bindings=advance.delegation_storage_bindings,
+                cli_call=advance.cli_call,
+            )
+        else:
+            publishing, shown_with_pause = await reply_pause(
+                advance,
+                paused,
+                visible_text=visible_text,
+                stream_status=stream_status,
+                tool_trace=visible_tool_trace,
+                waiting_text=plan.waiting_text,
+            )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
         failure_reason = "Chained approval publication failed"
         try:
-            edit_succeeded = await self.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=current.response_event_id,
-                    new_text=visible_text,
-                    extra_content={STREAM_STATUS_KEY: stream_status},
-                    tool_trace=list(visible_tool_trace) or None,
-                ),
-            )
-            _require_successful_edit(edit_succeeded, failure_reason)
+            if shown_with_pause is None:
+                shown_with_pause = await self.delivery_gateway.edit_text(
+                    EditTextRequest(
+                        target=target,
+                        event_id=current.response_event_id,
+                        new_text=visible_text,
+                        extra_content={STREAM_STATUS_KEY: stream_status},
+                        tool_trace=list(visible_tool_trace) or None,
+                    ),
+                )
+            _require_successful_edit(shown_with_pause, failure_reason)
             await self.publish_generation(
                 publishing,
                 plan,
@@ -449,8 +486,13 @@ class ApprovalResponseCoordinator:
         reason: str,
         *,
         visible_text: str | None = None,
+        interruption: Literal["interrupted", "restart"] | None = None,
     ) -> bool:
-        """Settle cards and the failure outcome from the owning source worker."""
+        """Settle cards and the failure outcome from the owning source worker.
+
+        ``interruption`` names the note a reply with records shows below its
+        content; ``visible_text`` is main's read-back of that content.
+        """
         current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:
             return True
@@ -476,6 +518,16 @@ class ApprovalResponseCoordinator:
         user_stop = reason == _USER_STOP_FAILURE_REASON
         visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if user_stop else redact_sensitive_text(reason))
         target = continuation_target(current)
+        written = await self.delivery_gateway.write_approval_failure_note(
+            current.response_event_id,
+            approval_id=current.approval_id,
+            reason=interruption or ("cancelled" if user_stop else "error"),
+            text=redact_sensitive_text(reason),
+            target=target,
+        )
+        if written is not None:
+            # The reply's records show the note; the finish ends the reply.
+            return written and await self.store.finish_approval_continuation(current.approval_id)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,

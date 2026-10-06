@@ -430,6 +430,8 @@ class MatrixDelivery:
     reply_id: str | None = None
     span_id: str | None = None
     reply_sequence: int | None = None
+    # What the row's acknowledgement and late edit target need; never sent.
+    reply_row: Mapping[str, object] | None = None
 
     @property
     def permanently_failed(self) -> bool:

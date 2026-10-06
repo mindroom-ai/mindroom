@@ -43,7 +43,7 @@ _OUTBOX_COLUMNS = """
     delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
     payload_json, result_json, edits_event_id, acknowledged_event_id, created_at_ns,
     attempted, retired, permanent_failure_reason, sending_device_id,
-    reply_id, span_id, reply_sequence
+    reply_id, span_id, reply_sequence, reply_row_json
 """
 _DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
 
@@ -144,6 +144,7 @@ def enqueue(
     reply_id: str | None = None,
     span_id: str | None = None,
     reply_sequence: int | None = None,
+    reply_row: Mapping[str, object] | None = None,
 ) -> str | None:
     """Record delivery intent without changing its durable membership owner."""
     if permanent_failure_reason is not None and not permanent_failure_reason:
@@ -188,8 +189,8 @@ def enqueue(
             principal_id, delivery_id, stage, event_type, room_id, membership_epoch,
             thread_id, transaction_id, payload_json, result_json, edits_event_id,
             edit_target_pending, attempted, permanent_failure_reason, created_at_ns,
-            reply_id, span_id, reply_sequence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            reply_id, span_id, reply_sequence, reply_row_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, delivery_id, stage) DO UPDATE SET
             room_id = excluded.room_id,
             membership_epoch = excluded.membership_epoch,
@@ -202,7 +203,8 @@ def enqueue(
             permanent_failure_reason = excluded.permanent_failure_reason,
             reply_id = excluded.reply_id,
             span_id = excluded.span_id,
-            reply_sequence = excluded.reply_sequence
+            reply_sequence = excluded.reply_sequence,
+            reply_row_json = excluded.reply_row_json
         WHERE matrix_delivery_outbox.attempted = 0
           AND matrix_delivery_outbox.permanent_failure_reason IS NULL
         """,
@@ -224,6 +226,7 @@ def enqueue(
             reply_id,
             span_id,
             reply_sequence,
+            None if reply_row is None else json.dumps(dict(reply_row), sort_keys=True, separators=(",", ":")),
         ),
     )
     return transaction_id
@@ -991,6 +994,7 @@ def _delivery(row: Row) -> MatrixDelivery:
         reply_id=row["reply_id"],
         span_id=row["span_id"],
         reply_sequence=None if row["reply_sequence"] is None else int(row["reply_sequence"]),
+        reply_row=None if row["reply_row_json"] is None else json.loads(str(row["reply_row_json"])),
     )
 
 

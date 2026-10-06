@@ -34,6 +34,10 @@ _CONTINUATION_COLUMNS = """
 """
 
 
+# The failure reason of an approval an edit superseded (DESIGN.md decision 1).
+SUPERSEDED_FAILURE_REASON = "superseded"
+
+
 def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
     """Return one membership's delivery identity for an unavailable-owner notice."""
     return f"approval-unavailable:{approval_id}:{membership_epoch}"
@@ -749,6 +753,43 @@ def advance(
     return get(transaction, principal_id, approval_id=approval_id)
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalAdvance:
+    """One claimed generation's next exact Agno pause, as ``advance`` records it."""
+
+    approval_id: str
+    claimant_generation: int
+    run_id: str
+    session_id: str
+    calls: tuple[ApprovalCall, ...]
+    runtime_model_name: str | None = None
+    response_text: str | None = None
+    response_tool_trace: tuple[dict[str, object], ...] | None = None
+    response_presentation_state: dict[str, object] | None = None
+    delegation_storage_bindings: dict[str, dict[str, object]] | None = None
+    cli_call: dict[str, object] | None = None
+    continuation_count: int | None = None
+
+    def apply(self, transaction: Transaction, principal_id: str) -> ApprovalContinuation | None:
+        """Record this pause on its continuation."""
+        return advance(
+            transaction,
+            principal_id,
+            approval_id=self.approval_id,
+            claimant_generation=self.claimant_generation,
+            run_id=self.run_id,
+            session_id=self.session_id,
+            calls=self.calls,
+            runtime_model_name=self.runtime_model_name,
+            response_text=self.response_text,
+            response_tool_trace=self.response_tool_trace,
+            response_presentation_state=self.response_presentation_state,
+            delegation_storage_bindings=self.delegation_storage_bindings,
+            cli_call=self.cli_call,
+            continuation_count=self.continuation_count,
+        )
+
+
 def activate(
     transaction: Transaction,
     principal_id: str,
@@ -821,16 +862,60 @@ def request_failure(
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
+def fence(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    reason: str,
+) -> ApprovalContinuation | None:
+    """Fence a continuation for failure on behalf of its reply, in whatever state it holds.
+
+    A Stop on a paused reply and an edit superseding it fence the approval in
+    their own transaction (DESIGN.md §6.4); a frozen successful FINAL still wins.
+    """
+    updated = transaction.fetchone(
+        """
+        UPDATE approval_continuations
+        SET state = 'failing', failure_reason = ?
+        WHERE principal_id = ? AND approval_id = ? AND state IN ('waiting', 'ready', 'claimed')
+          AND NOT EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS final
+            WHERE final.principal_id = approval_continuations.principal_id
+              AND final.delivery_id = (
+                SELECT source.event_id FROM approval_continuation_sources AS source
+                WHERE source.principal_id = approval_continuations.principal_id
+                  AND source.approval_id = approval_continuations.approval_id
+                  AND source.source_ordinal = 0
+              )
+              AND final.stage = 'final'
+              AND final.permanent_failure_reason IS NULL
+          )
+        RETURNING approval_id
+        """,
+        (reason, principal_id, approval_id),
+    )
+    return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
+
+
 def finish(
     transaction: Transaction,
     principal_id: str,
     *,
     approval_id: str,
 ) -> bool:
-    """Release sources after terminal FINAL delivery or proven failed-response deletion."""
+    """Release sources after terminal FINAL delivery, proven failed-response deletion, or supersession."""
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
+    if continuation.state == "failing" and continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
+        # An edit regenerates the reply; the old approval publishes nothing (decision 1).
+        journal.settle_many(transaction, principal_id, continuation.source_event_ids)
+        transaction.execute(
+            "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+            (principal_id, approval_id),
+        )
+        return True
     delivered = transaction.fetchone(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox

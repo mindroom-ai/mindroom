@@ -97,6 +97,8 @@ class PreparedReplyRow:
     payload: Mapping[str, object]
     result: Mapping[str, object] | None = None
     permanent_failure_reason: str | None = None
+    # The body an edit carries when the reply's create binds its target only after this row is prepared.
+    new_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +164,9 @@ class MatrixDeliveryWorker:
     terminal_turn_committed: _TerminalTurnCommitted | None = None
     process_shutdown_requested: Callable[[], bool] = lambda: False
     cleanup_deleted_initial: Callable[[MatrixDeliveryWorker, str], Awaitable[bool]] | None = None
+    # Told the reply whose row just stopped being unknown, so claims that
+    # waited for that reply's earlier writes run again.
+    reply_row_resolved: Callable[[str], None] | None = None
     delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
@@ -261,6 +266,7 @@ class MatrixDeliveryWorker:
                 response_attempt=response_attempt,
                 event_type=self.event_type,
                 permanent_failure_reason=prepared.permanent_failure_reason,
+                new_text=prepared.new_text,
             )
             if enqueued is None or enqueued.delivery_id is None or enqueued.stage is None:
                 return ReplyRowDelivery(enqueue=enqueued)
@@ -486,6 +492,30 @@ class MatrixDeliveryWorker:
                 stage=stage.value,
             )
             return _FlushOutcome(event_id=None, retry_required=blocked_final)
+        outcome = await self._flush_claimed(
+            claimed,
+            process_shutdown_requested=process_shutdown_requested,
+            on_cancelled=on_cancelled,
+        )
+        if claimed.reply_id is not None and self.reply_row_resolved is not None:
+            stored = await self.store.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+            if (
+                stored is None
+                or stored.acknowledged_event_id is not None
+                or stored.permanently_failed
+                or stored.retired
+            ):
+                self.reply_row_resolved(claimed.reply_id)
+        return outcome
+
+    async def _flush_claimed(
+        self,
+        claimed: MatrixDelivery,
+        *,
+        process_shutdown_requested: Callable[[], bool] | None,
+        on_cancelled: Callable[[], None] | None,
+    ) -> _FlushOutcome:
+        """Send or reconcile one claimed delivery."""
         if claimed.acknowledged_event_id is not None:
             return _FlushOutcome(event_id=claimed.acknowledged_event_id)
         if process_shutdown_requested is not None and process_shutdown_requested():

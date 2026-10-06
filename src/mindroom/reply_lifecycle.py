@@ -1283,6 +1283,35 @@ def approval_settled(  # noqa: PLR0911
     return _unchanged(Outcome.STALE, reply)
 
 
+def approval_failure_note(
+    reply: Reply,
+    span: Span,
+    *,
+    approval_id: str,
+    shown: str,
+    prepared_revision: int,
+    span_has_final: bool,
+    now_ns: int,
+) -> Transition:
+    """Write a failed approval's note while its continuation settles; ``approval_failed`` then ends the reply (§10)."""
+    resumed = span.kind is SpanKind.APPROVAL_RESUME and span.ended and span.approval_id == approval_id
+    if reply.terminal:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    if (reply.approval_id != approval_id and not resumed) or reply.current_span_id is not None:
+        # Another approval owns the reply now, or a running span writes it.
+        return _unchanged(Outcome.STALE, reply)
+    if span.span_id != reply.last_span_id:
+        msg = f"Approval {approval_id}'s note belongs to the reply's last span"
+        raise _invalid(msg)
+    recompute = _check_revision(reply, prepared_revision)
+    if recompute is not None:
+        return recompute
+    stage = WriteStage.EDIT if span_has_final else WriteStage.FINAL
+    updated = _touch(reply, now_ns, presentation=shown)
+    updated, row = _row(updated, span, stage, shown=shown, settles_sources=False)
+    return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
+
+
 def _state_for_span_outcome(outcome: SpanOutcome | None) -> ReplyState | None:
     if outcome is SpanOutcome.COMPLETED:
         return ReplyState.COMPLETED

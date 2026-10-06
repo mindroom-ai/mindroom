@@ -31,7 +31,7 @@ from mindroom.event_journal import (
     thread_root,
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY, UnreadableMatrixDelivery
-from mindroom.event_journal.replies import ReplyRowRequest, edit_delivery_id, row_result
+from mindroom.event_journal.replies import ReplyRowRequest, edit_delivery_id, row_new_text
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
@@ -104,6 +104,7 @@ from mindroom.reply_scope import (
     ReplyWrite,
     ReplyWriteRefusedError,
     SpanHandle,
+    approval_note_write,
     current_span,
     initial_write,
     owed_note_write,
@@ -201,9 +202,6 @@ def _segment_transaction_id(base_transaction_id: str, index: int) -> str:
     return str(uuid5(NAMESPACE_URL, f"mindroom-matrix-segment:{base_transaction_id}:{index}"))
 
 
-_REPLY_ROW_NEW_TEXT_KEY = "io.mindroom.reply_new_text"
-
-
 def _refused_reply_outcome(
     refused: ReplyWriteRefusedError,
     request: FinalDeliveryRequest,
@@ -220,6 +218,10 @@ def _refused_reply_outcome(
         tool_trace=tuple(draft.tool_trace or ()),
         extra_content=draft.extra_content,
     )
+
+
+# What a failed approval's note says (DESIGN.md §10).
+type ApprovalFailureNote = Literal["cancelled", "error", "interrupted", "restart"]
 
 
 def _with_note(shown: Presentation, note: Segment) -> Presentation:
@@ -267,11 +269,11 @@ def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
     payload = dict(claimed.payload)
     if claimed.reply_id is None or claimed.edits_event_id is None or "m.new_content" in payload:
         return payload
-    new_text = (claimed.result or {}).get(_REPLY_ROW_NEW_TEXT_KEY)
+    new_text = row_new_text(claimed)
     envelope = build_edit_event_content(
         event_id=claimed.edits_event_id,
         new_content=payload,
-        new_text=new_text if isinstance(new_text, str) else str(payload.get("body", "")),
+        new_text=new_text if new_text is not None else str(payload.get("body", "")),
     )
     envelope[DURABLE_DELIVERY_ID_KEY] = payload.get(DURABLE_DELIVERY_ID_KEY)
     return envelope
@@ -594,6 +596,8 @@ class DeliveryGatewayDeps:
     # Runs what committed reply transitions left for after their commit:
     # cancelling a span a Stop reached, waking an approval source.
     reply_effects: Callable[[tuple[object, ...]], Awaitable[None]] | None = None
+    # Wakes claims that waited for a reply's earlier writes.
+    reply_row_resolved: Callable[[str], None] | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -1169,6 +1173,7 @@ class DeliveryGateway:
             cleanup_deleted_initial=(
                 self.deps.response_recovery.cleanup if self.deps.response_recovery is not None else None
             ),
+            reply_row_resolved=self.deps.reply_row_resolved,
         )
 
     @asynccontextmanager
@@ -1548,14 +1553,17 @@ class DeliveryGateway:
                 failure_reason = _matrix_delivery_failure_reason(prepared)
             else:
                 payload = prepared.content
-            stored = row_result(
-                _result_with_segment_payloads(result, prepared),
-                placeholder_only=write.placeholder_only,
-            )
-            if not edits and stage is not DeliveryStage.INITIAL:
+            return PreparedReplyRow(
+                payload=payload,
+                result=_result_with_segment_payloads(result, prepared),
+                permanent_failure_reason=failure_reason,
                 # Wrapped when the row is claimed, if the reply's create binds an event by then.
-                stored[_REPLY_ROW_NEW_TEXT_KEY] = new_text or str(content.get("body", ""))
-            return PreparedReplyRow(payload=payload, result=stored, permanent_failure_reason=failure_reason)
+                new_text=(
+                    new_text or str(content.get("body", ""))
+                    if not edits and stage is not DeliveryStage.INITIAL
+                    else None
+                ),
+            )
 
         try:
             delivery = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver_reply_row(
@@ -1734,6 +1742,52 @@ class DeliveryGateway:
         if not enqueued.transition.applied:
             raise ReplyWriteRefusedError(enqueued.transition)
         return True
+
+    async def write_approval_failure_note(
+        self,
+        event_id: str,
+        *,
+        approval_id: str,
+        reason: ApprovalFailureNote,
+        text: str,
+        target: MessageTarget,
+    ) -> bool | None:
+        """Show a failed approval's note on the reply it paused, as main does.
+
+        A Stop or failure note replaces the reply's body; an interruption note
+        goes below what the reply showed. Returns ``None`` when no reply records
+        own the event, else whether the note was delivered; the continuation's
+        finish then ends the reply.
+        """
+        note = {
+            "cancelled": note_segment(NoteKind.CANCELLED),
+            "error": note_segment(NoteKind.ERROR, text),
+            "interrupted": note_segment(NoteKind.INTERRUPTED),
+            "restart": note_segment(NoteKind.RESTART),
+        }[reason]
+        while (reply := await self.deps.outbox.replies.for_event(event_id)) is not None:
+            span = await self.deps.outbox.replies.span(reply.last_span_id)
+            assert span is not None, "a reply's last span exists"
+            final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
+            shown_before = _shown_before(reply, None)
+            if reason in {"cancelled", "error"}:
+                shown_before = replace(shown_before, segments=())
+            shown = with_trailing_note(shown_before, note)
+            write = approval_note_write(reply, span, shown, approval_id=approval_id, span_has_final=final is not None)
+            state = ReplyState.CANCELLED.value if reason == "cancelled" else ReplyState.FAILED.value
+            rendered = render(shown, WriteKind.TERMINAL, state=state)
+            try:
+                return (
+                    await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
+                    is not None
+                )
+            except ReplyWriteRefusedError as refused:
+                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
+                    # The reply changed after this note was rendered; render it again.
+                    continue
+                # The reply ended otherwise; the continuation's finish reads its rows.
+                return True
+        return None
 
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Show a dispatch failure on the reply bound to one event before a span ran it.
@@ -2920,6 +2974,12 @@ class DeliveryGateway:
         visible_progress_callback: Callable[[str], None] | None = None,
     ) -> AbstractAsyncContextManager[ProgressPublisher]:
         """Stream live progress into an existing reply whose terminal delivery the caller owns."""
+        handle = self._live_span()
+        hooks = (
+            {}
+            if handle is None
+            else self._reply_stream_hooks(handle, target, ResponseAttempt(self.deps.agent_name, identity.sources), None)
+        )
         return stream_progress_edits(
             self._client(),
             target,
@@ -2933,6 +2993,9 @@ class DeliveryGateway:
                 identity.response_envelope.source_event_id,
                 target.room_id,
             ),
+            # The reply's records hear of each progress edit before it is sent.
+            progress_write_ahead=hooks.get("progress_write_ahead"),
+            progress_delivered=hooks.get("progress_delivered"),
         )
 
     def _stream_transport_gate(

@@ -137,9 +137,9 @@ _PRE_REPLY_OUTBOX_COLUMNS = (
 
 
 # LEGACY_COMPAT: Outbox rows without reply identity and with only initial and final stages.
-# Legacy format: matrix_delivery_outbox without reply_id, span_id, and reply_sequence columns, whose stage
-# CHECK constraint admits only 'initial' and 'final'.
-# Last legacy release: v2026.10.162; replacement: the unreleased durable reply messages add the three nullable
+# Legacy format: matrix_delivery_outbox without reply_id, span_id, reply_sequence, and reply_row_json columns, whose
+# stage CHECK constraint admits only 'initial' and 'final'.
+# Last legacy release: v2026.10.162; replacement: the unreleased durable reply messages add the four nullable
 # columns and the 'edit' stage for non-terminal reply writes.
 # Handling: SQLite rebuilds the table under the new definition and copies every row unchanged, before the schema's
 # indexes are created; PostgreSQL adds the columns and replaces the stage constraint. Existing rows keep null reply
@@ -169,6 +169,7 @@ def upgrade_outbox_reply_rows(
     transaction.execute("ALTER TABLE matrix_delivery_outbox ADD COLUMN IF NOT EXISTS reply_id TEXT")
     transaction.execute("ALTER TABLE matrix_delivery_outbox ADD COLUMN IF NOT EXISTS span_id TEXT")
     transaction.execute("ALTER TABLE matrix_delivery_outbox ADD COLUMN IF NOT EXISTS reply_sequence BIGINT")
+    transaction.execute("ALTER TABLE matrix_delivery_outbox ADD COLUMN IF NOT EXISTS reply_row_json TEXT")
     # The released constraint is unnamed in its DDL; find it in the catalog
     # rather than trusting the name PostgreSQL generated for it.
     for row in transaction.fetchall(

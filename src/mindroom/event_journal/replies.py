@@ -16,6 +16,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.reply_lifecycle import (
     CancelSpan,
     Effect,
+    FenceApproval,
     Reply,
     SettleSources,
     Span,
@@ -24,10 +25,10 @@ from mindroom.reply_lifecycle import (
     WakeApproval,
 )
 
-from . import journal, outbox, reply_messages, reply_spans
+from . import approval_continuations, journal, outbox, reply_messages, reply_spans
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from .backend import Backend, Transaction
     from .models import MatrixDelivery
@@ -35,9 +36,6 @@ if TYPE_CHECKING:
 # Effects the caller runs after the transaction commits.
 type PostCommitEffect = CancelSpan | WakeApproval
 type Decide = Callable[[Reply, Span], Transition]
-
-# Local facts a reply row needs after Matrix answers it; never sent.
-REPLY_ROW_RESULT_KEY = "io.mindroom.reply_row"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +87,8 @@ def _run(
         case SettleSources(span_id=span_id):
             span = span_for(transaction, principal_id, transition, span_id)
             journal.settle_many(transaction, principal_id, span.sources.pending)
+        case FenceApproval(approval_id=approval_id, disposition=disposition):
+            approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
         case CancelSpan() | WakeApproval():
             post_commit.append(effect)
         case TransferStop():
@@ -114,6 +114,42 @@ def decide_on_span(
         msg = f"Reply {reply_id} or span {span_id} does not exist"
         raise RuntimeError(msg)
     return apply(transaction, principal_id, decide(reply, span))
+
+
+def approval_finished(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: approval_continuations.ApprovalContinuation,
+) -> AppliedTransition | None:
+    """Apply a finished continuation to the reply it paused (DESIGN.md §6.4 ``approval_failed``/``approval_finished``)."""
+    found = reply_messages.for_event(transaction, principal_id, continuation.response_event_id)
+    if found is None:
+        return None
+    reply = reply_messages.lock(transaction, principal_id, found.reply_id)
+    assert reply is not None
+    failed = continuation.state == "failing"
+    reason = continuation.failure_reason
+    disposition: rl.FailureDisposition | None = None
+    if failed:
+        disposition = (
+            "cancelled_by_user"
+            if reason == "cancelled_by_user"
+            else "superseded"
+            if reason == approval_continuations.SUPERSEDED_FAILURE_REASON
+            else "failed"
+        )
+    return apply(
+        transaction,
+        principal_id,
+        rl.approval_settled(
+            reply,
+            reply_spans.load(transaction, principal_id, reply.last_span_id),
+            approval_id=continuation.approval_id,
+            result="failed" if failed else "finished",
+            disposition=disposition,
+            now_ns=time.time_ns(),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -275,13 +311,21 @@ class ReplyRowEnqueue:
 
 def row_placeholder_only(delivery: MatrixDelivery) -> bool:
     """Return whether one reply row shows only the reply's placeholder."""
-    facts = (delivery.result or {}).get(REPLY_ROW_RESULT_KEY)
-    return isinstance(facts, dict) and facts.get("placeholder_only") is True
+    return (delivery.reply_row or {}).get("placeholder_only") is True
 
 
-def row_result(result: Mapping[str, object] | None, *, placeholder_only: bool) -> dict[str, object]:
-    """Return a reply row's local result, carrying what it shows."""
-    return {**(result or {}), REPLY_ROW_RESULT_KEY: {"placeholder_only": placeholder_only}}
+def row_new_text(delivery: MatrixDelivery) -> str | None:
+    """Return the fallback body a reply row's edit carries when its target was bound after it was prepared."""
+    new_text = (delivery.reply_row or {}).get("new_text")
+    return new_text if isinstance(new_text, str) else None
+
+
+def row_facts(*, placeholder_only: bool, new_text: str | None) -> dict[str, object]:
+    """Return what a reply row's acknowledgement and late edit target need."""
+    facts: dict[str, object] = {"placeholder_only": placeholder_only}
+    if new_text is not None:
+        facts["new_text"] = new_text
+    return facts
 
 
 def has_unresolved_rows(transaction: Transaction, principal_id: str, reply_id: str) -> bool:
