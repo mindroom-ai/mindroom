@@ -2840,6 +2840,26 @@ def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egres
     assert "approvedEgress with Agent Vault must be squid-first" in completed.stderr
 
 
+def _access_grants_config(job: dict[str, Any]) -> dict[str, Any]:
+    """Return the grants config the access-grants Job mounts from its own pod template annotation."""
+    pod = job["spec"]["template"]
+    [volume] = [volume for volume in pod["spec"]["volumes"] if volume["name"] == "access-grants-config"]
+    [item] = volume["downwardAPI"]["items"]
+    assert item["path"] == "access-grants.yaml"
+    annotation = re.fullmatch(r"metadata\.annotations\['(.+)'\]", item["fieldRef"]["fieldPath"])
+    assert annotation is not None
+    return yaml.safe_load(pod["metadata"]["annotations"][annotation.group(1)])
+
+
+def _access_grants_config_maps(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        doc
+        for doc in docs
+        if doc["kind"] == "ConfigMap"
+        and doc["metadata"].get("labels", {}).get("app.kubernetes.io/component") == "agent-vault-access-grants"
+    ]
+
+
 def test_runtime_chart_agent_vault_access_grants_are_noop_by_default() -> None:
     """Access grants should not add grant resources unless explicitly enabled with grants."""
     docs = _render_runtime_chart()
@@ -2892,10 +2912,9 @@ def test_runtime_chart_agent_vault_access_grants_renders_shared_grant_job(tmp_pa
         values_files=(values_path,),
         release_name="mindroom-runtime",
     )
-    config_map = _resource(docs, "ConfigMap", "agent-vault-access-grants")
     job = _resource(docs, "Job", "agent-vault-access-grants")
     container = _container(job, "access-grants")
-    config = yaml.safe_load(config_map["data"]["access-grants.yaml"])
+    config = _access_grants_config(job)
 
     assert config == {
         "apiUrl": "http://agent-vault:14321",
@@ -2977,7 +2996,7 @@ def test_runtime_chart_agent_vault_access_grants_renders_user_agent_grant(tmp_pa
         values_files=(values_path,),
         release_name="mindroom-runtime",
     )
-    config = yaml.safe_load(_resource(docs, "ConfigMap", "agent-vault-access-grants")["data"]["access-grants.yaml"])
+    config = _access_grants_config(_resource(docs, "Job", "agent-vault-access-grants"))
 
     assert config["grants"] == [
         {
@@ -3029,7 +3048,7 @@ def test_runtime_chart_agent_vault_access_grants_renders_user_grant(tmp_path: Pa
         values_files=(values_path,),
         release_name="mindroom-runtime",
     )
-    config = yaml.safe_load(_resource(docs, "ConfigMap", "agent-vault-access-grants")["data"]["access-grants.yaml"])
+    config = _access_grants_config(_resource(docs, "Job", "agent-vault-access-grants"))
 
     assert config["grants"] == [
         {
@@ -3143,35 +3162,28 @@ def test_runtime_chart_agent_vault_content_hash_jobs_skip_helm_hooks(tmp_path: P
         assert "annotations" not in job["metadata"]
         assert job["spec"]["ttlSecondsAfterFinished"] == 86400
         assert job["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] == base_name
-    grants_pod = grants_job["spec"]["template"]["spec"]
-    assert grants_pod["automountServiceAccountToken"] is False
-    config_map_name = grants_pod["volumes"][0]["configMap"]["name"]
-    assert re.fullmatch(r"agent-vault-access-grants-[0-9a-f]{10}", config_map_name)
-    assert _resource(docs, "ConfigMap", config_map_name)
+    assert grants_job["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+    assert _access_grants_config(grants_job)["grants"][0]["email"] == "maintainer@example.test"
+    assert _access_grants_config_maps(docs) == []
     assert bootstrap_job["spec"]["template"]["spec"]["serviceAccountName"] == "agent-vault-bootstrap"
 
 
 def test_runtime_chart_agent_vault_content_hash_tracks_each_jobs_inputs(tmp_path: Path) -> None:
-    """Only the Job whose rendered inputs changed gets a new name, and each grants Job mounts its own config."""
+    """Only the Job whose rendered inputs changed gets a new name, and each grants Job carries its own config."""
 
-    def names(**overrides: str) -> tuple[str, str, str]:
-        docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
-        config_map_name = grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"]
-        grants = yaml.safe_load(_resource(docs, "ConfigMap", config_map_name)["data"]["access-grants.yaml"])["grants"]
+    def names(**overrides: str) -> tuple[str, str]:
+        _, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
+        grants = _access_grants_config(grants_job)["grants"]
         assert grants[0]["email"] == overrides.get("grant_email", "maintainer@example.test")
-        return grants_job["metadata"]["name"], config_map_name, bootstrap_job["metadata"]["name"]
+        return grants_job["metadata"]["name"], bootstrap_job["metadata"]["name"]
 
-    grants_name, config_map_name, bootstrap_name = names()
-    assert names() == (grants_name, config_map_name, bootstrap_name)
-    changed_grants_name, changed_config_map_name, same_bootstrap_name = names(grant_email="second@example.test")
+    grants_name, bootstrap_name = names()
+    assert names() == (grants_name, bootstrap_name)
+    changed_grants_name, same_bootstrap_name = names(grant_email="second@example.test")
     assert changed_grants_name != grants_name
-    assert changed_config_map_name != config_map_name
     assert same_bootstrap_name == bootstrap_name
-    same_grants_name, same_config_map_name, changed_bootstrap_name = names(
-        kubectl_image="registry.example.test/kubectl:2",
-    )
+    same_grants_name, changed_bootstrap_name = names(kubectl_image="registry.example.test/kubectl:2")
     assert same_grants_name == grants_name
-    assert same_config_map_name == config_map_name
     assert changed_bootstrap_name != bootstrap_name
 
 
@@ -3208,8 +3220,8 @@ def test_runtime_chart_agent_vault_fixed_jobs_keep_names_and_grant_hook(tmp_path
     docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="fixed")
 
     assert grants_job["metadata"]["name"] == "agent-vault-access-grants"
-    assert grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] == "agent-vault-access-grants"
-    assert _resource(docs, "ConfigMap", "agent-vault-access-grants")
+    assert _access_grants_config(grants_job)["grants"][0]["email"] == "maintainer@example.test"
+    assert _access_grants_config_maps(docs) == []
     assert grants_job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
     assert bootstrap_job["metadata"]["name"] == "agent-vault-bootstrap"
     assert "annotations" not in bootstrap_job["metadata"]
