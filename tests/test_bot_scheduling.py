@@ -522,7 +522,7 @@ class TestBotTaskRestoration:
                 mock_restore.return_value = 2  # 2 tasks restored
 
                 await bot.start()
-                # Runners that agents create run on the started router's client.
+                # New runners use the started router's client in rooms it can serve.
                 assert scheduling._runner_owner == scheduling.ScheduledTaskRunnerOwner(
                     mock_client,
                     bot._conversation_reader,
