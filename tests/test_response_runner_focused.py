@@ -10153,7 +10153,7 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(tm
 @pytest.mark.asyncio
 @pytest.mark.parametrize("succeeded", [True, False])
 async def test_automations_hear_of_every_final_response(succeeded: bool) -> None:
-    """A failed run must still reach verify, which restores files a broken run left behind."""
+    """A failed run must still reach verify, which asks for a re-check when a broken run left the files off."""
     calls: list[str] = []
 
     await apply_post_response_effects(
