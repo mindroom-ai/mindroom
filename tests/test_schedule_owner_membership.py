@@ -876,6 +876,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         hydrator=ConversationHydrator(store=principal, runtime=live_runtime, self_sender="@router:server"),
     )
     task: asyncio.Task | None = None
+    client.rooms = {"!test:server": nio.MatrixRoom("!test:server", "@router:server")}
     scheduling.set_scheduled_task_runner_owner(scheduling.ScheduledTaskRunnerOwner(client, reader))
     try:
         context = ToolRuntimeContext(

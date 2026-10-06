@@ -570,6 +570,32 @@ async def test_schedule_created_without_a_running_router_waits_for_its_restore(t
     start.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_new_schedule_is_refused_in_a_room_the_running_router_has_not_joined(tmp_path: Path) -> None:
+    """A schedule the router cannot run or restore is refused before anything is saved."""
+    router_client = AsyncMock()
+    router_client.rooms = {"!other:server": MagicMock()}
+    scheduling.set_scheduled_task_runner_owner(
+        scheduling.ScheduledTaskRunnerOwner(router_client, _conversation_reader()),
+    )
+    try:
+        with patch.object(scheduling, "_persist_scheduled_task_state", new=AsyncMock()) as persist:
+            task_id, message = await schedule_task(
+                runtime=_scheduling_runtime(runtime_paths=_test_runtime_paths(tmp_path)),
+                room_id="!test:server",
+                thread_id=None,
+                scheduled_by="@user:server",
+                full_text="in 5 minutes remind me to stretch",
+            )
+    finally:
+        scheduling.clear_scheduled_task_runner_owner(router_client)
+
+    assert task_id is None
+    assert message == scheduling._ROUTER_MISSING_SCHEDULE_ERROR
+    assert "invite_router" in message
+    persist.assert_not_awaited()
+
+
 def test_stopping_router_generation_keeps_its_replacement_as_runner_owner() -> None:
     """Only the router that registered itself can stop being the runner owner."""
     retired_client = AsyncMock()

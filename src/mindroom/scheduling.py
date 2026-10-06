@@ -76,6 +76,11 @@ _PRE_APPROVED_EDIT_ERROR = (
     "runs a pre-approved tool call, which cannot be edited; cancel it and schedule the call again"
 )
 _SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
+_ROUTER_MISSING_SCHEDULE_ERROR = (
+    "❌ Scheduling needs the router in this room, because the router runs and restores schedules. "
+    "If `router.accept_invites` allows this Matrix account, call `invite_router` and wait for the router to join; "
+    "otherwise enable it or add the router manually, then retry."
+)
 
 # Shared validation message for edit attempts that change task type.
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
@@ -622,6 +627,11 @@ def _start_scheduled_task(
         )
     _running_tasks[task_id] = task
     return True
+
+
+def _router_missing_from_room(room_id: str) -> bool:
+    """Return whether the running router has not joined the room a new schedule is for."""
+    return bool(_runner_owners) and room_id not in _runner_owners[0].client.rooms
 
 
 def _start_owned_scheduled_task(
@@ -1813,6 +1823,8 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if selected_model is not None and selected_model not in runtime.config.models:
         available = ", ".join(sorted(runtime.config.models))
         return (None, f"❌ Unknown model: {selected_model}. Available models: {available}")
+    if existing_task is None and _router_missing_from_room(room_id):
+        return (None, _ROUTER_MISSING_SCHEDULE_ERROR)
 
     client = runtime.client
     config = runtime.config
