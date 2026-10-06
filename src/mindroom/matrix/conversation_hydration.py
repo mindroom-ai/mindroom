@@ -818,6 +818,8 @@ class ConversationHydrator:
             recovery_state=recovery.state.value,
             exhausted_server=walk.exhausted_server,
             unreadable=bool(walk.unreadable),
+            # Why threads in this room may come back short of full history.
+            unreadable_history=walk.unreadable.describe() if walk.unreadable else None,
             walk_complete=walk.exhausted_server and not walk.unreadable,
         )
         return outcome
