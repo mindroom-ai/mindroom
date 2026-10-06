@@ -40,6 +40,7 @@ __all__ = [
     "PERSONALITY_CONTEXT_SECTION_HEADING",
     "PREVIOUS_CONVERSATION_THREAD_HEADER",
     "PROMPT_CURATION_PROMPT_TEMPLATE",
+    "PROMPT_CURATION_RECHECK_TEMPLATE",
     "PROMPT_DEFAULTS",
     "PROMPT_DEFAULT_NAMES",
     "PROMPT_TEMPLATE_FIELDS",
@@ -289,8 +290,10 @@ Files: {file_sizes}.
 5. Never invent facts or change their meaning, names, dates, or numbers.
 {protected_line}
 Delete only true duplicates; move everything else.
-When you finish, MindRoom restores the files if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, or detail was deleted instead of moved.
+When you finish, MindRoom measures the files again and asks you to re-check if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, or detail was deleted instead of moved.
 Reply with one line saying what you changed."""
+PROMPT_CURATION_RECHECK_TEMPLATE = """⚠️ Prompt maintenance took the files from {measured_tokens} to {tokens_after} tokens, but {findings}.
+Compare your change with the commit you made before it, put back anything that was deleted rather than moved or cut too far, and reply with one line saying what you fixed."""
 MEMORY_EXISTING_SNIPPETS_TEMPLATE = "Existing memory snippets (avoid duplicates):\n{existing_context}\n"
 MEMORY_NO_EXISTING_SNIPPETS = "Existing memory snippets: (none)\n"
 MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE = """Extract only durable memories from this conversation excerpt.
@@ -661,6 +664,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
                 "protected_line",
             },
         ),
+        "PROMPT_CURATION_RECHECK_TEMPLATE": frozenset({"measured_tokens", "tokens_after", "findings"}),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
             {"no_reply_token", "existing_block", "excerpt"},
         ),

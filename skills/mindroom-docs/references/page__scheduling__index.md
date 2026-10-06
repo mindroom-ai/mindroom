@@ -288,7 +288,7 @@ agents:
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a one-line notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
+- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
 - An automation does not post again while its previous prompt awaits verify.
 - Nothing is persisted: the schedule is the cooldown, and a restart skips the occurrence it missed.
 
@@ -300,29 +300,26 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
 1. The check measures `MEMORY.md` plus the agent's `context_files`, except `protected_files`, with the estimate behind `static_prompt_tokens` (characters / 4).
-2. Above `trigger_tokens`, it snapshots those files and posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", which asks for a 10 to 15% cut, or only the gap to 90% of the trigger when that is smaller.
+2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
-4. Verify writes the snapshot back over every changed file, and posts why, when any of these holds:
+4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
     - a file can no longer be read safely, for example because it became a link or grew past 1 MiB;
     - a file shrank by more than `max_file_shrink`;
     - the files total less than the floor, or did not shrink;
     - a protected file changed, or a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
-A restore also rewrites any `memory/` topic file the run changed other than by appending, back to its archived text followed by everything the run left in it, and new files are kept, so moved detail is never lost.
-A topic file that grew past 1 MiB or is no longer valid UTF-8 cannot be compared safely, so it is left as it is.
-When the prompt files are unchanged, only lost memory content triggers that restore.
-A reply that rewrites a curated file or a changed topic file during the run can be overwritten when verify restores the snapshot.
+Verify never writes the files, because other conversations with the same agent may save memories to them during the run; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
 
 | Field | Default | Description |
 |---|---|---|
 | `cron` | `0 4 * * *` | When to check |
 | `room` | first configured room | Where to post the prompt |
 | `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
-| `min_reduction` | `0.10` | Cut the prompt asks for, or only the gap to 90% of the trigger when that is smaller |
-| `max_reduction` | `0.15` | Largest cut one run may make |
-| `max_file_shrink` | `0.25` | Largest shrink of any single file in one run |
-| `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size |
-| `protected_files` | `[]` | Workspace-relative paths the run must leave unchanged |
+| `min_reduction` | `0.10` | Smallest cut the prompt asks for |
+| `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
+| `max_file_shrink` | `0.25` | Largest shrink of any single file before verify asks for a re-check |
+| `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
+| `protected_files` | `[]` | Workspace-relative paths the run should leave unchanged |
 
-`prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt template is overridable as `PROMPT_CURATION_PROMPT_TEMPLATE`.
+`prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.

@@ -81,7 +81,7 @@ def test_the_plan_covers_memory_and_every_context_file_with_a_gradual_band(tmp_p
     assert plan.curated == {"MEMORY.md": 1286, "SOUL.md": 4, "USER.md": 2}
     assert plan.measured_tokens == 1292
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
-    assert plan.memory_snapshot == {"memory/2026-10-01.md": "Daily note.\n"}
+    assert plan.memory_tokens == 3
 
 
 def test_protected_files_are_excluded_from_the_band(tmp_path: Path) -> None:
@@ -94,7 +94,7 @@ def test_protected_files_are_excluded_from_the_band(tmp_path: Path) -> None:
 
 
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
-    """The visible prompt names every file, the band, the per-file cap, and committing first."""
+    """The visible prompt names every file, the band, the per-file cap, committing first, and the re-check."""
     plan, config, _root = _plan(tmp_path)
 
     prompt = curation_prompt(config, plan)
@@ -104,32 +104,30 @@ def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) ->
     assert "at most 1163 tokens in total, but not below 1098" in prompt
     assert "shrink by more than 25%" in prompt
     assert "git init" in prompt
+    assert "asks you to re-check" in prompt
     assert "6. Leave" not in prompt
 
 
 def test_an_untouched_workspace_is_reported_unchanged(tmp_path: Path) -> None:
-    """A run that edits nothing restores nothing and says so."""
-    plan, _config, root = _plan(tmp_path)
-    before = _snapshot(root)
+    """A run that edits nothing gets a plain notice."""
+    plan, config, _root = _plan(tmp_path)
 
     result = verify_curation(plan)
 
-    assert (result.changed, result.restored) == (False, False)
-    assert _snapshot(root) == before
-    assert curation_notice(plan, result) == "Prompt maintenance changed nothing; the files stay at 1292 tokens."
+    assert (result.changed, result.findings) == (False, ())
+    assert curation_notice(config, plan, result) == "Prompt maintenance changed nothing; the files stay at 1292 tokens."
 
 
-def test_moving_a_section_into_memory_within_bounds_is_kept(tmp_path: Path) -> None:
-    """Detail moved verbatim into memory/ with a pointer lands in the band and stays."""
-    plan, _config, root = _plan(tmp_path)
+def test_moving_a_section_into_memory_within_bounds_is_accepted(tmp_path: Path) -> None:
+    """Detail moved verbatim into memory/ with a pointer lands in the band and gets a plain notice."""
+    plan, config, root = _plan(tmp_path)
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
     result = verify_curation(plan)
 
-    assert (result.changed, result.restored) == (True, False)
-    assert (root / "MEMORY.md").read_text() == MEMORY.replace(SECTIONS[3], POINTER)
-    assert curation_notice(plan, result) == "✅ Prompt files condensed from 1292 to 1139 tokens."
+    assert (result.changed, result.findings) == (True, ())
+    assert curation_notice(config, plan, result) == "✅ Prompt files condensed from 1292 to 1139 tokens."
 
 
 def _over_cut(root: Path) -> None:
@@ -164,10 +162,10 @@ def _replace_with_a_link(root: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("change", "violation"),
+    ("change", "finding"),
     [
         (_over_cut, "MEMORY.md shrank 87% (more than 25%)"),
-        (_delete_without_moving, "161 tokens of memory were deleted instead of moved to memory/ (at most 65)"),
+        (_delete_without_moving, "about 161 tokens of memory were deleted rather than moved to memory/ (at most 65)"),
         (_grow, "the files did not shrink (1296 tokens)"),
         (_delete_a_file, "USER.md shrank 100% (more than 25%)"),
         (_corrupt, "MEMORY.md is no longer valid UTF-8"),
@@ -175,36 +173,50 @@ def _replace_with_a_link(root: Path) -> None:
         (_replace_with_a_link, "MEMORY.md cannot be read ([Errno 40] Too many levels of symbolic links: 'MEMORY.md')"),
     ],
 )
-def test_a_run_that_misses_the_bounds_is_restored_byte_identical(
+def test_a_run_that_misses_the_bounds_is_asked_to_recheck_and_left_as_is(
     tmp_path: Path,
     change: Callable[[Path], None],
-    violation: str,
+    finding: str,
 ) -> None:
-    """Every guard writes the snapshot back over the changed files and names the reason."""
-    plan, _config, root = _plan(tmp_path)
-    before = _snapshot(root)
+    """Every bound names its finding in a re-check request, and verify writes nothing."""
+    plan, config, root = _plan(tmp_path)
     change(root)
+    after = _snapshot(root)
 
     result = verify_curation(plan)
 
-    assert result.restored
-    assert violation in result.violations
-    assert _snapshot(root) == before
-    assert curation_notice(plan, result).startswith("↩️ Restored the snapshot: ")
+    assert finding in result.findings
+    assert _snapshot(root) == after
+    notice = curation_notice(config, plan, result)
+    assert notice.startswith("⚠️ Prompt maintenance took the files from 1292 to ")
+    assert finding in notice
+    assert "Compare your change with the commit you made before it" in notice
 
 
-def test_changing_a_protected_file_restores_it_and_the_rest(tmp_path: Path) -> None:
-    """A protected file edit fails verify even when the cut itself is fine."""
+def test_a_fact_another_conversation_writes_during_the_run_is_kept(tmp_path: Path) -> None:
+    """Verify never writes, so a fact added in a parallel thread survives even a run that misses the bounds."""
+    plan, _config, root = _plan(tmp_path)
+    _over_cut(root)
+    with (root / "MEMORY.md").open("a", encoding="utf-8") as memory:
+        memory.write("- Dentist on Friday.\n")
+
+    result = verify_curation(plan)
+
+    assert result.findings
+    assert (root / "MEMORY.md").read_text().endswith("- Dentist on Friday.\n")
+
+
+def test_changing_a_protected_file_is_reported(tmp_path: Path) -> None:
+    """A protected file edit is a finding even when the cut itself is fine."""
     plan, _config, root = _plan(tmp_path, protected_files=["SOUL.md"])
-    before = _snapshot(root)
     (root / "SOUL.md").write_text("Rewritten.\n", encoding="utf-8")
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
     result = verify_curation(plan)
 
-    assert result.violations == ("SOUL.md changed but is protected",)
-    assert {path: data for path, data in _snapshot(root).items() if path != "memory/topics.md"} == before
+    assert result.findings == ("SOUL.md changed although it is protected",)
+    assert (root / "SOUL.md").read_text() == "Rewritten.\n"
 
 
 def test_a_planted_link_stops_the_check(tmp_path: Path) -> None:
@@ -232,88 +244,17 @@ def _plan_with_archive(tmp_path: Path) -> tuple[CurationPlan, Path]:
     return plan, root
 
 
-def test_deleting_archived_memory_is_restored_even_when_the_prompt_files_are_untouched(tmp_path: Path) -> None:
-    """A run that empties a memory/ topic file loses detail verify must catch on its own."""
+def test_deleting_archived_memory_while_cutting_is_reported(tmp_path: Path) -> None:
+    """A cut in bounds that also empties a memory/ topic file deleted detail, which the loss finding names."""
     plan, root = _plan_with_archive(tmp_path)
-    before = _snapshot(root)
     (root / "memory" / "projects.md").unlink()
-
-    result = verify_curation(plan)
-
-    assert result.restored
-    assert any("deleted instead of moved" in violation for violation in result.violations)
-    assert _snapshot(root) == before
-
-
-def test_overwriting_archived_memory_while_moving_is_restored(tmp_path: Path) -> None:
-    """Overwriting a topic file drops its archive; verify restores it, keeps the lines the run added, and MEMORY.md."""
-    plan, root = _plan_with_archive(tmp_path)
-    (root / "memory" / "projects.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
     result = verify_curation(plan)
 
-    assert result.restored
-    assert (root / "MEMORY.md").read_text() == MEMORY
-    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + SECTIONS[3]
-
-
-def test_a_restored_archive_keeps_facts_added_during_the_run(tmp_path: Path) -> None:
-    """A fact appended to a damaged topic file, for example by auto-flush, survives the restore."""
-    plan, root = _plan_with_archive(tmp_path)
-    (root / "memory" / "projects.md").write_text("# Projects\n- Dentist on Friday.\n", encoding="utf-8")
-
-    result = verify_curation(plan)
-
-    assert result.restored
-    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "# Projects\n- Dentist on Friday.\n"
-
-
-def test_a_restored_archive_keeps_a_fact_repeated_under_another_heading(tmp_path: Path) -> None:
-    """The run's text is kept whole, so the same line under a different heading is not dropped as a duplicate."""
-    config, automation, root = _setup(tmp_path)
-    archive = "# Project A\nDeadline: Friday\n" + "Archived project detail. " * 80 + "\n"
-    (root / "memory" / "projects.md").write_text(archive, encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = plan_curation(config, paths, "mind", automation)
-    assert plan is not None
-    (root / "memory" / "projects.md").write_text("# Project B\nDeadline: Friday\n", encoding="utf-8")
-
-    result = verify_curation(plan)
-
-    assert result.restored
-    assert (root / "memory" / "projects.md").read_text() == archive + "# Project B\nDeadline: Friday\n"
-
-
-def test_an_archive_appended_past_the_read_cap_is_left_alone(tmp_path: Path) -> None:
-    """A topic file that grows past 1 MiB cannot be compared safely, so verify neither counts it lost nor restores it."""
-    config, automation, root = _setup(tmp_path)
-    big = "x" * ((1 << 20) - 100) + "\n"
-    (root / "memory" / "projects.md").write_text(big, encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = plan_curation(config, paths, "mind", automation)
-    assert plan is not None
-    with (root / "memory" / "projects.md").open("a", encoding="utf-8") as archive:
-        archive.write("- Dentist on Friday at 10, bring the insurance card.\n" * 4)
-
-    result = verify_curation(plan)
-
-    assert (result.changed, result.restored) == (False, False)
-    assert (root / "memory" / "projects.md").read_text().endswith("bring the insurance card.\n")
-
-
-def test_an_archive_that_stops_being_utf8_is_left_alone(tmp_path: Path) -> None:
-    """A topic file that is no longer valid UTF-8 cannot be compared safely, so a restore leaves its bytes alone."""
-    plan, root = _plan_with_archive(tmp_path)
-    with (root / "memory" / "projects.md").open("ab") as archive:
-        archive.write(b"caf\xe9\n")
-    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
-
-    result = verify_curation(plan)
-
-    assert result.restored
-    assert (root / "MEMORY.md").read_text() == MEMORY
-    assert (root / "memory" / "projects.md").read_bytes() == ARCHIVE.encode() + b"caf\xe9\n"
+    assert any("deleted rather than moved" in finding for finding in result.findings)
+    assert not (root / "memory" / "projects.md").exists()
 
 
 def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_path: Path) -> None:
@@ -323,44 +264,11 @@ def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_p
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     plan = plan_curation(config, paths, "mind", automation)
     assert plan is not None
-    before = _snapshot(root)
-    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+    _delete_without_moving(root)
 
     result = verify_curation(plan)
 
-    assert "161 tokens of memory were deleted instead of moved to memory/ (at most 65)" in result.violations
-    assert _snapshot(root) == before
-
-
-def test_a_topic_file_the_scan_skipped_is_not_treated_as_deleted(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A snapshotted topic file past the scan's byte budget is read directly, so its appended facts survive."""
-    plan, root = _plan_with_archive(tmp_path)
-    monkeypatch.setattr("mindroom.memory._file_backend._MAX_MEMORY_SCAN_BYTES", 1)
-    with (root / "memory" / "projects.md").open("a", encoding="utf-8") as archive:
-        archive.write("- Dentist on Friday.\n")
-    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
-
-    result = verify_curation(plan)
-
-    assert result.restored
-    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "- Dentist on Friday.\n"
-
-
-def test_a_topic_file_the_scan_cut_short_is_still_restored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The file where the scan's byte budget runs out is read directly, so an overwritten archive is still restored."""
-    plan, root = _plan_with_archive(tmp_path)
-    (root / "memory" / "projects.md").write_text("# Projects\n" + SECTIONS[3], encoding="utf-8")
-    memory = MEMORY.replace(SECTIONS[3], POINTER)
-    (root / "MEMORY.md").write_text(memory, encoding="utf-8")
-    monkeypatch.setattr("mindroom.memory._file_backend._MAX_MEMORY_SCAN_BYTES", len(memory) + len("Daily note.\n") + 20)
-
-    result = verify_curation(plan)
-
-    assert result.restored
-    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "# Projects\n" + SECTIONS[3]
+    assert "about 161 tokens of memory were deleted rather than moved to memory/ (at most 65)" in result.findings
 
 
 def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
@@ -373,36 +281,20 @@ def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     plan = plan_curation(config, paths, "mind", automation)
     assert plan is not None
-    assert "memory/context.md" not in plan.memory_snapshot
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "memory" / "context.md").write_text(context.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
     result = verify_curation(plan)
 
-    assert (result.changed, result.restored) == (True, False)
+    assert (result.changed, result.findings) == (True, ())
 
 
-def test_reorganizing_an_archive_without_losing_content_is_kept(tmp_path: Path) -> None:
+def test_reorganizing_an_archive_without_losing_content_is_accepted(tmp_path: Path) -> None:
     """Rewriting a topic file is fine as long as the detail stays and the cut is in bounds."""
     plan, root = _plan_with_archive(tmp_path)
-    reorganized = SECTIONS[3] + ARCHIVE
-    (root / "memory" / "projects.md").write_text(reorganized, encoding="utf-8")
+    (root / "memory" / "projects.md").write_text(SECTIONS[3] + ARCHIVE, encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
     result = verify_curation(plan)
 
-    assert (result.changed, result.restored) == (True, False)
-    assert (root / "memory" / "projects.md").read_text() == reorganized
-
-
-def test_a_lossless_memory_edit_while_the_prompt_files_are_untouched_is_kept(tmp_path: Path) -> None:
-    """Without a curation edit, only lost content triggers a restore; reorganizing memory/ is left alone."""
-    plan, root = _plan_with_archive(tmp_path)
-    (root / "memory" / "projects.md").unlink()
-    (root / "memory" / "work.md").write_text(ARCHIVE, encoding="utf-8")
-
-    result = verify_curation(plan)
-
-    assert (result.changed, result.restored) == (False, False)
-    assert not (root / "memory" / "projects.md").exists()
-    assert curation_notice(plan, result).startswith("Prompt maintenance changed nothing")
+    assert (result.changed, result.findings) == (True, ())

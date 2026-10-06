@@ -33,19 +33,19 @@ class PromptCurationAutomation(BaseModel):
         default=0.10,
         gt=0,
         lt=1,
-        description="Fraction of the files' size each pass is asked to remove, unless less is needed",
+        description="Smallest fraction of the files' size each pass is asked to remove",
     )
     max_reduction: float = Field(
         default=0.15,
         gt=0,
         lt=1,
-        description="Largest fraction of the files' size one pass may remove",
+        description="Largest fraction of the files' size one pass may remove before verify asks for a re-check",
     )
     max_file_shrink: float = Field(
         default=0.25,
         gt=0,
         le=1,
-        description="Largest fraction any single file may shrink in one pass",
+        description="Largest fraction any single file may shrink in one pass before verify asks for a re-check",
     )
     max_content_loss: float = Field(
         default=0.05,
@@ -53,12 +53,12 @@ class PromptCurationAutomation(BaseModel):
         lt=1,
         description=(
             "Largest net drop in total memory content (the files plus memory/**), as a fraction of the files' "
-            "size; detail must move to memory/ instead of being deleted"
+            "size, before verify asks for a re-check; detail should move to memory/ instead of being deleted"
         ),
     )
     protected_files: list[str] = Field(
         default_factory=list,
-        description="Workspace-relative files the pass must leave unchanged",
+        description="Workspace-relative files the pass should leave unchanged",
     )
 
     @field_validator("cron")
