@@ -277,6 +277,18 @@ memory:
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 
+## Prompt Curation
+
+Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
+Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, with the bounds enforced afterwards in code.
+
+```yaml
+agents:
+  mind:
+    memory_backend: file
+    automations: [prompt_curation]
+```
+
 ## [`memory`]
 
 The `memory` tool lets an agent deliberately remember, look up, correct, or forget something, alongside automatic memory.

@@ -38,6 +38,7 @@ from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.automations import PromptCurationAutomation  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
@@ -1848,6 +1849,34 @@ class Config(BaseModel):
             return self.memory.search
         # exclude_none keeps the "None inherits" tri-state; deep copy avoids aliasing memory.search.include.
         return self.memory.search.model_copy(update=override.model_dump(exclude_none=True), deep=True)
+
+    def _automation_block_reason(self, agent_name: str) -> str | None:
+        """Return why an agent cannot run automations, or None when it can.
+
+        Automations run unattended, so requester-private agents have no identity to run them as, and
+        prompt curation moves detail into file memory, which needs the file backend.
+        """
+        if self.get_agent(agent_name).private is not None:
+            return "is private; automations run unattended and need a shared agent"
+        if self._agent_memory_backend(agent_name) != "file":
+            return "needs memory_backend: file for prompt_curation"
+        return None
+
+    def _agent_automations(self, agent_name: str) -> list[PromptCurationAutomation]:
+        """Get one agent's built-in automations: its own list, or the defaults when it can run them."""
+        agent = self.get_agent(agent_name)
+        if agent.automations is not None:
+            return agent.automations
+        return [] if self._automation_block_reason(agent_name) is not None else self.defaults.automations
+
+    @model_validator(mode="after")
+    def validate_agent_automations(self) -> Config:
+        """Reject automations an agent lists but cannot run."""
+        for agent_name, agent in self.agents.items():
+            if agent.automations and (reason := self._automation_block_reason(agent_name)) is not None:
+                msg = f"Agent {agent_name!r} {reason}"
+                raise ValueError(msg)
+        return self
 
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""
