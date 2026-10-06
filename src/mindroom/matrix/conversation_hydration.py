@@ -752,13 +752,16 @@ class ConversationHydrator:
 
         An event the walk fetched but could not read is not such a failure for
         a prompt. Reaching the start of the room still proves the gap was
-        fetched, and a missing key may never arrive, so refusing there failed
-        every read in the room for as long as the key stayed missing -- in a
-        new encrypted room, from the first follow-up on. Live sync drops an
-        undecryptable event without refusing anything either, so the room
-        conversation only stops calling itself complete. A caller that needs
-        completeness still refuses, exactly as its own walk of a conversation
-        does.
+        fetched, and a missing key may never arrive, so refusing there would
+        fail every read in the room for as long as the key stays missing. A
+        new encrypted room routinely holds such an event: the router encrypts
+        its welcome before it has seen the agent's device. Live sync drops an
+        undecryptable event without refusing anything either. What the walk
+        cannot say is which thread the event belonged to, so the settlement
+        records the room conversation as incomplete and revokes every thread's
+        marker, and each thread's own next walk decides whether it is complete.
+        A caller that needs completeness still refuses, exactly as its own walk
+        of a conversation does.
         """
         if await self.store.room_history_recovery(recovery.room_id) != recovery:
             # Another reader already settled this. `_shared` only joins readers

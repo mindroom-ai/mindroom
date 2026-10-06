@@ -683,8 +683,10 @@ class PrincipalStore:
 
         ``exhausted_server`` alone decides the obligation, because a walk that
         reached the start of the room fetched everything the gap skipped.
-        ``unreadable`` only keeps the room conversation from calling itself
-        complete, the same as an ordinary room walk that met such an event.
+        ``unreadable`` says some of it could not be read, which no marker in
+        the room can vouch for, so a repaired settlement records the room
+        conversation as incomplete and revokes every thread's marker for that
+        thread's own walk to settle again.
         """
         return await self._backend.write(
             lambda transaction: _settle_history_recovery(
@@ -1865,6 +1867,11 @@ def _settle_history_recovery(
         return HistoryRecoveryOutcome.SUPERSEDED
     if not journal.claim_room_history_recovery(transaction, principal_id, recovery):
         return HistoryRecoveryOutcome.SUPERSEDED
+    if exhausted_server and unreadable:
+        # Repairing unmasks every marker the gap retracted, and one from before
+        # the gap cannot vouch for an event this walk could not read: it may be
+        # a reply in that very thread. A truncated obligation keeps them masked.
+        reads.revoke_room_hydration(transaction, principal_id, room_id=recovery.room_id)
     reads.publish_conversation_hydration(
         transaction,
         principal_id,

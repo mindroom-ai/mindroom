@@ -505,6 +505,14 @@ def publish_conversation_hydration(
     )
 
 
+def revoke_room_hydration(transaction: Transaction, principal_id: str, *, room_id: str) -> None:
+    """Drop every conversation marker in one room so each is walked again on its next read."""
+    transaction.execute(
+        "DELETE FROM conversation_hydration WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+
+
 def _visible_message(row: Row) -> VisibleMessage:
     return VisibleMessage(
         logical_event_id=row["logical_event_id"],

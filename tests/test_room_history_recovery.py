@@ -997,6 +997,29 @@ async def test_successful_room_repair_restores_existing_thread_completeness(
     assert coverage.attempted_policy_rank == 2
 
 
+async def test_unreadable_room_repair_revokes_every_marker_in_the_room(principal: PrincipalStore) -> None:
+    """A repair that could not read everything it fetched certifies no conversation in the room."""
+    thread_id = "$thread"
+    await mark_complete(principal, None)
+    await mark_complete(principal, thread_id)
+    recovery = await principal.record_room_history_recovery(ROOM)
+    assert recovery is not None
+
+    outcome = await principal.settle_room_history_recovery(
+        recovery,
+        exhausted_server=True,
+        unreadable=True,
+        attempted_policy_rank=1,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
+
+    assert outcome is HistoryRecoveryOutcome.REPAIRED
+    assert await principal.room_history_recovery(ROOM) is None
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
+    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+
+
 async def test_exact_object_mismatch_publishes_nothing(principal: PrincipalStore) -> None:
     """An older walk can neither add facts nor publish over a newer abandonment."""
     stale = await principal.record_room_history_recovery(ROOM)

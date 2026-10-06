@@ -187,7 +187,8 @@ Each page is installed under the exact recovery revision and membership epoch, s
 Server exhaustion completes the obligation; reaching a ceiling retains a durable truncated result.
 A later read does not repeat the same bounded repair under the same policy, while a complete-history caller with a higher policy rank can request a further bounded attempt.
 Fetch failures fail the read and leave the obligation repairable.
-Unreadable history at server exhaustion does the same only for a complete-history caller; a prompt read settles the obligation and leaves the room conversation incomplete, because a missing room key may never arrive and live sync drops such events without refusing anything.
+Unreadable history at server exhaustion does the same only for a complete-history caller; a prompt read settles the obligation, because a missing room key may never arrive and live sync drops such events without refusing anything.
+That settlement records the room conversation as incomplete and revokes every thread's hydration marker, since the walk cannot tell which thread an unreadable event belonged to, so each thread's next walk decides whether it is complete.
 These repairs are read-triggered; there is no unrestricted periodic background rescan.
 
 ### 8. Membership epochs fence every derived and pending fact
