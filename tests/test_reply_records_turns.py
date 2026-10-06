@@ -187,6 +187,33 @@ async def test_the_replys_settlement_alone_records_its_turn_answered(tmp_path: P
     assert bot._turn_store.is_handled("$event")
 
 
+async def test_an_answered_turn_is_ready_for_shutdown_from_its_reply_alone(tmp_path: Path) -> None:
+    """A turn whose reply finished and delivered every row is ready, with no ledger copy of its answer."""
+    bot = await _streaming_bot(tmp_path)
+    await _pending_turn(bot)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
+
+    record = bot._turn_store.get_turn_record("$event")
+    assert record is not None
+    assert record.response_event_id is None
+    assert await bot._response_recovery_ready(record)
+
+
+async def test_a_turn_whose_reply_still_owes_a_row_is_ready_for_shutdown(tmp_path: Path) -> None:
+    """Recovery sends the row a finished reply still owes, so its turn does not need this process."""
+    bot = await _streaming_bot(tmp_path)
+    await _pending_turn(bot)
+    flaky = _FlakyHomeserver(failures=1_000)
+    with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
+        await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
+
+    reply = await _reply(bot)
+    assert await bot._reply_runtime.store.replies.has_unresolved_rows(reply.reply_id)
+    record = bot._turn_store.get_turn_record("$event")
+    assert record is not None
+    assert await bot._response_recovery_ready(record)
+
+
 async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: Path) -> None:
     """A Stop recorded on the reply cancels exactly its span, which writes the cancelled terminal row."""
     bot = await _streaming_bot(tmp_path)

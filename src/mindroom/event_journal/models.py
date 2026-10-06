@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
+    from mindroom.reply_lifecycle import Reply
     from mindroom.turn_record import TurnRecord
 
     from .projection import ProjectedEvent
@@ -466,6 +467,8 @@ class ResponseRecoveryState:
     turn_records: tuple[TurnRecord | None, ...]
     source_tombstones: tuple[bool, ...] = ()
     approval_owned: bool = False
+    # The newest reply answering the sources, which owns an AI turn's outcome.
+    reply: Reply | None = None
 
 
 @dataclass(frozen=True, slots=True)

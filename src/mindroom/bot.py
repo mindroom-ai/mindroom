@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, ApprovalContinuation, IngestionRecordAdmission
+    from mindroom.event_journal.models import ResponseRecoveryState
     from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
@@ -2037,6 +2038,21 @@ class AgentBot:
                 pending_source_count=sum(pending_sources),
             )
             return False
+        reply = recovery_state.reply
+        if reply is not None:
+            # The reply's records own an AI turn's outcome, and recovery sends any row it still owes.
+            if not reply.terminal:
+                self._record_response_recovery_not_ready(
+                    reason="reply_unfinished",
+                    turn_record=turn_record,
+                    pending_source_count=0,
+                )
+            return reply.terminal
+        return self._ledger_turn_recovery_ready(turn_record, recovery_state)
+
+    def _ledger_turn_recovery_ready(self, turn_record: TurnRecord, recovery_state: ResponseRecoveryState) -> bool:
+        """Prove that a turn no reply answers is complete or still owned by its outbox row."""
+        turn_id = turn_record.anchor_event_id
         if turn_id is None:
             self._record_response_recovery_not_ready(
                 reason="missing_turn_anchor",

@@ -322,6 +322,7 @@ class PrincipalStore:
                     )
                     for event_id in source_event_ids
                 ),
+                reply=reply_messages.for_sources(transaction, self._principal_id, source_event_ids),
             )
 
         return await self._backend.recovery_read(load)
