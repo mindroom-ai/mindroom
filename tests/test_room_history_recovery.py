@@ -272,9 +272,6 @@ def hydrator(
     )
 
 
-# A caller that needs the whole conversation, walking under the widest policy.
-EXPORT_CALLER: dict[str, Any] = {"require_complete": True, "policy": HydrationPolicy.EXPORT}
-
 UNDECRYPTABLE = {
     "event_id": "$encrypted",
     "sender": ALICE,
@@ -589,9 +586,10 @@ async def test_unreadable_server_exhaustion_fails_a_complete_history_caller(prin
     """Exhaustion proves nothing to an export when the walk could not read every fetched event."""
     client = PagedClient(pages=[([UNDECRYPTABLE], "older"), ([UNDECRYPTABLE], None)])
     recovery = await principal.record_room_history_recovery(ROOM)
+    export = hydrator(principal, client, require_complete=True, policy=HydrationPolicy.EXPORT)
 
     with pytest.raises(_HydrationError, match="unreadable") as failure:
-        await hydrator(principal, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=None)
+        await export.ensure_hydrated(room_id=ROOM, thread_id=None)
 
     assert "encrypted_events=2" in str(failure.value)
     assert "encrypted_sessions=1" in str(failure.value)
@@ -622,12 +620,10 @@ async def test_bad_event_at_server_exhaustion_stays_repairable_for_a_complete_hi
             return nio.RoomMessagesResponse(ROOM, [malformed], "start", None)  # type: ignore[list-item]
 
     recovery = await principal.record_room_history_recovery(ROOM)
+    export = hydrator(principal, BadEventClient(pages=[]), require_complete=True, policy=HydrationPolicy.EXPORT)
 
     with pytest.raises(_HydrationError, match="unreadable") as failure:
-        await hydrator(principal, BadEventClient(pages=[]), **EXPORT_CALLER).ensure_hydrated(
-            room_id=ROOM,
-            thread_id=None,
-        )
+        await export.ensure_hydrated(room_id=ROOM, thread_id=None)
 
     assert "invalid_events=1" in str(failure.value)
     assert "encrypted_events=0" in str(failure.value)
