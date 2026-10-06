@@ -53,6 +53,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# PDFs can be free of NUL bytes when their streams are uncompressed or ASCII-encoded.
+_BINARY_SIGNATURES = (b"%PDF-", b"PK\x03\x04")
+
 _MODEL_FUNCTION_NAME_ALIASES = {
     "list_files": "google_drive_list_files",
     "search_files": "google_drive_search_files",
@@ -519,10 +522,10 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 content_bytes = self._download_bytes(request)
 
-            # Treat content with a NUL byte as binary, as git does for a file's first 8000 bytes: PDFs, images,
-            # and Office files would reach the model as garbage, while 8-bit text in any encoding has none.
-            # UTF-16 text is refused too.
-            if b"\x00" in content_bytes:
+            # Treat PDF and zip (Office) signatures and any NUL byte as binary, as git does with NULs in a
+            # file's first 8000 bytes: such files would reach the model as garbage, while 8-bit text in any
+            # encoding has neither. UTF-16 text is refused too.
+            if content_bytes.startswith(_BINARY_SIGNATURES) or b"\x00" in content_bytes:
                 return self._text_read_refusal(mime_type, metadata)
             content = content_bytes.decode("utf-8", errors="replace")
             return json.dumps(

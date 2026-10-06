@@ -1095,6 +1095,11 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
     ("name", "mime_type", "content"),
     [
         ("report.pdf", "application/pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\nstream\nx\x9c\x00\x01"),
+        (
+            "plain.pdf",
+            "application/pdf",
+            b"%PDF-1.4\n1 0 obj\n<< /Length 44 >>\nstream\nBT /F1 12 Tf (Hello) Tj ET\nendstream",
+        ),
         ("report.docx", _DOCX_MIME_TYPE, b"PK\x03\x04\x14\x00\x06\x00\x08\x00[Content_Types].xml"),
     ],
 )
