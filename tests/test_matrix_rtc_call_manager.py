@@ -2467,6 +2467,7 @@ def _agent_call_state_event(*, sender: str = "@alice:example.org") -> dict:
 
 _ORIGIN_CONTEXT = CallOriginContext(
     origin=CallOrigin(room_id="!origin:example.org", thread_id="$root"),
+    caller_id="@alice:example.org",
     room_name="Lobby",
     thread_title="Trip planning",
     messages=(_CallBriefMessage(label="Alice", body="Book the 9am train"),),
@@ -2788,6 +2789,7 @@ def test_live_instructions_include_origin_brief_within_limit() -> None:
     assert 9_000 < approximate_o200k_tokens(large_prompt) < 14_000
     long_context = CallOriginContext(
         origin=_ORIGIN_CONTEXT.origin,
+        caller_id=_ORIGIN_CONTEXT.caller_id,
         room_name="Lobby",
         thread_title=None,
         messages=tuple(
