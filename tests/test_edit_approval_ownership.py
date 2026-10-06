@@ -315,13 +315,10 @@ async def _paused_case(  # noqa: PLR0915
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    assert runner.deps.replies is not None
-    runner.deps = replace(
-        runner.deps,
-        delivery_gateway=gateway,
-        approval_store=principal,
-        replies=replace(runner.deps.replies, store=principal),
-    )
+    # These cases pause answers written before reply records existed, with
+    # continuations main wrote; reply-owned approvals are covered in
+    # tests/test_reply_records_approvals.py, decision 1 included.
+    runner.deps = replace(runner.deps, delivery_gateway=gateway, approval_store=principal, replies=None)
     runner._approval_responses.store = principal
     runner._approval_responses.delivery_gateway = gateway
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)

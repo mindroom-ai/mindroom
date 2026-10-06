@@ -1709,6 +1709,42 @@ class PrincipalStore:
             ),
         )
 
+    async def claim_approval_in_place(
+        self,
+        approval_id: str,
+        *,
+        runtime_generation: str,
+        legacy_show_tool_calls: bool | None,
+        reply_id: str,
+        span_id: str,
+    ) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
+        """Claim a ready continuation for the response waiting on it, and resume its reply in place."""
+
+        def claim(transaction: Transaction) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
+            claimed = approval_continuations.claim(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                runtime_generation=runtime_generation,
+                legacy_show_tool_calls=legacy_show_tool_calls,
+            )
+            if claimed is None:
+                return None, None
+            return claimed, replies.decide_on_span(
+                transaction,
+                self._principal_id,
+                reply_id=reply_id,
+                span_id=span_id,
+                decide=lambda reply, span: rl.resumed_in_place(
+                    reply,
+                    span,
+                    approval_id=approval_id,
+                    now_ns=time.time_ns(),
+                ),
+            )
+
+        return await self._backend.write(claim)
+
     async def advance_approval_continuation(
         self,
         approval_id: str,
@@ -1781,15 +1817,22 @@ class PrincipalStore:
         )
 
     async def release_approval_continuation(self, approval_id: str, *, expected_generation: int) -> bool:
-        """Hand an interrupted continuation's still-pending sources back to ordinary replay."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.release(
+        """Hand an interrupted continuation's still-pending sources back to replay, with its reply."""
+
+        def release(transaction: Transaction) -> bool:
+            continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
+            if not approval_continuations.release(
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
                 expected_generation=expected_generation,
-            ),
-        )
+            ):
+                return False
+            if continuation is not None:
+                replies.approval_released(transaction, self._principal_id, continuation)
+            return True
+
+        return await self._backend.write(release)
 
     async def finish_approval_continuation(self, approval_id: str) -> bool:
         """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply."""

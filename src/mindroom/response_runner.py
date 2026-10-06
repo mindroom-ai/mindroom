@@ -100,6 +100,7 @@ from mindroom.reply_presentation import (
     TEAM_PLACEHOLDER,
     NoteKind,
     Presentation,
+    decode_presentation,
     format_error_note,
     note_segment,
 )
@@ -1013,6 +1014,8 @@ class ResponseRunner:
             responses=self._approval_responses,
             runtime_generation=self.deps.approval_runtime_generation,
             retry_sources=self.deps.retry_approval_sources,
+            claim=self._claim_in_place_approval,
+            advance=self._advance_in_place_approval,
         )
         self._approval_execution = AgentApprovalExecution(
             config=lambda: self.deps.runtime.config,
@@ -1466,6 +1469,7 @@ class ResponseRunner:
                 and current.session_id == paused.session_id
                 and current.cli_call == paused.cli_call
             ):
+                await self._end_expired_in_place_wait(current)
                 return FinalDeliveryOutcome(
                     terminal_status="suspended",
                     event_id=current.response_event_id,
@@ -1570,6 +1574,8 @@ class ResponseRunner:
                     draft,
                     shown=shown.reply_pause,
                     stage=shown.reply_stage,
+                    # A response-local CLI wait keeps its span running while it waits.
+                    in_place=paused.cli_call is not None,
                     target=target,
                     text=visible_text,
                     stream_status=stream_status,
@@ -1679,8 +1685,9 @@ class ResponseRunner:
         stream_status: str,
         tool_trace: tuple[ToolTraceEntry, ...],
         waiting_text: str | None,
+        in_place: bool = False,
     ) -> tuple[ApprovalContinuation | None, bool]:
-        """Advance the continuation and pause the resume span's reply with the pause row, in one transaction."""
+        """Advance the continuation and pause the span's reply with the pause row, in one transaction."""
         reply = await handle.runtime.store.replies.load(handle.reply_id)
         assert reply is not None
         assert reply.event_id is not None, "a resumed reply shows its paused event"
@@ -1696,7 +1703,7 @@ class ResponseRunner:
                         handle,
                         _paused_presentation(handle, paused, waiting_text=waiting_text),
                         approval_id=advance.approval_id,
-                        in_place=False,
+                        in_place=in_place,
                         enqueue=partial(self.deps.approval_store.pause_for_approval, advance),
                     ),
                 ),
@@ -1709,6 +1716,69 @@ class ResponseRunner:
             return None, False
         return current, shown
 
+    async def _claim_in_place_approval(
+        self,
+        current: ApprovalContinuation,
+        legacy_show_tool_calls: bool,
+    ) -> ApprovalContinuation | None:
+        """Claim a ready continuation for the response waiting on it, resuming its reply in place."""
+        handle = current_span()
+        if handle is None or handle.exited:
+            return await self.deps.approval_store.claim_approval_continuation(
+                current.approval_id,
+                runtime_generation=self.deps.approval_runtime_generation,
+                legacy_show_tool_calls=legacy_show_tool_calls,
+            )
+        claimed, applied = await self.deps.approval_store.claim_approval_in_place(
+            current.approval_id,
+            runtime_generation=self.deps.approval_runtime_generation,
+            legacy_show_tool_calls=legacy_show_tool_calls,
+            reply_id=handle.reply_id,
+            span_id=handle.span_id,
+        )
+        if applied is not None:
+            handle.note(applied)
+        return claimed
+
+    async def _advance_in_place_approval(
+        self,
+        current: ApprovalContinuation,
+        paused: PausedAttempt,
+        target: MessageTarget,
+    ) -> None:
+        """Record the next pause of a run that waits in place, with its reply's pause row."""
+        handle = current_span()
+        await self._approval_responses.advance_pause(
+            current,
+            paused,
+            target=target,
+            pending_text=PROGRESS_PLACEHOLDER,
+            reply_pause=(
+                None
+                if handle is None or handle.exited
+                else partial(self._advance_reply_pause, handle, target, in_place=True)
+            ),
+        )
+
+    async def _end_expired_in_place_wait(self, current: ApprovalContinuation) -> None:
+        """End the span of a response-local wait that expired; the reply waits for the decision (§6.4 pause)."""
+        handle = current_span()
+        if handle is None or handle.exited:
+            return
+        reply = await handle.runtime.store.replies.load(handle.reply_id)
+        assert reply is not None
+        handle.reply = reply
+        await self.deps.delivery_gateway.end_reply_span(
+            handle,
+            pause_decision(
+                handle,
+                decode_presentation(reply.presentation),
+                approval_id=current.approval_id,
+                in_place=False,
+                stage=None,
+            ),
+        )
+
     async def _pause_reply(
         self,
         handle: SpanHandle,
@@ -1716,6 +1786,7 @@ class ResponseRunner:
         *,
         shown: Presentation,
         stage: rl.WriteStage | None,
+        in_place: bool,
         target: MessageTarget,
         text: str,
         stream_status: str,
@@ -1730,7 +1801,7 @@ class ResponseRunner:
         if stage is None:
             return await self.deps.delivery_gateway.pause_shown_reply(
                 handle,
-                pause_decision(handle, shown, approval_id=continuation.approval_id, in_place=False, stage=None),
+                pause_decision(handle, shown, approval_id=continuation.approval_id, in_place=in_place, stage=None),
                 enqueue=enqueue,
                 target=target,
             )
@@ -1745,7 +1816,7 @@ class ResponseRunner:
                     handle,
                     shown,
                     approval_id=continuation.approval_id,
-                    in_place=False,
+                    in_place=in_place,
                     enqueue=enqueue,
                 ),
             ),

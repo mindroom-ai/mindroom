@@ -18,7 +18,6 @@ from mindroom.orchestration.runtime import (
     current_task_is_process_shutdown,
 )
 from mindroom.response_turn import ResponsePausedForApproval, apply_exact_approval_decisions
-from mindroom.streaming import PROGRESS_PLACEHOLDER
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
     from agno.run.requirement import RunRequirement
 
     from mindroom.approval_response import ApprovalResponseCoordinator
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import PausedAttempt
@@ -47,6 +46,11 @@ class CliApprovalWaits:
     responses: ApprovalResponseCoordinator
     runtime_generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
+    # Claims a ready continuation for the waiting response, with its reply's
+    # resume in place when reply records own the reply.
+    claim: Callable[[ApprovalContinuation, bool], Awaitable[ApprovalContinuation | None]]
+    # Records a claimed continuation's next pause while the response waits in place.
+    advance: Callable[[ApprovalContinuation, PausedAttempt, MessageTarget], Awaitable[object]]
     waiters: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
 
     def wake(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
@@ -79,12 +83,7 @@ class CliApprovalWaits:
         if current is None:
             await publish(paused)
         elif current.state == "claimed" and current.cli_call is not None:
-            await self.responses.advance_pause(
-                current,
-                paused,
-                target=target,
-                pending_text=PROGRESS_PLACEHOLDER,
-            )
+            await self.advance(current, paused, target)
         else:
             msg = "CLI approval source already has another owner"
             raise RuntimeError(msg)
@@ -109,11 +108,7 @@ class CliApprovalWaits:
                     raise PermissionError(msg)
                 if deadline is not None and time.time_ns() >= deadline:
                     raise ResponsePausedForApproval(paused)
-                claimed = await self.store.claim_approval_continuation(
-                    current.approval_id,
-                    runtime_generation=self.runtime_generation,
-                    legacy_show_tool_calls=show_tool_calls,
-                )
+                claimed = await self.claim(current, show_tool_calls)
                 if claimed is None:
                     msg = "CLI approval lost its single execution claim"
                     raise RuntimeError(msg)

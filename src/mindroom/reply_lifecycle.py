@@ -930,6 +930,8 @@ def _terminal_row(
         now_ns,
         presentation=write.shown,
         frozen_display=write.frozen_display,
+        # A resume's terminal row ends the approval's hold on the reply; its span still names it.
+        approval_id=None if resume else updated.approval_id,
     )
     shown = write.shown if write.frozen_display is None else write.frozen_display
     updated, row = _row(updated, span, stage, shown=shown, settles_sources=settles)
