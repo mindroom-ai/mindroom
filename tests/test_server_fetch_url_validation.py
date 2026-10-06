@@ -8,8 +8,10 @@ import threading
 from typing import get_type_hints
 
 import httpx
+import httpx2
 import pytest
 
+from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport
 from mindroom.server_fetch_url import (
     ServerFetchAsyncHTTPTransport,
     ServerFetchHTTPTransport,
@@ -25,7 +27,10 @@ def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]
     return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, 443))]
 
 
-@pytest.mark.parametrize("transport_cls", [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport])
+@pytest.mark.parametrize(
+    "transport_cls",
+    [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport, ServerFetchAsyncHTTPX2Transport],
+)
 def test_server_fetch_transport_type_hints_resolve_at_runtime(transport_cls: type[object]) -> None:
     """Transport constructor annotations should support runtime type inspection."""
     hints = get_type_hints(transport_cls.__init__)
@@ -334,7 +339,50 @@ def test_server_fetch_http_transport_rejects_private_request_url_without_network
 
 
 @pytest.mark.asyncio
-async def test_async_transport_resolves_the_dialed_host_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_httpx2_transport_rejects_private_request_url_without_network() -> None:
+    """The httpx2 transport handed to the MCP SDK should deny unsafe request URLs before opening a socket."""
+    transport = ServerFetchAsyncHTTPX2Transport()
+    request = httpx2.Request("GET", "http://127.0.0.1/admin")
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        await transport.handle_async_request(request)
+
+    assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dialed_address", "reason"),
+    [("10.0.0.5", "private_address"), ("169.254.1.1", "blocked_address")],
+)
+async def test_httpx2_transport_rejects_dns_results_that_change_to_internal_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+    dialed_address: str,
+    reason: str,
+) -> None:
+    """The httpx2 transport validates the address resolved at dial time, not only the request URL."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo(dialed_address),
+    )
+
+    async with httpx2.AsyncClient(transport=ServerFetchAsyncHTTPX2Transport()) as client:
+        with pytest.raises(ServerFetchUrlError) as exc_info:
+            await client.get("https://rebinding.example/")
+
+    assert exc_info.value.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_cls", "transport_cls"),
+    [(httpx.AsyncClient, ServerFetchAsyncHTTPTransport), (httpx2.AsyncClient, ServerFetchAsyncHTTPX2Transport)],
+)
+async def test_async_transport_resolves_the_dialed_host_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    client_cls: type[httpx.AsyncClient | httpx2.AsyncClient],
+    transport_cls: type[ServerFetchAsyncHTTPTransport | ServerFetchAsyncHTTPX2Transport],
+) -> None:
     """A slow DNS lookup for one connection must not stall other work on the event loop."""
     loop = asyncio.get_running_loop()
     loop_kept_running = threading.Event()
@@ -348,7 +396,7 @@ async def test_async_transport_resolves_the_dialed_host_off_the_event_loop(monke
 
     monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", slow_getaddrinfo)
 
-    async with httpx.AsyncClient(transport=ServerFetchAsyncHTTPTransport()) as client:
+    async with client_cls(transport=transport_cls()) as client:
         with pytest.raises(ServerFetchUrlError) as exc_info:
             await client.get("https://slow-dns.example/")
 

@@ -6,16 +6,15 @@ import asyncio
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-import httpx
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+import httpx2
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.message import SessionMessage
+from mcp.client.streamable_http import streamable_http_client
 
-from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
+from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport
+from mindroom.server_fetch_url import validate_server_fetch_url
 
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -24,16 +23,12 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from typing import Any
 
+    from mcp.client._transport import TransportStreams as _TransportStreams
+
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.config import MCPServerConfig, MCPTransport
 
-_TransportStreams = tuple[
-    MemoryObjectReceiveStream[SessionMessage | Exception],
-    MemoryObjectSendStream[SessionMessage],
-]
-
-if TYPE_CHECKING:
-    _RemoteTransportClient = Callable[..., AbstractAsyncContextManager[tuple[Any, ...]]]
+    _RemoteTransportClient = Callable[..., AbstractAsyncContextManager[_TransportStreams]]
 
 
 @dataclass(frozen=True)
@@ -51,7 +46,7 @@ class _MCPHTTPAuthorizationTracker:
 
     rejected: bool = False
 
-    async def observe_response(self, response: httpx.Response) -> None:
+    async def observe_response(self, response: httpx2.Response) -> None:
         """Remember only the status class; never retain provider-controlled content."""
         if response.status_code == 401:
             self.rejected = True
@@ -80,15 +75,15 @@ def _interpolate_mcp_headers(values: Mapping[str, str], runtime_paths: RuntimePa
 
 def _server_fetch_mcp_http_client(
     headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
-    auth: httpx.Auth | None = None,
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
     authorization_tracker: _MCPHTTPAuthorizationTracker | None = None,
     **_ignored: object,
-) -> httpx.AsyncClient:
+) -> httpx2.AsyncClient:
     """Create an MCP HTTP client that validates requests, redirects, and dialed addresses."""
     kwargs: dict[str, Any] = {
         "follow_redirects": True,
-        "transport": ServerFetchAsyncHTTPTransport(),
+        "transport": ServerFetchAsyncHTTPX2Transport(),
     }
     if timeout is not None:
         kwargs["timeout"] = timeout
@@ -98,20 +93,20 @@ def _server_fetch_mcp_http_client(
         kwargs["auth"] = auth
     if authorization_tracker is not None:
         kwargs["event_hooks"] = {"response": [authorization_tracker.observe_response]}
-    return httpx.AsyncClient(**kwargs)
+    return httpx2.AsyncClient(**kwargs)
 
 
 def _tracked_mcp_http_client_factory(
     authorization_tracker: _MCPHTTPAuthorizationTracker,
-) -> Callable[..., httpx.AsyncClient]:
+) -> Callable[..., httpx2.AsyncClient]:
     """Bind one response-status latch to one deferred remote transport."""
 
     def factory(
         headers: dict[str, str] | None = None,
-        timeout: httpx.Timeout | None = None,
-        auth: httpx.Auth | None = None,
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
         **kwargs: object,
-    ) -> httpx.AsyncClient:
+    ) -> httpx2.AsyncClient:
         return _server_fetch_mcp_http_client(
             headers=headers,
             timeout=timeout,
@@ -155,13 +150,30 @@ async def _open_stdio(
 
 
 @asynccontextmanager
+async def _streamable_http_client(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: float,  # noqa: ASYNC109 - Signature must match sse_client.
+    sse_read_timeout: float,
+    httpx_client_factory: Callable[..., httpx2.AsyncClient],
+) -> AsyncIterator[_TransportStreams]:
+    """Open streamable HTTP on a factory-built client, matching `sse_client`'s client construction."""
+    async with (
+        httpx_client_factory(headers=headers, timeout=httpx2.Timeout(timeout, read=sse_read_timeout)) as http_client,
+        streamable_http_client(url, http_client=http_client) as streams,
+    ):
+        yield streams
+
+
+@asynccontextmanager
 async def _open_remote_transport(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
     *,
     transport: MCPTransport,
     client: _RemoteTransportClient,
-    httpx_client_factory: Callable[..., httpx.AsyncClient],
+    httpx_client_factory: Callable[..., httpx2.AsyncClient],
     extra_headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[_TransportStreams]:
     if server_config.url is None:
@@ -179,7 +191,7 @@ async def _open_remote_transport(
         sse_read_timeout=server_config.call_timeout_seconds,
         httpx_client_factory=httpx_client_factory,
     ) as streams:
-        yield cast("_TransportStreams", streams[:2])
+        yield streams
 
 
 def build_transport_handle(
@@ -214,7 +226,7 @@ def build_transport_handle(
                 server_config,
                 runtime_paths,
                 transport="streamable-http",
-                client=streamablehttp_client,
+                client=_streamable_http_client,
                 httpx_client_factory=_tracked_mcp_http_client_factory(authorization_tracker),
                 extra_headers=extra_headers,
             ),

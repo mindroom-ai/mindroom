@@ -1059,7 +1059,7 @@ async def test_mcp_body_failure_returns_redacted_error_without_retry(
     failure = (
         RuntimeError(message)
         if failure_kind == "transport"
-        else CallToolResult(isError=True, content=[TextContent(type="text", text=message)])
+        else CallToolResult(is_error=True, content=[TextContent(type="text", text=message)])
     )
     monkeypatch.setattr(
         _FakeClientSession,

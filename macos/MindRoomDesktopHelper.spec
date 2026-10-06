@@ -9,7 +9,7 @@ root = Path(SPECPATH).parent
 hiddenimports = collect_submodules("mindroom.desktop") + collect_submodules("mindroom.matrix")
 datas = copy_metadata("mindroom")
 binaries = []
-for package in ("mcp", "nio", "olm", "pyautogui", "PIL"):
+for package in ("mcp", "httpx2", "nio", "olm", "pyautogui", "PIL"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries

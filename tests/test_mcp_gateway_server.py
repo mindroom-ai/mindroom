@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
+import httpx2
 import pytest
 from fastapi import HTTPException
-from mcp import ClientSession
+from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -93,6 +94,19 @@ def _call(
 
 def _cancel(request_id: int | str) -> dict[str, object]:
     return {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id}}
+
+
+def _modern(payload: dict[str, object]) -> tuple[dict[str, object], dict[str, str]]:
+    """Carry a message in the 2026-07-28 per-request envelope with its routing headers."""
+    params = cast("dict[str, object]", payload.get("params") or {})
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    headers = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": str(payload["method"])}
+    if "name" in params:
+        headers["Mcp-Name"] = str(params["name"])
+    return {**payload, "params": {**params, "_meta": meta}}, headers
 
 
 @pytest.mark.parametrize(
@@ -191,13 +205,25 @@ async def test_newer_protocol_probe_is_logged_as_negotiation() -> None:
         "jsonrpc": "2.0",
         "id": 1,
         "method": "server/discover",
-        "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}},
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
     }
     with capture_logs(processors=[merge_contextvars]) as logs:
         async with _client(dispatch) as client:
-            probed = await client.post("/mcp", json=probe, headers={"MCP-Protocol-Version": "2026-07-28"})
+            probed = await client.post(
+                "/mcp",
+                json=probe,
+                headers={"MCP-Protocol-Version": "2099-01-01", "Mcp-Method": "server/discover"},
+            )
             malformed = await client.post("/mcp", content=b"{", headers={"Content-Type": "application/json"})
     assert probed.status_code == 400
+    # The rejection names the served revision, so a newer client can retry with it.
+    assert probed.json()["error"]["code"] == -32022
+    assert probed.json()["error"]["data"]["supported"] == ["2026-07-28"]
     assert malformed.status_code == 400
     probe_log, malformed_log = [entry for entry in logs if entry["event"] == "mcp_gateway_http_completed"]
     assert probe_log["log_level"] == "info"
@@ -261,6 +287,10 @@ async def test_activity_records_successful_discovery_and_calls_only() -> None:
         await client.post("/mcp", json=_call(name="unknown"))
         await client.post("/mcp", json=_call(arguments={"query": "unavailable"}))
         await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "invented"})
+        # Header validation for a 2026-07-28 call must not run the activity-recording tool listing.
+        modern, headers = _modern(_call(arguments={"query": "unavailable"}))
+        failed = await client.post("/mcp", json=modern, headers=headers)
+        assert failed.json()["result"]["isError"] is True
         assert activity == []
         result = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         assert "tools" in result.json()["result"]
@@ -393,6 +423,86 @@ async def test_duplicate_active_request_cannot_replace_cancellation_owner() -> N
         await client.post("/mcp", json=_cancel(7))
         await asyncio.wait_for(finished.wait(), 2)
         await asyncio.wait_for(asyncio.gather(first, return_exceptions=True), 2)
+
+
+async def test_modern_call_is_cancelled_only_by_its_own_closed_stream() -> None:
+    """A 2026-07-28 call ends when its requester disconnects, not on another requester's request ID."""
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def dispatch(request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        if request.headers["authorization"] == "Bearer alice":
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return {"user": request.headers["authorization"]}
+
+    modern, headers = _modern(_call(12))
+    disconnected = asyncio.Event()
+    delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": json.dumps(modern).encode(), "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (name.lower().encode(), value.encode())
+            for name, value in {
+                "Host": "portal.example.org",
+                "Content-Type": "application/json",
+                **_HEADERS,
+                **headers,
+            }.items()
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("portal.example.org", 443),
+    }
+    server = GatewayServer(authenticate=_authenticate, dispatch=dispatch, public_url="https://portal.example.org")
+    app = Starlette(routes=[Route("/mcp", endpoint=server, methods=["POST"])])
+    async with (
+        server.run(),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://portal.example.org",
+            headers=_HEADERS,
+        ) as client,
+    ):
+        call = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(started.wait(), 2)
+        bob, bob_headers = _modern(_call(12))
+        concurrent = await client.post("/mcp", json=bob, headers={**bob_headers, "Authorization": "Bearer bob"})
+        assert concurrent.json()["result"]["structuredContent"] == {"user": "Bearer bob"}
+        version = {"MCP-Protocol-Version": "2026-07-28"}
+        assert (
+            await client.post("/mcp", json=_cancel(12), headers={**version, "Authorization": "Bearer bob"})
+        ).status_code == 202
+        assert (await client.post("/mcp", json=_cancel("12"), headers=version)).status_code == 202
+        assert not cancelled.is_set()
+        disconnected.set()
+        await asyncio.wait_for(cancelled.wait(), 2)
+        await asyncio.wait_for(call, 2)
+    response = json.loads(b"".join(cast("bytes", message.get("body", b"")) for message in sent))
+    assert response["result"]["structuredContent"]["error"]["code"] == "cancelled"
 
 
 async def test_timeout_is_bounded_and_does_not_retry_execution() -> None:
@@ -580,6 +690,52 @@ async def test_typed_envelope_privacy_preserves_protocol(
         if status == 202:
             assert response.content == b""
     # Manager shutdown drains asynchronous log paths before checking privacy.
+    assert "harmless-envelope-marker" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        (
+            {
+                "jsonrpc": "2.0",
+                "id": "bounded",
+                "method": "tools/call",
+                "params": {"name": "search_tools", "arguments": ["harmless-envelope-marker"]},
+            },
+            400,
+        ),
+        ({"jsonrpc": "2.0", "id": 4, "method": "harmless-envelope-marker"}, 400),
+        ({"jsonrpc": "2.0", "method": "notifications/harmless-envelope-marker"}, 202),
+        (
+            {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": "harmless-envelope-marker"}},
+            202,
+        ),
+        ({"jsonrpc": "2.0", "id": 4, "result": {"value": "harmless-envelope-marker"}}, 202),
+    ],
+)
+async def test_modern_envelope_privacy_preserves_protocol(
+    payload: dict[str, object],
+    status: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """2026-07-28 messages pass the same privacy gate, with that revision's HTTP status for errors."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        pytest.fail("Envelope must not invoke a tool")
+
+    caplog.set_level("DEBUG")
+    modern, headers = _modern(payload) if "method" in payload else (payload, {"MCP-Protocol-Version": "2026-07-28"})
+    async with _client(dispatch) as client:
+        response = await client.post("/mcp", json=modern, headers=headers)
+        await asyncio.sleep(0.01)
+        assert response.status_code == status
+        assert "harmless-envelope-marker" not in response.text
+        if status == 400:
+            assert response.json()["error"]["code"] == -32602
+            assert response.json()["id"] == payload["id"]
+        else:
+            assert response.content == b""
     assert "harmless-envelope-marker" not in caplog.text
 
 
@@ -773,8 +929,9 @@ async def test_early_responses_preserve_transport_negotiation(
         assert response.status_code == status
 
 
-async def test_sdk_client_handshake_search_and_call() -> None:
-    """The real client keeps initialization, tool discovery and typed invocation working."""
+@pytest.mark.parametrize(("mode", "protocol_version"), [("auto", "2026-07-28"), ("legacy", "2025-11-25")])
+async def test_sdk_client_negotiation_search_and_call(mode: str, protocol_version: str) -> None:
+    """The real client keeps discovery or initialization, tool listing, and typed invocation working."""
 
     async def dispatch(request: Request, name: str, arguments: dict[str, object]) -> dict[str, object]:
         assert request.headers["authorization"] == "Bearer alice"
@@ -789,25 +946,40 @@ async def test_sdk_client_handshake_search_and_call() -> None:
         }
         return {"result": 3}
 
-    async with (
-        _client(dispatch) as client,
-        streamable_http_client("https://portal.example.org/mcp", http_client=client) as (read, write, _session_id),
-        ClientSession(read, write) as session,
-    ):
-        initialized = await session.initialize()
-        assert initialized.protocolVersion == "2025-11-25"
-        listed = await session.list_tools()
-        assert {tool.name for tool in listed.tools} == {"search_tools", "get_tool", "invoke_tool"}
-        searched = await session.call_tool("search_tools", {})
-        assert searched.structuredContent == {
-            "results": [{"agent": "personal", "toolkit": "calculator", "function": "add"}],
-        }
-        result = await session.call_tool(
-            "invoke_tool",
-            {"agent": "personal", "toolkit": "calculator", "function": "add", "arguments": {"a": 1, "b": 2}},
-        )
-        assert result.structuredContent == {"result": 3}
-        assert result.isError is False
+    server = GatewayServer(authenticate=_authenticate, dispatch=dispatch, public_url="https://portal.example.org")
+    app = Starlette(routes=[Route("/mcp", endpoint=server, methods=["GET", "POST", "DELETE"])])
+    with capture_logs() as logs:
+        async with (
+            server.run(),
+            httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app),
+                base_url="https://portal.example.org",
+                headers={"Authorization": "Bearer alice"},
+            ) as http_client,
+            Client(
+                streamable_http_client("https://portal.example.org/mcp", http_client=http_client),
+                mode=mode,
+            ) as client,
+        ):
+            assert client.protocol_version == protocol_version
+            assert client.instructions is not None
+            assert "search_tools" in client.instructions
+            listed = await client.list_tools()
+            assert {tool.name for tool in listed.tools} == {"search_tools", "get_tool", "invoke_tool"}
+            searched = await client.call_tool("search_tools", {})
+            assert searched.structured_content == {
+                "results": [{"agent": "personal", "toolkit": "calculator", "function": "add"}],
+            }
+            result = await client.call_tool(
+                "invoke_tool",
+                {"agent": "personal", "toolkit": "calculator", "function": "add", "arguments": {"a": 1, "b": 2}},
+            )
+            assert result.structured_content == {"result": 3}
+            assert result.is_error is False
+    statuses = [entry["status_code"] for entry in logs if entry["event"] == "mcp_gateway_http_completed"]
+    # A 2026-07-28 client reaches the gateway directly, without a rejected probe before a fallback handshake.
+    assert statuses
+    assert all(status < 400 for status in statuses)
 
 
 @pytest.mark.parametrize("method", ["unknown", "tools/list"])

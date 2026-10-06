@@ -493,7 +493,7 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
     h = response_harness
     script = tmp_path / "echo_server.py"
     script.write_text(
-        'from mcp.server.fastmcp import FastMCP\nserver = FastMCP("echo")\n@server.tool()\ndef echo(text: str) -> str:\n return "echo:" + text\n@server.tool()\ndef secret() -> str:\n raise AssertionError("filtered tool ran")\nserver.run()\n',
+        'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n return "echo:" + text\n@server.tool()\ndef secret() -> str:\n raise AssertionError("filtered tool ran")\nserver.run()\n',
     )
     h.runtime.config.mcp_servers = {"echo": MCPServerConfig(transport="stdio", command="uv", args=["run", str(script)])}
     h.runtime.config.agents["helper"] = AgentConfig(
