@@ -7486,6 +7486,7 @@ from = ["mindroom.agno_compat_sqlite"]
 expose = [
     "remove_default_pragmas",
     "run_table",
+    "session_table",
     "insert_run_row",
     "upsert_run_at_end",
     "run_deletion_transaction",
