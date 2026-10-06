@@ -311,6 +311,8 @@ def _disconnect_cancellation(ctx: ServerRequestContext, request: Request, lease:
         yield
         return
     watcher = asyncio.create_task(_cancel_after_disconnect(request, lease))
+    # Retrieve a failed receive so it is not reported as an unretrieved task exception.
+    watcher.add_done_callback(lambda task: task.cancelled() or task.exception())
     try:
         yield
     finally:

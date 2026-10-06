@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import httpx2
+import mcp.client.sse as mcp_sse_client
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -17,6 +19,8 @@ from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport
 from mindroom.server_fetch_url import validate_server_fetch_url
 
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
+# Tool results may exceed the SDK's default 1 MiB per-event cap, which 1.x did not have; `sse_client` has no option for it.
+mcp_sse_client.sse_within_origin = functools.partial(mcp_sse_client.sse_within_origin, max_event_size=None)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping

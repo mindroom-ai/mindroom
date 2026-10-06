@@ -510,3 +510,57 @@ async def test_sse_401_is_latched_and_classified_through_the_sdk(
 
     assert MCPServerManager._runtime_exception_has_http_status(exc_info.value, 401)
     assert handle.authorization_rejected()
+
+
+@asynccontextmanager
+async def _serve_large_result_server(transport: MCPTransport) -> AsyncIterator[str]:
+    """Serve one tool whose result is larger than the SDK's default 1 MiB SSE event cap."""
+    import uvicorn  # noqa: PLC0415
+    from mcp.server.mcpserver import MCPServer  # noqa: PLC0415
+
+    server = MCPServer("Large result")
+
+    @server.tool()
+    def large() -> str:
+        return "x" * (2 * 1024 * 1024)
+
+    app = server.sse_app() if transport == "sse" else server.streamable_http_app()
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    uvicorn_server = uvicorn.Server(uvicorn.Config(app, log_level="error", ws="none"))
+    serving = asyncio.create_task(uvicorn_server.serve(sockets=[sock]))
+    while not uvicorn_server.started:  # noqa: ASYNC110 - uvicorn exposes startup only as a flag
+        await asyncio.sleep(0.01)
+    try:
+        yield f"http://127.0.0.1:{sock.getsockname()[1]}/{'sse' if transport == 'sse' else 'mcp'}"
+    finally:
+        uvicorn_server.should_exit = True
+        await serving
+        sock.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+async def test_remote_transports_deliver_results_larger_than_one_mebibyte(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: MCPTransport,
+) -> None:
+    """Tool results are not cut off by the SDK's per-event SSE cap, which 1.x did not have."""
+    monkeypatch.setattr(transport_module, "validate_server_fetch_url", lambda url, **_kwargs: url)
+    monkeypatch.setattr(transport_module, "ServerFetchAsyncHTTPX2Transport", httpx2.AsyncHTTPTransport)
+    async with _serve_large_result_server(transport) as url:
+        handle = build_transport_handle(
+            "large",
+            MCPServerConfig(transport=transport, url=url),
+            _runtime_paths(tmp_path),
+        )
+        async with (
+            asyncio.timeout(20),
+            handle.opener() as (read_stream, write_stream),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool("large", {})
+    assert result.is_error is False
+    assert len(result.content[0].text) == 2 * 1024 * 1024  # type: ignore[union-attr]

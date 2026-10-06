@@ -621,18 +621,23 @@ async def test_request_id_cannot_expand_an_ordinary_response_beyond_limit() -> N
         assert calls == []
 
 
-@pytest.mark.parametrize("modern", [False, True])
-async def test_response_limit_includes_valid_request_id_and_jsonrpc_envelope(modern: bool) -> None:
-    """A result near the payload ceiling cannot overflow through its response envelope."""
+@pytest.mark.parametrize(("modern", "largest_result"), [(False, 65320), (True, 65343)])
+async def test_response_limit_includes_valid_request_id_and_jsonrpc_envelope(modern: bool, largest_result: int) -> None:
+    """The largest accepted result cannot overflow through its response envelope, and one more byte is refused."""
+    size = largest_result
 
     async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
-        return {"result": "x" * 65460}
+        return {"result": "x" * size}
 
     payload, headers = _modern(_call("a" * 126)) if modern else (_call("a" * 126), {})
     async with _client(dispatch) as client:
         response = await client.post("/mcp", json=payload, headers=headers)
         assert response.status_code == 200
         assert len(response.content) <= 131072
+        assert response.json()["result"]["structuredContent"] == {"result": "x" * largest_result}
+        size = largest_result + 1
+        response = await client.post("/mcp", json=payload, headers=headers)
+        assert response.json()["result"]["structuredContent"]["error"]["code"] == "result_too_large"
 
 
 @pytest.mark.parametrize(
