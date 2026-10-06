@@ -7992,3 +7992,7 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.cli.local_model_config"
 depends_on = ["mindroom.atomic_file", "mindroom.cli.config", "mindroom.config.main", "mindroom.path_confinement"]
 visibility = ["mindroom.cli.config"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.google_service"]
+expose = ["GoogleCloudToolkit"]

@@ -167,7 +167,7 @@ class ThreadLocalGoogleServiceMixin:
         self._google_service_state().user_email = value
 
 
-class GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
+class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
     """Google toolkit with scoped OAuth credentials and optional service-account fallback."""
 
     def __init__(
@@ -204,7 +204,7 @@ class GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, 
             defer_to_original_auth=defer_to_original_auth,
         )
         super().__init__(name=name, tools=tools)
-        self._set_original_auth(GoogleOAuthToolkit._service_account_auth)
+        self._set_original_auth(_GoogleOAuthToolkit._service_account_auth)
         self._wrap_oauth_function_entrypoints()
 
     def _should_fallback_to_original_auth(self) -> bool:
@@ -229,7 +229,7 @@ class GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, 
         return creds
 
 
-class GoogleApiToolkit(GoogleOAuthToolkit):
+class GoogleApiToolkit(_GoogleOAuthToolkit):
     """Native Google API toolkit built on googleapiclient discovery services."""
 
     _google_api_name: str
@@ -248,7 +248,7 @@ class GoogleApiToolkit(GoogleOAuthToolkit):
         return self.service
 
 
-class GoogleCloudToolkit(GoogleOAuthToolkit):
+class GoogleCloudToolkit(_GoogleOAuthToolkit):
     """Google toolkit for google-cloud client libraries on scoped Google Cloud credentials."""
 
     def _google_cloud_credentials(self) -> Any:  # noqa: ANN401
