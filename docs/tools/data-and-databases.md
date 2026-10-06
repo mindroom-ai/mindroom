@@ -30,9 +30,9 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](index.md#security-restrictions).
-`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, `credentials`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
+`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](../architecture/security-posture.md#file-access).
-The Google tools connect through per-service OAuth; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md) or [Google Services OAuth](../deployment/google-services-oauth.md) for custom and hosted setups.
+The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the shared Google Cloud connection; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md) or [Google Services OAuth](../deployment/google-services-oauth.md) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).
 
 ## [`sql`]
@@ -220,7 +220,7 @@ run_dataframe_operation("sales", "describe", {})
 
 `google_bigquery` provides `list_tables()`, `describe_table(table_id)`, and `run_sql_query(query)` for the configured dataset.
 The dataset is only the default for unqualified table names, so queries can still reference other datasets that the connected account can read.
-It queries as the requester's **Google Cloud** connection, which has the read-only `cloud-platform.read-only` scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured.
+It queries as the connected Google Cloud account for the agent's credential scope, using the shared **Google Cloud** connection and its read-only `cloud-platform.read-only` scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured.
 It does not use the MindRoom process's Application Default Credentials, and it takes no `credentials` option.
 The connected account or service account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.

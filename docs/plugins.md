@@ -706,6 +706,7 @@ The base class provides three helpers:
 The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client`, `google-auth-httplib2`, and `google-auth-oauthlib`.
 MindRoom installs them only as extras of its built-in Google tools, so a clean install without them fails to load the tool; see [Dependencies](#dependencies).
 Build clients only from the credentials the helpers return, and do not copy them with `with_quota_project`, because the copy no longer refreshes through the stored connection.
+Refresh and connection state are tracked per tool-call thread, so call client libraries on the tool-call thread and avoid background transports or transfer managers, or a refresh failure surfaces as a generic error instead of a connect prompt.
 
 ### Additional Atlassian connections
 
