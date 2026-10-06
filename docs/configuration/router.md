@@ -52,7 +52,8 @@ Then:
 
 If routing fails, for example because of a model error or an invalid choice, the router replies "Please try mentioning an agent or team directly with @ or rephrase your request."
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.
-An entity invited into a configured room that does not list it posts a note when it joins, and repeats that note instead of answering when it is mentioned there, alone or with other entities: the room's agents are managed in the MindRoom configuration, so talk to the entity in a new room it is invited to.
+An entity invited into a configured room that does not list it posts a note when it joins, and repeats that note instead of answering when it alone is mentioned there: the room's agents are managed in the MindRoom configuration, so talk to the entity in a new room it is invited to.
+A request that mentions several entities gets the same explanation when every entity it cannot use is such an invited, unlisted entity.
 The note speaks only to people the entity's `access` admits and names the room's agents they can ask instead.
 See [Multi-Human Thread Protection](threads.md#multi-human-thread-protection) for when threads require explicit tags.
 

@@ -2708,6 +2708,53 @@ async def test_agent_explains_joining_a_managed_room_it_cannot_answer_in(
 
 
 @pytest.mark.asyncio
+async def test_managed_room_notice_is_not_repeated_when_reconciling_a_joined_invite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Re-handling an invite the agent already joined must not post the note again."""
+    room_id = "!managed:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(display_name="Agent 1"),
+                "agent2": AgentConfig(display_name="Agent 2", rooms=[room_id]),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=AgentMatrixUser(
+            agent_name="agent1",
+            user_id="@mindroom_agent1:localhost",
+            display_name="Agent 1",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    send_response = AsyncMock(return_value="$notice")
+    install_send_response_mock(bot, send_response)
+    monkeypatch.setattr(
+        "mindroom.matrix.client_room_admin.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    room = MagicMock(room_id=room_id)
+    room.canonical_alias = None
+    inviter = MagicMock(sender="@inviter:localhost")
+
+    await _handle_invite(bot, room, inviter)
+    assert room_id in bot.client.rooms
+    await _handle_invite(bot, room, inviter)
+
+    send_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_managed_room_notice_stays_silent_for_inviters_the_agent_does_not_accept(
     monkeypatch: pytest.MonkeyPatch,

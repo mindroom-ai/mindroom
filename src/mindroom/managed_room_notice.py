@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import configured_responder_entities_for_room, is_sender_allowed_for_responder
+from mindroom.authorization import (
+    configured_responder_entities_for_room,
+    filter_responders_by_sender_permissions,
+    is_sender_allowed_for_responder,
+)
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 
@@ -19,7 +23,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
 _ROOM_RULE = "This room is managed in the MindRoom configuration"
-_MAX_NAMED_AGENTS = 3
 
 
 def managed_room_notice(*, available: Sequence[str], unavailable: Sequence[str] = ()) -> str:
@@ -72,36 +75,30 @@ def managed_room_join_notice(
     configured_responders = configured_responder_entities_for_room(room, config, runtime_paths)
     if configured_responders is None or agent_user_id in {responder.full_id for responder in configured_responders}:
         return None
-
-    def inviter_may_address(entity_name: str) -> bool:
-        return is_sender_allowed_for_responder(
-            inviter,
-            entity_name,
-            room.room_id,
-            config,
-            runtime_paths,
-            membership_index,
-        )
-
-    if not inviter_may_address(agent_name):
+    if not is_sender_allowed_for_responder(
+        inviter,
+        agent_name,
+        room.room_id,
+        config,
+        runtime_paths,
+        membership_index,
+    ):
         return None
-    registry = entity_identity_registry(config, runtime_paths)
-    addressable = [
-        responder
-        for responder in configured_responders
-        if (name := registry.current_entity_name_for_user_id(responder.full_id)) is not None
-        and inviter_may_address(name)
-    ]
+    addressable = filter_responders_by_sender_permissions(
+        configured_responders,
+        inviter,
+        config,
+        runtime_paths,
+        membership_index,
+        room.room_id,
+    )
     return managed_room_notice(available=responder_display_names(addressable, config, runtime_paths))
 
 
 def _join_names(names: Sequence[str], conjunction: str) -> str:
-    """Join display names into one phrase, naming at most a few agents."""
-    shown = list(names[:_MAX_NAMED_AGENTS])
-    if len(names) > _MAX_NAMED_AGENTS:
-        shown.append(f"{len(names) - _MAX_NAMED_AGENTS} others")
-    if len(shown) == 1:
-        return shown[0]
-    if len(shown) == 2:
-        return f"{shown[0]} {conjunction} {shown[1]}"
-    return f"{', '.join(shown[:-1])}, {conjunction} {shown[-1]}"
+    """Join display names into one phrase."""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} {conjunction} {names[1]}"
+    return f"{', '.join(names[:-1])}, {conjunction} {names[-1]}"
