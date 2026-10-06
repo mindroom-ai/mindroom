@@ -481,6 +481,28 @@ async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJ
     assert older.failure_reason == "superseded"
 
 
+async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store: EventJournalStore) -> None:
+    """A paused regeneration main left still answers the edit it selected once its reply is adopted."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    selected = TurnRecord.create(
+        ["$source"],
+        source_event_revisions={"$source": (20, "$edit")},
+        latest_edit_receipt_order=7,
+        response_event_id="$reply",
+        response_owner=ENTITY,
+        conversation_target=MessageTarget.resolve(ROOM, None, "$source"),
+    )
+    await _main_continuation(principal, replace(_continuation("waiting"), prepared_edit_record=selected))
+
+    await _adopt(principal)
+    adopted = await principal.approval_continuation("approval-1")
+    assert adopted is not None
+    assert adopted.span_id is not None
+    assert adopted.prepared_edit_record == selected
+
+
 async def test_a_claimed_team_resume_keeps_its_document_instead_of_a_read(journal_store: EventJournalStore) -> None:
     """A team's resume restores the document its continuation kept, which a read of rendered text would lose."""
     principal = journal_store.principal(PRINCIPAL)

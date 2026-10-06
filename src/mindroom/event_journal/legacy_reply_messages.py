@@ -302,6 +302,7 @@ def _span(
     now_ns: int,
     outcome: rl.SpanOutcome | None,
     approval_id: str | None = None,
+    prepared_edit: str | None = None,
 ) -> rl.Span:
     return rl.Span(
         span_id=_new_id(),
@@ -315,6 +316,7 @@ def _span(
         approval_id=approval_id,
         outcome=outcome,
         ended_at_ns=None if outcome is None else now_ns,
+        prepared_edit=prepared_edit,
     )
 
 
@@ -367,6 +369,12 @@ def _paused_reply(
         now_ns=now_ns,
         outcome=rl.SpanOutcome.PAUSED,
         approval_id=continuation.approval_id,
+        # A regeneration's paused span carries the edit it selected, as one paused now does.
+        prepared_edit=(
+            None
+            if continuation.prepared_edit_record is None
+            else turn_records.encode_prepared_edit(continuation.prepared_edit_record)
+        ),
     )
     shown = presentations.paused(
         continuation,
