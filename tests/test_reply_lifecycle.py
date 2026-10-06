@@ -987,7 +987,9 @@ def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> No
         disposition="failed",
         now_ns=NOW,
     )
-    assert finished.reply is None or finished.reply.state is ReplyState.FAILED
+    # The note already released the approval, so its settlement no longer names the reply.
+    assert finished.outcome is Outcome.STALE
+    assert finished.reply == stop.reply
 
 
 def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None:

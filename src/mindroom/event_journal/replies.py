@@ -219,7 +219,7 @@ def claim(
         )
         reply = None if found is None else reply_messages.lock(transaction, principal_id, found.reply_id)
     if reply is not None and reply.state is rl.ReplyState.GONE and request.driving_edit_id is None:
-        # A removed reply is never continued; main answers again in a new one.
+        # A removed reply is never continued; the turn answers again in a new one.
         reply = None
     active_generation = reply_messages.active_generation(transaction, principal_id) or request.bot_generation
     context = rl.ClaimContext(
@@ -559,9 +559,12 @@ def acknowledge_row(
         ),
     )
     bound = applied.transition.reply or reply
-    if delivery.edits_event_id is not None or bound.event_id != event_id:
+    if delivery.edits_event_id is not None:
         return applied
-    pending_stop = reply_messages.take_pending_stop(transaction, principal_id, event_id)
+    pending_stop = (
+        reply_messages.take_pending_stop(transaction, principal_id, event_id) if bound.event_id == event_id else None
+    )
+    reply_messages.drop_unbindable_stops(transaction, principal_id, bound.room_id)
     if pending_stop is None:
         return applied
     receipt_order, _room_id = pending_stop
@@ -599,11 +602,14 @@ def fail_row(
     span = reply_spans.load(transaction, principal_id, delivery.span_id)
     if reply is None or span is None:
         return None
-    return apply(
+    applied = apply(
         transaction,
         principal_id,
         rl.write_failed(reply, span, rl.FailedWrite(_write_facts(delivery), reason), now_ns=time.time_ns()),
     )
+    if delivery.edits_event_id is None:
+        reply_messages.drop_unbindable_stops(transaction, principal_id, reply.room_id)
+    return applied
 
 
 # ---------------------------------------------------------------------------
@@ -751,6 +757,17 @@ class ReplyStore:
                 self._principal_id,
                 room_id,
                 tuple(sorted(span_ids)),
+            ),
+        )
+
+    async def forget_finished(self, *, before_ns: int, limit: int) -> int:
+        """Delete up to ``limit`` finished replies that owe nothing and are older than ``before_ns``."""
+        return await self._backend.write(
+            lambda transaction: reply_messages.forget_finished(
+                transaction,
+                self._principal_id,
+                before_ns=before_ns,
+                limit=limit,
             ),
         )
 

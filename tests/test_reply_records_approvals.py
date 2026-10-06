@@ -172,6 +172,25 @@ async def test_a_pause_waiting_for_a_human_leaves_the_reply_paused(tmp_path: Pat
         assert _sent_bodies(bot) == ["Thinking...", "Reading document"]
 
 
+async def test_a_handoff_that_fails_after_its_pause_committed_writes_nothing_behind_the_reply(tmp_path: Path) -> None:
+    """Once the pause committed, the reply is its approval's: no direct failure edit replaces what it shows."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with (
+            patch.object(
+                runner._approval_responses,
+                "publish_generation",
+                AsyncMock(side_effect=RuntimeError("cards unavailable")),
+            ),
+            patch.object(type(runner), "_failed_approval_handoff", AsyncMock(return_value=None)),
+        ):
+            await _respond(bot)
+
+        reply = await _reply(bot)
+        assert reply.state is rl.ReplyState.PAUSED
+        assert _sent_bodies(bot) == ["Thinking...", "Reading document"]
+
+
 async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: Path) -> None:
     """A Stop fences the approval with the turn's durable Stop; the settlement shows the note and ends the reply."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:

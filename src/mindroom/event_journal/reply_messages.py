@@ -286,6 +286,54 @@ def ended_by_deletion(transaction: Transaction, principal_id: str, event_id: str
     return tuple(reply for reply in replies if reply is not None)
 
 
+def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: int, limit: int) -> int:
+    """Delete up to ``limit`` finished replies unchanged since ``before_ns``, with their spans; return how many.
+
+    Only replies that owe nothing: no redaction, note, unsent row, approval, or
+    Stop still to apply. Pending Stops that old are dropped too.
+    """
+    rows = transaction.fetchall(
+        """
+        SELECT reply.reply_id FROM reply_messages AS reply
+        WHERE reply.principal_id = ? AND reply.state IN ('completed', 'cancelled', 'failed', 'gone')
+          AND reply.updated_at_ns < ?
+          AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL AND reply.approval_id IS NULL
+          AND (reply.stop_receipt_order IS NULL OR reply.stop_applied_receipt_order >= reply.stop_receipt_order)
+          AND NOT EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS row
+            WHERE row.principal_id = reply.principal_id AND row.reply_id = reply.reply_id
+              AND row.acknowledged_event_id IS NULL AND row.retired = 0 AND row.permanent_failure_reason IS NULL
+          )
+        LIMIT ?
+        """,
+        (principal_id, before_ns, limit),
+    )
+    reply_ids = tuple(str(row["reply_id"]) for row in rows)
+    if reply_ids:
+        placeholders = ", ".join("?" for _ in reply_ids)
+        transaction.execute(
+            f"""
+            DELETE FROM reply_span_sources WHERE principal_id = ? AND span_id IN (
+                SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})
+            )
+            """,  # noqa: S608 - fixed placeholders
+            (principal_id, principal_id, *reply_ids),
+        )
+        transaction.execute(
+            f"DELETE FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
+            (principal_id, *reply_ids),
+        )
+        transaction.execute(
+            f"DELETE FROM reply_messages WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
+            (principal_id, *reply_ids),
+        )
+    transaction.execute(
+        "DELETE FROM pending_reply_stops WHERE principal_id = ? AND created_at_ns < ?",
+        (principal_id, before_ns),
+    )
+    return len(reply_ids)
+
+
 def spans_in_room(
     transaction: Transaction,
     principal_id: str,
@@ -472,6 +520,16 @@ def record_pending_stop(
         (principal_id, target_event_id, receipt_order, room_id, now_ns),
     )
     return row is not None
+
+
+def drop_unbindable_stops(transaction: Transaction, principal_id: str, room_id: str) -> None:
+    """Forget the room's pending Stops once no create in it is unresolved: no acknowledgement can bind them."""
+    if has_unresolved_create(transaction, principal_id, room_id):
+        return
+    transaction.execute(
+        "DELETE FROM pending_reply_stops WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
 
 
 def take_pending_stop(transaction: Transaction, principal_id: str, event_id: str) -> tuple[int, str] | None:

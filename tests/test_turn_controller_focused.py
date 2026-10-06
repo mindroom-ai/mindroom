@@ -584,7 +584,8 @@ def _build_harness(
                 entity_name=agent_name,
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
-                run_effects=AsyncMock(),
+                record_stop=AsyncMock(),
+                clean_up_superseded=lambda _continuation: None,
             ),
         ),
     )

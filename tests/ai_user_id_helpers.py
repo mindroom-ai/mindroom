@@ -565,7 +565,8 @@ def _build_response_runner(
                 entity_name=bot.agent_name,
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
-                run_effects=AsyncMock(),
+                record_stop=AsyncMock(),
+                clean_up_superseded=lambda _continuation: None,
             ),
         ),
     )

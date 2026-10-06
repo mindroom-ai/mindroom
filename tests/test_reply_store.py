@@ -479,6 +479,72 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     assert await principal.replies.ended_by_deletion("$second") == (gone,)
 
 
+async def test_deleted_initial_cleanup_waits_until_the_reply_ends(journal_store: EventJournalStore) -> None:
+    """A running reply's rows stay its span's; once deletion ends the reply, the cleanup also detaches its turn."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$other")
+    await admit(principal, "$source")
+    await principal.replies.write_generation("gen-1", now_ns=1)
+    request = replace(_request(), sources=SpanSources(pending=("$source", "$other"), logical=("$source", "$other")))
+    claim = (await principal.replies.claim(request, ClaimLookup())).transition
+    reply, span = claim.reply, claim.claimed
+    assert reply is not None
+    assert span is not None
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, span: rl.enqueue_initial(
+                reply,
+                span,
+                shown="ph",
+                placeholder_only=True,
+                prepared_revision=reply.revision,
+                now_ns=60,
+            ),
+            placeholder_only=True,
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "Thinking..."},
+    )
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    await _acknowledge_the_create(principal)
+
+    await _delete(principal, "$source")
+    running = await principal.replies.load(reply.reply_id)
+    assert running is not None
+    assert running.state is ReplyState.ACTIVE
+    assert await principal.deleted_initial_deliveries(agent_name="agent") == ()
+
+    await _delete(principal, "$other")
+    gone = await principal.replies.load(reply.reply_id)
+    assert gone is not None
+    assert gone.state is ReplyState.GONE
+    assert gone.redaction_pending == ("$reply",)
+    (initial,) = await principal.deleted_initial_deliveries(agent_name="agent")
+    assert initial.delivery_id == "$source"
+
+
+async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_store: EventJournalStore) -> None:
+    """Retention drops an old finished reply and its spans; one still owing Matrix a note is kept."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    ended = rl.sources_settled_without_reply(replace(reply, event_id="$reply"), span, now_ns=100)
+    await _apply(journal_store, ended)
+    assert ended.reply is not None
+    assert ended.reply.owed_write is not None
+
+    assert await principal.replies.forget_finished(before_ns=1_000, limit=10) == 0
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(ended.reply, owed_write=None)))
+    assert await principal.replies.forget_finished(before_ns=50, limit=10) == 0
+    assert await principal.replies.forget_finished(before_ns=1_000, limit=10) == 1
+
+    assert await principal.replies.load(reply.reply_id) is None
+    assert await principal.replies.span(span.span_id) is None
+    assert await principal.replies.for_sources(("$source",)) is None
+
+
 async def _stop_waiting_for_the_create(journal_store: EventJournalStore) -> PrincipalStore:
     """Record a Stop on ``$reply`` while the reply's create, which Matrix gives that event, is still unacknowledged."""
     principal = journal_store.principal(PRINCIPAL)
@@ -554,6 +620,27 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
     assert stored is not None
     assert stored.stop_receipt_order == 9
     await _assert_the_turn_learned_the_stop(journal_store)
+
+
+async def test_a_pending_stop_no_create_binds_is_forgotten(journal_store: EventJournalStore) -> None:
+    """A Stop on another event, taken while the create was unresolved, goes once no create in the room can bind it."""
+    principal = await _stop_waiting_for_the_create(journal_store)
+    await journal_store.backend.write(
+        lambda tx: reply_messages.record_pending_stop(
+            tx,
+            PRINCIPAL,
+            target_event_id="$someone-else",
+            receipt_order=10,
+            room_id=ROOM,
+            now_ns=1,
+        ),
+    )
+    await _acknowledge_the_create(principal)
+
+    remaining = await journal_store.backend.read(
+        lambda tx: tx.fetchall("SELECT target_event_id FROM pending_reply_stops WHERE principal_id = ?", (PRINCIPAL,)),
+    )
+    assert not remaining
 
 
 async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: EventJournalStore) -> None:

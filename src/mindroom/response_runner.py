@@ -924,6 +924,36 @@ class _TeamResponseRequest:
     resolution_reason: str | None = None
 
 
+def _post_lock_error(
+    error: Exception,
+    early_placeholder: _EarlyPlaceholderState,
+    *,
+    reply_owned: bool,
+) -> Exception:
+    """Return the error a locked response failed with, naming the early placeholder it showed, if any.
+
+    Retries and errors already naming their placeholder are returned as they are.
+    """
+    already_linked = isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
+    if (
+        isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
+        or early_placeholder.placeholder_event_id is None
+        or early_placeholder.settlement_started
+        or already_linked
+    ):
+        return error
+    mapped = PostLockRequestPreparationError(
+        placeholder_event_id=early_placeholder.placeholder_event_id,
+        reply_owned=reply_owned,
+    )
+    mapped.__cause__ = (
+        error.__cause__
+        if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
+        else error
+    )
+    return mapped
+
+
 @dataclass(frozen=True)
 class ResponseRunnerDeps:
     """Explicit collaborators for the response lifecycle."""
@@ -3101,14 +3131,13 @@ class ResponseRunner:
                 locked_operation=locked_operation,
                 signal_queued_message=signal_queued_message,
                 acknowledge_deferred=acknowledge_deferred,
-                span_claimed=lambda: span_slot is not None and span_slot.handle is not None,
+                span_slot=span_slot,
             )
         except BaseException as error:
             handle = None if span_slot is None else span_slot.handle
-            # A process stop leaves the span exactly as a crash would; the next
-            # bot instance ends it as lost and replays its sources.
-            if handle is not None and not handle.exited and not current_task_is_process_shutdown():
-                await run_coroutine_until_complete(self._exit_span_on_error(handle, error, target=resolved_target))
+            # The locked operation ends its span before the lock is released;
+            # this covers what raises outside it.
+            await self._exit_unended_span(handle, error, target=resolved_target)
             if handle is not None and isinstance(error, PostLockRequestPreparationError) and not error.reply_owned:
                 # The span's exit ended the reply with this error; the turn records the event that shows it.
                 reply = await handle.runtime.store.replies.load(handle.reply_id)
@@ -3143,9 +3172,13 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
         signal_queued_message: bool,
         acknowledge_deferred: Callable[[str, str], Awaitable[None]],
-        span_claimed: Callable[[], bool],
+        span_slot: SpanSlot | None,
     ) -> str | None:
         """Run one response under its conversation lock, mapping early failures to their outcomes."""
+
+        def span_claimed() -> bool:
+            return span_slot is not None and span_slot.handle is not None
+
         try:
             return await self._lifecycle_coordinator.run_locked_response(
                 target=resolved_target,
@@ -3157,9 +3190,10 @@ class ResponseRunner:
                     self.deps.runtime_paths,
                     on_defer=acknowledge_deferred,
                 ),
-                locked_operation=lambda target: self._run_owned_or_locked_response(
+                locked_operation=lambda target: self._run_locked_ending_span(
                     request,
                     target=target,
+                    span_slot=span_slot,
                     early_placeholder=early_placeholder,
                     locked_operation=locked_operation,
                 ),
@@ -3184,25 +3218,42 @@ class ResponseRunner:
                 )
             raise
         except Exception as error:
-            already_linked = (
-                isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
-            )
-            if (
-                isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
-                or early_placeholder.placeholder_event_id is None
-                or early_placeholder.settlement_started
-                or already_linked
-            ):
+            mapped = _post_lock_error(error, early_placeholder, reply_owned=span_claimed())
+            if mapped is error:
                 raise
-            cause = (
-                error.__cause__
-                if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
+            raise mapped from mapped.__cause__
+
+    async def _run_locked_ending_span(
+        self,
+        request: ResponseRequest,
+        *,
+        target: MessageTarget,
+        span_slot: SpanSlot | None,
+        early_placeholder: _EarlyPlaceholderState,
+        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+    ) -> str | None:
+        """Run the locked response, ending a span it left running before the conversation lock is released.
+
+        A claim waiting for the lock must not find that span still current.
+        """
+        try:
+            return await self._run_owned_or_locked_response(
+                request,
+                target=target,
+                early_placeholder=early_placeholder,
+                locked_operation=locked_operation,
+            )
+        except BaseException as error:
+            handle = None if span_slot is None else span_slot.handle
+            mapped = (
+                _post_lock_error(error, early_placeholder, reply_owned=handle is not None)
+                if isinstance(error, Exception)
                 else error
             )
-            raise PostLockRequestPreparationError(
-                placeholder_event_id=early_placeholder.placeholder_event_id,
-                reply_owned=span_claimed(),
-            ) from cause
+            await self._exit_unended_span(handle, mapped, target=target)
+            if mapped is error:
+                raise
+            raise mapped from mapped.__cause__
 
     async def _run_owned_or_locked_response(
         self,
@@ -3263,6 +3314,21 @@ class ResponseRunner:
                 or owned.generation <= claimed.generation
             ):
                 return event_id
+
+    async def _exit_unended_span(
+        self,
+        handle: SpanHandle | None,
+        error: BaseException,
+        *,
+        target: MessageTarget,
+    ) -> None:
+        """End a claimed span the error left running.
+
+        A process stop leaves the span exactly as a crash would; the next bot
+        instance ends it as lost and replays its sources.
+        """
+        if handle is not None and not handle.exited and not current_task_is_process_shutdown():
+            await run_coroutine_until_complete(self._exit_span_on_error(handle, error, target=target))
 
     async def _exit_span_on_error(self, handle: SpanHandle, error: BaseException, *, target: MessageTarget) -> None:
         """End a span whose locked response raised before ending it."""
@@ -4410,6 +4476,15 @@ class ResponseRunner:
             )
             # A Stop recorded meanwhile ends it cancelled instead.
             return noted if noted.terminal_status == "cancelled" else replace(noted, failure_reason=failure_reason)
+        if handle is not None:
+            # The pause committed: the reply is its approval's, whose failure
+            # settlement writes what it shows.
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=progress.tracked_event_id or request.existing_event_id,
+                is_visible_response=False,
+                failure_reason=failure_reason,
+            )
         event_id = progress.tracked_event_id or request.existing_event_id
         text = APPROVAL_START_FAILED_NOTE
         extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}

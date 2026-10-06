@@ -26,7 +26,7 @@ Its state is `active`, `paused` (waiting for an approval decision), or terminal:
 It holds the canonical presentation, the possibly-shown presentation of its latest write with that write's sequence, the confirmed sequence Matrix acknowledged, a frozen display when a final transform reshaped the answer, the Stop it recorded and whether it was applied, the Stop button's event id, redactions it still owes, a note it owes but has not enqueued, and the approval that holds it.
 
 A span (`reply_spans`, `reply_span_sources`) is one execution that writes a reply: `turn`, `replay`, `regeneration`, or `approval_resume`.
-It records its delivery id, the journal sources it answers, the bot generation that claimed it, the reply's write sequence at claim, a rollback snapshot for regenerations, and its outcome once it ends: `completed`, `cancelled`, `failed`, `paused`, `released`, `superseded`, `lost`, or `suppressed`.
+It records its delivery id, the journal sources it answers, the bot generation that claimed it, the reply's write sequence at claim, a rollback snapshot for regenerations, and its outcome once it ends: `completed`, `cancelled`, `failed`, `paused`, `released`, `superseded`, `lost`, `suppressed`, or `restored` (a regeneration that put the old answer back).
 At most one span is current per reply.
 
 Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`, and `reply_sequence`; the stage is `initial` (the create), `final` (the span's terminal write), or `edit`.
@@ -82,6 +82,7 @@ A replay that a newer message from the same requester supersedes settles its sou
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
 Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit; the bot then cancels its running span and redacts what it showed, while a paused reply, an approval resume, and a written answer are kept.
 An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes.
+The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
 
 ## Invariants
 

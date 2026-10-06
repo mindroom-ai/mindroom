@@ -689,12 +689,21 @@ def deleted_initials(
     agent_name: str,
     after: tuple[int, str] | None = None,
 ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-    """Keep deleted-source cleanup discoverable after its journal callback settles."""
+    """Keep deleted-source cleanup discoverable after its journal callback settles.
+
+    A reply still running or paused is not here: its records decide whether
+    the deletion ends it, and its span still writes these rows.
+    """
     cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
     rows = transaction.fetchall(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox AS delivery
         WHERE principal_id = ? AND event_type = 'm.room.message' AND stage = 'initial' AND retired = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM reply_messages AS reply
+            WHERE reply.principal_id = delivery.principal_id AND reply.reply_id = delivery.reply_id
+              AND reply.state IN ('active', 'paused')
+          )
           AND EXISTS (
             SELECT 1 FROM redaction_tombstones AS tombstone
             WHERE tombstone.principal_id = delivery.principal_id AND tombstone.room_id = delivery.room_id

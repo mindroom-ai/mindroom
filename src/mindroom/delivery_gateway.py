@@ -156,7 +156,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.event_journal.backend import Transaction
-    from mindroom.event_journal.replies import Decide
+    from mindroom.event_journal.replies import Decide, PostCommitEffect
     from mindroom.history.types import (
         CompactionLifecycleFailure,
         CompactionLifecycleProgress,
@@ -653,7 +653,7 @@ class DeliveryGatewayDeps:
     response_recovery: ResponseDeliveryRecovery | None = None
     # Runs what committed reply transitions left for after their commit:
     # cancelling a span a Stop reached, waking an approval source.
-    reply_effects: Callable[[tuple[object, ...]], Awaitable[None]] | None = None
+    reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
     # Wakes claims that waited for a reply's earlier writes.
     reply_row_resolved: Callable[[str], None] | None = None
 
@@ -1639,7 +1639,7 @@ class DeliveryGateway:
             return requested
         return DeliveredMatrixEvent(event_id=delivery.event_id, content_sent=content)
 
-    async def _run_reply_effects(self, effects: tuple[object, ...]) -> None:
+    async def _run_reply_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
         """Run the work a committed reply transition left for after its commit."""
         if effects and self.deps.reply_effects is not None:
             await self.deps.reply_effects(effects)

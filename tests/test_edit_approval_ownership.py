@@ -307,7 +307,9 @@ async def _paused_case(  # noqa: PLR0915
         runner.deps,
         delivery_gateway=gateway,
         approval_store=principal,
-        replies=replace(runner.deps.replies, store=principal),
+        # These cases end a superseded approval by hand, as its source's worker
+        # would after a crash cut its background cleanup short.
+        replies=replace(runner.deps.replies, store=principal, clean_up_superseded=lambda _continuation: None),
     )
     await runner.deps.replies.start()
     runner._approval_responses.store = principal

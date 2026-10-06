@@ -98,7 +98,7 @@ class VisibilityPolicy(StrEnum):
 
 
 class LegacyPending(StrEnum):
-    """A one-time Matrix read a reply migrated from main still needs."""
+    """A one-time Matrix read a reply adopted from an earlier release still needs."""
 
     PRESENTATION_READ = "presentation_read"
     ADOPTION_SCAN = "adoption_scan"
@@ -504,7 +504,7 @@ class ClaimRequest:
     approval_generation: int | None = None
     # Set when an interactive selection created this span at its acknowledgement.
     interactive_span_id: str | None = None
-    # Set when no reply record exists but main recorded a historical response event.
+    # Set when no reply record exists but the turn records a historical response event.
     historical_event_id: str | None = None
 
 
@@ -1103,7 +1103,7 @@ def fail(  # noqa: C901, PLR0911
             effects=_settle_sources(reply, span),
         )
     if phase == "pre_delivery":
-        # Main returns the sources for a retry, which streams into the kept placeholder.
+        # The sources return for a retry, which streams into the kept placeholder.
         updated = _touch(_clear_current(reply, span.span_id), now_ns)
         ended = _end(span, SpanOutcome.RELEASED, now_ns)
         if write is None:
@@ -1683,7 +1683,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
     updated = reply
     if last.outcome is None:
         if last.kind is SpanKind.APPROVAL_RESUME:
-            # Main's approval recovery still owns this resume and reports through approval events.
+            # Approval recovery still owns this resume and reports through approval events.
             return _unchanged(Outcome.DUPLICATE, reply)
         last = _end(last, SpanOutcome.LOST, now_ns)
         spans.append(last)

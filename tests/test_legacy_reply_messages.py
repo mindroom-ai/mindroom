@@ -242,6 +242,24 @@ async def test_a_stream_main_stopped_after_its_sources_settled_gets_the_restart_
     assert ended.owed_write.note == rl._NOTE_RESTART
 
 
+async def test_a_settled_stream_from_days_ago_is_history(journal_store: EventJournalStore) -> None:
+    """No cleanup an earlier release ran could still reach it, so it gets no reply and no read."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.settle_many(("$source",))
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    initial = await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    assert initial is not None
+    two_days_later = initial.created_at_ns + 2 * 24 * 60 * 60 * 1_000_000_000
+
+    await principal.replies.write_generation("gen-new", now_ns=two_days_later)
+    await principal.adopt_legacy_replies(entity_name=ENTITY, presentations=LEGACY_PRESENTATIONS, now_ns=two_days_later)
+
+    assert await principal.legacy_reply_reads() == ()
+    assert await principal.replies.for_sources(("$source",)) is None
+
+
 async def test_a_stream_that_shows_it_completed_keeps_its_answer(journal_store: EventJournalStore) -> None:
     """An event whose status says it ended is history, not a stream to annotate."""
     principal = journal_store.principal(PRINCIPAL)

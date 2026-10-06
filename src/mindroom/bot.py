@@ -103,7 +103,6 @@ from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
-    SUPERSEDED_FAILURE_REASON,
     EventJournalStore,
     EventKind,
     PrincipalStore,
@@ -134,7 +133,6 @@ from .matrix.room_member_joins import (
 )
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
-from .reply_lifecycle import CancelSpan, TransferStop, WakeApproval
 from .reply_scope import ReplyRuntime
 from .response_admission import admitted_response_decision
 from .response_delivery_recovery import ResponseDeliveryRecovery
@@ -175,7 +173,7 @@ if TYPE_CHECKING:
     from mindroom.coalescing_batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
-    from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
+    from mindroom.event_journal import AdmissionFacts, ApprovalContinuation, IngestionRecordAdmission
     from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
@@ -640,7 +638,13 @@ class AgentBot:
             generation=self._approval_runtime_generation,
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
-            run_effects=self._run_reply_effects,
+            record_stop=lambda stop: self._turn_store.record_user_stopped_response(
+                stop.target_event_id,
+                stop.receipt_order,
+                delivery_settled=True,
+                turn_id=stop.turn_id,
+            ),
+            clean_up_superseded=self._clean_up_superseded_approval,
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
@@ -678,7 +682,7 @@ class AgentBot:
                     event_id,
                     record,
                 ),
-                reply_effects=self._run_reply_effects,
+                reply_effects=self._reply_runtime.run_effects,
                 reply_row_resolved=self._reply_row_resolved,
             ),
         )
@@ -972,45 +976,14 @@ class AgentBot:
             context=Context(),
         )
 
-    async def _run_reply_effects(self, effects: tuple[object, ...]) -> None:
-        """Run what committed reply transitions left for after their commit.
-
-        Span cancels run last: the acknowledgement that applies a Stop can run
-        in the span's own task, whose next await the cancel interrupts.
-        """
-        for effect in effects:
-            if isinstance(effect, TransferStop):
-                # The acknowledgement already wrote it; the ledger's cache learns it here.
-                await self._turn_store.record_user_stopped_response(
-                    effect.target_event_id,
-                    effect.receipt_order,
-                    delivery_settled=True,
-                    turn_id=effect.turn_id,
-                )
-            elif isinstance(effect, WakeApproval):
-                await self._wake_fenced_approval(effect.approval_id)
-        for effect in effects:
-            if isinstance(effect, CancelSpan):
-                self._reply_runtime.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
-
-    async def _wake_fenced_approval(self, approval_id: str) -> None:
-        """Run a fenced approval's failure settlement."""
-        continuation = await self._reply_runtime.store.approval_continuation(approval_id)
-        if continuation is None:
-            return
-        if continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
-            # An edit superseded it: nothing of it is shown any more, so its cleanup runs
-            # now, outside the conversation the regeneration holds.
-            create_background_task(
-                self._response_runner.settle_superseded_approval(continuation),
-                name=f"superseded_approval_{approval_id}",
-                owner=self._runtime_view,
-                context=Context(),
-            )
-            return
-        # Its source worker settles it once whatever owns the
-        # source lets go of it.
-        self._journal_dispatcher.retry_turn_sources(continuation.room_id, continuation.source_event_ids)
+    def _clean_up_superseded_approval(self, continuation: ApprovalContinuation) -> None:
+        """Start an edit-superseded approval's cleanup outside the conversation its regeneration holds."""
+        create_background_task(
+            self._response_runner.settle_superseded_approval(continuation),
+            name=f"superseded_approval_{continuation.approval_id}",
+            owner=self._runtime_view,
+            context=Context(),
+        )
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""
@@ -2025,6 +1998,7 @@ class AgentBot:
         await self._turn_store.cleanup(
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
+        await self._reply_runtime.forget_finished()
 
     def _schedule_handled_turn_cleanup(self) -> None:
         """Start one retention pass per interval so records do not wait for a restart."""

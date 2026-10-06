@@ -1,7 +1,7 @@
 """What an earlier release left in flight, made into reply records: its presentations, and what only Matrix shows.
 
 ``event_journal.legacy_reply_messages`` adopts an earlier release's replies from the database
-at the first start with reply records. This module encodes what main stored
+at the first start with reply records. This module encodes what that release stored
 into presentations for it, and reads, after each room syncs, what only the
 reply's Matrix event knows: what it showed, and for a reply its stream
 created directly, which event that was. A read that keeps
@@ -50,8 +50,15 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
 
-# Main's startup cleanup gave a restart note only to streams it found this
-# recent (matrix/stale_stream_cleanup.py, removed with reply records).
+# LEGACY_COMPAT: Matrix events of replies an earlier release left in flight.
+# Legacy format: a reply adopted with legacy_pending set, whose event an earlier release streamed into directly, so only
+# the event's latest edit holds what it showed and its io.mindroom.stream_status says whether it ended.
+# Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record every write ahead of
+# sending it, so no reply needs its event read back.
+# Handling: after the reply's room syncs, its event is read once per recovery pass, up to three passes, and the read
+# becomes its presentation; a stream that ended without a terminal status within that release's six-hour stale-stream
+# window gets the restart note its startup cleanup gave, and claims and notes wait for the read.
+# Coverage: tests/test_legacy_reply_messages.py::test_reads_after_sync_record_what_the_event_showed.
 _STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 # Passes a read is retried in before its reply proceeds with what it showed unknown.
 _READ_ATTEMPTS = 3

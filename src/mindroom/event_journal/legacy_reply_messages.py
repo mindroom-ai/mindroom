@@ -1,6 +1,6 @@
 """Replies an earlier release started before durable reply records, adopted once per principal.
 
-Main kept what an in-flight reply was in four places: its turn record, its
+An earlier release kept what an in-flight reply was in four places: its turn record, its
 ``INITIAL`` and ``FINAL`` outbox rows, its approval continuation, and the
 Matrix event itself. The first start with reply records reads the first three
 here, from the database only, and gives every reply that still has work a
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .backend import Transaction
     from .models import MatrixDelivery
 
-# The generation of spans main ran: never active, so nothing they left is live.
+# The generation of spans an earlier release ran: never active, so nothing they left is live.
 _LEGACY_GENERATION = "legacy"
 
 # What the wire status of an earlier release's answer says its reply ended as.
@@ -46,6 +46,11 @@ _OUTCOME_BY_STATE = {
     rl.ReplyState.CANCELLED: rl.SpanOutcome.CANCELLED,
     rl.ReplyState.FAILED: rl.SpanOutcome.FAILED,
 }
+# A stream an earlier release ended by direct edit, its sources settled, needs
+# its event read only when that release's stale-stream cleanup, which looked
+# at streams edited in the last six hours, could still have reached it. One
+# started a day ago is history.
+_HISTORICAL_STREAM_NS = 24 * 60 * 60 * 1_000_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +65,7 @@ class LegacyPausedAnswer:
 # LEGACY_COMPAT: Paused answers stored in approval continuation context.
 # Legacy format: approval_continuations.context_json carrying response_text, response_tool_trace, and
 # response_presentation_state, which earlier releases wrote at every pause before replies held what a pause shows.
-# Last legacy release: v2026.10.162; replacement: the unreleased durable reply messages keep the paused answer as
+# Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages keep the paused answer as
 # the reply's answer segment and no longer write these keys.
 # Handling: adoption reads them once, from the stored context of a continuation it adopts, to build the paused
 # reply's presentation; nothing else reads them, and an advance rewrites the context without them.
@@ -83,7 +88,7 @@ def _legacy_paused_answer(transaction: Transaction, principal_id: str, approval_
 
 @dataclass(frozen=True, slots=True)
 class LegacyPresentations:
-    """Encoders of what main showed, owned by the reply layer that defines presentations."""
+    """Encoders of what an earlier release showed, owned by the reply layer that defines presentations."""
 
     # The placeholder alone, for a team or an agent reply.
     empty: Callable[[bool], str]
@@ -99,7 +104,7 @@ class _Adoption:
 
     reply: rl.Reply
     spans: tuple[rl.Span, ...]
-    # Main's row the reply now owns, given reply identity so its acknowledgement binds the reply.
+    # The earlier release's row the reply now owns, given reply identity so its acknowledgement binds the reply.
     row: MatrixDelivery | None = None
     row_placeholder_only: bool = False
 
@@ -116,13 +121,13 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # LEGACY_COMPAT: In-flight agent and team replies without reply records.
 # Legacy format: approval continuations, INITIAL and FINAL outbox rows without reply_id, and pending turn records that
 # earlier releases wrote for replies before reply_messages existed; the selected principal has no reply_legacy_classifications row.
-# Last legacy release: v2026.10.162; replacement: the unreleased durable reply messages record every reply in
+# Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans and give its outbox rows reply identity.
 # Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
 # reply per newest continuation (older ones are superseded), the state a frozen unacknowledged FINAL implies, a lost
-# span for an INITIAL whose sources are pending or whose stream may need a restart note, and an adoption scan for a
-# pending turn whose stream created its reply directly; an unsettled Stop is applied to the reply it names. What only
-# Matrix knows is marked legacy_pending and read after the room syncs.
+# span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, and an
+# adoption scan for a pending turn whose stream created its reply directly; an unsettled Stop is applied to the reply
+# it names. What only Matrix knows is marked legacy_pending and read after the room syncs.
 # Coverage: tests/test_legacy_reply_messages.py.
 def classify(
     transaction: Transaction,
@@ -392,7 +397,7 @@ def _paused_reply(
             legacy_pending=None,
         )
         return _Adoption(reply=answered, spans=(paused, ended), row=final if owed else None)
-    # Main's approval recovery owns a resume a stopped instance left running.
+    # Approval recovery owns a resume a stopped instance left running.
     running = replace(reply, state=rl.ReplyState.ACTIVE, current_span_id=resume.span_id, last_span_id=resume.span_id)
     return _Adoption(reply=running, spans=(paused, resume))
 
@@ -485,7 +490,8 @@ def _reply_of_rows(
         # Answered, or retired by a departure or a deleted source: their existing owners finish it.
         return None
     stopped = record.user_stop_receipt_order is not None
-    if not sources.pending and (initial.acknowledged_event_id is None or stopped):
+    historical = initial.created_at_ns < now_ns - _HISTORICAL_STREAM_NS
+    if not sources.pending and (initial.acknowledged_event_id is None or stopped or historical):
         return None
     span = _span(
         reply_id,
@@ -585,7 +591,7 @@ def _unsettled_stops(
     entity_name: str,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
-    """Apply each Stop a turn recorded but main never settled to the reply it names."""
+    """Apply each Stop a turn recorded but an earlier release never settled to the reply it names."""
     applied: list[AppliedTransition] = []
     seen: set[str] = set()
     for index_event_id, _anchor, record_json in turn_records.load_all(transaction, entity_name):

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
+from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.reply_presentation import (
@@ -169,6 +170,12 @@ class ClaimRefused(Enum):
     ANSWERED = "answered"
 
 
+# As long as the handled-turn ledger keeps a turn: nothing reaches a finished
+# reply after its turn is forgotten.
+_FINISHED_REPLY_RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
+_FORGET_BATCH = 500
+
+
 @dataclass
 class ReplyRuntime:
     """One bot instance's owner of its replies' claims and span exits."""
@@ -177,8 +184,10 @@ class ReplyRuntime:
     entity_name: str
     generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Runs what a committed transition left for after its commit.
-    run_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]]
+    # Tells the turn ledger's cache about a Stop an acknowledgement already wrote.
+    record_stop: Callable[[rl.TransferStop], Awaitable[object]]
+    # Starts the cleanup of an approval an edit superseded, outside any conversation.
+    clean_up_superseded: Callable[[ApprovalContinuation], None]
     clock: Callable[[], int] = field(default=time.time_ns)
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
@@ -188,6 +197,34 @@ class ReplyRuntime:
         init=False,
         repr=False,
     )
+
+    async def run_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
+        """Run what committed reply transitions left for after their commit.
+
+        Span cancels run last: the acknowledgement that applies a Stop can run
+        in the span's own task, whose next await the cancel interrupts.
+        """
+        for effect in effects:
+            if isinstance(effect, rl.TransferStop):
+                await self.record_stop(effect)
+            elif isinstance(effect, rl.WakeApproval):
+                await self._wake_fenced_approval(effect.approval_id)
+        for effect in effects:
+            if isinstance(effect, rl.CancelSpan):
+                self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
+
+    async def _wake_fenced_approval(self, approval_id: str) -> None:
+        """Run a fenced approval's failure settlement."""
+        continuation = await self.store.approval_continuation(approval_id)
+        if continuation is None:
+            return
+        if continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
+            # An edit superseded it: nothing of it is shown any more, so its
+            # cleanup runs now, outside the conversation the regeneration holds.
+            self.clean_up_superseded(continuation)
+            return
+        # Its source worker settles it once whatever owns the source lets go of it.
+        self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
     async def _wait_for_rows(self, reply_id: str, room_id: str, sources: tuple[str, ...]) -> None:
         """Retry sources once the reply's earlier writes resolve, instead of retrying at once."""
@@ -232,6 +269,12 @@ class ReplyRuntime:
         for reply in replies:
             self.spans.cancel(reply.last_span_id, cancel_source=None)
         return tuple(reply.reply_id for reply in replies)
+
+    async def forget_finished(self) -> None:
+        """Drop the records of replies finished as long ago as the handled-turn ledger forgets their turns."""
+        before_ns = self.clock() - _FINISHED_REPLY_RETENTION_NS
+        while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
+            pass
 
     async def take_ownership(self) -> None:
         """Make this bot instance the owner of its principal's replies, before it writes any of them."""
