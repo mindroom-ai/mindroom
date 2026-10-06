@@ -1870,7 +1870,8 @@ def _settle_history_recovery(
     if exhausted_server and unreadable:
         # Repairing unmasks every marker the gap retracted, and one from before
         # the gap cannot vouch for an event this walk could not read: it may be
-        # a reply in that very thread. A truncated obligation keeps them masked.
+        # a reply in that very thread. A truncated obligation already withholds
+        # their completeness.
         reads.revoke_room_hydration(transaction, principal_id, room_id=recovery.room_id)
     reads.publish_conversation_hydration(
         transaction,

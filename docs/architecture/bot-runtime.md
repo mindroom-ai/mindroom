@@ -161,7 +161,7 @@ Nio history-loss records create a durable `room_history_recovery` obligation in 
 The obligation exists even when the projection is empty, and recording it retracts completeness for every room and thread marker.
 A repairable room reads as unhydrated for every conversation in it, so the next read walks `/messages` past the prompt window until server exhaustion or a configured cost ceiling.
 Server exhaustion clears the obligation, while a cost ceiling retains a truncated obligation and bounded context without claiming completeness.
-Malformed or undecryptable events at server exhaustion do not fail the repair; it records the room conversation as incomplete and revokes every thread's hydration marker, as contract 7 in `docs/dev/matrix-event-journal-contracts.md` describes.
+Malformed or undecryptable events at server exhaustion do not fail the repair, as [contract 7](../dev/matrix-event-journal-contracts.md) describes.
 Every later signal resets the obligation to repairable and increments its revision, and settlement compares that exact revision so an older walk cannot clear a newer gap.
 A departure drops the old membership's obligation, and a signal received while departure remains fenced is ignored.
 An event that never reached either durable owner and later falls outside Matrix replay is the explicit pre-admission loss boundary.
