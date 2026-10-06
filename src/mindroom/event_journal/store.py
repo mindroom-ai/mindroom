@@ -75,7 +75,7 @@ from .projection import (
     project,
     tombstoned_event_ids,
 )
-from .replies import ReplyRowEnqueue, ReplyRowRequest, ReplyStore
+from .replies import AppliedTransition, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
 from .scheduled_approvals import (  # noqa: TC001
     ScheduledApprovalArmState,
     ScheduledCall,
@@ -1660,12 +1660,12 @@ class PrincipalStore:
         runtime_generation: str,
         claim: rl.ClaimRequest,
         legacy_show_tool_calls: bool | None = None,
-    ) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
-        """Claim one ready paused run and its reply's resume span together (PR-1.md §4.3).
+    ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
+        """Claim one ready paused run and its reply's resume span together.
 
-        A reply with unresolved durable writes refuses the resume, and the
-        continuation stays ready; a continuation whose response no reply
-        records own is claimed alone, as on main.
+        Returns neither when the continuation is not ready. A reply with
+        unresolved durable writes refuses the resume, and the continuation
+        stays ready.
         """
         return await self._backend.write(
             lambda transaction: _claim_approval_resume(
@@ -1686,10 +1686,10 @@ class PrincipalStore:
         legacy_show_tool_calls: bool | None,
         reply_id: str,
         span_id: str,
-    ) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
+    ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
         """Claim a ready continuation for the response waiting on it, and resume its reply in place."""
 
-        def claim(transaction: Transaction) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
+        def claim(transaction: Transaction) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
             claimed = approval_continuations.claim(
                 transaction,
                 self._principal_id,
@@ -1861,8 +1861,8 @@ class PrincipalStore:
         entity_name: str,
         presentations: legacy_reply_messages.LegacyPresentations,
         now_ns: int,
-    ) -> tuple[replies.AppliedTransition, ...]:
-        """Give the replies main left in flight records, once per principal (DESIGN.md §14.5)."""
+    ) -> tuple[AppliedTransition, ...]:
+        """Give the replies main left in flight records, once per principal."""
         return await self._backend.write(
             lambda transaction: legacy_reply_messages.classify(
                 transaction,
@@ -1885,7 +1885,7 @@ class PrincipalStore:
         read: rl.LegacyRead,
         *,
         now_ns: int,
-    ) -> replies.AppliedTransition | None:
+    ) -> AppliedTransition | None:
         """Record what a main-era reply's event showed, releasing whatever waited for it."""
         return await self._backend.write(
             lambda transaction: legacy_reply_messages.read_done(
@@ -2073,22 +2073,21 @@ def _claim_approval_resume(
     runtime_generation: str,
     claim: rl.ClaimRequest,
     legacy_show_tool_calls: bool | None,
-) -> tuple[ApprovalContinuation | None, replies.AppliedTransition | None]:
+) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
     """Claim the continuation and the resume span of its paused reply in one transaction."""
     current = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if current is None or current.state != "ready":
         return None, None
-    applied = None
-    if reply_messages.for_event(transaction, principal_id, current.response_event_id) is not None:
-        applied = replies.claim(
-            transaction,
-            principal_id,
-            replace(claim, approval_id=current.approval_id, approval_generation=current.generation),
-            replies.ClaimLookup(existing_event_id=current.response_event_id),
-        )
-        if applied.transition.claimed is None:
-            # The reply's earlier writes are unresolved; their resolution wakes the sources.
-            return None, applied
+    # Every continuation pauses a reply: its pause, or adoption, recorded it.
+    applied = replies.claim(
+        transaction,
+        principal_id,
+        replace(claim, approval_id=current.approval_id, approval_generation=current.generation),
+        replies.ClaimLookup(existing_event_id=current.response_event_id),
+    )
+    if applied.transition.claimed is None:
+        # The reply's earlier writes are unresolved; their resolution wakes the sources.
+        return None, applied
     claimed = approval_continuations.claim(
         transaction,
         principal_id,
@@ -2137,7 +2136,7 @@ def _pause_for_approval(
     permanent_failure_reason: str | None,
     new_text: str | None,
 ) -> ReplyRowEnqueue:
-    """Create or advance the continuation, then pause its reply, so neither exists without the other (DESIGN.md §6.4)."""
+    """Create or advance the continuation, then pause its reply, so neither exists without the other."""
     held = (
         hold.apply(transaction, principal_id)
         if isinstance(hold, ApprovalAdvance)
@@ -2181,7 +2180,7 @@ def _decide_reply_row(
             assert reused is not None, "an acknowledgement's reply is created with its INITIAL row"
             return replace(
                 reused,
-                applied=replies.AppliedTransition(
+                applied=AppliedTransition(
                     transition=rl.Transition(outcome=rl.Outcome.DUPLICATE, reply=created, spans=(earlier,)),
                     post_commit=(),
                 ),
@@ -2301,7 +2300,7 @@ def _enqueue_reply_row(
         assert refused is not None
         failed = replies.fail_row(transaction, principal_id, refused, reason=permanent_failure_reason)
         if failed is not None:
-            applied = replies.AppliedTransition(
+            applied = AppliedTransition(
                 transition=transition,
                 post_commit=(*applied.post_commit, *failed.post_commit),
             )
@@ -2336,7 +2335,7 @@ def _span_row(
     if stage is rl.WriteStage.FINAL and stored.span_id != span.span_id:
         return None
     return ReplyRowEnqueue(
-        applied=replies.AppliedTransition(
+        applied=AppliedTransition(
             transition=rl.Transition(outcome=rl.Outcome.DUPLICATE, reply=reply),
             post_commit=(),
         ),

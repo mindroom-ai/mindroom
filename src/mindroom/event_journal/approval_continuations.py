@@ -34,7 +34,7 @@ _CONTINUATION_COLUMNS = """
 """
 
 
-# The failure reason of an approval an edit superseded (DESIGN.md decision 1).
+# The failure reason of an approval an edit superseded.
 SUPERSEDED_FAILURE_REASON = "superseded"
 
 
@@ -885,7 +885,7 @@ def fence(
     """Fence a continuation for failure on behalf of its reply, in whatever state it holds.
 
     A Stop on a paused reply and an edit superseding it fence the approval in
-    their own transaction (DESIGN.md §6.4); a frozen successful FINAL still wins.
+    their own transaction; a frozen successful FINAL still wins.
     """
     updated = transaction.fetchone(
         """

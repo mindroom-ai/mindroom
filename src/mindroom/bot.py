@@ -77,7 +77,6 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     restart_reason_category_for,
 )
-from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_approval import is_process_active_approval_card
@@ -348,7 +347,6 @@ class AgentBot:
     rooms: list[str]
     config_path: Path | None
     logger: structlog.stdlib.BoundLogger
-    stop_manager: StopManager
 
     # Mutable lifecycle state
     running: bool
@@ -433,7 +431,6 @@ class AgentBot:
         self.rooms = [] if rooms is None else rooms
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
-        self.stop_manager = StopManager()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -760,7 +757,6 @@ class AgentBot:
             ResponseRunnerDeps(
                 runtime=self._runtime_view,
                 logger=self.logger,
-                stop_manager=self.stop_manager,
                 runtime_paths=self.runtime_paths,
                 storage_path=self.storage_path,
                 agent_name=self.agent_name,
@@ -908,7 +904,6 @@ class AgentBot:
                 agent_reply_memberships=self._runtime_view.agent_reply_memberships,
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
-                stop_manager=self.stop_manager,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
@@ -989,7 +984,7 @@ class AgentBot:
                 self._reply_runtime.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
-        """Run a fenced approval's failure settlement (DESIGN.md §10)."""
+        """Run a fenced approval's failure settlement."""
         continuation = await self._reply_runtime.store.approval_continuation(approval_id)
         if continuation is None:
             return
@@ -1987,7 +1982,7 @@ class AgentBot:
         try:
             if opened_recovery_client:
                 await self._open_approval_recovery_client()
-                # A recovery-only bot is its own instance for the replies it finishes (DESIGN.md §9.3).
+                # A recovery-only bot is its own instance for the replies it finishes.
                 await self._reply_runtime.take_ownership()
             return await self._response_runner.recover_approval_final(approval_id)
         finally:

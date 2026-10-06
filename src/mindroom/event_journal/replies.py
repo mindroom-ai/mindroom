@@ -132,7 +132,7 @@ def approval_finished(
     principal_id: str,
     continuation: approval_continuations.ApprovalContinuation,
 ) -> AppliedTransition | None:
-    """Apply a finished continuation to the reply it paused (DESIGN.md §6.4 ``approval_failed``/``approval_finished``)."""
+    """Apply a finished continuation to the reply it paused."""
     found = reply_messages.for_event(transaction, principal_id, continuation.response_event_id)
     if found is None:
         return None
@@ -186,7 +186,7 @@ def approval_released(
 
 @dataclass(frozen=True, slots=True)
 class ClaimLookup:
-    """Where a claim looks for the reply it continues (PR-1.md §6.1)."""
+    """Where a claim looks for the reply it continues."""
 
     interactive_span_id: str | None = None
     existing_event_id: str | None = None
@@ -316,7 +316,7 @@ def supersede_replay(
 
 
 def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
-    """End the open replies of entities with no bot any more, without writing to Matrix (DESIGN.md §9.3)."""
+    """End the open replies of entities with no bot any more, without writing to Matrix."""
     ended = 0
     for principal_id, found in reply_messages.open_replies(transaction):
         if not ends(found.entity_name):
@@ -340,7 +340,7 @@ def owner_lost(
     active_generation: str,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
-    """End the work an older bot instance left on this principal's replies (DESIGN.md §6.4 ``owner_lost``).
+    """End the work an older bot instance left on this principal's replies.
 
     Runs once per bot instance at start, after its generation is written and
     before journal replay: records and rows only, nothing is sent here.
@@ -413,13 +413,13 @@ def stop_target(
 
 
 def edit_delivery_id(span_delivery_id: str, sequence: int) -> str:
-    """Return the derived delivery id of a reply's non-terminal durable write (DESIGN.md §7.2)."""
+    """Return the derived delivery id of a reply's non-terminal durable write."""
     return f"{span_delivery_id}:edit:{sequence}"
 
 
 @dataclass(frozen=True, slots=True)
 class ReplyCreation:
-    """A reply whose first row creates it: an interactive selection's acknowledgement (PR-1.md §6.1)."""
+    """A reply whose first row creates it: an interactive selection's acknowledgement."""
 
     claim: rl.ClaimRequest
     # The encoded presentation the acknowledgement shows.

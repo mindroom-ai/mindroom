@@ -105,7 +105,7 @@ def load(transaction: Transaction, principal_id: str, span_id: str) -> Span | No
 
 
 def latest_for_delivery(transaction: Transaction, principal_id: str, delivery_id: str) -> Span | None:
-    """Return the latest span that uses one delivery id (DESIGN.md §4.1)."""
+    """Return the latest span that uses one delivery id."""
     row = transaction.fetchone(
         f"""
         SELECT {_SPAN_COLUMNS} FROM reply_spans

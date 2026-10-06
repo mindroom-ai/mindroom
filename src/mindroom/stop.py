@@ -1,9 +1,8 @@
-"""Stop button tracking with hard-cancel-first response handling."""
+"""Reply span cancellation, hard cancel first and then the Agno run, and the Stop button reaction."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,12 +15,11 @@ from mindroom.matrix.client import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from nio import AsyncClient
 
     from mindroom.cancellation import TaskCancelSource
-    from mindroom.message_target import MessageTarget
 
 logger = get_logger(__name__)
 _GRACEFUL_CANCEL_FALLBACK_SECONDS = 10.0
@@ -130,310 +128,6 @@ async def send_stop_button(client: AsyncClient, room_id: str, message_id: str) -
 
 
 @dataclass
-class _TrackedMessage:
-    """Track a message with stop button."""
-
-    message_id: str
-    target: MessageTarget
-    task: asyncio.Task[None]
-    reaction_event_id: str | None = None
-    run_id: str | None = None
-    cancel_requested: bool = False
-
-
-class StopManager:
-    """Manage stop reactions with immediate task cancellation."""
-
-    def __init__(self, graceful_cancel_fallback_seconds: float = _GRACEFUL_CANCEL_FALLBACK_SECONDS) -> None:
-        """Initialize the stop manager."""
-        self.tracked_messages: dict[str, _TrackedMessage] = {}
-        self.cleanup_tasks: list[asyncio.Task[None]] = []
-        self.graceful_cancel_fallback_seconds = graceful_cancel_fallback_seconds
-        logger.info("StopManager initialized")
-
-    @staticmethod
-    def _log_target(target: MessageTarget) -> dict[str, str | None]:
-        """Return standard room/thread fields for tracked-message logs."""
-        return {
-            "room_id": target.room_id,
-            "thread_id": target.resolved_thread_id,
-        }
-
-    def set_current(
-        self,
-        message_id: str,
-        target: MessageTarget,
-        task: asyncio.Task[None],
-        reaction_event_id: str | None = None,
-        run_id: str | None = None,
-    ) -> None:
-        """Track a message generation."""
-        self.tracked_messages[message_id] = _TrackedMessage(
-            message_id=message_id,
-            target=target,
-            task=task,
-            reaction_event_id=reaction_event_id,
-            run_id=run_id,
-        )
-        logger.info(
-            "Tracking message generation",
-            message_id=message_id,
-            reaction_event_id=reaction_event_id,
-            run_id=run_id,
-            total_tracked=len(self.tracked_messages),
-            **self._log_target(target),
-        )
-
-    def update_run_id(self, message_id: str | None, run_id: str | None) -> None:
-        """Update the tracked Agno run_id for a message before a new attempt starts."""
-        if message_id is None:
-            return
-
-        tracked = self._get_active_tracked_message(message_id)
-        if tracked is None or tracked.run_id == run_id:
-            return
-
-        previous_run_id = tracked.run_id
-        tracked.run_id = run_id
-        logger.info(
-            "Updated tracked run id",
-            message_id=message_id,
-            previous_run_id=previous_run_id,
-            run_id=run_id,
-            cancel_requested=tracked.cancel_requested,
-            **self._log_target(tracked.target),
-        )
-
-        if tracked.cancel_requested and run_id:
-            logger.info(
-                "Stop already requested; scheduling best-effort cleanup for updated run id",
-                message_id=message_id,
-                run_id=run_id,
-                **self._log_target(tracked.target),
-            )
-            self._schedule_graceful_run_cancel(message_id, run_id)
-
-    def _discard_cleanup_task(self, task: asyncio.Task[None]) -> None:
-        """Drop finished background tasks from the strong-reference list."""
-        with suppress(ValueError):
-            self.cleanup_tasks.remove(task)
-
-    def _track_cleanup_task(self, task: asyncio.Task[None]) -> None:
-        """Keep a strong reference to background cleanup/fallback tasks."""
-        task.add_done_callback(self._discard_cleanup_task)
-        self.cleanup_tasks.append(task)
-
-    def _get_active_tracked_message(self, message_id: str) -> _TrackedMessage | None:
-        """Return the tracked message while its task is still active."""
-        tracked = self.tracked_messages.get(message_id)
-        if tracked is None or tracked.task.done():
-            return None
-        return tracked
-
-    def can_handle_stop_reaction(self, message_id: str, room_id: str) -> bool:
-        """Return whether a stop reaction in ``room_id`` currently has a live semantic consumer."""
-        tracked = self._get_active_tracked_message(message_id)
-        return tracked is not None and tracked.target.room_id == room_id
-
-    def _schedule_graceful_run_cancel(self, message_id: str, run_id: str) -> None:
-        """Queue best-effort Agno run cleanup after the response task is cancelled."""
-        tracked = self.tracked_messages.get(message_id)
-        log_fields = {"message_id": message_id, **(self._log_target(tracked.target) if tracked is not None else {})}
-        self._track_cleanup_task(
-            asyncio.create_task(
-                _graceful_run_cancel_cleanup(run_id, self.graceful_cancel_fallback_seconds, log_fields),
-            ),
-        )
-
-    def clear_message(
-        self,
-        message_id: str,
-        client: AsyncClient,
-        remove_button: bool = True,
-        delay: float = 5.0,
-    ) -> None:
-        """Clear tracking for a specific message and optionally remove stop button."""
-        tracked = self.tracked_messages.get(message_id)
-        if tracked is None:
-            logger.debug("Message not tracked, skipping cleanup", message_id=message_id)
-            return
-        reaction_event_id = tracked.reaction_event_id
-
-        async def delayed_clear() -> None:
-            """Clear the message and remove stop button after a delay."""
-            if remove_button and reaction_event_id:
-                logger.info(
-                    "Removing stop button in cleanup",
-                    message_id=message_id,
-                    **self._log_target(tracked.target),
-                )
-                try:
-                    await client.room_redact(
-                        room_id=tracked.target.room_id,
-                        event_id=reaction_event_id,
-                        reason="Response completed",
-                    )
-                    if (
-                        self.tracked_messages.get(message_id) is tracked
-                        and tracked.reaction_event_id == reaction_event_id
-                    ):
-                        tracked.reaction_event_id = None
-                except Exception as e:
-                    logger.warning(
-                        "stop_button_cleanup_failed",
-                        message_id=message_id,
-                        error=str(e),
-                        **self._log_target(tracked.target),
-                    )
-
-            await asyncio.sleep(delay)
-            if self.tracked_messages.get(message_id) is tracked:
-                logger.info(
-                    "Clearing tracked message after delay",
-                    message_id=message_id,
-                    delay=delay,
-                    **self._log_target(tracked.target),
-                )
-                del self.tracked_messages[message_id]
-
-        logger.info(
-            "Scheduling message cleanup",
-            message_id=message_id,
-            delay=delay,
-            remove_button=remove_button,
-            **self._log_target(tracked.target),
-        )
-        self._track_cleanup_task(asyncio.create_task(delayed_clear()))
-
-    def discard_message(self, message_id: str) -> None:
-        """Drop process-local tracking without scheduling Matrix cleanup."""
-        tracked = self.tracked_messages.pop(message_id, None)
-        if tracked is None:
-            return
-        logger.info(
-            "Discarding tracked message for process shutdown",
-            message_id=message_id,
-            **self._log_target(tracked.target),
-        )
-
-    def request_stop_if(self, message_id: str, should_stop: Callable[[], bool]) -> bool:
-        """Atomically validate current intent and request cancellation without yielding."""
-        if not should_stop():
-            return False
-        return self._request_stop(message_id)
-
-    def _request_stop(self, message_id: str) -> bool:
-        """Request cancellation for the response currently tracked by this message."""
-        tracked = self.tracked_messages.get(message_id)
-        target_log = self._log_target(tracked.target) if tracked is not None else {}
-        logger.info(
-            "Handling stop reaction",
-            message_id=message_id,
-            tracked_messages=list(self.tracked_messages.keys()),
-            **target_log,
-        )
-
-        if tracked is not None:
-            if tracked.task and not tracked.task.done():
-                if tracked.cancel_requested:
-                    logger.info(
-                        "Cancellation already requested for message",
-                        message_id=message_id,
-                        **target_log,
-                    )
-                    return True
-
-                tracked.cancel_requested = True
-                logger.info(
-                    "Hard cancelling tracked response task",
-                    message_id=message_id,
-                    run_id=tracked.run_id,
-                    **target_log,
-                )
-                request_task_cancel(tracked.task, cancel_source="user_stop")
-                if tracked.run_id:
-                    logger.info(
-                        "Scheduling best-effort Agno run cleanup after hard task cancel",
-                        message_id=message_id,
-                        run_id=tracked.run_id,
-                        **target_log,
-                    )
-                    self._schedule_graceful_run_cancel(message_id, tracked.run_id)
-                return True
-            logger.info(
-                "Task already completed or missing",
-                message_id=message_id,
-                task_exists=tracked.task is not None,
-                task_done=tracked.task.done() if tracked.task else None,
-                **target_log,
-            )
-        else:
-            logger.debug("Stop reaction for untracked message", message_id=message_id)
-        return False
-
-    async def add_stop_button(
-        self,
-        client: AsyncClient,
-        message_id: str,
-    ) -> str | None:
-        """Add a stop button reaction to a tracked message."""
-        tracked = self.tracked_messages.get(message_id)
-        if tracked is None:
-            logger.warning("Cannot add stop button for untracked message", message_id=message_id)
-            return None
-
-        logger.info(
-            "Adding stop button",
-            message_id=message_id,
-            **self._log_target(tracked.target),
-        )
-        event_id = await send_stop_button(client, tracked.target.room_id, message_id)
-        if event_id is not None:
-            tracked.reaction_event_id = event_id
-        return event_id
-
-    async def remove_stop_button(
-        self,
-        client: AsyncClient,
-        message_id: str | None = None,
-    ) -> None:
-        """Remove the stop button reaction immediately when user clicks it."""
-        if message_id and message_id in self.tracked_messages:
-            tracked = self.tracked_messages[message_id]
-            if tracked.reaction_event_id:
-                reaction_event_id = tracked.reaction_event_id
-                logger.info(
-                    "Removing stop button immediately (user clicked)",
-                    message_id=message_id,
-                    reaction_event_id=reaction_event_id,
-                    **self._log_target(tracked.target),
-                )
-                try:
-                    await client.room_redact(
-                        room_id=tracked.target.room_id,
-                        event_id=reaction_event_id,
-                        reason="User clicked stop",
-                    )
-                    tracked.reaction_event_id = None
-                    logger.info("Stop button removed successfully", **self._log_target(tracked.target))
-                except Exception as e:
-                    logger.exception(
-                        "Failed to remove stop button",
-                        error=str(e),
-                        **self._log_target(tracked.target),
-                    )
-            else:
-                logger.debug(
-                    "Stop button already removed or missing",
-                    message_id=message_id,
-                    has_reaction_id=tracked.reaction_event_id is not None,
-                    **self._log_target(tracked.target),
-                )
-        else:
-            logger.debug("Message not tracked, cannot remove stop button", message_id=message_id)
-
-
-@dataclass
 class _LiveSpan:
     """The task executing one reply span, and the Agno run it is on."""
 
@@ -443,7 +137,7 @@ class _LiveSpan:
 
 
 class SpanRegistry:
-    """The task and Agno run of each reply span this bot instance executes (DESIGN.md §8).
+    """The task and Agno run of each reply span this bot instance executes.
 
     A Stop names a span, never a message: the reply's records decide which span
     it reaches, so a reply whose event does not exist yet is just as stoppable.

@@ -233,7 +233,7 @@ class VisibleResponseReconciler:
         """Send an interactive selection's acknowledgement, which creates the reply its answer then edits.
 
         Returns the acknowledgement's event and the span it created for the
-        answer to adopt (PR-1.md §6.1). A retry resolves to the row its first
+        answer to adopt. A retry resolves to the row its first
         attempt recorded, so it neither sends nor creates a second reply.
         """
         replies = self.deps.replies

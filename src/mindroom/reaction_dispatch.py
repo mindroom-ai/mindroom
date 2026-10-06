@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
-    from mindroom.stop import StopManager
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
     from mindroom.user_stop_reconciliation import UserStopReconciler
@@ -45,7 +44,6 @@ class ReactionDispatcherDeps:
     agent_reply_memberships: AgentReplyMembershipIndex
     turn_policy: TurnPolicy
     turn_store: TurnStore
-    stop_manager: StopManager
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
@@ -128,8 +126,7 @@ class ReactionDispatcher:
                 and turn_record.conversation_target.room_id == room.room_id
             )
             if sender_agent_name or not (
-                self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to, room.room_id)
-                or has_stoppable_turn
+                has_stoppable_turn
                 # A running reply, including one whose create is still unacknowledged.
                 or await self.deps.user_stop_reconciler.accepts_reply_stop(event.reacts_to, room.room_id)
             ):
@@ -138,16 +135,9 @@ class ReactionDispatcher:
                 SemanticConsumer.STOP_REACTION,
             )
 
-        async def remove_current_stop_button() -> None:
-            await self.deps.stop_manager.remove_stop_button(
-                self._client(),
-                event.reacts_to,
-            )
-
         stopped = await self.deps.user_stop_reconciler.finalize(
             event.reacts_to,
             await self.deps.journal_dispatcher.receipt_order(),
-            remove_current_stop_button,
             room_id=room.room_id,
         )
         if stopped:

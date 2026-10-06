@@ -624,8 +624,6 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path
@@ -729,8 +727,6 @@ async def test_generate_team_response_helper_streaming_delivery_carries_live_met
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path
@@ -960,8 +956,6 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path
@@ -1557,8 +1551,6 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path
@@ -1644,8 +1636,6 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path

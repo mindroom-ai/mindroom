@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,63 +17,34 @@ from mindroom.cancellation import (
 )
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
-from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
-from mindroom.stop import StopManager
+from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 
 
 @dataclass
-class _TrackedMessage:
-    reaction_event_id: str | None = None
+class _Span:
+    """Records what one attempt tells the reply span that owns it."""
+
+    registered: list[asyncio.Task[None]] = field(default_factory=list)
+    stop_buttons: list[str] = field(default_factory=list)
+
+    def attempt(self) -> SpanAttempt:
+        return SpanAttempt(register=self.registered.append, add_stop_button=self._add_stop_button)
+
+    async def _add_stop_button(self, message_id: str) -> None:
+        self.stop_buttons.append(message_id)
 
 
-class _StopManager:
-    def __init__(self) -> None:
-        self.tracked_messages: dict[str, _TrackedMessage] = {}
-        self.set_current_calls: list[tuple[str, MessageTarget, object, str | None]] = []
-        self.added_buttons: list[str] = []
-        self.cleared_messages: list[tuple[str, bool]] = []
-
-    def set_current(
-        self,
-        message_id: str,
-        target: MessageTarget,
-        task: object,
-        _reaction_event_id: str | None = None,
-        run_id: str | None = None,
-    ) -> None:
-        self.tracked_messages[message_id] = _TrackedMessage()
-        self.set_current_calls.append((message_id, target, task, run_id))
-
-    async def add_stop_button(self, _client: object, message_id: str) -> str:
-        self.added_buttons.append(message_id)
-        self.tracked_messages[message_id].reaction_event_id = "$reaction"
-        return "$reaction"
-
-    def clear_message(self, message_id: str, _client: object, *, remove_button: bool) -> None:
-        self.cleared_messages.append((message_id, remove_button))
-
-    def discard_message(self, message_id: str) -> None:
-        self.cleared_messages.append((message_id, False))
-        self.tracked_messages.pop(message_id, None)
-
-
-def _runner(
-    *,
-    stop_manager: _StopManager | None = None,
-    show_stop_button: bool = False,
-) -> tuple[ResponseAttemptRunner, _StopManager]:
-    resolved_stop_manager = stop_manager or _StopManager()
+def _runner(*, show_stop_button: bool = False) -> tuple[ResponseAttemptRunner, _Span]:
     return (
         ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=MagicMock(user_id="@mindroom_agent:localhost"),
-                stop_manager=resolved_stop_manager,
                 logger=MagicMock(),
                 show_stop_button=lambda: show_stop_button,
                 config=Config(),
             ),
         ),
-        resolved_stop_manager,
+        _Span(),
     )
 
 
@@ -86,60 +57,62 @@ async def test_response_attempt_tracks_the_adopted_placeholder_as_the_visible_ta
     cannot add a second one even by mistake.
     """
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, stop_manager = _runner()
+    runner, span = _runner()
     seen_message_ids: list[str | None] = []
+    attempt_tasks: list[asyncio.Task[None] | None] = []
 
     async def response_function(message_id: str | None) -> None:
         seen_message_ids.append(message_id)
+        attempt_tasks.append(asyncio.current_task())
 
     message_id = await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
+            span=span.attempt(),
             existing_event_id="$thinking",
-            run_id="run-1",
         ),
     )
 
     assert message_id == "$thinking"
     assert seen_message_ids == ["$thinking"]
-    assert stop_manager.set_current_calls[0][0] == "$thinking"
-    assert stop_manager.set_current_calls[0][1] == target
-    assert stop_manager.set_current_calls[0][3] == "run-1"
-    assert stop_manager.cleared_messages == [("$thinking", False)]
+    assert span.registered == attempt_tasks
+    assert span.stop_buttons == []
 
 
 @pytest.mark.asyncio
-async def test_response_attempt_uses_pending_tracking_key_without_visible_message() -> None:
-    """Responses without a visible message should still be tracked until cleanup."""
+async def test_response_attempt_without_visible_message_registers_its_task_without_a_stop_button() -> None:
+    """A reply span can stop an attempt that has no visible message yet, which has no event to carry a Stop button."""
     target = MessageTarget.resolve("!room:localhost", None, "$reply", room_mode=True)
-    runner, stop_manager = _runner()
+    runner, span = _runner(show_stop_button=True)
     seen_message_ids: list[str | None] = []
+    attempt_tasks: list[asyncio.Task[None] | None] = []
 
     async def response_function(message_id: str | None) -> None:
         seen_message_ids.append(message_id)
+        attempt_tasks.append(asyncio.current_task())
 
     message_id = await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
+            span=span.attempt(),
         ),
     )
 
     assert message_id is None
     assert seen_message_ids == [None]
-    tracked_id = stop_manager.set_current_calls[0][0]
-    assert tracked_id.startswith("__pending_response__:")
-    assert stop_manager.cleared_messages == [(tracked_id, False)]
+    assert span.registered == attempt_tasks
+    assert span.stop_buttons == []
 
 
 @pytest.mark.asyncio
-async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_on_cleanup(
+async def test_response_attempt_adds_the_reply_stop_button_for_online_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Online users get a stop reaction that is removed during cleanup."""
+    """Online users get the reply span's Stop button on the attempt's message."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, stop_manager = _runner(show_stop_button=True)
+    runner, span = _runner(show_stop_button=True)
     is_user_online = AsyncMock(return_value=True)
     monkeypatch.setattr(response_attempt_module, "is_user_online", is_user_online)
 
@@ -150,6 +123,7 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
+            span=span.attempt(),
             existing_event_id="$thinking",
             user_id="@user:localhost",
         ),
@@ -161,8 +135,7 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
         "@user:localhost",
         room_id="!room:localhost",
     )
-    assert stop_manager.added_buttons == ["$thinking"]
-    assert stop_manager.cleared_messages == [("$thinking", True)]
+    assert span.stop_buttons == ["$thinking"]
     runner.deps.logger.info.assert_any_call(
         "Stop button decision",
         message_id="$thinking",
@@ -176,7 +149,7 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
 async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
     """Cancelling the awaiting chain must cancel the attempt task with the same provenance."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, _stop_manager = _runner()
+    runner, span = _runner()
     inner_started = asyncio.Event()
     inner_cancel_args: list[tuple[object, ...]] = []
     cancellation_reasons: list[str] = []
@@ -194,6 +167,7 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
             ResponseAttemptRequest(
                 target=target,
                 response_function=response_function,
+                span=span.attempt(),
                 existing_event_id="$existing",
                 on_cancelled=cancellation_reasons.append,
             ),
@@ -214,7 +188,7 @@ async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
     """Orderly shutdown cannot finish the owned runner while its response child is live."""
     monkeypatch.setattr(response_attempt_module, "_FORWARDED_CANCEL_WAIT_SECONDS", 0.01)
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, stop_manager = _runner()
+    runner, span = _runner()
     child_started = asyncio.Event()
     child_cancelled = asyncio.Event()
     release_child = asyncio.Event()
@@ -239,6 +213,7 @@ async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
             ResponseAttemptRequest(
                 target=target,
                 response_function=response_function,
+                span=span.attempt(),
                 existing_event_id="$existing",
             ),
         ),
@@ -251,14 +226,13 @@ async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
         await asyncio.sleep(0.02)
         assert child_shutdown_markers == [True]
         assert not outer.done()
-        assert "$existing" in stop_manager.tracked_messages
+        assert span.registered == child_tasks
     finally:
         release_child.set()
         results = await asyncio.gather(outer, *child_tasks, return_exceptions=True)
 
     assert isinstance(results[0], asyncio.CancelledError)
     assert outer.cancelled()
-    assert stop_manager.cleared_messages == [("$existing", False)]
     runner.deps.logger.warning.assert_called_once()
     assert runner.deps.logger.warning.call_args.kwargs["exc_info"] is False
 
@@ -266,7 +240,7 @@ async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
 @pytest.mark.asyncio
 async def test_process_shutdown_upgrade_retains_generic_unwind_child() -> None:
     """A second cancellation upgrades child ownership and still propagates interruption."""
-    runner, stop_manager = _runner()
+    runner, span = _runner()
     started = asyncio.Event()
     unwinding = asyncio.Event()
     upgraded = asyncio.Event()
@@ -294,6 +268,7 @@ async def test_process_shutdown_upgrade_retains_generic_unwind_child() -> None:
                 target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
                 existing_event_id="$existing",
                 response_function=response_function,
+                span=span.attempt(),
             ),
         ),
     )
@@ -305,12 +280,10 @@ async def test_process_shutdown_upgrade_retains_generic_unwind_child() -> None:
         await asyncio.wait_for(upgraded.wait(), timeout=0.1)
         assert flags == [False, True]
         assert not outer.done()
-        assert "$existing" in stop_manager.tracked_messages
     finally:
         release.set()
         results = await asyncio.gather(outer, return_exceptions=True)
     assert isinstance(results[0], asyncio.CancelledError)
-    assert stop_manager.cleared_messages == [("$existing", False)]
 
 
 @pytest.mark.asyncio
@@ -319,7 +292,7 @@ async def test_process_shutdown_during_stop_button_setup_still_owns_child(
 ) -> None:
     """Cancellation during presence setup must not orphan the already-started response."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, stop_manager = _runner(show_stop_button=True)
+    runner, span = _runner(show_stop_button=True)
     child_started = asyncio.Event()
     child_cancelled = asyncio.Event()
     presence_started = asyncio.Event()
@@ -350,6 +323,7 @@ async def test_process_shutdown_during_stop_button_setup_still_owns_child(
             ResponseAttemptRequest(
                 target=target,
                 response_function=response_function,
+                span=span.attempt(),
                 existing_event_id="$existing",
                 user_id="@user:localhost",
             ),
@@ -362,7 +336,7 @@ async def test_process_shutdown_during_stop_button_setup_still_owns_child(
     try:
         await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
         assert not outer.done()
-        assert "$existing" in stop_manager.tracked_messages
+        assert span.registered == child_tasks
     finally:
         for child in child_tasks:
             if not child.done():
@@ -370,13 +344,13 @@ async def test_process_shutdown_during_stop_button_setup_still_owns_child(
         release_child.set()
         await asyncio.gather(outer, *child_tasks, return_exceptions=True)
 
-    assert stop_manager.cleared_messages == [("$existing", False)]
+    assert span.stop_buttons == []
 
 
 @pytest.mark.asyncio
 async def test_attempt_task_error_during_forwarded_cancellation_is_logged() -> None:
     """An attempt task that errors while unwinding the forced cancel must be reported."""
-    runner, _stop_manager = _runner()
+    runner, _span = _runner()
     inner_started = asyncio.Event()
 
     async def misbehaving_attempt() -> None:
@@ -403,7 +377,7 @@ async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
 ) -> None:
     """A straggler outliving the forwarded-cancel wait must still report its eventual failure."""
     monkeypatch.setattr(response_attempt_module, "_FORWARDED_CANCEL_WAIT_SECONDS", 0.01)
-    runner, _stop_manager = _runner()
+    runner, _span = _runner()
     inner_started = asyncio.Event()
     release = asyncio.Event()
 
@@ -444,15 +418,15 @@ async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
         ((), "interrupted", "warning", "Response interrupted — traceback for diagnosis"),
     ],
 )
-async def test_response_attempt_cancellation_records_reason_logs_provenance_and_clears_tracking(
+async def test_response_attempt_cancellation_records_reason_and_logs_provenance(
     cancel_args: tuple[str, ...],
     expected_reason: str,
     log_method: str,
     log_message: str,
 ) -> None:
-    """Cancelled attempts should classify provenance and always clear tracking."""
+    """Cancelled attempts should classify and log their cancellation provenance."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, stop_manager = _runner()
+    runner, span = _runner()
     cancellation_reasons: list[str] = []
 
     async def response_function(_message_id: str | None) -> None:
@@ -462,6 +436,7 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
+            span=span.attempt(),
             existing_event_id="$existing",
             on_cancelled=cancellation_reasons.append,
         ),
@@ -469,47 +444,7 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
 
     assert message_id == "$existing"
     assert cancellation_reasons == [expected_reason]
-    assert stop_manager.cleared_messages == [("$existing", False)]
     getattr(runner.deps.logger, log_method).assert_called_once()
     log_call = getattr(runner.deps.logger, log_method).call_args
     assert log_call.args[0] == log_message
     assert log_call.kwargs["message_id"] == "$existing"
-
-
-@pytest.mark.asyncio
-async def test_process_shutdown_discards_tracking_without_delayed_cleanup_task() -> None:
-    """Orderly shutdown needs no five-second local-only tracking tail."""
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    stop_manager = StopManager()
-    runner = ResponseAttemptRunner(
-        ResponseAttemptDeps(
-            client=MagicMock(user_id="@mindroom_agent:localhost"),
-            stop_manager=stop_manager,
-            logger=MagicMock(),
-            show_stop_button=lambda: False,
-            config=Config(),
-        ),
-    )
-    response_started = asyncio.Event()
-
-    async def response_function(_message_id: str | None) -> None:
-        response_started.set()
-        await asyncio.Event().wait()
-
-    attempt = asyncio.create_task(
-        runner.run(
-            ResponseAttemptRequest(
-                target=target,
-                response_function=response_function,
-                existing_event_id="$existing",
-            ),
-        ),
-    )
-    await response_started.wait()
-    request_task_cancel(attempt, process_shutdown=True)
-
-    with pytest.raises(asyncio.CancelledError):
-        await attempt
-
-    assert stop_manager.tracked_messages == {}
-    assert stop_manager.cleanup_tasks == []

@@ -187,7 +187,7 @@ def test_folded_turns_a_frozen_display_into_history() -> None:
     ],
 )
 def test_wire_status_per_write(write: WriteKind, state: str, decision: bool, expected: str | None) -> None:
-    """Every write kind carries main's wire status (DESIGN.md §5.3)."""
+    """Every write kind carries the wire status earlier releases sent."""
     assert stream_status_for(write, state=state, needs_human_decision=decision) == expected
 
 

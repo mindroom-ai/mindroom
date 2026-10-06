@@ -269,7 +269,7 @@ class ReplyStop:
         )
 
 
-# What a failed approval's note says (DESIGN.md §10).
+# What a failed approval's note says.
 type ApprovalFailureNote = Literal["cancelled", "error", "interrupted", "restart"]
 
 
@@ -788,7 +788,7 @@ class DeliveryGateway:
         """Remove a completed placeholder-only streamed event before returning no-visible-response."""
         handle = self._live_span()
         if handle is not None:
-            # The reply's records remove the placeholder (DESIGN.md §6.4 ``suppress``).
+            # The reply's records remove the placeholder.
             confirms = handle.unconfirmed_progress
             now_ns = time.time_ns()
             await self.end_reply_span(
@@ -1737,7 +1737,7 @@ class DeliveryGateway:
         return event_id if edited else None
 
     async def supersede_replay(self, source_event_ids: tuple[str, ...]) -> bool | None:
-        """Settle a superseded replay's sources with the reply they left (DESIGN.md §6.4).
+        """Settle a superseded replay's sources with the reply they left.
 
         Returns ``None`` when no reply has those sources, and ``False`` when
         the reply still owes Matrix a write, which only its replay resolves.
@@ -1756,7 +1756,7 @@ class DeliveryGateway:
         """End the reply an earlier attempt left for sources that became terminal before a claim.
 
         Returns whether reply records own those sources, so main's interrupted
-        note is not written (PR-1.md §6.2, first gate).
+        note is not written.
         """
         reply = await self.deps.outbox.replies.for_sources(source_event_ids)
         if reply is None:
@@ -1889,7 +1889,7 @@ class DeliveryGateway:
         """Show a dispatch failure on the reply bound to one event before a span ran it.
 
         Returns whether a reply owns the event; its records then settle the
-        sources and deliver the error (DESIGN.md §6.4 ``dispatch_failed``).
+        sources and deliver the error.
         """
         reply = await self.deps.outbox.replies.for_event(event_id)
         if reply is None:
@@ -1910,7 +1910,7 @@ class DeliveryGateway:
         return True
 
     async def add_reply_stop_button(self, handle: SpanHandle, event_id: str) -> None:
-        """Show the Stop button on a span's reply, best effort, and record it on the reply (DESIGN.md §7.4)."""
+        """Show the Stop button on a span's reply, best effort, and record it on the reply."""
         if handle.reply.stop_button_event_id is not None:
             # An earlier span of the reply already shows one.
             return
@@ -1930,7 +1930,7 @@ class DeliveryGateway:
             await self.settle_reply_debt(handle.reply_id)
 
     async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> ReplyStop:
-        """Return the Stop on a reply that commits with the turn record's Stop (PR-1.md §4.3).
+        """Return the Stop on a reply that commits with the turn record's Stop.
 
         A Stop on an event no reply is bound to yet, while a reply create in
         its room is unresolved, is recorded here; that create's acknowledgement
@@ -2517,7 +2517,7 @@ class DeliveryGateway:
         *,
         failure_reason: str,
     ) -> FinalDeliveryOutcome:
-        """A before-response hook raised for a reply span (DESIGN.md §6.4 ``hook_failed``)."""
+        """A before-response hook raised for a reply span."""
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         silent = request.identity.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
         if silent and reply is not None and (reply.event_id is None or reply.placeholder_only):
@@ -2553,7 +2553,7 @@ class DeliveryGateway:
         *,
         suppression_reason: str,
     ) -> FinalDeliveryOutcome:
-        """A hook suppressed a reply span's answer (DESIGN.md §6.4 ``suppress``)."""
+        """A hook suppressed a reply span's answer."""
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         now_ns = time.time_ns()
         confirms = handle.unconfirmed_progress

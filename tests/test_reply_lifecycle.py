@@ -1,4 +1,4 @@
-"""Pure reply lifecycle rules, one test per rule and guard (DESIGN.md §6.4)."""
+"""Pure reply lifecycle rules, one test per rule and guard."""
 
 from __future__ import annotations
 
@@ -1200,7 +1200,10 @@ def test_a_superseded_replay_ends_the_interrupted_reply_and_settles_its_sources(
     assert superseded.reply.state is ReplyState.FAILED
     assert superseded.effects == (SettleSources(span.span_id),)
     placeholder = rl.replay_superseded(
-        replace(reply, placeholder_only=True), span, durable_write_debt=False, now_ns=NOW,
+        replace(reply, placeholder_only=True),
+        span,
+        durable_write_debt=False,
+        now_ns=NOW,
     )
     assert placeholder.reply is not None
     assert placeholder.reply.state is ReplyState.GONE
@@ -1222,7 +1225,10 @@ def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
         assert owing.outcome is Outcome.DEFERRED
         assert owing.effects == ()
     answered = rl.replay_superseded(
-        replace(reply, state=ReplyState.COMPLETED), span, durable_write_debt=False, now_ns=NOW,
+        replace(reply, state=ReplyState.COMPLETED),
+        span,
+        durable_write_debt=False,
+        now_ns=NOW,
     )
     assert answered.outcome is Outcome.DUPLICATE
 

@@ -197,7 +197,7 @@ def event_ids_of_spans(
 
 
 def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, now_ns: int) -> None:
-    """End the room's replies as its membership ends, without touching Matrix (DESIGN.md §6.4 ``departed``).
+    """End the room's replies as its membership ends, without touching Matrix.
 
     Running replies end gone with their spans released, and what finished
     replies still owed the room is dropped. The departing bot cancels the span

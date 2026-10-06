@@ -1,6 +1,6 @@
 """The in-memory side of one span: its handle, its presentation, and its claim and exits.
 
-A span is one executor's claim on a durable reply (DESIGN.md §3). The handle
+A span is one executor's claim on a durable reply. The handle
 lives in a context variable for the task that runs the span, so the attempt
 task, the streamer's tasks, and the delivery gateway all see the same span
 without threading it through every call. The reply record is the durable
@@ -217,7 +217,7 @@ class ReplyRuntime:
         return applied
 
     async def live_event_ids(self, room_id: str) -> frozenset[str]:
-        """Return the events of a room's replies whose span runs in this bot instance (DESIGN.md §8)."""
+        """Return the events of a room's replies whose span runs in this bot instance."""
         return await self.store.replies.event_ids_of_spans(room_id, self.spans.live_span_ids())
 
     async def departed(self, room_id: str) -> None:
@@ -232,7 +232,7 @@ class ReplyRuntime:
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
-        Runs before journal replay (DESIGN.md §9.2): replies main left in flight
+        Runs before journal replay: replies main left in flight
         get records first, replay claims continue the replies whose sources are
         still pending, and the notes this owes are delivered by the outbox
         recovery after each room syncs.
@@ -367,9 +367,8 @@ class ReplyRuntime:
     ) -> tuple[ApprovalContinuation | None, SpanHandle | None]:
         """Claim a ready continuation and its paused reply's resume span together.
 
-        Returns no handle for a continuation no reply records own; returns
-        neither when the reply's earlier writes are unresolved, which retry the
-        sources once they resolve.
+        Returns neither when the continuation is not ready, or when the reply's
+        earlier writes are unresolved, which retry the sources once they resolve.
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
         sources = continuation.sources
@@ -395,7 +394,7 @@ class ReplyRuntime:
             )
             if applied is None:
                 self.spans.forget(claim.span_id)
-                return claimed, None
+                return None, None
             transition = (await self.committed(applied)).transition
         except BaseException:
             self.spans.forget(claim.span_id)
@@ -419,7 +418,7 @@ class ReplyRuntime:
         requester_id: str,
         text: str,
     ) -> ReplyWrite:
-        """Return an interactive selection's acknowledgement, the row that creates its reply (PR-1.md §6.1)."""
+        """Return an interactive selection's acknowledgement, the row that creates its reply."""
         claim = await self.claim_request(
             delivery_id=delivery_id,
             sources=rl.SpanSources(pending=pending, logical=logical, discovery=discovery),
@@ -528,7 +527,7 @@ class ReplyWrite:
 
 
 def _acknowledgement_write(claim: rl.ClaimRequest, shown: Presentation) -> ReplyWrite:
-    """Return an interactive selection's acknowledgement, the row that creates its reply (PR-1.md §6.1)."""
+    """Return an interactive selection's acknowledgement, the row that creates its reply."""
     encoded = encode_presentation(shown)
     # Pure: names the reply and the not-yet-current span the row creates.
     created = rl.interactive_acknowledgement(claim, shown=encoded)
@@ -551,7 +550,7 @@ def pause_decision(
     in_place: bool,
     stage: rl.WriteStage | None,
 ) -> Decide:
-    """Return the rule that pauses a span's reply for approval (DESIGN.md §6.4 ``pause``)."""
+    """Return the rule that pauses a span's reply for approval."""
     write = rl.PauseWrite(
         shown=encode_presentation(shown),
         prepared_revision=handle.reply.revision,
@@ -647,7 +646,7 @@ def terminal_write(
 
 
 def owed_note_write(reply: rl.Reply, span: rl.Span, shown: Presentation, *, span_has_final: bool) -> ReplyWrite:
-    """Return the row that delivers a note a reply-authored transition owed (DESIGN.md §7.2 staging)."""
+    """Return the row that delivers a note a reply-authored transition owed."""
     encoded = encode_presentation(shown)
     revision = reply.revision
     return ReplyWrite(

@@ -105,7 +105,7 @@ from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -140,7 +140,7 @@ from mindroom.runtime_shutdown import (
     SYNC_RESTART_SHUTDOWN,
     RuntimeShutdownIntent,
 )
-from mindroom.stop import StopManager
+from mindroom.stop import SpanRegistry
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -170,7 +170,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.history_helpers import RecordingModel
-from tests.legacy_reply_helpers import read_after_sync
+from tests.legacy_reply_helpers import adopt_main_left_approval, read_after_sync, resumed_main_left_approval
 from tests.response_runner_helpers import (
     _bot,
     _config,
@@ -181,6 +181,7 @@ from tests.response_runner_helpers import (
     _target,
 )
 from tests.test_agent_tool_calls import _catalog
+from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
     _AdapterLog,
     _blocking_adapter,
@@ -197,6 +198,7 @@ if TYPE_CHECKING:
 
     from nio import AsyncClient
 
+    from mindroom.bot import AgentBot
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
     from mindroom.response_lifecycle import _QueuedMessageState
@@ -1107,31 +1109,10 @@ async def test_detached_inbox_response_owns_source_until_task_finishes() -> None
     retry_sources.assert_called_once_with(_target().room_id, ("$reaction",))
 
 
-class RecordingStopManager(StopManager):
-    """Real StopManager whose deferred clear is made immediate and observable."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.cleared: list[str] = []
-
-    def clear_message(
-        self,
-        message_id: str,
-        client: AsyncClient,
-        remove_button: bool = True,
-        delay: float = 5.0,
-    ) -> None:
-        """Record the clear request and drop tracking without the production delay."""
-        del client, remove_button, delay
-        self.cleared.append(message_id)
-        self.tracked_messages.pop(message_id, None)
-
-
-def _attempt_runner(tmp_path: Path, stop_manager: StopManager) -> ResponseAttemptRunner:
+def _attempt_runner(tmp_path: Path) -> ResponseAttemptRunner:
     return ResponseAttemptRunner(
         ResponseAttemptDeps(
             client=make_matrix_client_mock(),
-            stop_manager=stop_manager,
             logger=get_logger("tests.response_attempt"),
             show_stop_button=lambda: False,
             config=_config(tmp_path),
@@ -1524,91 +1505,25 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lock(tmp_path: Path) -> None:
-    """STOP must cancel the lock owner before it records the durable terminal turn."""
+async def test_user_stop_finalizes_only_under_the_conversation_lock(tmp_path: Path) -> None:
+    """A Stop on an event no reply owns records its terminal turn only once the conversation's lock is free."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread", reply_to_event_id="$event")
     lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
     await lifecycle_lock.acquire()
-    response_task = asyncio.create_task(asyncio.Event().wait())
-    bot.stop_manager.set_current("$response", target, response_task)
     finalize = AsyncMock(return_value=True)
 
-    stop_task = asyncio.create_task(
-        runner.finalize_user_stop("$response", "$source", target, 7, Mock(return_value=True), finalize),
-    )
-    await asyncio.gather(response_task, return_exceptions=True)
+    stop_task = asyncio.create_task(runner.finalize_user_stop("$response", "$source", target, 7, finalize))
+    for _ in range(5):
+        await asyncio.sleep(0)
 
+    assert not stop_task.done()
     finalize.assert_not_awaited()
     lifecycle_lock.release()
 
     assert await stop_task is True
     finalize.assert_awaited_once_with(False)
-
-
-@pytest.mark.asyncio
-async def test_user_stop_guard_and_cancellation_do_not_yield_between_each_other(tmp_path: Path) -> None:
-    """A later tracked edit cannot replace the guarded task before cancellation."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(thread_id="$thread", reply_to_event_id="$event")
-    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
-    await lifecycle_lock.acquire()
-    old_response_task = asyncio.create_task(asyncio.Event().wait())
-    later_edit_task = asyncio.create_task(asyncio.Event().wait())
-    bot.stop_manager.set_current("$response", target, old_response_task)
-
-    def should_cancel() -> bool:
-        asyncio.get_running_loop().call_soon(
-            bot.stop_manager.set_current,
-            "$response",
-            target,
-            later_edit_task,
-        )
-        return True
-
-    stop_task = asyncio.create_task(
-        runner.finalize_user_stop("$response", "$source", target, 2, should_cancel, AsyncMock(return_value=True)),
-    )
-    await asyncio.gather(old_response_task, return_exceptions=True)
-    await asyncio.sleep(0)
-
-    assert later_edit_task.done() is False
-    assert bot.stop_manager.tracked_messages["$response"].task is later_edit_task
-    lifecycle_lock.release()
-    assert await stop_task is True
-    later_edit_task.cancel()
-    await asyncio.gather(later_edit_task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_settled_stop_retry_does_not_cancel_later_live_response(tmp_path: Path) -> None:
-    """A STOP superseded by a later edit must not cancel that edit while waiting."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(thread_id="$thread", reply_to_event_id="$event")
-    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
-    await lifecycle_lock.acquire()
-    response_task = asyncio.create_task(asyncio.Event().wait())
-    bot.stop_manager.set_current("$response", target, response_task)
-    should_cancel = Mock(return_value=False)
-    finalize = AsyncMock(return_value=True)
-
-    stop_task = asyncio.create_task(
-        runner.finalize_user_stop("$response", "$source", target, 2, should_cancel, finalize),
-    )
-    await asyncio.sleep(0)
-
-    assert response_task.done() is False
-    lifecycle_lock.release()
-
-    assert await stop_task is True
-    should_cancel.assert_called()
-    finalize.assert_awaited_once_with(False)
-    assert response_task.done() is False
-    response_task.cancel()
-    await asyncio.gather(response_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1676,7 +1591,6 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
             "$source",
             _target(thread_id="$thread"),
             8,
-            Mock(return_value=True),
             finalize,
         )
 
@@ -1748,7 +1662,6 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
             "$source",
             _target(thread_id="$thread"),
             7,
-            Mock(return_value=True),
             finalize_stop,
         )
         still_claimed = await store.approval_continuation(continuation.approval_id)
@@ -1763,7 +1676,6 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
             "$source",
             _target(thread_id="$thread"),
             7,
-            Mock(return_value=True),
             finalize_stop,
         )
 
@@ -1821,7 +1733,6 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
             "$source",
             _target(thread_id="$thread"),
             7,
-            Mock(return_value=True),
             finalize_stop,
         )
         await store.acknowledge_matrix_delivery(
@@ -1842,7 +1753,6 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
             "$source",
             _target(thread_id="$thread"),
             7,
-            Mock(return_value=True),
             finalize_stop,
         )
 
@@ -1902,7 +1812,6 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
 
     lifecycle = MagicMock(finalize=AsyncMock())
     finalize_stopped_response = AsyncMock(return_value=True)
-    on_current_stop_finalized = AsyncMock()
     with (
         patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()),
         patch.object(runner, "_build_lifecycle", return_value=lifecycle),
@@ -1916,7 +1825,6 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
             await bot._user_stop_reconciler.finalize(
                 "$waiting",
                 7,
-                on_current_stop_finalized,
                 room_id=target.room_id,
             )
 
@@ -1942,12 +1850,10 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
         assert await bot._user_stop_reconciler.finalize(
             "$waiting",
             7,
-            on_current_stop_finalized,
             room_id=target.room_id,
         )
 
     finalize_stopped_response.assert_not_awaited()
-    on_current_stop_finalized.assert_awaited_once()
     stopped_turn = turn_store.get_turn_record("$source")
     assert stopped_turn is not None
     assert stopped_turn.response_event_id == "$waiting"
@@ -2738,7 +2644,8 @@ async def test_restart_recovery_skips_redacted_replacement(tmp_path: Path) -> No
 @pytest.mark.parametrize("cancelled", [False, True], ids=("error", "cancellation"))
 async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, cancelled: bool) -> None:
     """A failed outbox read cannot hide a same-runtime claim until restart."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = ApprovalContinuation(
@@ -2756,6 +2663,8 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
+    # Every continuation pauses a reply; one stored without records is adopted at start.
+    await adopt_main_left_approval(bot, continuation)
     failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
 
     with (
@@ -3127,7 +3036,8 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
 @pytest.mark.asyncio
 async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_input(tmp_path: Path) -> None:
     """An internal resume must serialize without interrupting the active human turn."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread", reply_to_event_id="$follow-up")
     await _admit_approval_source(runner.deps.approval_store)
     continuation = ApprovalContinuation(
@@ -3145,6 +3055,8 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         state="ready",
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    # Every continuation pauses a reply; one stored without records is adopted at start.
+    await adopt_main_left_approval(bot, continuation)
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
@@ -3364,7 +3276,8 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Path) -> None:
     """A visible error is not terminal while its continuation still owns the source."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
     continuation = ApprovalContinuation(
@@ -3390,6 +3303,8 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
         state="ready",
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    # Every continuation pauses a reply; one stored without records is adopted at start.
+    await adopt_main_left_approval(bot, continuation)
     incomplete = FinalDeliveryOutcome(
         terminal_status="error",
         event_id="$waiting",
@@ -4835,13 +4750,15 @@ async def test_completed_approval_continuation_delivers_canonical_ordered_body_u
     assert final_request.tool_trace == trace
 
 
-async def _claim_streamable_approval(
-    runner: ResponseRunner,
+@asynccontextmanager
+async def _resumed_streamable_approval(
+    bot: AgentBot,
     *,
     requester_online: bool,
     entity_kind: Literal["agent", "team"] = "agent",
-) -> ApprovalContinuation:
-    """Claim one ready agent or team continuation whose requester is online or away."""
+) -> AsyncIterator[ApprovalContinuation]:
+    """Claim one ready agent or team continuation, whose requester is online or away, with its resume span."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     client = runner._client()
@@ -4876,12 +4793,8 @@ async def _claim_streamable_approval(
         ),
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    claimed = await store.claim_approval_continuation(
-        continuation.approval_id,
-        runtime_generation=runner.deps.approval_runtime_generation,
-    )
-    assert claimed is not None
-    return claimed
+    async with resumed_main_left_approval(bot, continuation) as claimed:
+        yield claimed
 
 
 def _approval_reply_edits(client: AsyncClient) -> list[tuple[str, str]]:
@@ -4902,8 +4815,8 @@ async def test_approval_continuation_streams_into_its_reply_only_for_streaming_r
     requester_online: bool,
 ) -> None:
     """An online requester watches resumed work in the reply; an away requester gets only the final edit."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    claimed = await _claim_streamable_approval(runner, requester_online=requester_online)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     completed = ToolTraceEntry(type="tool_call_completed", tool_name="inspect", tool_call_id="call-1")
     body = "Checking.\n\n🔧 `inspect` [1]\n\nThe report is clean."
 
@@ -4921,10 +4834,11 @@ async def test_approval_continuation_streams_into_its_reply_only_for_streaming_r
         return CompletedApprovalRun(response_text=body, metadata_content={})
 
     with patch.object(runner, "_continue_entity_call", new=continue_call):
-        outcome = await runner._run_claimed_approval_lifecycle(
-            claimed,
-            target=_target(thread_id="$thread", reply_to_event_id="$source"),
-        )
+        async with _resumed_streamable_approval(bot, requester_online=requester_online) as claimed:
+            outcome = await runner._run_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            )
 
     assert outcome.terminal_status == "completed"
     progress_edits = [(STREAM_STATUS_STREAMING, body)] if requester_online else []
@@ -4934,8 +4848,8 @@ async def test_approval_continuation_streams_into_its_reply_only_for_streaming_r
 @pytest.mark.asyncio
 async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path) -> None:
     """A resumed team run edits the same reply live before its durable final edit."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    claimed = await _claim_streamable_approval(runner, requester_online=True, entity_kind="team")
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     body = "🤝 **Team Response** (General):\n\n**General**: The report is clean."
 
     async def continue_team(*, progress: ProgressPublisher | None, **_kwargs: object) -> CompletedApprovalRun:
@@ -4943,14 +4857,15 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
         await progress(StructuredStreamChunk(content=body))
         return CompletedApprovalRun(response_text=body, metadata_content={})
 
-    with (
-        patch("mindroom.response_runner.continue_paused_team_run", new=continue_team),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
-    ):
-        outcome = await runner._run_claimed_approval_lifecycle(
-            claimed,
-            target=_target(thread_id="$thread", reply_to_event_id="$source"),
-        )
+    async with _resumed_streamable_approval(bot, requester_online=True, entity_kind="team") as claimed:
+        with (
+            patch("mindroom.response_runner.continue_paused_team_run", new=continue_team),
+            patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        ):
+            outcome = await runner._run_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            )
 
     assert outcome.terminal_status == "completed"
     assert _approval_reply_edits(runner._client()) == [(STREAM_STATUS_STREAMING, body), (STREAM_STATUS_COMPLETED, body)]
@@ -4959,8 +4874,8 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_streamed_approval_continuation_that_pauses_again_ends_on_its_new_approval(tmp_path: Path) -> None:
     """Live progress yields to the next approval, leaving the reply approval-pending."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    claimed = await _claim_streamable_approval(runner, requester_online=True)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     gated = _ordered_pause(
         PausedAttempt(
             session_id="session-1",
@@ -4995,14 +4910,15 @@ async def test_streamed_approval_continuation_that_pauses_again_ends_on_its_new_
         )
         assert activated is not None
 
-    with (
-        patch.object(runner, "_continue_entity_call", new=continue_call),
-        patch.object(runner._approval_responses, "_publish_cards", new=publish_cards),
-    ):
-        outcome = await runner._run_claimed_approval_lifecycle(
-            claimed,
-            target=_target(thread_id="$thread", reply_to_event_id="$source"),
-        )
+    async with _resumed_streamable_approval(bot, requester_online=True) as claimed:
+        with (
+            patch.object(runner, "_continue_entity_call", new=continue_call),
+            patch.object(runner._approval_responses, "_publish_cards", new=publish_cards),
+        ):
+            outcome = await runner._run_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            )
 
     assert outcome.terminal_status == "suspended"
     assert _approval_reply_edits(runner._client()) == [
@@ -5014,18 +4930,21 @@ async def test_streamed_approval_continuation_that_pauses_again_ends_on_its_new_
 @pytest.mark.asyncio
 async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled(tmp_path: Path) -> None:
     """A stop during live progress ends progress before the reply settles as cancelled."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    claimed = await _claim_streamable_approval(runner, requester_online=True)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    # The turn whose answer the approval paused, which the Stop reaction names.
+    await bot._turn_store.record_pending_turn(
+        TurnRecord.create(
+            ("$source",),
+            response_event_id="$waiting",
+            completed=False,
+            response_owner="general",
+            requester_id="@user:localhost",
+            conversation_target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        ),
+    )
     client = runner._client()
     progress_edited = asyncio.Event()
-    send = client.room_send.side_effect
-
-    def record_send(**kwargs: object) -> nio.RoomSendResponse:
-        if "m.new_content" in cast("dict[str, object]", kwargs["content"]):
-            progress_edited.set()
-        return send(**kwargs)
-
-    client.room_send.side_effect = record_send
 
     async def continue_call(
         _continuation: ApprovalContinuation,
@@ -5039,23 +4958,32 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
         msg = "The stopped continuation kept running"
         raise AssertionError(msg)
 
-    with (
-        patch.object(runner, "_continue_entity_call", new=continue_call),
-        patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
-            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
-        ),
-    ):
-        lifecycle = asyncio.create_task(
-            runner._run_claimed_approval_lifecycle(
-                claimed,
-                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+    async with _resumed_streamable_approval(bot, requester_online=True) as claimed:
+        with (
+            patch.object(runner, "_continue_entity_call", new=continue_call),
+            patch(
+                "mindroom.approval_response.approval_manager.get_approval_store",
+                return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
             ),
-        )
-        async with asyncio.timeout(5):
-            await progress_edited.wait()
-        request_task_cancel(runner.deps.stop_manager.tracked_messages["$waiting"].task, cancel_source="user_stop")
-        outcome = await lifecycle
+        ):
+            send = client.room_send.side_effect
+
+            def record_send(**kwargs: object) -> nio.RoomSendResponse:
+                if "m.new_content" in cast("dict[str, object]", kwargs["content"]):
+                    progress_edited.set()
+                return send(**kwargs)
+
+            client.room_send.side_effect = record_send
+            lifecycle = asyncio.create_task(
+                runner._run_claimed_approval_lifecycle(
+                    claimed,
+                    target=_target(thread_id="$thread", reply_to_event_id="$source"),
+                ),
+            )
+            async with asyncio.timeout(5):
+                await progress_edited.wait()
+            assert await bot._user_stop_reconciler.finalize("$waiting", 7, room_id="!room:localhost")
+            outcome = await lifecycle
 
     assert outcome.terminal_status == "cancelled"
     assert _approval_reply_edits(client) == [
@@ -5698,7 +5626,8 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
 @pytest.mark.asyncio
 async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_path: Path) -> None:
     """A visible successful FINAL must complete even if the live caller is cancelled afterward."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = ApprovalContinuation(
@@ -5717,11 +5646,6 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    claimed = await store.claim_approval_continuation(
-        continuation.approval_id,
-        runtime_generation=runner.deps.approval_runtime_generation,
-    )
-    assert claimed is not None
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
         await store.enqueue_matrix_delivery(
@@ -5745,15 +5669,16 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         raise asyncio.CancelledError
 
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
-    with (
-        patch.object(runner, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
-        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
-        patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
-    ):
-        outcome = await runner._run_claimed_approval_lifecycle(
-            claimed,
-            target=_target(thread_id="$thread", reply_to_event_id="$source"),
-        )
+    async with resumed_main_left_approval(bot, continuation) as claimed:
+        with (
+            patch.object(runner, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
+            patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+            patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
+        ):
+            outcome = await runner._run_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            )
 
     assert outcome.terminal_status == "completed"
     assert outcome.event_id == "$waiting"
@@ -5765,7 +5690,8 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
 @pytest.mark.asyncio
 async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp_path: Path) -> None:
     """Late lifecycle cancellation must adopt the visible success before failure fencing."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(store)
@@ -5785,6 +5711,8 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
+    # Every continuation pauses a reply; one stored without records is adopted at start.
+    await adopt_main_left_approval(bot, continuation)
 
     async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
         await store.enqueue_matrix_delivery(
@@ -6290,22 +6218,26 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
 
 
 # ---------------------------------------------------------------------------
-# 2. Attempt mechanics: placeholder, stop tracking on success/failure
+# 2. Attempt mechanics: placeholder, failures, and suspensions
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_adopted_placeholder_is_passed_to_the_response_function(tmp_path: Path) -> None:
     """The event the turn already made visible is what the attempt generates against."""
-    stop_manager = RecordingStopManager()
-    runner = _attempt_runner(tmp_path, stop_manager)
+    runner = _attempt_runner(tmp_path)
     seen: list[str | None] = []
 
     async def respond(message_id: str | None) -> None:
         seen.append(message_id)
 
     result = await runner.run(
-        ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$placeholder"),
+        ResponseAttemptRequest(
+            target=_target(),
+            response_function=respond,
+            span=_Span().attempt(),
+            existing_event_id="$placeholder",
+        ),
     )
 
     assert result == "$placeholder"
@@ -6313,38 +6245,9 @@ async def test_adopted_placeholder_is_passed_to_the_response_function(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_stop_tracking_registered_during_run_and_cleared_on_success(tmp_path: Path) -> None:
-    """The attempt is stop-trackable while generating and tracking clears after success."""
-    stop_manager = RecordingStopManager()
-    runner = _attempt_runner(tmp_path, stop_manager)
-    target = _target()
-    observed: list[tuple[MessageTarget, str | None, bool]] = []
-
-    async def respond(message_id: str | None) -> None:
-        assert message_id is not None
-        tracked = stop_manager.tracked_messages[message_id]
-        observed.append((tracked.target, tracked.run_id, tracked.task.done()))
-
-    result = await runner.run(
-        ResponseAttemptRequest(
-            target=target,
-            response_function=respond,
-            existing_event_id="$placeholder",
-            run_id="run-1",
-        ),
-    )
-
-    assert result == "$placeholder"
-    assert observed == [(target, "run-1", False)]
-    assert stop_manager.cleared == ["$placeholder"]
-    assert stop_manager.tracked_messages == {}
-
-
-@pytest.mark.asyncio
-async def test_stop_tracking_cleared_on_failure(tmp_path: Path) -> None:
-    """Generation failures re-raise but never leave dangling stop tracking."""
-    stop_manager = RecordingStopManager()
-    runner = _attempt_runner(tmp_path, stop_manager)
+async def test_generation_failure_reraises(tmp_path: Path) -> None:
+    """Generation failures re-raise to the response lifecycle that settles the reply."""
+    runner = _attempt_runner(tmp_path)
 
     async def respond(_message_id: str | None) -> None:
         msg = "generation exploded"
@@ -6352,19 +6255,20 @@ async def test_stop_tracking_cleared_on_failure(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="generation exploded"):
         await runner.run(
-            ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$placeholder"),
+            ResponseAttemptRequest(
+                target=_target(),
+                response_function=respond,
+                span=_Span().attempt(),
+                existing_event_id="$placeholder",
+            ),
         )
-
-    assert stop_manager.cleared == ["$placeholder"]
-    assert stop_manager.tracked_messages == {}
 
 
 @pytest.mark.asyncio
 async def test_approval_suspension_is_not_logged_as_generation_failure(tmp_path: Path) -> None:
     """A native pause is a lifecycle handoff, not an exceptional generation failure."""
-    stop_manager = RecordingStopManager()
     logger = MagicMock()
-    runner = ResponseAttemptRunner(replace(_attempt_runner(tmp_path, stop_manager).deps, logger=logger))
+    runner = ResponseAttemptRunner(replace(_attempt_runner(tmp_path).deps, logger=logger))
     suspension = ResponsePausedForApproval(
         PausedAttempt(
             session_id="session-1",
@@ -6379,32 +6283,16 @@ async def test_approval_suspension_is_not_logged_as_generation_failure(tmp_path:
 
     with pytest.raises(ResponsePausedForApproval) as raised:
         await runner.run(
-            ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$placeholder"),
+            ResponseAttemptRequest(
+                target=_target(),
+                response_function=respond,
+                span=_Span().attempt(),
+                existing_event_id="$placeholder",
+            ),
         )
 
     assert raised.value is suspension
     logger.exception.assert_not_called()
-    assert stop_manager.cleared == ["$placeholder"]
-
-
-@pytest.mark.asyncio
-async def test_attempt_without_visible_message_tracks_synthetic_key(tmp_path: Path) -> None:
-    """No placeholder and no existing event still produces stop-trackable state."""
-    stop_manager = RecordingStopManager()
-    runner = _attempt_runner(tmp_path, stop_manager)
-    tracked_keys: list[str] = []
-
-    async def respond(message_id: str | None) -> None:
-        assert message_id is None
-        tracked_keys.extend(stop_manager.tracked_messages)
-
-    result = await runner.run(ResponseAttemptRequest(target=_target(), response_function=respond))
-
-    assert result is None
-    assert len(tracked_keys) == 1
-    assert tracked_keys[0].startswith("__pending_response__:")
-    assert stop_manager.cleared == tracked_keys
-    assert stop_manager.tracked_messages == {}
 
 
 # ---------------------------------------------------------------------------
@@ -6413,14 +6301,17 @@ async def test_attempt_without_visible_message_tracks_synthetic_key(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_user_stop_mid_generation_cancels_task_and_clears_tracking(tmp_path: Path) -> None:
-    """A stop reaction mid-generation cancels the attempt, records the outcome, and clears tracking."""
-    stop_manager = RecordingStopManager()
-    runner = _attempt_runner(tmp_path, stop_manager)
+async def test_user_stop_mid_generation_cancels_the_span_task(tmp_path: Path) -> None:
+    """A Stop on the reply span mid-generation cancels the attempt, which records the outcome and keeps its event."""
+    runner = _attempt_runner(tmp_path)
+    spans = SpanRegistry()
+    spans.expect("span-1")
     started = asyncio.Event()
     cancel_reasons: list[str] = []
+    attempt_tasks: list[asyncio.Task[None] | None] = []
 
     async def respond(_message_id: str | None) -> None:
+        attempt_tasks.append(asyncio.current_task())
         started.set()
         await asyncio.Event().wait()
 
@@ -6429,22 +6320,26 @@ async def test_user_stop_mid_generation_cancels_task_and_clears_tracking(tmp_pat
             ResponseAttemptRequest(
                 target=_target(),
                 response_function=respond,
+                span=SpanAttempt(
+                    register=lambda task: spans.register("span-1", task),
+                    add_stop_button=AsyncMock(),
+                ),
                 existing_event_id="$placeholder",
                 on_cancelled=cancel_reasons.append,
             ),
         ),
     )
     await asyncio.wait_for(started.wait(), timeout=2)
-    tracked = stop_manager.tracked_messages["$placeholder"]
 
-    assert stop_manager.request_stop_if("$placeholder", lambda: True) is True
+    assert spans.cancel("span-1", cancel_source="user_stop") is True
     # The attempt survives the cancellation and still reports its visible event id.
     assert await asyncio.wait_for(run_task, timeout=2) == "$placeholder"
 
-    assert tracked.task.cancelled()
+    [attempt_task] = attempt_tasks
+    assert attempt_task is not None
+    assert attempt_task.cancelled()
     assert cancel_reasons == ["cancelled_by_user"]
-    assert stop_manager.cleared == ["$placeholder"]
-    assert stop_manager.tracked_messages == {}
+    assert spans.live_span_ids() == frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -8425,26 +8320,23 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("thread_id", "failure_reason", "final_visible_body", "expected_user_stops"),
+    ("thread_id", "failure_reason", "final_visible_body"),
     [
-        ("$thread", "interrupted", INTERRUPTED_RESPONSE_NOTE, []),
-        (None, "sync_restart_cancelled", RESTART_INTERRUPTED_RESPONSE_NOTE, []),
-        ("$thread", "cancelled_by_user", "partial answer", [("$response", 7)]),
+        ("$thread", "interrupted", INTERRUPTED_RESPONSE_NOTE),
+        (None, "sync_restart_cancelled", RESTART_INTERRUPTED_RESPONSE_NOTE),
     ],
-    ids=["interrupted", "threadless-restart", "user-stop"],
+    ids=["interrupted", "threadless-restart"],
 )
 async def test_landed_terminal_interruption_settles_the_turn(
     tmp_path: Path,
     thread_id: str | None,
     failure_reason: str,
     final_visible_body: str,
-    expected_user_stops: list[tuple[str, int]],
 ) -> None:
-    """A landed interruption is terminal, so the turn is handled; only an explicit user stop records a user stop."""
+    """A landed interruption is terminal, so the turn is handled, without recording a user stop."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     user_stops: list[tuple[str, int]] = []
-    coordinator._user_stop_receipt_orders["$response"] = {7}
     request = replace(
         _plain_request(_target(thread_id=thread_id)),
         on_deferred_outcome_handled=_async_callback(lambda _event_id: None),
@@ -8489,7 +8381,7 @@ async def test_landed_terminal_interruption_settles_the_turn(
         )
 
     assert result == "$response"
-    assert user_stops == expected_user_stops
+    assert user_stops == []
 
 
 @pytest.mark.asyncio
@@ -9886,10 +9778,20 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
 @pytest.mark.asyncio
 async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlement(tmp_path: Path) -> None:
     """A stop during progress shutdown ends the in-flight edit before the reply settles as cancelled."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    claimed = await _claim_streamable_approval(runner, requester_online=True)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    # The turn whose answer the approval paused, which the Stop reaction names.
+    await bot._turn_store.record_pending_turn(
+        TurnRecord.create(
+            ("$source",),
+            response_event_id="$waiting",
+            completed=False,
+            response_owner="general",
+            requester_id="@user:localhost",
+            conversation_target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        ),
+    )
     client = runner._client()
-    send = client.room_send.side_effect
     progress_started = asyncio.Event()
     settlement_started = asyncio.Event()
     exiting = asyncio.Event()
@@ -9913,8 +9815,6 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         finally:
             in_flight.remove(status)
 
-    client.room_send.side_effect = slow_progress_send
-
     async def continue_call(
         _continuation: ApprovalContinuation,
         *,
@@ -9927,25 +9827,28 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         exiting.set()
         return CompletedApprovalRun(response_text="The report is clean.", metadata_content={})
 
-    with (
-        patch.object(runner, "_continue_entity_call", new=continue_call),
-        patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
-            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
-        ),
-    ):
-        lifecycle = asyncio.create_task(
-            runner._run_claimed_approval_lifecycle(
-                claimed,
-                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+    async with _resumed_streamable_approval(bot, requester_online=True) as claimed:
+        send = client.room_send.side_effect
+        client.room_send.side_effect = slow_progress_send
+        with (
+            patch.object(runner, "_continue_entity_call", new=continue_call),
+            patch(
+                "mindroom.approval_response.approval_manager.get_approval_store",
+                return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
             ),
-        )
-        async with asyncio.timeout(5):
-            await exiting.wait()
-        request_task_cancel(runner.deps.stop_manager.tracked_messages["$waiting"].task, cancel_source="user_stop")
-        async with asyncio.timeout(5):
-            outcome = await lifecycle
-        assert in_flight == []
+        ):
+            lifecycle = asyncio.create_task(
+                runner._run_claimed_approval_lifecycle(
+                    claimed,
+                    target=_target(thread_id="$thread", reply_to_event_id="$source"),
+                ),
+            )
+            async with asyncio.timeout(5):
+                await exiting.wait()
+            assert await bot._user_stop_reconciler.finalize("$waiting", 7, room_id="!room:localhost")
+            async with asyncio.timeout(5):
+                outcome = await lifecycle
+            assert in_flight == []
 
     assert outcome.terminal_status == "cancelled"
     assert landed == [STREAM_STATUS_CANCELLED]

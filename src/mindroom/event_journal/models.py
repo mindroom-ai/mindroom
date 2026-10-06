@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
-    from mindroom.reply_lifecycle import CancelSpan, WakeApproval
+    from mindroom.reply_lifecycle import CancelSpan, TransferStop, WakeApproval
     from mindroom.turn_record import TurnRecord
 
     from .projection import ProjectedEvent
@@ -490,7 +490,7 @@ class DeliveryAcknowledgement:
     terminal_turn: TerminalTurnWrite | None = None
     # Work a reply row's acknowledgement left for after the commit, such as
     # cancelling a span a Stop that waited for this event now reaches.
-    reply_effects: tuple[CancelSpan | WakeApproval, ...] = ()
+    reply_effects: tuple[CancelSpan | WakeApproval | TransferStop, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,7 +500,7 @@ class PermanentDeliveryFailure:
     # The event a concurrent acknowledgement bound, which wins over the refusal.
     acknowledged_event_id: str | None = None
     # Work refused reply rows left for after the commit.
-    reply_effects: tuple[CancelSpan | WakeApproval, ...] = ()
+    reply_effects: tuple[CancelSpan | WakeApproval | TransferStop, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

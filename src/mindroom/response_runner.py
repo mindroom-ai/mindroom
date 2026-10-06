@@ -238,7 +238,6 @@ if TYPE_CHECKING:
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
-    from mindroom.stop import StopManager
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -920,7 +919,6 @@ class ResponseRunnerDeps:
 
     runtime: BotRuntimeView
     logger: structlog.stdlib.BoundLogger
-    stop_manager: StopManager
     runtime_paths: RuntimePaths
     storage_path: Path
     agent_name: str
@@ -994,7 +992,6 @@ class ResponseRunner:
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _process_shutdown_started: bool = field(default=False, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
     _approval_responses: ApprovalResponseCoordinator = field(init=False, repr=False)
     _approval_execution: AgentApprovalExecution = field(init=False, repr=False)
     _cli_approval_waits: CliApprovalWaits = field(init=False, repr=False)
@@ -2598,10 +2595,7 @@ class ResponseRunner:
                         request,
                         response_run_id=continuation.run_id,
                     ),
-                    run_id_callback=lambda run_id: self._note_run_id(
-                        continuation.response_event_id,
-                        run_id,
-                    ),
+                    run_id_callback=self._note_run_id,
                     progress=progress,
                 )
         return response_text
@@ -2913,18 +2907,9 @@ class ResponseRunner:
         source_event_id: str,
         target: MessageTarget,
         stop_receipt_order: int,
-        should_cancel: Callable[[], bool],
         finalize: Callable[[bool], Awaitable[bool]],
     ) -> bool:
-        """Cancel the live response, then durably finalize its turn under the same lock."""
-        cancellation_requested = False
-        self._user_stop_receipt_orders.setdefault(message_id, set()).add(stop_receipt_order)
-
-        async def cancel_live_response() -> None:
-            nonlocal cancellation_requested
-            if cancellation_requested:
-                return
-            cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
+        """Durably finalize a Stop on an event no reply owns, under its conversation's lock."""
 
         async def finalize_locked() -> bool:
             edited_sources = await self.deps.approval_store.edited_approval_sources_for_user_stop(
@@ -2947,18 +2932,10 @@ class ResponseRunner:
                     approval_settled |= settled
             return False if unresolved_final else await finalize(approval_settled)
 
-        try:
-            return await self._lifecycle_coordinator.run_locked_target_operation(
-                target=target,
-                while_waiting=cancel_live_response,
-                locked_operation=finalize_locked,
-            )
-        finally:
-            receipt_orders = self._user_stop_receipt_orders.get(message_id)
-            if receipt_orders is not None:
-                receipt_orders.discard(stop_receipt_order)
-            if not receipt_orders:
-                self._user_stop_receipt_orders.pop(message_id, None)
+        return await self._lifecycle_coordinator.run_locked_target_operation(
+            target=target,
+            locked_operation=finalize_locked,
+        )
 
     def reserve_waiting_human_message(
         self,
@@ -3010,13 +2987,8 @@ class ResponseRunner:
         )
 
     async def _active_response_event_ids(self, room_id: str) -> set[str]:
-        """Return still-running response event IDs for one room: replies whose span runs here, then the rest."""
-        active = {
-            event_id
-            for event_id, tracked in self.deps.stop_manager.tracked_messages.items()
-            if tracked.target.room_id == room_id and not tracked.task.done()
-        }
-        return active | await self.deps.replies.live_event_ids(room_id)
+        """Return the events of one room's replies whose span runs in this bot instance."""
+        return set(await self.deps.replies.live_event_ids(room_id))
 
     async def _run_locked_response_lifecycle(
         self,
@@ -3256,7 +3228,7 @@ class ResponseRunner:
                 require_resolved_membership=True,
             ):
                 return await self._settle_unauthorized_approval_continuation(owned)
-            # Each claimed generation runs in its own resume span (PR-1.md §5.2).
+            # Each claimed generation runs in its own resume span.
             async with self._reply_span_scope() as resume_slot:
                 claimed = await self._claim_owned_approval(owned, slot=resume_slot)
                 if claimed is None:
@@ -3274,7 +3246,7 @@ class ResponseRunner:
                 return event_id
 
     async def _exit_span_on_error(self, handle: SpanHandle, error: BaseException, *, target: MessageTarget) -> None:
-        """End a span whose locked response raised before ending it (PR-1.md §6.2 scope exits)."""
+        """End a span whose locked response raised before ending it."""
         gateway = self.deps.delivery_gateway
         confirms = handle.unconfirmed_progress
         now_ns = time.time_ns()
@@ -3347,7 +3319,7 @@ class ResponseRunner:
         *,
         history_scope: HistoryScope,
     ) -> ResponseRequest | None:
-        """Claim the reply this request answers, after main's first source gate passed (PR-1.md §6.1).
+        """Claim the reply this request answers, after main's first source gate passed.
 
         ``None`` means no span opened: earlier writes of the reply are
         unresolved, and the claim retries the sources once they resolve; or a
@@ -3508,16 +3480,10 @@ class ResponseRunner:
         self,
         owned: ApprovalContinuation,
         *,
-        slot: SpanSlot | None,
+        slot: SpanSlot,
     ) -> ApprovalContinuation | None:
-        """Claim a ready continuation, with its reply's resume span when reply records own the reply."""
+        """Claim a ready continuation together with its reply's resume span."""
         legacy_show_tool_calls = self._show_tool_calls(owned.entity_name)
-        if slot is None:
-            return await self.deps.approval_store.claim_approval_continuation(
-                owned.approval_id,
-                runtime_generation=self.deps.approval_runtime_generation,
-                legacy_show_tool_calls=legacy_show_tool_calls,
-            )
         claimed, handle = await self.deps.replies.claim_approval_resume(
             owned,
             runtime_generation=self.deps.approval_runtime_generation,
@@ -4009,15 +3975,15 @@ class ResponseRunner:
     ) -> None:
         """Make explicit user-stop settlement durable before releasing the response lock."""
         on_user_stop_handled = request.on_user_stop_handled
-        if not source_handled or cancel_source != "user_stop" or on_user_stop_handled is None:
+        handle = current_span()
+        if not source_handled or cancel_source != "user_stop" or on_user_stop_handled is None or handle is None:
             return
         response_event_id = final_outcome.final_visible_event_id
         assert response_event_id is not None
-        stop_receipt_orders = self._user_stop_receipt_orders.get(response_event_id)
-        if not stop_receipt_orders:
+        reply = await handle.runtime.store.replies.load(handle.reply_id)
+        if reply is None or reply.stop_applied_receipt_order is None:
             return
-        stop_receipt_order = max(stop_receipt_orders)
-        await on_user_stop_handled(response_event_id, stop_receipt_order)
+        await on_user_stop_handled(response_event_id, reply.stop_applied_receipt_order)
 
     async def _request_remains_authorized(
         self,
@@ -4101,7 +4067,7 @@ class ResponseRunner:
         return request if handle is None else self._with_recorded_interrupted_attempt(request, handle)
 
     def _with_recorded_interrupted_attempt(self, request: ResponseRequest, handle: SpanHandle) -> ResponseRequest:
-        """Tell a replay what its stopped attempt may have shown, from the reply's records (DESIGN.md §5.4)."""
+        """Tell a replay what its stopped attempt may have shown, from the reply's records."""
         if handle.span.kind is not rl.SpanKind.REPLAY:
             return request
         unfinished = handle.resumed
@@ -4199,7 +4165,7 @@ class ResponseRunner:
         *,
         source_deleted: bool,
     ) -> None:
-        """End a claimed span whose source became terminal before it ran (PR-1.md §6.2 second gate)."""
+        """End a claimed span whose source became terminal before it ran."""
         gateway = self.deps.delivery_gateway
         now_ns = time.time_ns()
         if source_deleted:
@@ -4339,7 +4305,7 @@ class ResponseRunner:
         regenerated) must never be treated as a redactable placeholder.
         """
         if current_span() is not None:
-            # The span's exit decides the reply; a placeholder stays for the retry (PR-1.md §6.2).
+            # The span's exit decides the reply; a placeholder stays for the retry.
             return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                 terminal_status=terminal_status,
                 failure_reason=failure_reason,
@@ -4663,7 +4629,7 @@ class ResponseRunner:
         target: MessageTarget,
         delivery_started: bool,
     ) -> FinalDeliveryOutcome:
-        """End a span whose settled outcome wrote no terminal row (PR-1.md §6.2)."""
+        """End a span whose settled outcome wrote no terminal row."""
         gateway = self.deps.delivery_gateway
         confirms = handle.unconfirmed_progress
         now_ns = time.time_ns()
@@ -4774,7 +4740,7 @@ class ResponseRunner:
         request = prepared_request
         handle = current_span()
         if handle is not None and not handle.exited:
-            # Nothing to answer: a placeholder goes, as a suppressed answer's does (PR-1.md §6.2).
+            # Nothing to answer: a placeholder goes, as a suppressed answer's does.
             confirms = handle.unconfirmed_progress
             now_ns = time.time_ns()
             await self.deps.delivery_gateway.end_reply_span(
@@ -5098,7 +5064,7 @@ class ResponseRunner:
             )
 
             def _note_attempt_run_id(current_run_id: str) -> None:
-                self._note_run_id(message_id, current_run_id)
+                self._note_run_id(current_run_id)
                 team_turn_recorder.set_run_id(current_run_id)
 
             def _note_visible_response_event_id(response_event_id: str) -> None:
@@ -5441,7 +5407,6 @@ class ResponseRunner:
         return await ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=self._client(),
-                stop_manager=self.deps.stop_manager,
                 logger=self.deps.logger,
                 show_stop_button=lambda: show_stop_button and self.deps.runtime.config.defaults.show_stop_button,
                 config=self.deps.runtime.config,
@@ -5452,29 +5417,32 @@ class ResponseRunner:
                 response_function=response_function,
                 existing_event_id=existing_event_id,
                 user_id=user_id,
-                run_id=run_id,
                 on_cancelled=on_cancelled,
-                span=self._span_attempt(),
+                span=self._span_attempt(run_id),
             ),
         )
 
-    def _span_attempt(self) -> SpanAttempt | None:
+    def _span_attempt(self, run_id: str | None) -> SpanAttempt:
         """Return the current reply span's ownership of an attempt: its Stop and its Stop button."""
         handle = current_span()
-        if handle is None:
-            return None
+        assert handle is not None, "every response attempt runs in a reply span"
+        spans = handle.runtime.spans
+
+        def register(task: asyncio.Task[None]) -> None:
+            spans.register(handle.span_id, task)
+            spans.update_run_id(handle.span_id, run_id)
+
         return SpanAttempt(
-            register=lambda task: handle.runtime.spans.register(handle.span_id, task),
+            register=register,
             add_stop_button=lambda message_id: self.deps.delivery_gateway.add_reply_stop_button(handle, message_id),
         )
 
-    def _note_run_id(self, message_id: str | None, run_id: str | None) -> None:
-        """Tell whoever cancels this attempt which Agno run it is on."""
+    @staticmethod
+    def _note_run_id(run_id: str | None) -> None:
+        """Tell the span registry which Agno run the current span's attempt is on, so a Stop cancels it too."""
         handle = current_span()
-        if handle is not None:
-            handle.runtime.spans.update_run_id(handle.span_id, run_id)
-        else:
-            self.deps.stop_manager.update_run_id(message_id, run_id)
+        assert handle is not None, "every response attempt runs in a reply span"
+        handle.runtime.spans.update_run_id(handle.span_id, run_id)
 
     @timed("prepare_response_runtime")
     async def prepare_response_runtime(
@@ -5542,7 +5510,7 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any] = {}
 
         def note_attempt_run_id(current_run_id: str) -> None:
-            self._note_run_id(request.existing_event_id, current_run_id)
+            self._note_run_id(current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
@@ -5646,7 +5614,7 @@ class ResponseRunner:
         )
 
         def note_attempt_run_id(current_run_id: str) -> None:
-            self._note_run_id(request.existing_event_id, current_run_id)
+            self._note_run_id(current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 

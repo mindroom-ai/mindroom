@@ -1414,8 +1414,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.orchestrator = MagicMock()
         bot._redact_message_event = AsyncMock(return_value=True)
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
-        add_stop_button = AsyncMock(return_value=None)
-        bot.stop_manager.add_stop_button = add_stop_button
         mock_team_response = AsyncMock(return_value="Finding")
         mock_team_response_stream = MagicMock(side_effect=fake_team_response_stream)
 
@@ -1434,6 +1432,10 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.delivery_gateway.DeliveryGateway.edit_text",
                 new=AsyncMock(return_value="$response"),
             ) as edit_text,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.add_reply_stop_button",
+                new=AsyncMock(),
+            ) as add_stop_button,
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(

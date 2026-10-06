@@ -27,7 +27,6 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_runner import ResponseShutdownTimeoutError
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
-from mindroom.stop import StopManager
 from tests.conftest import unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -42,6 +41,7 @@ from tests.test_edit_regenerator import (
     _harness,
     _turn_record,
 )
+from tests.test_response_attempt import _Span
 from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _store
 
@@ -92,7 +92,6 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     attempt = ResponseAttemptRunner(
         ResponseAttemptDeps(
             client=harness.regenerator.deps.runtime.client,
-            stop_manager=StopManager(),
             logger=MagicMock(),
             show_stop_button=lambda: False,
             config=harness.config,
@@ -111,6 +110,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
                 target=request.response_envelope.target,
                 existing_event_id=request.existing_event_id,
                 response_function=model,
+                span=_Span().attempt(),
                 on_cancelled=cancelled.append,
             ),
         )
@@ -455,7 +455,6 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
     attempt = ResponseAttemptRunner(
         ResponseAttemptDeps(
             client=bot.client,
-            stop_manager=StopManager(),
             logger=MagicMock(),
             show_stop_button=lambda: False,
             config=bot.config,
@@ -480,7 +479,7 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
             raise
 
     async def callback(_room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
-        await attempt.run(ResponseAttemptRequest(target=_target(), response_function=model))
+        await attempt.run(ResponseAttemptRequest(target=_target(), response_function=model, span=_Span().attempt()))
         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     dispatcher = _dispatcher(principal, callback)

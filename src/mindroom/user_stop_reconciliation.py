@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.delivery_gateway import DeliveryGateway, ReplyStop
     from mindroom.handled_turns import TurnRecord
     from mindroom.message_target import MessageTarget
@@ -62,19 +60,11 @@ class UserStopReconciler:
             raise RuntimeError(msg)
         return stopped
 
-    def _should_cancel(self, source_event_id: str, stop_receipt_order: int) -> bool:
-        current = self.deps.turn_store.get_turn_record(source_event_id)
-        return current is None or (
-            (current.latest_edit_receipt_order or 0) <= stop_receipt_order
-            and not self._is_settled(current, stop_receipt_order)
-        )
-
     async def _finalize_under_lock(
         self,
         response_event_id: str,
         stop_receipt_order: int,
         target: MessageTarget,
-        on_current_stop_finalized: Callable[[], Awaitable[None]],
         approval_settled: bool,
     ) -> bool:
         async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
@@ -98,11 +88,7 @@ class UserStopReconciler:
                     delivery_settled=True,
                     deleted_turn_id=deleted_turn_id,
                 )
-        if not self._is_settled(stopped, stop_receipt_order):
-            return False
-        if not newer_edit_exists:
-            await on_current_stop_finalized()
-        return True
+        return self._is_settled(stopped, stop_receipt_order)
 
     async def accepts_reply_stop(self, response_event_id: str, room_id: str) -> bool:
         """Return whether a Stop on this event reaches a reply record in the room."""
@@ -112,7 +98,6 @@ class UserStopReconciler:
         self,
         response_event_id: str,
         stop_receipt_order: int,
-        on_current_stop_finalized: Callable[[], Awaitable[None]],
         *,
         room_id: str,
     ) -> bool:
@@ -126,6 +111,8 @@ class UserStopReconciler:
         transaction that records it on the turn, so no terminal row slips
         between them, and the span's exit, the approval's failure settlement,
         or the owed cancel note shows it. Nothing waits for the conversation.
+        A Stop on an event no reply owns, a turn main left, finalizes under the
+        conversation's lock.
         """
         owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
         if owner is not None and owner.conversation_target is None:
@@ -168,12 +155,10 @@ class UserStopReconciler:
             source_event_id,
             target,
             stop_receipt_order,
-            lambda: self._should_cancel(source_event_id, stop_receipt_order),
             lambda approval_settled: self._finalize_under_lock(
                 response_event_id,
                 stop_receipt_order,
                 target,
-                on_current_stop_finalized,
                 approval_settled,
             ),
         )

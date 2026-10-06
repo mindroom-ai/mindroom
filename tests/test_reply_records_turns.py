@@ -85,7 +85,7 @@ async def _stop(bot: AgentBot, event_id: str, receipt_order: int) -> asyncio.Tas
     """Start a Stop on the reply showing ``event_id``, as a Stop reaction does: through the turn's durable Stop."""
     await _pending_turn(bot)
     stop = asyncio.create_task(
-        bot._user_stop_reconciler.finalize(event_id, receipt_order, AsyncMock(), room_id=_target().room_id),
+        bot._user_stop_reconciler.finalize(event_id, receipt_order, room_id=_target().room_id),
     )
 
     async def recorded() -> None:
@@ -646,8 +646,9 @@ async def test_a_retried_terminal_edit_resolves_to_the_row_it_recorded(tmp_path:
 async def _blocked_stream(
     bot: AgentBot,
     first_chunk: str | None = "Partial",
+    request: ResponseRequest | None = None,
 ) -> tuple[asyncio.Task[str | None], asyncio.Event]:
-    """Start a streamed answer that shows ``first_chunk``, if any, and then waits until cancelled."""
+    """Start a streamed answer to ``request`` that shows ``first_chunk``, if any, and then waits until cancelled."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     streaming = asyncio.Event()
 
@@ -663,7 +664,7 @@ async def _blocked_stream(
         should_use_streaming=AsyncMock(return_value=True),
         typing_indicator=_noop_typing,
     ):
-        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        response = asyncio.create_task(runner.generate_response(request or _plain_request(_target())))
         await asyncio.wait_for(streaming.wait(), timeout=5)
     return response, streaming
 
@@ -678,7 +679,7 @@ async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_
     await _pending_turn(bot)
 
     with patch.object(type(runner), "finalize_user_stop", new=AsyncMock()) as polling:
-        assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, AsyncMock(), room_id=_target().room_id)
+        assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
     polling.assert_not_awaited()
     stopped = bot._turn_store.get_turn_record("$event")
     assert stopped is not None
@@ -689,6 +690,25 @@ async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.CANCELLED
     assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
+
+
+async def test_a_stopped_reply_reports_its_stop_to_its_turn(tmp_path: Path) -> None:
+    """The request learns which Stop ended its reply, so its turn records that Stop as handled."""
+    bot = await _streaming_bot(tmp_path)
+    handled: list[tuple[str, int]] = []
+
+    async def record_user_stop(event_id: str, receipt_order: int) -> None:
+        handled.append((event_id, receipt_order))
+
+    request = replace(_plain_request(_target()), on_user_stop_handled=record_user_stop)
+    response, _streaming = await _blocked_stream(bot, request=request)
+    reply = await _reply(bot)
+    assert reply.event_id is not None
+    stop = await _stop(bot, reply.event_id, 7)
+    await asyncio.wait_for(response, timeout=5)
+    assert await asyncio.wait_for(stop, timeout=5)
+
+    assert handled == [(reply.event_id, 7)]
 
 
 def _stop_reaction(reacts_to: str) -> MagicMock:
@@ -732,7 +752,7 @@ async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_p
 
         # The user reacted to the event the homeserver did create.
         assert await bot._user_stop_reconciler.accepts_reply_stop("$sent1", _target().room_id)
-        assert await bot._user_stop_reconciler.finalize("$sent1", 7, AsyncMock(), room_id=_target().room_id)
+        assert await bot._user_stop_reconciler.finalize("$sent1", 7, room_id=_target().room_id)
         assert (await _reply(bot)).stop_receipt_order is None
         pending = bot._turn_store.get_turn_record("$event")
         assert pending is not None
@@ -785,7 +805,7 @@ async def test_a_stop_after_the_answer_was_written_changes_nothing(tmp_path: Pat
     assert answered.event_id is not None
     sent = len(bot.client.room_send.await_args_list)
 
-    assert await bot._user_stop_reconciler.finalize(answered.event_id, 7, AsyncMock(), room_id=_target().room_id)
+    assert await bot._user_stop_reconciler.finalize(answered.event_id, 7, room_id=_target().room_id)
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
@@ -895,7 +915,6 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
     assert reply.stop_button_event_id is None
     assert reply.redaction_pending == ()
     assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]
-    assert bot._response_runner.deps.stop_manager.tracked_messages == {}
 
 
 async def test_history_counts_a_reply_in_progress_only_while_its_span_runs(tmp_path: Path) -> None:

@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.constants import STREAM_STATUS_APPROVAL_PENDING, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent, ProjectedEvent
 from mindroom.history.types import HistoryScope
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.turn_record import TurnRecord
+from tests.conftest import unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.bot import AgentBot
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.event_journal import ApprovalContinuation
 
 
 async def main_left_reply(
@@ -90,3 +95,38 @@ async def read_after_sync(bot: AgentBot, visible: ResolvedVisibleMessage | Excep
         for _attempt in range(3):
             await bot._legacy_reply_reads.run()
     return fetch
+
+
+async def adopt_main_left_approval(bot: AgentBot, continuation: ApprovalContinuation) -> None:
+    """Start the bot, which adopts the paused reply of a continuation stored without reply records, and read it."""
+    await bot._reply_runtime.start()
+    await read_after_sync(
+        bot,
+        ResolvedVisibleMessage.synthetic(
+            event_id=continuation.response_event_id,
+            sender=bot.matrix_id.full_id,
+            body="Waiting for approval.",
+            timestamp=1,
+            thread_id=continuation.thread_id,
+            content={"body": "Waiting for approval.", STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+        ),
+    )
+
+
+@asynccontextmanager
+async def resumed_main_left_approval(
+    bot: AgentBot,
+    continuation: ApprovalContinuation,
+) -> AsyncIterator[ApprovalContinuation]:
+    """Adopt a ready continuation stored without reply records, then claim it with its reply's resume span.
+
+    The claim is the one the journal's approval handoff makes, so the claimed
+    continuation runs as the span's attempt for as long as the context is open.
+    """
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await adopt_main_left_approval(bot, continuation)
+    async with runner._reply_span_scope() as slot:
+        claimed = await runner._claim_owned_approval(continuation, slot=slot)
+        assert claimed is not None
+        assert slot.handle is not None
+        yield claimed

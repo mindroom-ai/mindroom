@@ -66,6 +66,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage as Vi
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
+from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_lifecycle import _response_outcome_label
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -116,6 +117,7 @@ from tests.conftest import (
     request_envelope,
     runtime_paths_for,
     seed_session,
+    unwrap_extracted_collaborator,
 )
 from tests.legacy_reply_helpers import main_left_reply, read_after_sync
 from tests.participation_helpers import ParticipationModel
@@ -1116,7 +1118,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Non-streaming AI calls should receive only live tracked event IDs for the room."""
+        """Non-streaming AI calls should receive the events of the room's replies whose span runs here."""
 
         @asynccontextmanager
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
@@ -1129,19 +1131,9 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
-        running_task = asyncio.create_task(asyncio.sleep(60))
-        done_task = asyncio.create_task(asyncio.sleep(0))
-        other_room_task = asyncio.create_task(asyncio.sleep(60))
-        await done_task
-        bot.stop_manager.set_current("$active", MessageTarget.resolve("!test:localhost", None, "$active"), running_task)
-        bot.stop_manager.set_current("$done", MessageTarget.resolve("!test:localhost", None, "$done"), done_task)
-        bot.stop_manager.set_current(
-            "$other-room",
-            MessageTarget.resolve("!other:localhost", None, "$other-room"),
-            other_room_task,
-        )
+        live_event_ids = AsyncMock(return_value=frozenset({"$active"}))
 
-        try:
+        with patch.object(ReplyRuntime, "live_event_ids", new=live_event_ids):
             mock_ai_response = AsyncMock(return_value="Handled")
             with patch_response_runner_module(
                 typing_indicator=noop_typing_indicator,
@@ -1164,10 +1156,7 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
             assert mock_ai_response.call_args.args[0].active_event_ids == frozenset({"$active"})
-        finally:
-            running_task.cancel()
-            other_room_task.cancel()
-            await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+        live_event_ids.assert_awaited_with("!test:localhost")
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_ignores_post_visible_before_response_mutation(
@@ -1245,7 +1234,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Streaming AI calls should receive only live tracked event IDs for the room."""
+        """Streaming AI calls should receive the events of the room's replies whose span runs here."""
 
         @asynccontextmanager
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
@@ -1259,19 +1248,9 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
-        running_task = asyncio.create_task(asyncio.sleep(60))
-        done_task = asyncio.create_task(asyncio.sleep(0))
-        other_room_task = asyncio.create_task(asyncio.sleep(60))
-        await done_task
-        bot.stop_manager.set_current("$active", MessageTarget.resolve("!test:localhost", None, "$active"), running_task)
-        bot.stop_manager.set_current("$done", MessageTarget.resolve("!test:localhost", None, "$done"), done_task)
-        bot.stop_manager.set_current(
-            "$other-room",
-            MessageTarget.resolve("!other:localhost", None, "$other-room"),
-            other_room_task,
-        )
+        live_event_ids = AsyncMock(return_value=frozenset({"$active"}))
 
-        try:
+        with patch.object(ReplyRuntime, "live_event_ids", new=live_event_ids):
             mock_stream = MagicMock(return_value=mock_streaming_response())
             with patch(
                 "mindroom.delivery_gateway.send_streaming_response",
@@ -1299,10 +1278,7 @@ class TestAgentBot(AgentBotTestBase):
                     )
 
             assert mock_stream.call_args.args[0].active_event_ids == frozenset({"$active"})
-        finally:
-            running_task.cancel()
-            other_room_task.cancel()
-            await asyncio.gather(running_task, other_room_task, return_exceptions=True)
+        live_event_ids.assert_awaited_with("!test:localhost")
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_redacts_suppressed_placeholder(
@@ -2459,8 +2435,6 @@ class TestAgentBot(AgentBotTestBase):
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         redact_message_event = AsyncMock(return_value=True)
         replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
-        add_stop_button = AsyncMock(return_value=None)
-        bot.stop_manager.add_stop_button = add_stop_button
         mock_ai_response = AsyncMock(return_value=response_text)
 
         with (
@@ -2478,6 +2452,10 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.delivery_gateway.DeliveryGateway.edit_text",
                 new=AsyncMock(return_value="$response"),
             ) as edit_text,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.add_reply_stop_button",
+                new=AsyncMock(),
+            ) as add_stop_button,
         ):
             response_event_id = await bot._response_runner.generate_response(
                 ResponseRequest(
@@ -3348,24 +3326,29 @@ class TestAgentBot(AgentBotTestBase):
         async def generate(_message_id: str | None) -> None:
             progress.settle(suppressed)
 
-        identity = bot._response_runner._response_identity(request, response_kind="ai")
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        identity = runner._response_identity(request, response_kind="ai")
 
         async def finalize(outcome: FinalDeliveryOutcome, **_kwargs: object) -> FinalDeliveryOutcome:
             events.append("cleanup_complete")
             return outcome
 
         lifecycle = cast("Any", SimpleNamespace(identity=identity, finalize=finalize))
-        result = await bot._response_runner._run_and_settle_locked_response(
-            request,
-            target=request.response_envelope.target,
-            lifecycle=lifecycle,
-            progress=progress,
-            response_function=generate,
-            user_id=request.user_id,
-            run_id="run-silent",
-            build_post_response_outcome=lambda _outcome: cast("Any", SimpleNamespace()),
-            post_response_deps=lambda: cast("Any", SimpleNamespace()),
-        )
+        # The response runs in the reply span the locked generation claims for it.
+        async with runner._reply_span_scope():
+            claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
+            assert claimed is not None
+            result = await runner._run_and_settle_locked_response(
+                claimed,
+                target=claimed.response_envelope.target,
+                lifecycle=lifecycle,
+                progress=progress,
+                response_function=generate,
+                user_id=claimed.user_id,
+                run_id="run-silent",
+                build_post_response_outcome=lambda _outcome: cast("Any", SimpleNamespace()),
+                post_response_deps=lambda: cast("Any", SimpleNamespace()),
+            )
 
         assert result is None
         assert events == ["cleanup_complete", "source_settled"]

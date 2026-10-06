@@ -299,8 +299,6 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path
@@ -368,8 +366,6 @@ async def test_team_pre_delivery_failure_keeps_its_placeholder_for_the_retry_and
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path

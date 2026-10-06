@@ -1,4 +1,4 @@
-"""Interleaved reply events keep the lifecycle invariants (DESIGN.md §6.5 I1-I8).
+"""Interleaved reply events keep the lifecycle invariants, I1-I8 of docs/architecture/reply-messages.md.
 
 A state machine drives one reply through every rule in random order -- claims,
 progress, durable rows and their acknowledgements or failures, Stops at any

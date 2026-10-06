@@ -2703,7 +2703,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         turn_store=rebuilt.deps.turn_store,
         user_stop_reconciler=bot._user_stop_reconciler,
         ingress=rebuilt.deps.ingress,
-        stop_manager=bot.stop_manager,
         reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
         enqueue_interactive_selection=rebuilt.enqueue_interactive_selection,
         config_confirmation=replace(

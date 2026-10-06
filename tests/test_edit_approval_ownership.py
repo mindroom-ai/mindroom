@@ -139,7 +139,7 @@ class _ApprovalCase:
 
     async def stop(self, order: int = 4) -> None:
         reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.runner, self.gateway))
-        assert await reconciler.finalize("$answer", order, AsyncMock(), room_id=self.room.room_id)
+        assert await reconciler.finalize("$answer", order, room_id=self.room.room_id)
         await self.settle_woken_sources()
 
     async def settle_woken_sources(self) -> None:

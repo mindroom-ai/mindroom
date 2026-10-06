@@ -1547,7 +1547,7 @@ class _MultiAgentOrchestrator:
             bot.schedule_reply_authorized_call_reconciliation()
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
-        """End the replies of entities removed while MindRoom was stopped; no bot finishes them (DESIGN.md §9.3)."""
+        """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""
         configured = {ROUTER_AGENT_NAME, *config.agents, *config.teams}
         await self._shared_journal_store().end_entity_replies(
             lambda entity_name: entity_name not in configured,
@@ -1781,7 +1781,7 @@ class _MultiAgentOrchestrator:
             if bot is not None:
                 await bot.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
                 self.agent_bots.pop(entity_name, None)
-        # No bot remains to finish their replies (DESIGN.md §9.3).
+        # No bot remains to finish their replies.
         await self._shared_journal_store().end_entity_replies(removed_entities.__contains__, now_ns=time.time_ns())
 
     async def _stop_entities_before_mcp_sync(

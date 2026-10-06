@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -1613,20 +1612,26 @@ class TestAgentBot(AgentBotTestBase):
             agent_name=mock_agent_user.agent_name,
         )
 
+        first_runner = unwrap_extracted_collaborator(first._response_runner)
+        history_scope = first_runner.deps.state_writer.history_scope()
         with patch(
             "mindroom.approval_response.evaluate_tool_approval",
             new=AsyncMock(return_value=(requires_human, 60.0)),
         ):
-            suspended = await first._response_runner._suspend_for_approval(
-                paused,
-                request=request,
-                target=target,
-                progress=_DeliveryProgress(),
-                execution_identity=identity,
-                entity_kind="agent",
-                history_scope=first._response_runner.deps.state_writer.history_scope(),
-                show_tool_calls=True,
-            )
+            # The turn's reply span pauses for the approval, as the locked generation does.
+            async with first_runner._reply_span_scope():
+                claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
+                assert claimed_request is not None
+                suspended = await first_runner._suspend_for_approval(
+                    paused,
+                    request=claimed_request,
+                    target=target,
+                    progress=_DeliveryProgress(),
+                    execution_identity=identity,
+                    entity_kind="agent",
+                    history_scope=history_scope,
+                    show_tool_calls=True,
+                )
 
         assert suspended.terminal_status == "suspended"
         assert executed == []
@@ -2509,7 +2514,8 @@ class TestAgentBot(AgentBotTestBase):
         event = _reaction_event("🛑", "$stop-reaction")
 
         with (
-            patch.object(bot.stop_manager, "can_handle_stop_reaction", new=MagicMock(return_value=True)),
+            # A running reply owns the Stop: the turn already names its answer.
+            patch.object(bot._user_stop_reconciler, "accepts_reply_stop", new=AsyncMock(return_value=True)),
             patch.object(
                 bot._user_stop_reconciler,
                 "finalize",
@@ -2690,12 +2696,12 @@ class TestAgentBot(AgentBotTestBase):
         assert await restarted._journal_dispatcher.store.pending() == ()
 
     @pytest.mark.asyncio
-    async def test_older_stop_callback_preserves_later_edit_and_its_stop_button(
+    async def test_older_stop_leaves_a_later_edit_without_a_cancellation_note(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A delayed older STOP cannot cancel or clean up a later edit's live controls."""
+        """A delayed older STOP makes the turn terminal without writing its cancellation over a later edit."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -2717,24 +2723,6 @@ class TestAgentBot(AgentBotTestBase):
             response_event_id="$response",
             edit_receipt_order=3,
         )
-        later_edit_task = asyncio.create_task(asyncio.Event().wait())
-        bot.stop_manager.set_current(
-            "$response",
-            target,
-            later_edit_task,
-            reaction_event_id="$later-edit-stop-button",
-        )
-        response_runner = unwrap_extracted_collaborator(bot._response_runner)
-        lifecycle_lock = response_runner._lifecycle_coordinator._response_lifecycle_lock(target)
-        await lifecycle_lock.acquire()
-        turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        original_lookup = turn_store.get_turn_record
-        cancellation_check_started = threading.Event()
-
-        def tracked_lookup(source_event_id: str) -> TurnRecord | None:
-            cancellation_check_started.set()
-            return original_lookup(source_event_id)
-
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stale-stop-reaction")
         with (
@@ -2743,7 +2731,10 @@ class TestAgentBot(AgentBotTestBase):
                 "receipt_order",
                 new=AsyncMock(return_value=2),
             ),
-            patch.object(turn_store, "get_turn_record", side_effect=tracked_lookup) as source_lookup,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
+                new=AsyncMock(return_value=True),
+            ) as finalize_stopped_response,
         ):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
@@ -2752,27 +2743,21 @@ class TestAgentBot(AgentBotTestBase):
                 EventKind.REACTION,
                 EventClass.ACTIONABLE,
             )
-            replay_task = asyncio.create_task(bot._journal_dispatcher.drain_once())
-            assert await asyncio.to_thread(cancellation_check_started.wait, 2)
-            assert later_edit_task.done() is False
-            lifecycle_lock.release()
-            await replay_task
+            await bot._journal_dispatcher.drain_once()
 
-        source_lookup.assert_called_with("$source")
-        tracked = bot.stop_manager.tracked_messages["$response"]
-        assert tracked.task is later_edit_task
-        assert tracked.reaction_event_id == "$later-edit-stop-button"
+        finalize_stopped_response.assert_not_awaited()
         bot.client.room_redact.assert_not_awaited()
-        later_edit_task.cancel()
-        await asyncio.gather(later_edit_task, return_exceptions=True)
+        stopped = bot._turn_store.get_turn_record("$source")
+        assert stopped is not None
+        assert stopped.user_stop_settled_receipt_order == 2
 
     @pytest.mark.asyncio
-    async def test_stop_guard_uses_post_reconciliation_source_identity(
+    async def test_stop_finalizes_post_reconciliation_source_identity(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """STOP cancellation must follow the turn after a redacted alias is reassigned."""
+        """STOP finalizes the turn it names after a redacted alias is reassigned."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -2789,8 +2774,6 @@ class TestAgentBot(AgentBotTestBase):
                 conversation_target=target,
             ),
         )
-        live_task = asyncio.create_task(asyncio.Event().wait())
-        bot.stop_manager.set_current("$response-a", target, live_task)
         reconciler = bot._user_stop_reconciler
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
         original_record_user_stop = reconciler._record
@@ -2822,32 +2805,21 @@ class TestAgentBot(AgentBotTestBase):
                 reply_stop=reply_stop,
             )
 
-        on_current_stop_finalized = AsyncMock()
-        try:
-            with (
-                patch.object(reconciler, "_record", side_effect=record_after_alias_claim),
-                patch(
-                    "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-                    new=AsyncMock(return_value=True),
-                ),
-            ):
-                assert await reconciler.finalize(
-                    "$response-a",
-                    2,
-                    on_current_stop_finalized,
-                    room_id="!test:localhost",
-                )
-            await asyncio.sleep(0)
+        with (
+            patch.object(reconciler, "_record", side_effect=record_after_alias_claim),
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
+                new=AsyncMock(return_value=True),
+            ) as finalize_stopped_response,
+        ):
+            assert await reconciler.finalize("$response-a", 2, room_id="!test:localhost")
 
-            stopped = turn_store.turn_record_for_response_event_id("$response-a")
-            assert stopped is not None
-            assert stopped.source_event_ids == ("$second",)
-            assert turn_store.get_turn_record("$first").response_event_id == "$response-b"
-            assert live_task.cancelled()
-            on_current_stop_finalized.assert_awaited_once()
-        finally:
-            live_task.cancel()
-            await asyncio.gather(live_task, return_exceptions=True)
+        stopped = turn_store.turn_record_for_response_event_id("$response-a")
+        assert stopped is not None
+        assert stopped.source_event_ids == ("$second",)
+        assert stopped.user_stop_settled_receipt_order == 2
+        assert turn_store.get_turn_record("$first").response_event_id == "$response-b"
+        finalize_stopped_response.assert_awaited_once_with(target, "$response-a")
 
     @pytest.mark.asyncio
     async def test_interrupted_config_reaction_replays_only_its_durable_consumer(

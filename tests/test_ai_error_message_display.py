@@ -31,6 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
+from tests.ai_user_id_helpers import _claimed_reply_span
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -42,6 +43,7 @@ from tests.conftest import (
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
 )
 from tests.response_attempt_helpers import install_direct_response_admission
 
@@ -78,7 +80,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     )
     install_direct_response_admission(bot)
     bot.logger = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.user_id = "@mindroom_test_agent:localhost"
     bot.hook_registry = HookRegistry.empty()
@@ -414,23 +415,10 @@ class TestAIErrorDisplay:
         assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
-    async def test_collected_stream_cancelled_event_preserves_user_stop_note(self, tmp_path: Path) -> None:
-        """Collected non-streaming RunCancelledEvent should keep a user-stop label."""
+    async def test_collected_stream_cancelled_event_preserves_user_stop_outcome(self, tmp_path: Path) -> None:
+        """Collected non-streaming RunCancelledEvent should keep the user-stop outcome its reply's note shows."""
         bot = _mock_bot(tmp_path)
         bot.config.agents["test_agent"].show_tool_calls = True
-
-        edited_messages: list[tuple[str, str]] = []
-
-        async def mock_gateway_edit_message(
-            client: object,  # noqa: ARG001
-            room_id: str,  # noqa: ARG001
-            event_id: str,
-            content: dict[str, object],
-            text: str,
-            **_kwargs: object,
-        ) -> DeliveredMatrixEvent:
-            edited_messages.append((event_id, text))
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
@@ -455,42 +443,21 @@ class TestAIErrorDisplay:
                 new=lambda **_kwargs: nullcontext(_empty_scope_context()),
             ),
             patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
-            patch(
-                "mindroom.delivery_gateway.edit_message_outcome",
-                new=AsyncMock(side_effect=mock_gateway_edit_message),
-            ),
         ):
             _build_response_runner(bot)
             mock_agent.arun = MagicMock(return_value=fake_arun_stream())
 
-            outcome = await bot._response_runner._process_and_respond(
-                _response_request(existing_event_id="$thinking_msg"),
-            )
+            runner = unwrap_extracted_collaborator(bot._response_runner)
+            async with _claimed_reply_span(runner, _response_request()) as request:
+                outcome = await runner._process_and_respond(request)
 
-        assert len(edited_messages) == 1
-        event_id, text = edited_messages[0]
-        assert event_id == "$thinking_msg"
-        assert text == _CANCELLED_RESPONSE_NOTE
         assert outcome.delivery.terminal_status == "cancelled"
         assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
-    async def test_run_cancelled_event_preserves_user_stop_note_in_streaming(self, tmp_path: Path) -> None:
-        """RunCancelledEvent should keep a user-stop label in the final streamed edit."""
+    async def test_run_cancelled_event_preserves_user_stop_outcome_in_streaming(self, tmp_path: Path) -> None:
+        """A streamed RunCancelledEvent should keep the user-stop outcome its reply's note shows."""
         bot = _mock_bot(tmp_path)
-
-        edited_messages: list[tuple[str, str]] = []
-
-        async def mock_stream_edit_message(
-            client: object,  # noqa: ARG001
-            room_id: str,  # noqa: ARG001
-            event_id: str,
-            content: dict[str, object],
-            text: str,
-            **_kwargs: object,
-        ) -> DeliveredMatrixEvent:
-            edited_messages.append((event_id, text))
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
@@ -515,19 +482,15 @@ class TestAIErrorDisplay:
                 new=lambda **_kwargs: nullcontext(_empty_scope_context()),
             ),
             patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=mock_stream_edit_message)),
         ):
             _build_response_runner(bot)
             mock_agent.arun = MagicMock(return_value=fake_arun_stream())
 
-            outcome = await bot._response_runner._process_and_respond_streaming(
-                _response_request(existing_event_id="$thinking_msg"),
-            )
+            runner = unwrap_extracted_collaborator(bot._response_runner)
+            async with _claimed_reply_span(runner, _response_request()) as request:
+                outcome = await runner._process_and_respond_streaming(request)
 
-        assert len(edited_messages) == 2
-        event_id, text = edited_messages[-1]
-        assert event_id == "$thinking_msg"
-        assert text == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
+        assert bot.client.room_send.await_args.kwargs["content"]["body"] == "Partial answer"
         assert outcome.delivery.terminal_status == "cancelled"
         assert outcome.delivery.failure_reason == "cancelled_by_user"
 

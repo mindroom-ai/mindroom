@@ -1,4 +1,4 @@
-"""Replies main started before durable reply records, adopted once per principal (DESIGN.md §14.5).
+"""Replies main started before durable reply records, adopted once per principal.
 
 Main kept what an in-flight reply was in four places: its turn record, its
 ``INITIAL`` and ``FINAL`` outbox rows, its approval continuation, and the
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -23,7 +23,7 @@ from .models import DeliveryStage
 from .replies import AppliedTransition, apply, row_facts
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.turn_record import TurnRecord
 
@@ -249,8 +249,10 @@ def _span(
 
 
 def _final_state(final: MatrixDelivery) -> rl.ReplyState:
-    content = final.payload.get("m.new_content", final.payload)
-    status = content.get("io.mindroom.stream_status") if isinstance(content, dict) else None
+    content: object = final.payload.get("m.new_content", final.payload)
+    status = (
+        cast("Mapping[str, object]", content).get("io.mindroom.stream_status") if isinstance(content, dict) else None
+    )
     return _STATE_BY_STATUS.get(str(status), rl.ReplyState.COMPLETED)
 
 
@@ -583,7 +585,7 @@ def read_done(
     read: rl.LegacyRead,
     now_ns: int,
 ) -> AppliedTransition | None:
-    """Record what one main-era reply's legacy read found (DESIGN.md §14.5)."""
+    """Record what one main-era reply's legacy read found."""
     reply = reply_messages.lock(transaction, principal_id, reply_id)
     if reply is None:
         return None

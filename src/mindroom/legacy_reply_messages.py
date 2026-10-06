@@ -4,7 +4,7 @@
 at the first start with reply records. This module encodes what main stored
 into presentations for it, and reads, after each room syncs, what only the
 reply's Matrix event knows: what it showed, and for a reply its stream
-created directly, which event that was (DESIGN.md §14.5). A read that keeps
+created directly, which event that was. A read that keeps
 failing gives up with the presentation unknown, which a replay answers with
 main's "unknown attempt" account.
 """
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from nio.exceptions import EncryptionError, RemoteProtocolError
 
@@ -96,7 +96,7 @@ def _answered(delivery: MatrixDelivery, span_id: str) -> str:
     content: Mapping[str, object] = delivery.payload
     new_content = content.get("m.new_content")
     if isinstance(new_content, dict):
-        content = new_content
+        content = cast("Mapping[str, object]", new_content)
     body = content.get("body")
     return _answer(str(body) if isinstance(body, str) else "", span_id, placeholder=AGENT_PLACEHOLDER)
 

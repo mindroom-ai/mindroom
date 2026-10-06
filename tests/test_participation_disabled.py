@@ -6,7 +6,6 @@ import asyncio
 import json
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -264,7 +263,6 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
                         bot._user_stop_reconciler.finalize(
                             "$response",
                             1,
-                            AsyncMock(),
                             room_id=envelope.target.room_id,
                         ),
                     )

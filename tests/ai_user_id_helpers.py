@@ -305,9 +305,6 @@ def _make_bot(
 ) -> MagicMock:
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.add_stop_button = AsyncMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.agent_name = agent_name
@@ -543,7 +540,6 @@ def _build_response_runner(
         ResponseRunnerDeps(
             runtime=runtime,
             logger=bot.logger,
-            stop_manager=bot.stop_manager,
             runtime_paths=runtime_paths,
             storage_path=storage_path,
             agent_name=bot.agent_name,
@@ -573,6 +569,15 @@ def _build_response_runner(
             ),
         ),
     )
+
+
+@asynccontextmanager
+async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) -> AsyncIterator[ResponseRequest]:
+    """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
+    async with runner._reply_span_scope():
+        claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
+        assert claimed is not None
+        yield claimed
 
 
 def _response_request(
