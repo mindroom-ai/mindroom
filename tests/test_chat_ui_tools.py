@@ -1310,3 +1310,54 @@ async def test_reading_a_canvas_state_reports_nothing_shared_and_unshared_canvas
     result = await _read(foreign)
     assert result["action"] == "read_canvas_state"
     assert "Only your own canvases can be read." in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_newest_copy_is_reported_never_replaced_by_an_older_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent acting on superseded choices is worse than one told to try again."""
+    older = _state_copy(ts=1_000, json='{"done":[]}')
+
+    undecryptable = _context(tmp_path)
+    _serve_event(undecryptable, _canvas_source(undecryptable, share_state=True))
+    encrypted = MagicMock(spec=nio.MegolmEvent)
+    encrypted.sender = REQUESTER_ID
+    _serve_relations(undecryptable, encrypted, older)
+    undecryptable.client.olm = MagicMock()
+    undecryptable.client.decrypt_event = MagicMock(side_effect=nio.EncryptionError("no key"))
+    result = await _read(undecryptable)
+    assert result["status"] == "error"
+    assert "could not be decrypted" in result["message"]
+
+    deleted = _context(tmp_path)
+    _serve_event(deleted, _canvas_source(deleted, share_state=True))
+    redacted = MagicMock(spec=nio.RedactedEvent)
+    redacted.sender = REQUESTER_ID
+    _serve_relations(deleted, redacted, older)
+    assert "deleted the newest copy" in (await _read(deleted))["message"]
+
+    unread = _context(tmp_path)
+    _serve_event(unread, _canvas_source(unread, share_state=True))
+    _serve_relations(unread, _state_copy(ts=3_000, msgtype="m.file", url="mxc://example.org/state"), older)
+
+    async def download_failed(source: dict[str, object], _client: object) -> dict[str, object]:
+        return {**source, "content": {"msgtype": "m.file", "url": "mxc://example.org/state"}}
+
+    monkeypatch.setattr("mindroom.custom_tools.chat_ui.resolve_event_source_content", download_failed)
+    assert "could not be read" in (await _read(unread))["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_buried_under_other_references_is_not_reported_as_nothing_shared(tmp_path: Path) -> None:
+    """Other members' references to the canvas cannot make the user's choices look absent."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    noise = [_state_copy(sender="@mallory:example.org", ts=10_000 + index) for index in range(50)]
+    _serve_relations(context, *noise, _state_copy(json='{"done":["tent"]}'))
+
+    result = await _read(context)
+
+    assert result["status"] == "error"
+    assert "not among the newest references" in result["message"]

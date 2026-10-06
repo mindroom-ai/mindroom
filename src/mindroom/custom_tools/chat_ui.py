@@ -477,8 +477,9 @@ class ChatUITools(Toolkit):
         stays on the user's device, only the 100 most recently saved canvases keep it,
         and it reaches you only when the canvas shares it: with ``share_state=True``
         (decided when the canvas is first shown; Chat tells the user), Chat keeps a
-        copy in the room and ``read_canvas_state`` returns it whenever you want, so a
-        page like a checklist or a form needs no send button.
+        copy in the room, readable by its members, and ``read_canvas_state`` returns
+        it whenever you want, so a page like a checklist needs no send button; never
+        put secrets in ``saveState`` on such a page.
 
         If the page throws an error or loads something Chat blocks, the user can send
         you the errors as ``Canvas error (<canvas_event_id>, revision <event_id>):``
@@ -561,13 +562,14 @@ class ChatUITools(Toolkit):
                 message="This canvas does not share its state; show a new canvas with share_state=True.",
             )
         shared = await _latest_shared_canvas_state(context.client, context.room_id, canvas_event_id, requester_id)
-        if shared is None:
-            return self._payload(
-                "ok",
-                action=action,
-                canvas_event_id=canvas_event_id,
-                message="Nothing shared yet: the user has not changed anything in this canvas.",
+        if not isinstance(shared, tuple):
+            # No copy is a plain answer; an unreadable newest copy is an error, never an older copy.
+            status, message = (
+                ("error", shared)
+                if shared
+                else ("ok", "Nothing shared yet: the user has not changed anything in this canvas.")
             )
+            return self._payload(status, action=action, canvas_event_id=canvas_event_id, message=message)
         state, inputs, shared_at = shared
         return self._payload(
             "ok",
@@ -853,8 +855,12 @@ async def _latest_shared_canvas_state(
     room_id: str,
     canvas_event_id: str,
     requester_id: str,
-) -> tuple[object, object, str] | None:
-    """Return the page state, kept inputs, and time of the newest copy the requester's Chat shared."""
+) -> tuple[object, object, str] | str | None:
+    """Return the page state, kept inputs, and time of the newest copy the requester's Chat shared.
+
+    The newest copy is the answer: when it cannot be read, the reason is returned instead of an
+    older copy, so the agent never takes superseded choices for current ones. None means no copy.
+    """
     relations = client.room_get_event_relations(
         room_id,
         canvas_event_id,
@@ -866,18 +872,20 @@ async def _latest_shared_canvas_state(
         async for related in relations:
             scanned += 1
             if scanned > _CANVAS_STATE_SCAN_LIMIT:
-                return None
+                return "The user's copy is not among the newest references to this canvas; try again later."
             if related.sender != requester_id:
                 continue
             event = related
             if isinstance(event, nio.MegolmEvent):
                 # Encrypted rooms hide the event type, so it is checked after decrypting.
-                if client.olm is None:
-                    continue
                 try:
-                    event = client.decrypt_event(event)
+                    event = client.decrypt_event(event) if client.olm is not None else None
                 except nio.EncryptionError:
-                    continue
+                    event = None
+                if event is None:
+                    return "The newest copy could not be decrypted yet; try again later."
+            if isinstance(event, nio.RedactedEvent):
+                return "The user deleted the newest copy."
             source = event.source if isinstance(event.source, dict) else {}
             if (
                 getattr(event, "type", None) != _CANVAS_STATE_EVENT_TYPE
@@ -886,7 +894,7 @@ async def _latest_shared_canvas_state(
                 continue
             content = (await resolve_event_source_content(source, client)).get("content")
             if not isinstance(content, dict) or content.get("version") != 1:
-                continue
+                return "The newest copy could not be read; try again later."
             shared_at = datetime.fromtimestamp(related.server_timestamp / 1000, tz=UTC).isoformat()
             return _parsed_json(content.get("json")), _parsed_json(content.get("inputs")), shared_at
     return None
