@@ -20,8 +20,8 @@ The rule is deliberately narrow, and each clause is load-bearing:
   still running, so all four must reach the projection.
 
 The last clause is also why a crash mid-stream is safe. The logical row stays
-at the placeholder, and startup stale-stream cleanup rewrites the visible body
-with a terminal status whose echo then reduces like any other.
+at the placeholder, and after the restart the reply's records end the reply
+with a terminal write whose echo then reduces like any other.
 """
 
 from __future__ import annotations

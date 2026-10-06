@@ -70,25 +70,6 @@ class ResponseDeliveryRecovery:
             for record in state.turn_records
         )
 
-    async def permits_continuation(self, delivery: MatrixDelivery) -> bool:
-        """Let startup cleanup finish orphaned work under existing ownership guards."""
-        state = await self.state(delivery)
-        return not (
-            state.approval_owned
-            or any(state.source_tombstones)
-            or self._final_owned(state)
-            or any(state.pending_sources)
-            or state.sources_settled_by_departure
-            or any(
-                record is not None
-                and (
-                    record.user_stop_receipt_order is not None
-                    or any(self.turn_store().has_live_turn_claim(event_id) for event_id in record.indexed_event_ids)
-                )
-                for record in state.turn_records
-            )
-        )
-
     async def permits_supersession(self, delivery: MatrixDelivery) -> bool:
         """Only terminal or revoked INITIAL work may lose its canonical replay."""
         state = await self.state(delivery)

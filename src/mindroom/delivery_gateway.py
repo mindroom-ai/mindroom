@@ -1235,33 +1235,6 @@ class DeliveryGateway:
             run_reply_effects=self._run_reply_effects,
         )
 
-    @asynccontextmanager
-    async def response_recovery_scope(self, room_id: str, event_id: str) -> AsyncIterator[bool]:
-        """Keep startup decision and visible effect under normal FINAL delivery ownership."""
-        recovery = self.deps.response_recovery
-        if recovery is None:
-            yield False
-            return
-        turn_id = await recovery.principal.response_delivery_id(room_id=room_id, event_id=event_id)
-        if turn_id is None:
-            yield False
-            return
-        worker = self._recovery_worker()
-        async with worker._delivery_lock(turn_id):
-            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
-            if (
-                initial is None
-                or initial.retired
-                or not await recovery.principal.owns_matrix_response(
-                    room_id=room_id,
-                    event_id=event_id,
-                )
-            ):
-                yield False
-                return
-            await recovery.cleanup(worker, turn_id)
-            yield await recovery.permits_continuation(initial)
-
     def _recovery_worker(self) -> MatrixDeliveryWorker:
         """Use the same writer and exact locks for recovery and normal delivery."""
 

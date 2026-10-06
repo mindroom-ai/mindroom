@@ -896,17 +896,6 @@ class PrincipalStore:
             ),
         )
 
-    async def owns_matrix_response(self, *, room_id: str, event_id: str) -> bool:
-        """Return whether this journal owns the response in the current room membership."""
-        return await self._backend.read(
-            lambda transaction: outbox.owns_response(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                event_id=event_id,
-            ),
-        )
-
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self._backend.read(
@@ -1156,17 +1145,6 @@ class PrincipalStore:
             lambda transaction: outbox.initial_response_delivery_id(transaction, self._principal_id, event_id),
         )
 
-    async def response_delivery_id(self, *, room_id: str, event_id: str) -> str | None:
-        """Resolve a visible response to its current exact delivery owner."""
-        return await self._backend.read(
-            lambda transaction: outbox.response_delivery_id(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                event_id=event_id,
-            ),
-        )
-
     async def deleted_initial_deliveries(
         self,
         *,
@@ -1181,16 +1159,6 @@ class PrincipalStore:
                 agent_name=agent_name,
                 after=after,
             ),
-        )
-
-    async def recovery_initial_deliveries(
-        self,
-        *,
-        after: tuple[int, str] | None = None,
-    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-        """Page acknowledged INITIAL candidates, including potentially interrupted FINALs."""
-        return await self._backend.read(
-            lambda transaction: outbox.recovery_initials(transaction, self._principal_id, after=after),
         )
 
     async def retire_deleted_initial(self, *, delivery_id: str) -> None:

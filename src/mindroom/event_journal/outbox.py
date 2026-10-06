@@ -661,37 +661,12 @@ def claim_active_delivery_ownership(
     return ownership if membership_is_current and locked_ownership == ownership else None
 
 
-def owns_response(transaction: Transaction, principal_id: str, *, room_id: str, event_id: str) -> bool:
-    """Require a current attempted delivery before startup cleanup may repair a response."""
-    return response_delivery_id(transaction, principal_id, room_id=room_id, event_id=event_id) is not None
-
-
 def initial_response_delivery_id(transaction: Transaction, principal_id: str, event_id: str) -> str | None:
     """Resolve an exact INITIAL ACK, retaining identity after deleted-response retirement."""
     row = transaction.fetchone(
         """SELECT delivery_id FROM matrix_delivery_outbox
         WHERE principal_id = ? AND stage = 'initial' AND acknowledged_event_id = ?""",
         (principal_id, event_id),
-    )
-    return None if row is None else str(row["delivery_id"])
-
-
-def response_delivery_id(transaction: Transaction, principal_id: str, *, room_id: str, event_id: str) -> str | None:
-    """Resolve exact current transport ownership without granting semantic continuation."""
-    row = transaction.fetchone(
-        """
-        SELECT delivery.delivery_id FROM matrix_delivery_outbox AS delivery
-        JOIN room_membership AS membership
-          ON membership.principal_id = delivery.principal_id
-         AND membership.room_id = delivery.room_id
-         AND membership.membership_epoch = delivery.membership_epoch
-        WHERE delivery.principal_id = ? AND delivery.room_id = ?
-          AND delivery.attempted = 1 AND delivery.retired = 0
-          AND membership.departure_fenced = 0
-          AND (delivery.acknowledged_event_id = ? OR delivery.edits_event_id = ?)
-        LIMIT 1
-        """,
-        (principal_id, room_id, event_id, event_id),
     )
     return None if row is None else str(row["delivery_id"])
 
@@ -742,43 +717,6 @@ def deleted_initials(
         ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
         """,  # noqa: S608 - fixed column list and cursor clause
         (principal_id, agent_name, *(after or ())),
-    )
-    return tuple(_recovery_delivery(row) for row in rows)
-
-
-def recovery_initials(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    after: tuple[int, str] | None = None,
-) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-    """Enumerate recoverable INITIALs without resurrecting redacted responses."""
-    cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
-    rows = transaction.fetchall(
-        f"""
-        SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox AS delivery
-        WHERE principal_id = ? AND event_type = 'm.room.message' AND stage = 'initial'
-          AND attempted = 1 AND acknowledged_event_id IS NOT NULL AND retired = 0
-          AND NOT EXISTS (
-            SELECT 1 FROM redaction_tombstones AS tombstone
-            WHERE tombstone.principal_id = delivery.principal_id
-              AND tombstone.room_id = delivery.room_id
-              AND tombstone.redacted_event_id = delivery.acknowledged_event_id
-          )
-          AND EXISTS (
-            SELECT 1 FROM room_membership AS membership
-            WHERE membership.principal_id = delivery.principal_id AND membership.room_id = delivery.room_id
-              AND membership.membership_epoch = delivery.membership_epoch AND membership.departure_fenced = 0
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM matrix_delivery_outbox AS final
-            WHERE final.principal_id = delivery.principal_id AND final.delivery_id = delivery.delivery_id
-              AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
-                OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
-          ){cursor_clause}
-        ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
-        """,  # noqa: S608 - fixed columns and cursor clause
-        (principal_id, *(after or ())),
     )
     return tuple(_recovery_delivery(row) for row in rows)
 

@@ -11,7 +11,7 @@ import nio
 import pytest
 
 from mindroom.cancellation import request_task_cancel
-from mindroom.constants import ORIGINAL_SENDER_KEY, STREAM_STATUS_KEY
+from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import ResponseIdentity, _PlaceholderFailureUpdateRequest
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -20,7 +20,6 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LegacyReplyReads
-from mindroom.matrix import stale_stream_cleanup as cleanup
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix_delivery import TurnHandoff
@@ -38,28 +37,23 @@ from tests.conftest import (
     make_relation_lookup,
     make_visible_message,
     patch_response_runner_module,
-    runtime_paths_for,
     unwrap_extracted_collaborator,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.matrix_room_events import (
+    BOT_USER_ID,
+    NOW_MS,
+    ROOM_ID,
+    USER_ID,
+    make_message_event,
+    room_messages_response,
+    thread_reply_relation,
+)
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTestHooks
 from tests.test_response_delivery_gateway import _gateway, _response_recovery_bot
 from tests.test_response_redaction_recovery import _message, _redaction
-from tests.test_stale_stream_cleanup import (
-    BOT_USER_ID,
-    NOW_MS,
-    ROOM_ID,
-    STALE_AGE_MS,
-    USER_ID,
-    _make_client,
-    _make_config,
-    _make_message_event,
-    _room_get_event_response,
-    _room_messages_response,
-    _thread_reply_relation,
-)
 from tests.test_turn_controller_focused import _build_harness, _room_with_members, _text_event
 from tests.test_turn_store import _store
 from tests.test_user_stop_convergence import _SerializingRunner
@@ -222,7 +216,7 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
         payload={
             "msgtype": "m.text",
             "body": "Thinking...",
-            "m.relates_to": _thread_reply_relation(thread_id, source_id),
+            "m.relates_to": thread_reply_relation(thread_id, source_id),
         },
     )
     if debt != "unattempted":
@@ -337,17 +331,17 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
             settle_ignored_sources=settle_ignored,
         ),
     )
-    controller.deps.runtime.client.room_messages.return_value = _room_messages_response(
+    controller.deps.runtime.client.room_messages.return_value = room_messages_response(
         *(
             []
             if debt in {"unattempted", "lost_ack"}
             else [
-                _make_message_event(
+                make_message_event(
                     event_id=INITIAL,
                     sender=controller.deps.matrix_id.full_id,
                     body="Thinking...",
                     timestamp_ms=NOW_MS,
-                    relates_to=_thread_reply_relation(thread_id, source_id),
+                    relates_to=thread_reply_relation(thread_id, source_id),
                     extra_content={STREAM_STATUS_KEY: "pending"},
                 ),
             ]
@@ -394,123 +388,6 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
     assert visible == {INITIAL: "Original request finished with a substantive answer."}
     assert len([content for content in sends if "m.new_content" not in content]) == 1
     assert response_record.conversation_target.resolved_thread_id == thread_id
-
-
-@pytest.mark.parametrize("repair_first", [False, True])
-async def test_startup_snapshot_cannot_overwrite_completed_final(
-    journal_store: EventJournalStore,
-    tmp_path: Path,
-    repair_first: bool,
-) -> None:
-    """FINAL ACK while room history is in flight invalidates stale restart repair."""
-    principal = journal_store.principal("agent@alice")
-    store = await _store(journal_store)
-    target = MessageTarget.resolve(ROOM_ID, "$thread", SOURCE)
-    await store.record_pending_turn(TurnRecord.create([SOURCE], completed=False, conversation_target=target))
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=store.publish_committed_response,
-    )
-    gateway = replace(
-        gateway,
-        deps=replace(
-            gateway.deps,
-            response_recovery=ResponseDeliveryRecovery(
-                principal,
-                lambda store=store: store,
-                gateway.deps.redact_message_event,
-            ),
-        ),
-    )
-    visible = {}
-
-    async def send(delivery: MatrixDelivery) -> str:
-        visible[INITIAL] = delivery.payload.get("m.new_content", delivery.payload)["body"]
-        return INITIAL if delivery.stage is DeliveryStage.INITIAL else "$final"
-
-    worker = gateway._response_delivery(send, handoff=None)
-    await worker.deliver(
-        delivery_id=SOURCE,
-        stage=DeliveryStage.INITIAL,
-        room_id=ROOM_ID,
-        thread_id="$thread",
-        payload={"msgtype": "m.text", "body": "Thinking..."},
-    )
-    config = _make_config(tmp_path)
-    client = _make_client()
-    snapshot = _room_messages_response(
-        _make_message_event(
-            event_id=INITIAL,
-            body="Thinking...",
-            timestamp_ms=NOW_MS - STALE_AGE_MS,
-            relates_to=_thread_reply_relation("$thread", SOURCE),
-            extra_content={STREAM_STATUS_KEY: "pending", ORIGINAL_SENDER_KEY: USER_ID},
-        ),
-    )
-    captured, release = asyncio.Event(), asyncio.Event()
-    editing, release_edit = asyncio.Event(), asyncio.Event()
-
-    async def history(*_args: object, **_kwargs: object) -> nio.RoomGetEventResponse:
-        captured.set()
-        await release.wait()
-        return _room_get_event_response(snapshot.chunk[0])
-
-    async def edit(*_args: object, **kwargs: object) -> nio.RoomSendResponse:
-        editing.set()
-        await release_edit.wait()
-        visible[INITIAL] = kwargs["content"]["m.new_content"]["body"]
-        return nio.RoomSendResponse("$repair", ROOM_ID)
-
-    final_queued = asyncio.Event()
-
-    async def final() -> str | None:
-        final_queued.set()
-        return await worker.deliver(
-            delivery_id=SOURCE,
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM_ID,
-            thread_id="$thread",
-            edits_event_id=INITIAL,
-            payload={"msgtype": "m.text", "body": "answer", "m.new_content": {"msgtype": "m.text", "body": "answer"}},
-        )
-
-    client.room_get_event.side_effect = history
-    client.room_send.side_effect = edit
-    with patch.object(cleanup.time, "time", return_value=NOW_MS / 1000):
-        scan = asyncio.create_task(
-            cleanup._cleanup_stale_streaming_room(
-                client,
-                room_id=ROOM_ID,
-                actors={BOT_USER_ID: client},
-                target_event_ids=(INITIAL,),
-                bot_user_ids={BOT_USER_ID},
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                response_recovery_scope=lambda _agent, room, event, gateway=gateway: gateway.response_recovery_scope(
-                    room,
-                    event,
-                ),
-            ),
-        )
-        await captured.wait()
-        if repair_first:
-            release.set()
-            await editing.wait()
-            pending_final = asyncio.create_task(final())
-            await final_queued.wait()
-            assert not pending_final.done()
-            release_edit.set()
-            await scan
-            await pending_final
-        else:
-            release_edit.set()
-            await final()
-            release.set()
-            await scan
-    assert visible == {INITIAL: "answer"}
-    assert store.get_turn_record(SOURCE).completed
 
 
 @pytest.mark.parametrize(
@@ -935,8 +812,6 @@ async def test_recovery_respects_existing_source_and_final_owners(  # noqa: C901
             assert visible[INITIAL] == ("answer" if owner == "completed_final" else "Thinking...")
         async with gateway.supersession_scope(SOURCE, ROOM_ID) as allowed:
             assert allowed is (owner in {"owed_final", "completed_final", "stop"})
-        async with gateway.response_recovery_scope(ROOM_ID, INITIAL) as allowed:
-            assert allowed is (owner == "orphan")
         await gateway.cleanup_deleted_response(SOURCE)
         assert INITIAL in visible
         initial = await principal.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.INITIAL)

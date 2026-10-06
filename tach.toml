@@ -503,7 +503,6 @@ visibility = [
     "mindroom.matrix.journal_ingress",
     "mindroom.matrix._owned_session",
     "mindroom.matrix.relation_lookup",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.transport_progress",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
@@ -2718,7 +2717,6 @@ depends_on = [
     "mindroom.matrix.provisioning_heartbeat",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
@@ -3368,7 +3366,6 @@ visibility = [
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.matrix_rtc.call_writeback",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.scheduling",
     "mindroom.scheduling_executor",
     "mindroom.streaming",
@@ -3412,7 +3409,6 @@ visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestrator",
@@ -3756,7 +3752,6 @@ visibility = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_reads",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.response_runner",
     "mindroom.routing",
     "mindroom.thread_export.selection",
@@ -3779,7 +3774,6 @@ visibility = [
     "mindroom.bot",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.message_content",
-    "mindroom.matrix.stale_stream_cleanup",
 ]
 
 [[modules]]
@@ -3808,7 +3802,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.legacy_reply_messages",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.thread_summary",
     "mindroom.approval_transport",
     "mindroom.commands.config_confirmation",
@@ -3997,22 +3990,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix.thread_membership",
-]
-
-[[modules]]
-path = "mindroom.matrix.stale_stream_cleanup"
-depends_on = [
-    "mindroom.event_journal",
-    "mindroom.matrix.room_history_reads",
-    "mindroom.constants",
-    "mindroom.entity_resolution",
-    "mindroom.matrix.client_delivery",
-    "mindroom.matrix.client_room_admin",
-    "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.event_info",
-    "mindroom.matrix.message_content",
-    "mindroom.matrix.visible_body",
-    "mindroom.streaming",
 ]
 
 [[modules]]
@@ -5980,7 +5957,6 @@ expose = [
 from = ["mindroom.matrix.thread_projection"]
 visibility = [
     "mindroom.matrix.room_history_reads",
-    "mindroom.matrix.stale_stream_cleanup",
 ]
 exclusive = true
 

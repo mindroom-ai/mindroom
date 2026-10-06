@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, suppress
+from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -65,9 +65,6 @@ from mindroom.matrix.rooms import (
     ensure_root_space,
     ensure_user_in_rooms,
     reconcile_managed_rooms,
-)
-from mindroom.matrix.stale_stream_cleanup import (
-    recover_stale_streaming_messages,
 )
 from mindroom.matrix.state import load_rooms, resolve_room_aliases
 from mindroom.matrix.users import (
@@ -165,8 +162,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
-
-    import nio
 
     from mindroom.config_reload import ConfigReloadStatus
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -524,11 +519,6 @@ class _MultiAgentOrchestrator:
             ),
         )
         self._startup_maintenance = StartupMaintenanceController(
-            recover_stale_streams=lambda bots, config, startup_cutoff_ms: self._recover_stale_streams_after_restart(
-                bots,
-                config,
-                startup_cutoff_ms,
-            ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
             mark_runtime_support_ready=lambda: self._approval_recovery.mark_startup_runtime_support_ready(),
@@ -1483,42 +1473,6 @@ class _MultiAgentOrchestrator:
             return
         logger.info("All agent bots started successfully")
 
-    async def _recover_stale_streams_after_restart(
-        self,
-        bots: list[AgentBot | TeamBot],
-        config: Config,
-        startup_cutoff_ms: int | None,
-    ) -> None:
-        """Finish orphaned streams identified by the durable delivery outbox."""
-        actors: dict[str, nio.AsyncClient] = {}
-        for bot in bots:
-            if bot.client is None or not bot.agent_user.user_id:
-                continue
-            actors[bot.agent_user.user_id] = bot.client
-        if not actors:
-            return
-
-        recovery_bots = {bot.agent_name: bot for bot in bots if bot.client is not None}
-
-        def response_recovery_scope(agent_name: str, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
-            return recovery_bots[agent_name].response_recovery_scope(room_id, event_id)
-
-        result = await recover_stale_streaming_messages(
-            actors,
-            principals={
-                bot.agent_user.user_id: bot.journal_principal() for bot in bots if bot.agent_user.user_id in actors
-            },
-            response_recovery_scope=response_recovery_scope,
-            config=config,
-            runtime_paths=self.runtime_paths,
-            startup_cutoff_ms=startup_cutoff_ms,
-        )
-        logger.info(
-            "Completed stale stream recovery",
-            room_count=result.room_count,
-            cleaned_count=result.cleaned_count,
-        )
-
     def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
         """Resolve currently known room aliases into each bot's configured room IDs."""
         for bot in bots:
@@ -1643,8 +1597,7 @@ class _MultiAgentOrchestrator:
                 self._start_sync_task(bot.agent_name, bot)
             log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
-            startup_cutoff_ms = int(time.time() * 1000)
-            self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
+            self._startup_maintenance.start(started_bots, config)
             room_membership_policy_configured = self.agent_reply_memberships.needs_refresh(config)
             if room_membership_policy_configured:
                 set_runtime_starting("Establishing Matrix room memberships")

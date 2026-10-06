@@ -1,9 +1,8 @@
-"""Cancellation and interruption note markers must stay compatible with stale-stream cleanup matching.
+"""Cancellation and interruption note markers are a wire contract.
 
-The streaming layer owns the terminal note text; ``stale_stream_cleanup`` owns the
-suffix matcher that decides whether a visible reply already carries the restart
-note. These tests pin the contract through the production builders so marker
-text cannot drift on either side.
+Replies already in Matrix carry these notes, and reading a reply back
+recognizes them by their text. These tests pin the text through the
+production builders so it cannot drift.
 """
 
 from __future__ import annotations
@@ -13,9 +12,6 @@ from typing import Literal
 import pytest
 
 from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR
-from mindroom.matrix.stale_stream_cleanup import (
-    _has_restart_interrupted_note as has_restart_interrupted_note,
-)
 from mindroom.streaming import _CANCELLED_RESPONSE_NOTE as CANCELLED_RESPONSE_NOTE
 from mindroom.streaming import _STREAM_ERROR_RESPONSE_NOTE as STREAM_ERROR_RESPONSE_NOTE
 from mindroom.streaming import (
@@ -23,26 +19,17 @@ from mindroom.streaming import (
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_cancelled_response_update,
     build_restart_interrupted_body,
-    format_stream_error_note,
 )
 
 _CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 
 
-def test_marker_constants_keep_their_cleanup_matched_text() -> None:
-    """Marker text is a wire contract: cleanup suffix matching breaks if it drifts."""
+def test_marker_constants_keep_their_wire_text() -> None:
+    """Marker text is a wire contract: reading a reply back breaks if it drifts."""
     assert CANCELLED_RESPONSE_NOTE == "**[Response cancelled by user]**"
     assert INTERRUPTED_RESPONSE_NOTE == "**[Response interrupted]**"
     assert RESTART_INTERRUPTED_RESPONSE_NOTE == "**[Response interrupted by service restart]**"
     assert STREAM_ERROR_RESPONSE_NOTE == "**[Response interrupted by an error"
-
-
-def test_only_the_restart_note_matches_the_restart_matcher() -> None:
-    """The cleanup matcher recognizes the restart note and no other note."""
-    assert has_restart_interrupted_note(RESTART_INTERRUPTED_RESPONSE_NOTE)
-    assert not has_restart_interrupted_note(INTERRUPTED_RESPONSE_NOTE)
-    assert not has_restart_interrupted_note(CANCELLED_RESPONSE_NOTE)
-    assert not has_restart_interrupted_note(format_stream_error_note(RuntimeError("provider exploded")))
 
 
 @pytest.mark.parametrize(
@@ -63,7 +50,6 @@ def test_cancelled_updates_end_with_their_own_note(
 
     assert body == f"Partial answer\n\n{expected_note}"
     assert stream_status == expected_status
-    assert has_restart_interrupted_note(body) is (cancel_source == "sync_restart")
 
 
 @pytest.mark.parametrize(
@@ -85,8 +71,7 @@ def test_placeholder_only_bodies_collapse_to_the_bare_note(
 
 
 def test_placeholder_only_restart_body_is_the_bare_restart_note() -> None:
-    """A restart cleanup of a placeholder-only stream must still suffix-match."""
+    """A restart note on a placeholder-only stream replaces the placeholder."""
     body = build_restart_interrupted_body("Thinking...")
 
     assert body == RESTART_INTERRUPTED_RESPONSE_NOTE
-    assert has_restart_interrupted_note(body)

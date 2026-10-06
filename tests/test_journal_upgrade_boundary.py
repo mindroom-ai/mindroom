@@ -123,7 +123,6 @@ async def test_released_journal_upgrades_and_preserves_new_work(legacy_database:
         principal = store.principal(_ACCOUNT)
         assert not await principal.pending()
         assert await principal.approval_continuation("old-approval") is None
-        assert not await principal.owns_matrix_response(room_id="!room:example.org", event_id="$old")
         assert await store.backend.read(lambda tx: tx.fetchall("SELECT * FROM matrix_delivery_outbox")) == ()
         history = await store.backend.read(lambda tx: tx.fetchone("SELECT content_json FROM visible_messages"))
         assert history is not None

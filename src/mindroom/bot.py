@@ -164,7 +164,6 @@ from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from contextlib import AbstractAsyncContextManager
     from datetime import datetime
     from pathlib import Path
 
@@ -2032,10 +2031,6 @@ class AgentBot:
             # The pass covers every room's records, so it must not inherit the sync frame's context.
             context=Context(),
         )
-
-    def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
-        """Expose the delivery owner's startup operation to fleet discovery."""
-        return self._delivery_gateway.response_recovery_scope(room_id, event_id)
 
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""
