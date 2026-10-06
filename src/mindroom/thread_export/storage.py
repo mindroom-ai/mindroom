@@ -56,6 +56,10 @@ logger = get_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 _THREAD_EXPORT_MUTATION_LOCK = threading.RLock()
+# Every export pass revisits the entries it leaves untouched, so each one warns once per process.
+# Worker code can create entries without limit, so a full set starts over at the cost of one repeat warning per entry.
+_MAX_WARNED_UNRECOGNIZED_ENTRIES = 4096
+_WARNED_UNRECOGNIZED_ENTRIES: set[tuple[Path, str]] = set()
 
 
 def _serialized_export_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -742,8 +746,15 @@ def room_has_thread_exports(
 
 
 def _log_unrecognized_entry(output_dir: Path, entry: str, *, room_key: str | None = None) -> None:
-    """Warn that deletion left an unrecognized entry untouched."""
-    logger.warning(
+    """Warn once per root-relative entry path that deletion left it untouched, and log later passes at debug level."""
+    warning_key = (output_dir, entry)
+    log = logger.debug
+    if warning_key not in _WARNED_UNRECOGNIZED_ENTRIES:
+        if len(_WARNED_UNRECOGNIZED_ENTRIES) >= _MAX_WARNED_UNRECOGNIZED_ENTRIES:
+            _WARNED_UNRECOGNIZED_ENTRIES.clear()
+        _WARNED_UNRECOGNIZED_ENTRIES.add(warning_key)
+        log = logger.warning
+    log(
         "Leaving unrecognized thread export entry untouched",
         output_dir=str(output_dir),
         room_key=room_key,
@@ -776,7 +787,7 @@ def _remove_room_export_entries(
                 os.unlink(filename, dir_fd=room_fd)
                 removed_files = True
             else:
-                _log_unrecognized_entry(output_dir, filename, room_key=room_key)
+                _log_unrecognized_entry(output_dir, f"{room_name}/{filename}", room_key=room_key)
         if removed_files:
             _fsync_directory_fd(room_fd)
         removed_directory = False
@@ -861,7 +872,7 @@ def remove_stale_thread_exports(
             if not filename.endswith(".yaml") or filename in expected_names:
                 continue
             if not _is_thread_export_filename(filename) or not _regular_file_at(room_fd, filename):
-                _log_unrecognized_entry(output_dir, filename, room_key=room.key)
+                _log_unrecognized_entry(output_dir, f"{_room_path_segment(room.key)}/{filename}", room_key=room.key)
                 continue
             os.unlink(filename, dir_fd=room_fd)
             removed = True

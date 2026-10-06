@@ -122,6 +122,46 @@ def test_clear_thread_export_root_never_drops_ownership_before_cleanup_finishes(
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
 
 
+def test_clear_thread_export_root_warns_once_per_unrecognized_entry(tmp_path: Path) -> None:
+    """Repeat clearing passes report each foreign entry path once and log later passes at debug level."""
+    output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
+    _mark_export_root(output_dir)
+    notes = [output_dir / "notes.txt", output_dir / "lobby" / "notes.txt", output_dir / "support" / "notes.txt"]
+    for note in notes:
+        note.parent.mkdir(exist_ok=True)
+        note.write_text("keep", encoding="utf-8")
+
+    with (
+        patch("mindroom.thread_export.storage.logger.warning") as warning,
+        patch("mindroom.thread_export.storage.logger.debug") as debug,
+    ):
+        for _ in range(3):
+            assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
+
+    assert all(note.read_text(encoding="utf-8") == "keep" for note in notes)
+    assert all(call.args == ("Leaving unrecognized thread export entry untouched",) for call in warning.call_args_list)
+    assert sorted(call.kwargs["entry"] for call in warning.call_args_list) == [
+        "lobby/notes.txt",
+        "notes.txt",
+        "support/notes.txt",
+    ]
+    assert [call.args for call in debug.call_args_list] == [("Leaving unrecognized thread export entry untouched",)] * 6
+
+
+def test_unrecognized_entry_warnings_start_over_when_the_set_is_full(tmp_path: Path) -> None:
+    """Worker-created entry names cannot grow the warned set past its cap."""
+    with (
+        patch.object(thread_export_storage, "_MAX_WARNED_UNRECOGNIZED_ENTRIES", 2),
+        patch.object(thread_export_storage, "_WARNED_UNRECOGNIZED_ENTRIES", set()) as warned,
+        patch("mindroom.thread_export.storage.logger.warning") as warning,
+    ):
+        for entry in ("a", "b", "c", "c", "a"):
+            thread_export_storage._log_unrecognized_entry(tmp_path, entry)
+
+    assert [call.kwargs["entry"] for call in warning.call_args_list] == ["a", "b", "c", "a"]
+    assert warned == {(tmp_path, "c"), (tmp_path, "a")}
+
+
 def test_clear_thread_export_root_rejects_replaced_parent(tmp_path: Path) -> None:
     """Cleanup cannot follow an intermediate symlink installed after discovery."""
     instance_root = tmp_path / "private_instances" / "scope" / "agent"
@@ -336,8 +376,8 @@ def test_room_removal_preserves_a_present_unrecognized_directory(
             remove_room_export(output_dir, _room())
 
     assert keep.read_text(encoding="utf-8") == "private"
-    assert warning.call_count == 2
-    assert all(call.args == ("Leaving unrecognized thread export entry untouched",) for call in warning.call_args_list)
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Leaving unrecognized thread export entry untouched",)
 
 
 def test_room_retraction_is_idempotent_beside_a_foreign_file(tmp_path: Path) -> None:
