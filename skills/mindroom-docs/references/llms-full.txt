@@ -13338,7 +13338,7 @@ Installation-level connections that are not assigned to an agent scope must be r
 
 # Google Services OAuth For Local Installs
 
-This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud on a paired local installation.
+This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation, and Google Cloud once the provisioned client includes its scope.
 Paired installations use MindRoom's Google OAuth client, so you do not need a Google Cloud project, callback URLs, or a client secret.
 Pair first with `mindroom connect`, or let `mindroom run` pair automatically on first run (see [Hosted Matrix](https://docs.mindroom.chat/deployment/hosted-matrix/)).
 The provisioned client works only when MindRoom is opened on a loopback address (`localhost`, `127.0.0.1`, or `::1`).
@@ -13401,7 +13401,8 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 - **`OAuth client configuration could not be resolved`**: MindRoom could not get a Google OAuth client, usually because the install is not paired or its pairing was revoked.
   Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
 - **Google shows an unverified-app warning or blocks the Google Cloud connection**: `cloud-platform.read-only` is a sensitive scope, so an OAuth client that Google has not verified for it can be limited to test users.
-  Add your account as a test user, or use a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup) whose consent screen is Internal to your organization; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
+  The provisioned client is not yours to change, so use a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup) instead, ideally one whose consent screen is Internal to your Google Workspace organization.
+  On your own custom client, you can also add your account as a test user; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
 - **`The provisioned OAuth client is available only when MindRoom is opened on localhost...`**: open MindRoom on `localhost`, or configure a custom client for remote access.
 
 # Google Services OAuth
@@ -14407,7 +14408,12 @@ from mindroom.tool_system.registration import register_tool_with_metadata
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
     ),
-    dependencies=["google-cloud-storage"],
+    dependencies=[
+        "google-cloud-storage",
+        "google-api-python-client",
+        "google-auth-httplib2",
+        "google-auth-oauthlib",
+    ],
 )
 def cloud_storage_browser_tools() -> type[CloudStorageBrowserTools]:
     return CloudStorageBrowserTools
@@ -14421,7 +14427,8 @@ The base class provides three helpers:
 | `self._google_cloud_client(name, factory)` | Returns one client per worker thread, built by `factory(credentials)` and rebuilt whenever the credentials change |
 | `self._google_cloud_error_result(service_name, operation, exc)` | Returns a JSON error that exposes only the HTTP status, and turns an HTTP 401 into a reconnect prompt |
 
-The plugin must list and install its own client-library dependencies, because MindRoom does not ship them; see [Dependencies](#dependencies).
+The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client`, `google-auth-httplib2`, and `google-auth-oauthlib`.
+MindRoom installs them only as extras of its built-in Google tools, so a clean install without them fails to load the tool; see [Dependencies](#dependencies).
 Build clients only from the credentials the helpers return, and do not copy them with `with_quota_project`, because the copy no longer refreshes through the stored connection.
 
 ### Additional Atlassian connections

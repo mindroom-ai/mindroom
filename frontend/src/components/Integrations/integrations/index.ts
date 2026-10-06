@@ -5,8 +5,8 @@
 import { createElement } from "react";
 import {
   SiGmail,
-  SiGooglebigquery,
   SiGooglecalendar,
+  SiGooglecloud,
   SiGoogledocs,
   SiGoogledrive,
   SiGooglesheets,
@@ -318,20 +318,19 @@ const googleTasksIntegration = new GenericOAuthIntegrationProvider(
   "google_tasks",
 );
 
-const googleBigQueryIntegration = new GenericOAuthIntegrationProvider(
+const googleCloudIntegration = new GenericOAuthIntegrationProvider(
   {
-    id: "google_bigquery",
-    name: "Google BigQuery",
+    id: "google_cloud",
+    name: "Google Cloud",
     description:
-      "Query BigQuery datasets as the connected Google Cloud account",
+      "Connect Google Cloud with read-only access for Google Cloud tools",
     category: "development",
-    icon: createElement(SiGooglebigquery, {
+    icon: createElement(SiGooglecloud, {
       className: "h-5 w-5 text-blue-600",
     }),
     status: "available",
     setup_type: "oauth",
     connected: false,
-    oauth_provider_id: "google_cloud",
   },
   "google_cloud",
 );
@@ -354,8 +353,8 @@ const googleGmailIntegration = new GenericOAuthIntegrationProvider(
 
 // Export all integration providers
 export const integrationProviders: Record<string, IntegrationProvider> = {
-  google_bigquery: googleBigQueryIntegration,
   google_calendar: googleCalendarIntegration,
+  google_cloud: googleCloudIntegration,
   google_docs: googleDocsIntegration,
   google_drive: googleDriveIntegration,
   google_gmail: googleGmailIntegration,

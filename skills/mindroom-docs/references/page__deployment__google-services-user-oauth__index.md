@@ -1,6 +1,6 @@
 # Google Services OAuth For Local Installs
 
-This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud on a paired local installation.
+This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation, and Google Cloud once the provisioned client includes its scope.
 Paired installations use MindRoom's Google OAuth client, so you do not need a Google Cloud project, callback URLs, or a client secret.
 Pair first with `mindroom connect`, or let `mindroom run` pair automatically on first run (see [Hosted Matrix](https://docs.mindroom.chat/deployment/hosted-matrix/)).
 The provisioned client works only when MindRoom is opened on a loopback address (`localhost`, `127.0.0.1`, or `::1`).
@@ -63,5 +63,6 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 - **`OAuth client configuration could not be resolved`**: MindRoom could not get a Google OAuth client, usually because the install is not paired or its pairing was revoked.
   Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
 - **Google shows an unverified-app warning or blocks the Google Cloud connection**: `cloud-platform.read-only` is a sensitive scope, so an OAuth client that Google has not verified for it can be limited to test users.
-  Add your account as a test user, or use a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup) whose consent screen is Internal to your organization; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
+  The provisioned client is not yours to change, so use a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup) instead, ideally one whose consent screen is Internal to your Google Workspace organization.
+  On your own custom client, you can also add your account as a test user; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
 - **`The provisioned OAuth client is available only when MindRoom is opened on localhost...`**: open MindRoom on `localhost`, or configure a custom client for remote access.

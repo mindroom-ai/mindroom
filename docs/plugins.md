@@ -684,7 +684,12 @@ from mindroom.tool_system.registration import register_tool_with_metadata
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
     ),
-    dependencies=["google-cloud-storage"],
+    dependencies=[
+        "google-cloud-storage",
+        "google-api-python-client",
+        "google-auth-httplib2",
+        "google-auth-oauthlib",
+    ],
 )
 def cloud_storage_browser_tools() -> type[CloudStorageBrowserTools]:
     return CloudStorageBrowserTools
@@ -698,7 +703,8 @@ The base class provides three helpers:
 | `self._google_cloud_client(name, factory)` | Returns one client per worker thread, built by `factory(credentials)` and rebuilt whenever the credentials change |
 | `self._google_cloud_error_result(service_name, operation, exc)` | Returns a JSON error that exposes only the HTTP status, and turns an HTTP 401 into a reconnect prompt |
 
-The plugin must list and install its own client-library dependencies, because MindRoom does not ship them; see [Dependencies](#dependencies).
+The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client`, `google-auth-httplib2`, and `google-auth-oauthlib`.
+MindRoom installs them only as extras of its built-in Google tools, so a clean install without them fails to load the tool; see [Dependencies](#dependencies).
 Build clients only from the credentials the helpers return, and do not copy them with `with_quota_project`, because the copy no longer refreshes through the stored connection.
 
 ### Additional Atlassian connections

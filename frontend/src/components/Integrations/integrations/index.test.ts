@@ -36,16 +36,16 @@ describe("Generic OAuth integration provider", () => {
     });
   });
 
-  it("registers Google BigQuery on the shared Google Cloud connection", async () => {
-    const provider = integrationProviders.google_bigquery;
+  it("registers one Google Cloud card for the shared Google Cloud connection", async () => {
+    const provider = integrationProviders.google_cloud;
     const config = provider.getConfig();
 
     expect(config.integration).toMatchObject({
-      id: "google_bigquery",
-      name: "Google BigQuery",
+      id: "google_cloud",
+      name: "Google Cloud",
       setup_type: "oauth",
-      oauth_provider_id: "google_cloud",
     });
+    expect(integrationProviders).not.toHaveProperty("google_bigquery");
 
     (global.fetch as any).mockResolvedValueOnce({
       ok: true,
