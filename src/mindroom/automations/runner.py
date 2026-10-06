@@ -127,6 +127,8 @@ class AutomationRunner:
                 self._start_verify(pending)
 
     def _start_verify(self, pending: _PendingVerify) -> None:
+        # The automation is free again, so a run held while the last prompt was pending may be due now.
+        self._wake.set()
         create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
 
     def _busy(self, key: str) -> bool:

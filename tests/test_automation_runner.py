@@ -289,7 +289,7 @@ async def test_a_run_that_never_reports_back_is_verified_after_an_hour(tmp_path:
 
 @pytest.mark.asyncio
 async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) -> None:
-    """A frequent schedule never starts a second run on the same files before the first is verified."""
+    """A frequent schedule never starts a second run on the same files while the first is still running."""
     config, _paths, runner, bot = _setup(tmp_path)
     config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, cron="* * * * *")]
     await _tick(runner, NOON)
@@ -302,6 +302,20 @@ async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) ->
     await _tick(runner, NOON + timedelta(minutes=3))
 
     assert [message["thread_id"] for message in bot.sent] == [None, "$event1", None]
+
+
+@pytest.mark.asyncio
+async def test_the_automation_is_free_once_its_last_run_is_final(tmp_path: Path) -> None:
+    """Verify only reads the files, so a due prompt need not wait for it to finish."""
+    _config, _paths, runner, _bot = _setup(tmp_path)
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    assert runner._busy("mind:prompt_curation")
+
+    runner.response_finished(["$event1"])
+
+    assert not runner._busy("mind:prompt_curation")
+    assert await wait_for_background_tasks(5)
 
 
 @pytest.mark.asyncio

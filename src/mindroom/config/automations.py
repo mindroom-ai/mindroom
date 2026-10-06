@@ -10,6 +10,8 @@ from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Fie
 from mindroom.config.validation import duplicate_items
 
 _CRON_FIELDS = 5
+# No file may shrink by more than this in one pass, so no pass can be asked to cut more in total.
+MAX_FILE_SHRINK = 0.25
 
 
 class PromptCurationAutomation(BaseModel):
@@ -31,8 +33,8 @@ class PromptCurationAutomation(BaseModel):
     min_reduction: float = Field(
         default=0.10,
         gt=0,
-        lt=1,
-        description="Smallest fraction of the files' size each pass is asked to remove",
+        le=MAX_FILE_SHRINK,
+        description="Smallest fraction of the files' size each pass is asked to remove, at most the 0.25 per-file bound",
     )
     max_reduction: float = Field(
         default=0.15,

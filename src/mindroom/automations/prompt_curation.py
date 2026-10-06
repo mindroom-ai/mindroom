@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from mindroom.config.automations import MAX_FILE_SHRINK
 from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -30,8 +31,6 @@ if TYPE_CHECKING:
 _ENTRYPOINT = "MEMORY.md"
 _MEMORY_DIR_PREFIX = "memory/"
 _MAX_FILE_BYTES = 1 << 20
-# The global loss allowance can hide a small file, such as SOUL.md, being cut whole, so each file has its own bound.
-_MAX_FILE_SHRINK = 0.25
 
 
 @dataclass(frozen=True)
@@ -135,7 +134,7 @@ def curation_prompt(config: Config, plan: CurationPlan) -> str:
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
         upper_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
-        max_file_shrink_percent=round(100 * _MAX_FILE_SHRINK),
+        max_file_shrink_percent=round(100 * MAX_FILE_SHRINK),
     )
 
 
@@ -166,10 +165,11 @@ def _findings(
     if unreadable:
         # Without every file's size, totals and loss would read an unreadable file as deleted.
         return plan.measured_tokens, unreadable
+    # The global loss allowance can hide a small file, such as SOUL.md, being cut whole, so each file has its own bound.
     findings = [
-        f"{path} shrank {round(100 * (before - after[path]) / before)}% (more than {round(100 * _MAX_FILE_SHRINK)}%)"
+        f"{path} shrank {round(100 * (before - after[path]) / before)}% (more than {round(100 * MAX_FILE_SHRINK)}%)"
         for path, before in plan.curated.items()
-        if before and after[path] < before * (1 - _MAX_FILE_SHRINK)
+        if before and after[path] < before * (1 - MAX_FILE_SHRINK)
     ]
     total = sum(after.values())
     if total < plan.floor_tokens:

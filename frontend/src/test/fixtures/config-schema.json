@@ -3143,9 +3143,9 @@
         },
         "min_reduction": {
           "default": 0.1,
-          "description": "Smallest fraction of the files' size each pass is asked to remove",
-          "exclusiveMaximum": 1,
+          "description": "Smallest fraction of the files' size each pass is asked to remove, at most the 0.25 per-file bound",
           "exclusiveMinimum": 0,
+          "maximum": 0.25,
           "title": "Min Reduction",
           "type": "number"
         },

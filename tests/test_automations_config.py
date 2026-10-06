@@ -79,6 +79,7 @@ def test_an_agent_cannot_list_automations_it_cannot_run(agent: AgentConfig, mess
         {"name": "prompt_curation", "cron": "0 0 4 * * *"},
         {"name": "prompt_curation", "cron": "0 0 31 2 *"},
         {"name": "prompt_curation", "min_reduction": 0.2, "max_reduction": 0.1},
+        {"name": "prompt_curation", "min_reduction": 0.3, "max_reduction": 0.35},
         {"name": "prompt_curation", "unknown": 1},
     ],
 )
