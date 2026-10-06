@@ -257,7 +257,7 @@ Starting a call from a room's main timeline gives the agent the newest unthreade
 The snapshot is taken once, when the agent joins; messages sent during the call are not added.
 It works with all three call profiles; with `live`, the voice model skips it when the agent's prompt leaves too little room, but the delegated agent always gets it.
 
-The agent gets the snapshot only when you may reply in the room the call came from and the agent has joined that room.
+The agent gets the snapshot only when you are a member of the room the call came from, the agent's `access` admits you there, and the agent has joined it.
 Otherwise, or when reading the conversation takes longer than 5 seconds, the call starts without it.
 
 When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
@@ -284,7 +284,7 @@ Other Matrix clients ask for a conversation snapshot with the `origin` field of 
 ```
 
 `thread_id` is `null` when the call starts from the room's main timeline, and `origin` may be left out entirely.
-The agent uses `origin` only when the caller sent the event with `creator_user_id` and `agent_user_id` naming the caller and this agent, `thread_id` is the thread's root event, and `room_id` is not the call room.
+The agent uses `origin` only when the caller sent the event with an empty state key and `version: 1`, with `creator_user_id` and `agent_user_id` naming the caller and this agent, `thread_id` is the thread's root event, and `room_id` is not the call room.
 Write `origin` before each call, because the agent reads it when it joins.
 
 ## Transcripts and memory

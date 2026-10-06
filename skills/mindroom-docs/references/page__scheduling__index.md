@@ -303,7 +303,7 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
-    - a file can no longer be read safely, for example because it became a link or grew past 1 MiB;
+    - a file can no longer be read safely;
     - a file shrank by more than `max_file_shrink`;
     - the files total less than the floor, or did not shrink;
     - a protected file changed, or a file is no longer valid UTF-8;
