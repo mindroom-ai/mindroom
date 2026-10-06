@@ -610,8 +610,7 @@ Functions are prefixed, such as `secondary_get_latest_emails` and `secondary_sen
 ### Google Cloud tools
 
 A plugin tool that calls Google Cloud client libraries, such as `google-cloud-storage`, can reuse the built-in read-only **Google Cloud** connection instead of defining its own OAuth provider.
-Users connect once for every Google Cloud tool, the connection requests the `cloud-platform.read-only` scope, and a configured `GOOGLE_SERVICE_ACCOUNT_FILE` is used instead and counts as connected.
-See [Google Services OAuth](deployment/google-services-oauth.md) for the client setup, scope, and account restrictions.
+See [Google Services OAuth](deployment/google-services-oauth.md#providers) for the connection's scope, client setup, service-account option, and account restrictions.
 
 Subclass `GoogleCloudToolkit`, set `_oauth_provider` and `_oauth_tool_name`, and pass the managed constructor values through:
 
@@ -699,14 +698,13 @@ The base class provides three helpers:
 
 | Method | What it does |
 | --- | --- |
-| `self._google_cloud_credentials()` | Returns the requester's credentials, or the service account's; when the account is not connected, the tool call returns the standard connect prompt instead |
-| `self._google_cloud_client(name, factory)` | Returns one client per worker thread, built by `factory(credentials)` and rebuilt whenever the credentials change |
+| `self._google_cloud_credentials()` | Returns credentials for the requester's connection or the configured service account; when the account is not connected, the tool call returns the standard connect prompt instead |
+| `self._google_cloud_client(name, factory)` | Returns a client built by `factory(credentials)` and reuses it only for the same requester's current connection |
 | `self._google_cloud_error_result(service_name, operation, exc)` | Returns a JSON error that exposes only the HTTP status, and turns an HTTP 401 into a reconnect prompt |
 
 The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client`, `google-auth-httplib2`, and `google-auth-oauthlib`.
 MindRoom installs them only as extras of its built-in Google tools, so a clean install without them fails to load the tool; see [Dependencies](#dependencies).
-Build clients only from the credentials the helpers return, and do not copy them with `with_quota_project`, because the copy no longer refreshes through the stored connection.
-Refresh and connection state are tracked per tool-call thread, so call client libraries on the tool-call thread and avoid background transports or transfer managers, or a refresh failure surfaces as a generic error instead of a connect prompt.
+Build clients only from the credentials the helpers return, without copies such as `with_quota_project`, and call them from the tool function itself rather than background threads or transfer managers; otherwise an expired or revoked connection returns a generic error instead of a connect prompt.
 
 ### Additional Atlassian connections
 

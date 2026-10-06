@@ -6,7 +6,6 @@ icon: simple/googlecloud
 
 This page covers the Google OAuth providers behind the Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud tools: which scopes each requests and why, how to set up your own Google Cloud OAuth client, and how to restrict which Google accounts may connect.
 Paired local installations need no Google Cloud setup and use MindRoom's provisioned client; see [Google Services OAuth For Local Installs](google-services-user-oauth.md).
-Google Cloud tools work on paired installations only once MindRoom's provisioned client includes the read-only cloud scope, and otherwise need a custom client.
 Use a custom client when MindRoom is opened on any address other than a local loopback address such as `localhost` or `127.0.0.1`, when the installation is not paired, or when you need organization-specific Google policies or your own consent-screen branding.
 The provisioned client works only on a loopback address; other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
 How connections are made, stored per credential scope, disconnected, and reset is covered in the [OAuth Integration Framework](../oauth-framework.md).
@@ -48,8 +47,7 @@ MindRoom requests only the scopes needed for the operations it exposes to agents
 - `tasks` lets an agent list task lists and tasks and, when `manage_tasks` is enabled, create, update, complete, and delete tasks.
   It also authorizes creating and deleting task lists, but the `google_tasks` tool does not manage task lists.
 - `cloud-platform.read-only` lets Google Cloud tools such as `google_bigquery` read data and run read-only queries as the connected account.
-  The connection is read-only, and the account's own IAM roles still decide what it can read.
-  `google_bigquery` also refuses anything but a single `SELECT` or `WITH` statement.
+  The account's own IAM roles still decide what it can read.
 - `gmail.modify` is the narrowest single Gmail scope that keeps mailbox search and reading, drafts and sending, replies, labels, archiving, and other organization.
   It does not allow permanent deletion that bypasses the trash, and MindRoom does not request the full `mail.google.com` scope.
 - The OpenID email and profile scopes identify the connected account and enforce [account restrictions](#account-restrictions).

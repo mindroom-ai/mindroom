@@ -11,7 +11,7 @@ That page also lists the scopes each Google tool requests and how to restrict wh
 
 Add only the Google tools your agents need.
 Each Google Workspace tool connects and asks for Google approval separately.
-Google Cloud tools such as `google_bigquery` share one read-only **Google Cloud** connection, so you approve it once for all of them.
+Google Cloud tools such as `google_bigquery` use one Google Cloud connection instead; see [Providers](https://docs.mindroom.chat/deployment/google-services-oauth/#providers).
 
 ```yaml
 agents:
@@ -32,7 +32,6 @@ agents:
 With `user_agent`, each Matrix user connects their own account for this agent.
 With `shared`, everyone allowed to use the agent acts through one connected account and may receive its Google data in replies.
 See [Where Connections Are Stored](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored) for every scope.
-The Google Cloud connection requests the sensitive `cloud-platform.read-only` scope, and what the agent can read is limited by the connected account's own IAM roles.
 
 ## Connect
 
