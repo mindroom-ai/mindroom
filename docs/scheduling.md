@@ -292,9 +292,9 @@ agents:
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
+- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
 - An automation does not post again while its previous prompt awaits verify.
-- Nothing is persisted: the schedule is the cooldown, and a restart skips the occurrence it missed.
+- A restart skips an occurrence it missed, and prompts posted before the restart get no verify notice.
 
 For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](hooks.md#event-notes), which can suppress a fire or rewrite its message.
 
@@ -307,14 +307,14 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
-    - a file can no longer be read safely, for example because it became a link or grew past 1 MiB;
+    - a file can no longer be read safely;
     - a file shrank by more than `max_file_shrink`;
     - the files total less than the floor, or did not shrink;
     - a protected file changed, or a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
 When the prompt files are unchanged, verify only checks that no `memory/` detail was deleted, and otherwise reports that nothing changed.
-Verify never writes the files, because other conversations with the same agent may save memories to them during the run; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
+Verify only reports and never changes the files; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
 
 | Field | Default | Description |
 |---|---|---|
