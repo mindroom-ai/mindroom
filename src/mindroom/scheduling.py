@@ -331,11 +331,10 @@ def set_scheduled_task_runner_owner(owner: ScheduledTaskRunnerOwner) -> None:
     _runner_owner = owner
 
 
-def clear_scheduled_task_runner_owner(client: nio.AsyncClient) -> None:
+def clear_scheduled_task_runner_owner() -> None:
     """Stop starting runners on a router that is shutting down."""
     global _runner_owner
-    if _runner_owner is not None and _runner_owner.client is client:
-        _runner_owner = None
+    _runner_owner = None
 
 
 @dataclass
@@ -659,7 +658,6 @@ def _start_new_scheduled_task(
     if owner is not None:
         client = owner.client
         conversation_reader = owner.conversation_reader
-        matrix_admin = build_hook_matrix_admin(owner.client, runtime_paths, config=config)
     _start_scheduled_task(
         client,
         task_id,

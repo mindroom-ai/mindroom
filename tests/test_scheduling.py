@@ -589,17 +589,6 @@ async def test_schedule_in_a_room_the_router_cannot_serve_runs_on_its_creator(
     assert start.call_args.args[5] is agent_reader
 
 
-def test_stopping_router_generation_keeps_its_replacement_as_runner_owner() -> None:
-    """Only the router that registered itself can stop being the runner owner."""
-    retired_client = AsyncMock()
-    replacement = scheduling.ScheduledTaskRunnerOwner(AsyncMock(), _conversation_reader())
-    scheduling.set_scheduled_task_runner_owner(replacement)
-    scheduling.clear_scheduled_task_runner_owner(retired_client)
-    assert scheduling._runner_owner is replacement
-    scheduling.clear_scheduled_task_runner_owner(replacement.client)
-    assert scheduling._runner_owner is None
-
-
 @pytest.mark.asyncio
 async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure(tmp_path: Path) -> None:
     """One deferred task failure should not strand later queued tasks."""

@@ -2233,8 +2233,7 @@ class AgentBot:
         try:
             if self.agent_name == ROUTER_AGENT_NAME:
                 self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
-                if self.client is not None:
-                    clear_scheduled_task_runner_owner(self.client)
+                clear_scheduled_task_runner_owner()
                 cleared_queued_tasks = clear_deferred_overdue_tasks()
                 if cleared_queued_tasks > 0:
                     self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
