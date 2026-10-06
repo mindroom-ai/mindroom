@@ -15,8 +15,9 @@ from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _noop_typing, _plain_request, _target
@@ -323,6 +324,45 @@ async def test_a_chained_pause_pauses_the_resume_span_and_the_next_resume_answer
             (rl.SpanKind.APPROVAL_RESUME, rl.SpanOutcome.COMPLETED),
         ]
         assert _sent_bodies(bot) == ["Thinking...", "Reading document", "Reading the second document", "Both read."]
+
+
+async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:
+    """A resume continues the source answer and trace its reply's records keep, not what Matrix showed."""
+    trace = ToolTraceEntry(type="tool_call_started", tool_name="read_document", tool_call_id="call-run-1")
+    first = replace(
+        _paused(text="Reading document"),
+        acknowledged_response_text="Reading the rendered document",
+        tool_trace=(trace,),
+    )
+    continue_run = AsyncMock(
+        side_effect=[
+            _paused(run_id="run-2", text="Reading the second document"),
+            CompletedApprovalRun("Both read.", {}),
+        ],
+    )
+    async with _approval_bot(tmp_path, requires_human=False) as bot:
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with (
+            patch_response_runner_module(
+                ai_response=AsyncMock(side_effect=ResponsePausedForApproval(first)),
+                should_use_streaming=AsyncMock(return_value=False),
+                typing_indicator=_noop_typing,
+            ),
+            patch.object(type(runner._approval_execution), "continue_run", continue_run),
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
+        assert [call.kwargs["paused_answer"] for call in continue_run.await_args_list] == [
+            PausedAnswer(text="Reading document", tool_trace=(trace,)),
+            PausedAnswer(text="Reading the second document"),
+        ]
+        assert _sent_bodies(bot) == [
+            "Thinking...",
+            "Reading the rendered document",
+            "Reading the second document",
+            "Both read.",
+        ]
 
 
 async def test_an_edit_supersedes_the_approval_of_the_reply_it_regenerates(tmp_path: Path) -> None:

@@ -6864,36 +6864,29 @@ class TestApprovalContinuations:
         assert await alice.is_pending("$source-1") is not finished
         assert (await alice.approval_continuation("approval-1") is None) is finished
 
-    async def test_continuation_round_trips_committed_presentation_and_visibility(
+    async def test_continuation_round_trips_frozen_visibility_without_its_presentation(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A restart restores the exact pause presentation without consulting current config."""
+        """A restart restores frozen visibility without current config; the reply's records keep what it showed."""
         await self.admit_sources(alice)
-        continuation = replace(
-            self.continuation(),
-            response_text="Before.\n\n🔧 `inspect` [1] ⏳",
-            response_tool_trace=(
-                {
-                    "type": "tool_call_started",
-                    "tool_name": "inspect",
-                    "tool_call_id": "call-1",
-                },
-            ),
-            response_presentation_state={"kind": "team", "members": {"GeneralAgent": "Before."}},
-            show_tool_calls=False,
-        )
+        continuation = replace(self.continuation(), show_tool_calls=False)
 
         await alice.create_approval_continuation(continuation)
         restored = await alice.approval_continuation("approval-1")
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
 
         assert restored == continuation
         assert restored is not None
-        assert restored.response_presentation_state == {
-            "kind": "team",
-            "members": {"GeneralAgent": "Before."},
-        }
         assert restored.show_tool_calls is False
+        assert row is not None
+        stored = json.loads(str(row["context_json"]))
+        assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
     @pytest.mark.parametrize("current_policy", [False, True])
     async def test_claim_freezes_current_visibility_for_a_legacy_continuation(
@@ -7076,15 +7069,6 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
-            response_text="Before.\n\n🔧 `write_file` [2] ⏳",
-            response_tool_trace=(
-                {
-                    "type": "tool_call_started",
-                    "tool_name": "write_file",
-                    "tool_call_id": "call-2",
-                },
-            ),
-            response_presentation_state={"kind": "team", "consensus": "Before."},
         )
 
         assert stale is None
@@ -7094,9 +7078,6 @@ class TestApprovalContinuations:
         assert advanced.run_id == "run-2"
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
-        assert advanced.response_text.endswith("🔧 `write_file` [2] ⏳")
-        assert advanced.response_tool_trace[-1]["tool_call_id"] == "call-2"
-        assert advanced.response_presentation_state == {"kind": "team", "consensus": "Before."}
 
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
         self,

@@ -34,7 +34,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.teams import TeamMode, _attach_team_pause_presentation, continue_paused_team_run
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
@@ -297,7 +297,6 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
                         approval_calls=(call,),
                         history_scope=history_scope,
                         prior_presentation_state=paused.response_presentation_state,
-                        prior_response_text=paused.response_text,
                         prior_tool_trace=paused.tool_trace,
                         progress=None,
                     )
@@ -326,6 +325,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
                     )
                     result = await execution.continue_run(
                         continuation,
+                        paused_answer=PausedAnswer(),
                         execution_identity=identity,
                         tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=context),
                         decisions=decisions,
@@ -545,7 +545,6 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
                     approval_calls=calls,
                     history_scope=history_scope,
                     prior_presentation_state=result.response_presentation_state,
-                    prior_response_text=result.response_text,
                     prior_tool_trace=result.tool_trace,
                     progress=None,
                 )
@@ -566,6 +565,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
                 )
                 result = await execution.continue_run(
                     continuation,
+                    paused_answer=PausedAnswer(),
                     execution_identity=identity,
                     tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=context),
                     decisions=decisions,

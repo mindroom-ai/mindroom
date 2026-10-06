@@ -39,7 +39,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.teams import (
     TeamMode,
     _attach_team_pause_presentation,
@@ -294,7 +294,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 approval_calls=calls,
                 history_scope=scope,
                 prior_presentation_state=captured.response_presentation_state,
-                prior_response_text=captured.response_text,
                 prior_tool_trace=captured.tool_trace,
                 progress=None,
             )
@@ -317,6 +316,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 request_body="Add 2 and 3",
                 cli_call=cli_call,
             ),
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=(
                 LiveToolDispatchContext.from_runtime_context(context)

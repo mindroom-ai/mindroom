@@ -97,6 +97,7 @@ from mindroom.reply_presentation import (
     TEAM_PLACEHOLDER,
     NoteKind,
     Presentation,
+    current_answer,
     decode_presentation,
     format_error_note,
     note_segment,
@@ -125,7 +126,7 @@ from mindroom.response_terminal import (
     TerminalFailureStatus,
     build_terminal_stream_transport_outcome,
 )
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
@@ -159,7 +160,6 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -795,6 +795,17 @@ class PostLockRequestPreparationError(RuntimeError):
         self.placeholder_event_id = placeholder_event_id
         # The reply's records already own the visible failure notice.
         self.reply_owned = reply_owned
+
+
+def _paused_answer() -> PausedAnswer:
+    """Return the answer the current approval resume continues, as its reply's records keep it."""
+    handle = current_span()
+    assert handle is not None, "every approval resume runs in its reply's resume span"
+    segment = current_answer(handle.base, handle.span_id)
+    if segment is None:
+        return PausedAnswer()
+    # The resume completes these entries in place; the span's base keeps what the pause showed.
+    return PausedAnswer(text=segment.text, tool_trace=deepcopy(segment.tool_trace), team_state=segment.team_state)
 
 
 def _paused_presentation(handle: SpanHandle, paused: PausedAttempt, *, waiting_text: str | None) -> Presentation:
@@ -1527,9 +1538,6 @@ class ResponseRunner:
                 prepared_edit_record=request.prepared_edit_record,
                 calls=plan.calls,
                 state=continuation_state,
-                response_text=snapshot_text,
-                response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
-                response_presentation_state=paused.response_presentation_state,
                 delegation_storage_bindings=paused.delegation_storage_bindings,
                 show_tool_calls=show_tool_calls,
                 execution_identity=serialize_tool_execution_identity(execution_identity),
@@ -1622,7 +1630,7 @@ class ResponseRunner:
         stream_status: str,
         visible_tool_trace: tuple[ToolTraceEntry, ...],
     ) -> _ShownPause:
-        """Show a pause before its continuation exists, as main does, or prepare the reply row that shows it."""
+        """Show a pause before its continuation exists, or prepare the reply row that shows it."""
         shows_text = waiting_text is not None or bool(paused.response_text)
         initial = SendTextRequest(
             target=target,
@@ -1759,7 +1767,7 @@ class ResponseRunner:
         )
 
     async def _end_expired_in_place_wait(self, current: ApprovalContinuation) -> None:
-        """End the span of a response-local wait that expired; the reply waits for the decision (§6.4 pause)."""
+        """End the span of a response-local wait that expired; the reply waits for the decision."""
         handle = current_span()
         if handle is None or handle.exited:
             return
@@ -1985,7 +1993,7 @@ class ResponseRunner:
                     terminal_status="suspended",
                     event_id=current.response_event_id,
                     is_visible_response=True,
-                    final_visible_body=current.response_text,
+                    final_visible_body=result.response_text,
                     delivery_kind="edited",
                     extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
                 ),
@@ -2537,6 +2545,7 @@ class ResponseRunner:
             )
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
+        paused_answer = _paused_answer()
         with approval_receipt_context(build_approval_receipt(continuation.calls)):
             if continuation.entity_kind == "team":
 
@@ -2566,9 +2575,8 @@ class ResponseRunner:
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         approval_calls=continuation.calls,
                         history_scope=continuation.history_scope,
-                        prior_response_text=continuation.response_text,
-                        prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
-                        prior_presentation_state=continuation.response_presentation_state or None,
+                        prior_tool_trace=paused_answer.tool_trace,
+                        prior_presentation_state=paused_answer.team_state,
                         show_tool_calls=continuation.show_tool_calls,
                         tool_trace_collector=tool_trace_collector,
                         progress=progress,
@@ -2586,6 +2594,7 @@ class ResponseRunner:
             else:
                 response_text = await self._approval_execution.continue_run(
                     continuation,
+                    paused_answer=paused_answer,
                     execution_identity=execution_identity,
                     tool_dispatch=tool_dispatch,
                     decisions=decisions,
@@ -3126,7 +3135,7 @@ class ResponseRunner:
         acknowledge_deferred: Callable[[str, str], Awaitable[None]],
         span_claimed: Callable[[], bool],
     ) -> str | None:
-        """Run one response under its conversation lock, mapping early failures as main does."""
+        """Run one response under its conversation lock, mapping early failures to their outcomes."""
         try:
             return await self._lifecycle_coordinator.run_locked_response(
                 target=resolved_target,
@@ -3319,7 +3328,7 @@ class ResponseRunner:
         *,
         history_scope: HistoryScope,
     ) -> ResponseRequest | None:
-        """Claim the reply this request answers, after main's first source gate passed.
+        """Claim the reply this request answers, after the first source gate passed.
 
         ``None`` means no span opened: earlier writes of the reply are
         unresolved, and the claim retries the sources once they resolve; or a

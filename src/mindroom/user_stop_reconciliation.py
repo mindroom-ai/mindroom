@@ -111,7 +111,7 @@ class UserStopReconciler:
         transaction that records it on the turn, so no terminal row slips
         between them, and the span's exit, the approval's failure settlement,
         or the owed cancel note shows it. Nothing waits for the conversation.
-        A Stop on an event no reply owns, a turn main left, finalizes under the
+        A Stop on an event no reply owns, a turn an earlier release left, finalizes under the
         conversation's lock.
         """
         owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)

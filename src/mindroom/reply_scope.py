@@ -56,7 +56,7 @@ class SpanHandle:
     reply: rl.Reply
     # What earlier spans left above this span's answer.
     base: Presentation
-    # What a stopped attempt showed, for main's streamer to continue below.
+    # What a stopped attempt showed, for the streamer to continue below.
     resumed: UnfinishedStreamedReply | None = None
     # Whether what the reply showed before this span is known (records, not a legacy read).
     shown_before_known: bool = True
@@ -155,7 +155,7 @@ def current_slot() -> SpanSlot | None:
 
 
 def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
-    """Describe what a reply showed in the shape main's streamer continues below."""
+    """Describe what a reply showed in the shape the streamer continues below."""
     work = shown_work(shown)
     if work is None:
         return None
@@ -232,7 +232,7 @@ class ReplyRuntime:
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
-        Runs before journal replay: replies main left in flight
+        Runs before journal replay: replies an earlier release left in flight
         get records first, replay claims continue the replies whose sources are
         still pending, and the notes this owes are delivered by the outbox
         recovery after each room syncs.

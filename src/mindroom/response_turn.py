@@ -404,6 +404,16 @@ class ExcludedAttempt:
 
 
 @dataclass(frozen=True)
+class PausedAnswer:
+    """The answer a paused run showed, as its reply's records keep it, which its resume continues."""
+
+    text: str = ""
+    tool_trace: tuple[ToolTraceEntry, ...] = ()
+    # A team's structured document, restored instead of re-parsing its rendered text.
+    team_state: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
 class PausedAttempt:
     """One Agno run durably paused before approval-gated tool execution."""
 

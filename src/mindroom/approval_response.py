@@ -31,7 +31,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
+from mindroom.tool_system.events import tool_markers_match_trace
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
@@ -396,9 +396,6 @@ class ApprovalResponseCoordinator:
             calls=plan.calls,
             runtime_model_name=paused.runtime_model_name,
             continuation_count=max(current.continuation_count, paused.continuation_count),
-            response_text=paused.response_text,
-            response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
-            response_presentation_state=paused.response_presentation_state,
             delegation_storage_bindings=paused.delegation_storage_bindings,
             cli_call=paused.cli_call,
         )
@@ -412,9 +409,6 @@ class ApprovalResponseCoordinator:
                 calls=advance.calls,
                 runtime_model_name=advance.runtime_model_name,
                 continuation_count=advance.continuation_count,
-                response_text=advance.response_text,
-                response_tool_trace=advance.response_tool_trace,
-                response_presentation_state=advance.response_presentation_state,
                 delegation_storage_bindings=advance.delegation_storage_bindings,
                 cli_call=advance.cli_call,
             )
@@ -491,7 +485,7 @@ class ApprovalResponseCoordinator:
         """Settle cards and the failure outcome from the owning source worker.
 
         ``interruption`` names the note a reply with records shows below its
-        content; ``visible_text`` is main's read-back of that content.
+        content; ``visible_text`` is that content as read back from Matrix.
         """
         current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:

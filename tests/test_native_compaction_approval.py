@@ -24,7 +24,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_team_run
 from mindroom.tool_system.runtime_context import ToolDispatchContext
@@ -85,6 +85,7 @@ async def _resume_approval(
         ):
             result = await runner._approval_execution.continue_run(
                 continuation,
+                paused_answer=PausedAnswer(),
                 execution_identity=identity,
                 tool_dispatch=ToolDispatchContext(execution_identity=identity),
                 decisions={tool_call_id: False},

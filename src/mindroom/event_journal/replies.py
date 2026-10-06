@@ -1,7 +1,7 @@
 """Transactional application of reply lifecycle transitions.
 
 The pure rules in ``mindroom.reply_lifecycle`` decide; this module reads the
-facts a rule needs inside the transaction that also performs main's coupled
+facts a rule needs inside the transaction that also performs the journal's coupled
 durable step, writes what the rule decided, and runs the in-transaction
 effects. Post-commit effects are returned to the caller.
 """
@@ -388,7 +388,7 @@ def stop_target(
     may_wait: bool,
     now_ns: int,
 ) -> StopTarget:
-    """Find the reply a Stop reaches, or store the Stop for a create still unresolved in its room (§6.4 ``stop``)."""
+    """Find the reply a Stop reaches, or store the Stop for a create still unresolved in its room."""
     found = reply_messages.for_event(transaction, principal_id, event_id)
     if found is not None:
         if found.room_id != room_id:

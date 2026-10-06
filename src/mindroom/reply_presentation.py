@@ -67,7 +67,7 @@ class NoteKind(StrEnum):
 
 
 class WriteKind(StrEnum):
-    """Which write of a reply is being rendered; it decides the wire status (DESIGN §5.3)."""
+    """Which write of a reply is being rendered; it decides the wire status."""
 
     # A placeholder sent before the model runs: ``pending``, as a plain message.
     PLACEHOLDER = "placeholder"
@@ -182,7 +182,7 @@ def render_body(presentation: Presentation) -> tuple[str, tuple[ToolTraceEntry, 
     note = presentation.trailing_note
     if note is not None and (note.note is not NoteKind.APPROVAL_WAIT or not body):
         # A paused reply keeps showing its answer; the wait text appears only
-        # when there is nothing else to show, as on main.
+        # when there is nothing else to show.
         body = f"{body}\n\n{note.text}" if body else note.text
     return (body or presentation.placeholder), trace
 
@@ -199,7 +199,7 @@ def _terminal_status(state: str) -> str:
 
 
 def stream_status_for(write: WriteKind, *, state: str, needs_human_decision: bool = False) -> str | None:
-    """Return the wire status one write carries, following main's rules."""
+    """Return the wire status one write carries, following the rules earlier releases used."""
     match write:
         case WriteKind.PLACEHOLDER | WriteKind.CREATE:
             return STREAM_STATUS_PENDING
@@ -261,7 +261,7 @@ def folded(presentation: Presentation) -> Presentation:
 
 
 def shown_work(possibly_shown: Presentation) -> Segment | None:
-    """Return what a stopped reply showed of its work, without its notes, as main reads it back.
+    """Return what a stopped reply showed of its work, without its notes, as read back from Matrix.
 
     Trailing cancel, interruption, restart, and error notes are dropped, so a
     reply interrupted twice before its continuation showed anything carries
@@ -278,7 +278,7 @@ def after_restart(possibly_shown: Presentation) -> Presentation:
     """Return what a replay continues below: the shown work and the restart note, or nothing.
 
     A reply that showed only its placeholder is replaced rather than
-    annotated, as main's continuation does.
+    annotated, as a continued stream is.
     """
     work = shown_work(possibly_shown)
     if work is None:

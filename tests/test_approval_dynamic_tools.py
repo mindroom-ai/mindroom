@@ -29,7 +29,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session, save_loaded_tools_for_session
@@ -616,6 +616,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         async def continue_saved_run() -> CompletedApprovalRun | PausedAttempt:
             return await execution.continue_run(
                 continuation,
+                paused_answer=PausedAnswer(),
                 execution_identity=identity,
                 tool_dispatch=ToolDispatchContext(execution_identity=identity),
                 decisions={

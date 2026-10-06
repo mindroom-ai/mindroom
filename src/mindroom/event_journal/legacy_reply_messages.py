@@ -1,4 +1,4 @@
-"""Replies main started before durable reply records, adopted once per principal.
+"""Replies an earlier release started before durable reply records, adopted once per principal.
 
 Main kept what an in-flight reply was in four places: its turn record, its
 ``INITIAL`` and ``FINAL`` outbox rows, its approval continuation, and the
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 # The generation of spans main ran: never active, so nothing they left is live.
 LEGACY_GENERATION = "legacy"
 
-# What the wire status of a main-era answer says its reply ended as.
+# What the wire status of an earlier release's answer says its reply ended as.
 _STATE_BY_STATUS = {
     "completed": rl.ReplyState.COMPLETED,
     "cancelled": rl.ReplyState.CANCELLED,
@@ -49,20 +49,53 @@ _OUTCOME_BY_STATE = {
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyPausedAnswer:
+    """What an earlier release's approval continuation stored of the answer its pause showed."""
+
+    text: str = ""
+    tool_trace: tuple[dict[str, object], ...] = ()
+    team_state: dict[str, object] | None = None
+
+
+# LEGACY_COMPAT: Paused answers stored in approval continuation context.
+# Legacy format: approval_continuations.context_json carrying response_text, response_tool_trace, and
+# response_presentation_state, which earlier releases wrote at every pause before replies held what a pause shows.
+# Last legacy release: v2026.10.162; replacement: the unreleased durable reply messages keep the paused answer as
+# the reply's answer segment and no longer write these keys.
+# Handling: adoption reads them once, from the stored context of a continuation it adopts, to build the paused
+# reply's presentation; nothing else reads them, and an advance rewrites the context without them.
+# Coverage: tests/test_legacy_reply_messages.py::test_a_waiting_approval_pauses_its_reply_with_what_it_showed.
+def _legacy_paused_answer(transaction: Transaction, principal_id: str, approval_id: str) -> LegacyPausedAnswer:
+    row = transaction.fetchone(
+        "SELECT context_json FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+        (principal_id, approval_id),
+    )
+    stored = {} if row is None else json.loads(str(row["context_json"]))
+    text = stored.get("response_text")
+    trace = stored.get("response_tool_trace")
+    state = stored.get("response_presentation_state")
+    return LegacyPausedAnswer(
+        text=text if isinstance(text, str) else "",
+        tool_trace=tuple(dict(entry) for entry in trace if isinstance(entry, dict)) if isinstance(trace, list) else (),
+        team_state=dict(state) if isinstance(state, dict) and state else None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class LegacyPresentations:
     """Encoders of what main showed, owned by the reply layer that defines presentations."""
 
     # The placeholder alone, for a team or an agent reply.
     empty: Callable[[bool], str]
-    # What a paused approval showed, from its continuation, as the named span's answer.
-    paused: Callable[[ApprovalContinuation, str], str]
-    # What a frozen main-era answer row shows, as the named span's answer.
+    # What a paused approval showed, from what its continuation stored, as the named span's answer.
+    paused: Callable[[ApprovalContinuation, LegacyPausedAnswer, str], str]
+    # What a frozen answer row of an earlier release shows, as the named span's answer.
     answered: Callable[[MatrixDelivery, str], str]
 
 
 @dataclass(frozen=True, slots=True)
 class _Adoption:
-    """The reply records one main-era reply gets."""
+    """The reply records one earlier-release reply gets."""
 
     reply: rl.Reply
     spans: tuple[rl.Span, ...]
@@ -72,7 +105,7 @@ class _Adoption:
 
 
 def classified(transaction: Transaction, principal_id: str) -> bool:
-    """Return whether this principal's main-era replies were adopted already."""
+    """Return whether this principal's earlier-release replies were adopted already."""
     row = transaction.fetchone(
         "SELECT 1 AS present FROM reply_legacy_classifications WHERE principal_id = ?",
         (principal_id,),
@@ -82,7 +115,7 @@ def classified(transaction: Transaction, principal_id: str) -> bool:
 
 # LEGACY_COMPAT: In-flight agent and team replies without reply records.
 # Legacy format: approval continuations, INITIAL and FINAL outbox rows without reply_id, and pending turn records that
-# main wrote for replies before reply_messages existed; the selected principal has no reply_legacy_classifications row.
+# earlier releases wrote for replies before reply_messages existed; the selected principal has no reply_legacy_classifications row.
 # Last legacy release: v2026.10.162; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans and give its outbox rows reply identity.
 # Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
@@ -99,7 +132,7 @@ def classify(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
-    """Give each reply main left in flight a record, once per principal; return what to run after commit."""
+    """Give each reply an earlier release left in flight a record, once per principal; return what to run after commit."""
     if classified(transaction, principal_id):
         return ()
     adoptions: list[_Adoption] = []
@@ -164,7 +197,7 @@ def _newest_continuations(
     principal_id: str,
     entity_name: str,
 ) -> tuple[ApprovalContinuation, ...]:
-    """Return the newest continuation of each main-era reply; older ones are superseded (decision 1)."""
+    """Return the newest continuation of each earlier-release reply; older ones are superseded, as an edit supersedes them."""
     newest: dict[str, ApprovalContinuation] = {}
     for continuation in approval_continuations.for_principal(transaction, principal_id):
         if continuation.entity_name != entity_name:
@@ -257,7 +290,7 @@ def _final_state(final: MatrixDelivery) -> rl.ReplyState:
 
 
 def _owed_final(final: MatrixDelivery | None) -> bool:
-    """Return whether a main-era FINAL is still to be delivered."""
+    """Return whether an earlier release's FINAL is still to be delivered."""
     return (
         final is not None
         and final.acknowledged_event_id is None
@@ -292,7 +325,11 @@ def _paused_reply(
         outcome=rl.SpanOutcome.PAUSED,
         approval_id=continuation.approval_id,
     )
-    shown = presentations.paused(continuation, paused.span_id)
+    shown = presentations.paused(
+        continuation,
+        _legacy_paused_answer(transaction, principal_id, continuation.approval_id),
+        paused.span_id,
+    )
     reply = _reply(
         transaction,
         principal_id,
@@ -325,7 +362,7 @@ def _paused_reply(
     )
     if final is not None and (final.acknowledged_event_id is not None or _owed_final(final)):
         # The resume froze its answer: the reply ends as that row says, and
-        # main's frozen-final recovery still finishes the continuation.
+        # Frozen-final recovery still finishes the continuation.
         state = _final_state(final)
         ended = replace(resume, outcome=_OUTCOME_BY_STATE[state], ended_at_ns=now_ns)
         shown = presentations.answered(final, ended.span_id)
@@ -387,7 +424,7 @@ def _reply_of_rows(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> _Adoption | None:
-    """The reply main's INITIAL and FINAL rows of one turn imply, first match wins (§14.5)."""
+    """The reply that an earlier release's INITIAL and FINAL rows of one turn imply, first match wins."""
     record = _turn(transaction, entity_name, delivery_id)
     if record is None or record.conversation_target is None:
         return None
@@ -432,7 +469,7 @@ def _reply_of_rows(
     if initial is None:
         return None
     if final is not None or initial.retired:
-        # Answered, or retired by a departure or a deleted source: main's own owners finish it.
+        # Answered, or retired by a departure or a deleted source: their existing owners finish it.
         return None
     stopped = record.user_stop_receipt_order is not None
     if not sources.pending and (initial.acknowledged_event_id is None or stopped):
@@ -458,7 +495,7 @@ def _reply_of_rows(
         placeholder_only=acknowledged is not None,
         reply_sequence=1 if owed else 0,
         # Whether a replay continues below a shown attempt, or a stream that
-        # settled needs main's restart note, only the event says.
+        # settled needs the restart note, only the event says.
         legacy_pending=rl.LegacyPending.PRESENTATION_READ if acknowledged is not None else None,
         **base,  # type: ignore[arg-type]
     )
@@ -501,7 +538,7 @@ def _stream_created_reply(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> _Adoption:
-    """A turn whose stream created its reply without a placeholder row: main's adoption scan finds the event."""
+    """A turn whose stream created its reply without a placeholder row: the adoption scan finds the event."""
     assert record.conversation_target is not None
     reply_id = _new_id()
     span = _span(
@@ -562,7 +599,7 @@ def _unsettled_stops(
 
 
 def pending_reads(transaction: Transaction, principal_id: str) -> tuple[tuple[rl.Reply, rl.Span], ...]:
-    """Return main-era replies still waiting for their legacy read, with their last span."""
+    """Return earlier-release replies still waiting for their legacy read, with their last span."""
     rows = transaction.fetchall(
         "SELECT reply_id FROM reply_messages WHERE principal_id = ? AND legacy_pending IS NOT NULL ORDER BY reply_id",
         (principal_id,),
@@ -585,7 +622,7 @@ def read_done(
     read: rl.LegacyRead,
     now_ns: int,
 ) -> AppliedTransition | None:
-    """Record what one main-era reply's legacy read found."""
+    """Record what one earlier-release reply's legacy read found."""
     reply = reply_messages.lock(transaction, principal_id, reply_id)
     if reply is None:
         return None

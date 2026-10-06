@@ -481,7 +481,7 @@ def _restore(reply: Reply, span: Span, now_ns: int) -> Reply:
 
 @dataclass(frozen=True, slots=True)
 class ClaimRequest:
-    """One executor's request to claim a reply, after main's first source gate passed."""
+    """One executor's request to claim a reply, after the first source gate passed."""
 
     span_id: str
     delivery_id: str
@@ -602,7 +602,7 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
     ):
         # Waiting under the conversation lock would block the reply's own
         # sends; the debt's resolution wakes these sources instead. A reply
-        # main left waits for its legacy read the same way.
+        # an earlier release left waits for its legacy read the same way.
         return Transition(outcome=Outcome.DEFERRED, reply=reply if changed else context.reply, spans=tuple(changed))
 
     def claimed(transition_reply: Reply, span: Span, *extra_spans: Span) -> Transition:
@@ -634,7 +634,7 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
 
     if reply is None:
         if request.driving_edit_id is not None:
-            # A reply older than the records: main's handled-turn ledger named its event.
+            # A reply older than the records: the handled-turn ledger named its event.
             historical = _new_reply(request, state=ReplyState.COMPLETED, event_id=request.historical_event_id)
             span = _new_span(
                 request,
@@ -661,7 +661,7 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
             if reply.approval_id is None:
                 msg = f"Paused reply {reply.reply_id} has no approval"
                 raise _invalid(msg)
-            # Decision 1: an edit supersedes the approval; its cleanup runs
+            # An edit supersedes the approval; its cleanup runs
             # outside the conversation lock and publishes no failure note.
             effects.append(FenceApproval(reply.approval_id, "superseded"))
             effects.append(WakeApproval(reply.approval_id))
@@ -1031,7 +1031,7 @@ def stopped(
             spans=(_end(span, SpanOutcome.CANCELLED, now_ns),),
         )
     if span.kind is SpanKind.REGENERATION and span.rollback is not None and not had_acknowledged_write(reply, span):
-        # The old answer stays untouched, as main leaves it.
+        # The old answer stays untouched.
         return Transition(
             outcome=Outcome.APPLIED,
             reply=_restore(reply, span, now_ns),
@@ -1341,7 +1341,7 @@ def approval_failure_note(
     span_has_final: bool,
     now_ns: int,
 ) -> Transition:
-    """Write a failed approval's note, the reply's terminal write, while its continuation settles (§10).
+    """Write a failed approval's note, the reply's terminal write, while its continuation settles.
 
     The note freezes the reply's end: a Stop that arrives later is satisfied
     by it, as by any terminal row, and the continuation's finish changes
@@ -1512,7 +1512,7 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
         and current.rollback is not None
         and not had_acknowledged_write(reply, current)
     ):
-        # The old answer stays as it was, as main leaves it.
+        # The old answer stays as it was.
         return Transition(
             outcome=Outcome.APPLIED,
             reply=_restore(reply, current, now_ns),
@@ -1562,7 +1562,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
 
 
 def replay_superseded(reply: Reply, last: Span, *, durable_write_debt: bool, now_ns: int) -> Transition:
-    """A newer message superseded the replay of the reply's sources; they settle in this transaction (§6.4).
+    """A newer message superseded the replay of the reply's sources; they settle in this transaction.
 
     A reply that still owes Matrix a write is never superseded, because its
     replay is what resolves that write; neither is one a span runs, a pending
@@ -1692,7 +1692,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
 
 @dataclass(frozen=True, slots=True)
 class LegacyRead:
-    """What reading a main-era reply's event found, once its room synced."""
+    """What reading an earlier-release reply's event found, once its room synced."""
 
     # What the event showed, encoded; ``None`` when the read found nothing or gave up.
     shown: str | None = None
@@ -1700,15 +1700,15 @@ class LegacyRead:
     event_id: str | None = None
     # The event's wire status says the reply already ended, and how.
     ended_as: ReplyState | None = None
-    # The event was still streaming within main's stale-stream window.
+    # The event was still streaming within the stale-stream window earlier releases used.
     recent: bool = False
 
 
 def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pending: bool, now_ns: int) -> Transition:
-    """Record what a main-era reply showed; a stream main stopped after its sources settled ends here.
+    """Record what an earlier-release reply showed; a stream an earlier release stopped after its sources settled ends here.
 
-    That stream gets main's restart note when it was still streaming within
-    main's stale-stream window, as main's startup cleanup gave it; otherwise
+    That stream gets the restart note when it was still streaming within
+    the stale-stream window, as that release's startup cleanup gave it; otherwise
     the reply keeps what its event shows. Replies with pending sources or an
     approval keep their owners: the replay claim and the approval runtime,
     which waited for this read.

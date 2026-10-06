@@ -165,9 +165,6 @@ class ApprovalContinuation:
     sources: ResponseSources
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
-    response_text: str = ""
-    response_tool_trace: tuple[dict[str, object], ...] = ()
-    response_presentation_state: dict[str, object] = field(default_factory=dict)
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     show_tool_calls: bool = True
     show_tool_calls_is_frozen: bool = True
@@ -213,9 +210,6 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "entity_kind": continuation.entity_kind,
         "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
-        "response_text": continuation.response_text,
-        "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
-        "response_presentation_state": continuation.response_presentation_state,
         "delegation_storage_bindings": continuation.delegation_storage_bindings,
         "show_tool_calls": continuation.show_tool_calls,
         "execution_identity": continuation.execution_identity,
@@ -345,14 +339,6 @@ def _from_rows(
         sources=sources,
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
-        response_text=cast("str", stored.get("response_text", "")),
-        response_tool_trace=tuple(
-            dict(event) for event in cast("list[dict[str, object]]", stored.get("response_tool_trace", []))
-        ),
-        response_presentation_state=cast(
-            "dict[str, object]",
-            stored.get("response_presentation_state", {}),
-        ),
         delegation_storage_bindings=cast(
             "dict[str, dict[str, object]]",
             stored.get("delegation_storage_bindings", {}),
@@ -703,9 +689,6 @@ def advance(
     session_id: str,
     calls: tuple[ApprovalCall, ...],
     runtime_model_name: str | None = None,
-    response_text: str | None = None,
-    response_tool_trace: tuple[dict[str, object], ...] | None = None,
-    response_presentation_state: dict[str, object] | None = None,
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
     cli_call: dict[str, object] | None = None,
     continuation_count: int | None = None,
@@ -727,11 +710,6 @@ def advance(
         calls=calls,
         runtime_model_name=runtime_model_name or current.runtime_model_name,
         continuation_count=current.continuation_count if continuation_count is None else continuation_count,
-        response_text=current.response_text if response_text is None else response_text,
-        response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
-        response_presentation_state=(
-            current.response_presentation_state if response_presentation_state is None else response_presentation_state
-        ),
         delegation_storage_bindings=(
             current.delegation_storage_bindings if delegation_storage_bindings is None else delegation_storage_bindings
         ),
@@ -776,9 +754,6 @@ class ApprovalAdvance:
     session_id: str
     calls: tuple[ApprovalCall, ...]
     runtime_model_name: str | None = None
-    response_text: str | None = None
-    response_tool_trace: tuple[dict[str, object], ...] | None = None
-    response_presentation_state: dict[str, object] | None = None
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None
     cli_call: dict[str, object] | None = None
     continuation_count: int | None = None
@@ -794,9 +769,6 @@ class ApprovalAdvance:
             session_id=self.session_id,
             calls=self.calls,
             runtime_model_name=self.runtime_model_name,
-            response_text=self.response_text,
-            response_tool_trace=self.response_tool_trace,
-            response_presentation_state=self.response_presentation_state,
             delegation_storage_bindings=self.delegation_storage_bindings,
             cli_call=self.cli_call,
             continuation_count=self.continuation_count,
@@ -922,7 +894,7 @@ def finish(
     if continuation is None:
         return False
     if continuation.state == "failing" and continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
-        # An edit regenerates the reply; the old approval publishes nothing (decision 1).
+        # An edit regenerates the reply; the old approval publishes nothing.
         journal.settle_many(transaction, principal_id, continuation.source_event_ids)
         transaction.execute(
             "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",

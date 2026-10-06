@@ -42,9 +42,14 @@ from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalD
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, apply_exact_approval_decisions
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAnswer,
+    ResponsePausedForApproval,
+    apply_exact_approval_decisions,
+)
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
-from mindroom.tool_system.events import CollectedStreamPresentation, serialize_tool_trace
+from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     build_execution_identity_from_runtime_context,
@@ -221,6 +226,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
     run_ids = []
     result = await execution.continue_run(
         continuation,
+        paused_answer=PausedAnswer(),
         execution_identity=identity,
         tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
         decisions={"loader": True},
@@ -349,12 +355,6 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     presentation.start_tool(
         project_cli_execution(requirement.tool_execution, parent="bash-parent", toolkit_name="actions"),
     )
-
-    continuation = replace(
-        continuation,
-        response_text=presentation.final_text(),
-        response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
-    )
     published = []
 
     async def publish(chunk) -> None:
@@ -369,6 +369,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
         CliApprovalCall.from_dict(continuation.cli_call),
         catalog.run_response,
         catalog.session,
+        paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
         runtime_context=catalog.runtime_context,
         decisions={"hidden": approved},
         denial_reasons={"hidden": "Denied"},
@@ -465,8 +466,6 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
             requirements=(requirement,),
             delegation_depth=0,
         ).to_dict(),
-        response_text=presentation.final_text(),
-        response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
     )
     with tool_runtime_context(catalog.runtime_context):
         follow_up = await cli_approval_recovery.continue_cli_approval(
@@ -475,6 +474,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
             CliApprovalCall.from_dict(continuation.cli_call),
             catalog.run_response,
             catalog.session,
+            paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
             runtime_context=catalog.runtime_context,
             decisions={"bash": approved},
             denial_reasons={"bash": "Denied"},
@@ -657,8 +657,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         state="claimed",
         show_tool_calls=True,
         request_body="recover actual request",
-        response_text=presentation.response_text,
-        response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
         calls=(
             ApprovalCall(
                 "hidden",
@@ -813,6 +811,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             CliApprovalCall.from_dict(continuation.cli_call),
             persisted,
             session,
+            paused_answer=PausedAnswer(text=presentation.response_text, tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"hidden": True},
             denial_reasons={"hidden": None},
@@ -996,6 +995,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
     async def recover():
         return await execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
             decisions={"remember-id": True},

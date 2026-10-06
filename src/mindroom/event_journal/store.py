@@ -1723,9 +1723,6 @@ class PrincipalStore:
         session_id: str,
         calls: tuple[ApprovalCall, ...],
         runtime_model_name: str | None = None,
-        response_text: str | None = None,
-        response_tool_trace: tuple[dict[str, object], ...] | None = None,
-        response_presentation_state: dict[str, object] | None = None,
         delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
         cli_call: dict[str, object] | None = None,
         continuation_count: int | None = None,
@@ -1738,9 +1735,6 @@ class PrincipalStore:
             session_id=session_id,
             calls=calls,
             runtime_model_name=runtime_model_name,
-            response_text=response_text,
-            response_tool_trace=response_tool_trace,
-            response_presentation_state=response_presentation_state,
             delegation_storage_bindings=delegation_storage_bindings,
             cli_call=cli_call,
             continuation_count=continuation_count,
@@ -1862,7 +1856,7 @@ class PrincipalStore:
         presentations: legacy_reply_messages.LegacyPresentations,
         now_ns: int,
     ) -> tuple[AppliedTransition, ...]:
-        """Give the replies main left in flight records, once per principal."""
+        """Give the replies an earlier release left in flight records, once per principal."""
         return await self._backend.write(
             lambda transaction: legacy_reply_messages.classify(
                 transaction,
@@ -1874,7 +1868,7 @@ class PrincipalStore:
         )
 
     async def legacy_reply_reads(self) -> tuple[tuple[rl.Reply, rl.Span], ...]:
-        """Return main-era replies waiting for what only their Matrix event shows."""
+        """Return earlier-release replies waiting for what only their Matrix event shows."""
         return await self._backend.read(
             lambda transaction: legacy_reply_messages.pending_reads(transaction, self._principal_id),
         )
@@ -1886,7 +1880,7 @@ class PrincipalStore:
         *,
         now_ns: int,
     ) -> AppliedTransition | None:
-        """Record what a main-era reply's event showed, releasing whatever waited for it."""
+        """Record what an earlier-release reply's event showed, releasing whatever waited for it."""
         return await self._backend.write(
             lambda transaction: legacy_reply_messages.read_done(
                 transaction,
@@ -2325,7 +2319,7 @@ def _span_row(
 
     A send that failed after its row was recorded leaves the row owed; writing
     it again would decide a second time against a span that has moved on. The
-    stored row keeps its payload, as main's re-enqueue of an attempted row does.
+    stored row keeps its payload, as a re-enqueued attempted row does.
     """
     if stage not in {rl.WriteStage.INITIAL, rl.WriteStage.FINAL}:
         return None

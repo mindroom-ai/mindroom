@@ -277,7 +277,7 @@ def _owed_answer_outcome() -> FinalDeliveryOutcome:
     """Return the outcome of an answer whose row is recorded but not yet in the room.
 
     Its sources were handed over with the row, recovery sends it, and only a
-    permanent refusal changes the reply, as main's owed ``FINAL`` is suspended.
+    permanent refusal changes the reply, as an owed ``FINAL`` reports ``suspended``.
     """
     return FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed")
 
@@ -285,7 +285,7 @@ def _owed_answer_outcome() -> FinalDeliveryOutcome:
 def _with_note(shown: Presentation, note: Segment) -> Presentation:
     """Return what a reply shows with one note: below its content, or instead of it."""
     if note.note in {NoteKind.DELIVERY_FAILED, NoteKind.APPROVAL_FAILED}:
-        # These notes replace the reply's body, as main writes them.
+        # These notes replace the reply's body.
         return with_trailing_note(replace(shown, segments=()), note)
     return with_trailing_note(shown, note)
 
@@ -1755,7 +1755,7 @@ class DeliveryGateway:
     async def settle_unclaimed_reply(self, source_event_ids: tuple[str, ...], *, source_deleted: bool) -> bool:
         """End the reply an earlier attempt left for sources that became terminal before a claim.
 
-        Returns whether reply records own those sources, so main's interrupted
+        Returns whether reply records own those sources, so the first gate's interrupted
         note is not written.
         """
         reply = await self.deps.outbox.replies.for_sources(source_event_ids)
@@ -1811,7 +1811,7 @@ class DeliveryGateway:
         text: str,
         target: MessageTarget,
     ) -> bool | None:
-        """Show a failed approval's note on the reply it paused, as main does.
+        """Show a failed approval's note on the reply it paused.
 
         A Stop or failure note replaces the reply's body; an interruption note
         goes below what the reply showed. Returns ``None`` when no reply records
@@ -2521,7 +2521,7 @@ class DeliveryGateway:
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         silent = request.identity.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
         if silent and reply is not None and (reply.event_id is None or reply.placeholder_only):
-            # A silent schedule reports its failure durably, as main does.
+            # A silent schedule reports its failure durably.
             note = note_segment(NoteKind.ERROR, _BEFORE_RESPONSE_HOOK_FAILURE_TEXT)
             outcome = await self.end_reply_span_with_note(
                 handle,

@@ -32,6 +32,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
+    PausedAnswer,
     PausedAttempt,
     ResponsePausedForApproval,
     ResumedAttempt,
@@ -42,7 +43,6 @@ from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StructuredStreamChunk,
     ToolTraceEntry,
-    serialize_tool_trace,
 )
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
@@ -300,10 +300,12 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
         )
     trace: list[ToolTraceEntry] = []
     run_ids: list[str] = []
+    paused_answer = PausedAnswer()
 
     async def resume() -> CompletedApprovalRun | PausedAttempt:
         return await execution.continue_run(
             continuation,
+            paused_answer=paused_answer,
             execution_identity=identity,
             tool_dispatch=dispatch,
             decisions={call.tool_call_id: True for call in continuation.calls},
@@ -352,8 +354,6 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
             run_id=result.run_id,
             runtime_model_name=result.runtime_model_name,
             continuation_count=result.continuation_count,
-            response_text=result.response_text,
-            response_tool_trace=serialize_tool_trace(result.tool_trace, include_internal=True),
             calls=(
                 ApprovalCall(
                     "sleeper",
@@ -365,6 +365,7 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
                 ),
             ),
         )
+        paused_answer = PausedAnswer(text=result.response_text, tool_trace=result.tool_trace)
         result = await resume()
     if outcome == "pause_limit":
         assert isinstance(result, CompletedApprovalRun)
@@ -671,8 +672,6 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
             ),
         ),
         request_body="Add, then keep going.",
-        response_text=saved.response_text,
-        response_tool_trace=serialize_tool_trace(saved.tool_trace, include_internal=True),
         show_tool_calls=True,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
@@ -684,6 +683,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
 
     result = await execution.continue_run(
         continuation,
+        paused_answer=PausedAnswer(text=saved.response_text, tool_trace=tuple(saved.tool_trace)),
         execution_identity=identity,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         decisions={"approved": True},

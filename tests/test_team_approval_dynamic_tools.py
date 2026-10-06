@@ -50,8 +50,10 @@ from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths, unwrap_extracted_collaborator
+from tests.legacy_reply_helpers import resumed_main_left_approval
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_openai_native_compaction import _ANSWER, _event, _response
+from tests.test_response_runner_focused import _admit_approval_source
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -65,11 +67,13 @@ class _MemberAssemblyObservedError(Exception):
 @pytest.mark.asyncio
 async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path: Path) -> None:
     """The coordinator cannot replace frozen member ownership while rebuilding tools."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
     target = _target(thread_id="$thread")
     identity = ToolExecutionIdentity(
         channel="matrix",
-        agent_name="research",
+        agent_name="general",
         requester_id="@user:example.org",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
@@ -97,19 +101,20 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         run_id="paused-team-run",
         session_id="team-session",
         entity_kind="team",
-        entity_name="research",
+        entity_name="general",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         requester_id=identity.requester_id,
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         calls=calls,
-        state="claimed",
+        state="ready",
         execution_identity=serialize_tool_execution_identity(identity),
         runtime_model_name="default",
         team_member_names=("alpha", "beta"),
         team_mode="coordinate",
     )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
     progress = AsyncMock()
     with (
@@ -121,13 +126,14 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         patch("mindroom.response_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
-        result = await runner._continue_entity_call(
-            continuation,
-            request=_plain_request(target, source_event_id="$source"),
-            target=target,
-            tool_trace_collector=[],
-            progress=progress,
-        )
+        async with resumed_main_left_approval(bot, continuation) as claimed:
+            result = await runner._continue_entity_call(
+                claimed,
+                request=_plain_request(target, source_event_id="$source"),
+                target=target,
+                tool_trace_collector=[],
+                progress=progress,
+            )
     assert isinstance(result, CompletedApprovalRun)
     assert continued.await_args.kwargs["progress"] is progress
     assert continued.await_args.kwargs["approval_calls"] == calls
@@ -490,7 +496,6 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
             "history_scope": history_scope,
             "show_tool_calls": False,
             "prior_presentation_state": pause.response_presentation_state,
-            "prior_response_text": pause.response_text,
             "progress": None,
         }
         if scenario == "removed":

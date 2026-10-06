@@ -989,7 +989,7 @@ class AgentBot:
         if continuation is None:
             return
         if continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
-            # Decision 1: nothing of it is shown any more, so its cleanup runs
+            # An edit superseded it: nothing of it is shown any more, so its cleanup runs
             # now, outside the conversation the regeneration holds.
             create_background_task(
                 self._response_runner.settle_superseded_approval(continuation),
@@ -998,7 +998,7 @@ class AgentBot:
                 context=Context(),
             )
             return
-        # Its source worker settles it, as on main, once whatever owns the
+        # Its source worker settles it once whatever owns the
         # source lets go of it.
         self._journal_dispatcher.retry_turn_sources(continuation.room_id, continuation.source_event_ids)
 
@@ -1581,7 +1581,7 @@ class AgentBot:
         onto the same event.
         """
         try:
-            # Replies main left in flight learn what they showed before anything owed for them is sent.
+            # Replies an earlier release left in flight learn what they showed before anything owed for them is sent.
             await self._legacy_reply_reads.run()
             outcome = await self._delivery_gateway.recover_deliveries()
         except Exception:

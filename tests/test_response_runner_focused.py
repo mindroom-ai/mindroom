@@ -125,6 +125,7 @@ from mindroom.response_turn import (
     AttemptResolved,
     CompletedApprovalRun,
     CompletedAttempt,
+    PausedAnswer,
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
@@ -3521,14 +3522,6 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         execution_identity={},
         sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
-        response_text="Before approval.\n\n🔧 `run_shell_command` [1] ⏳",
-        response_tool_trace=(
-            {
-                "type": "tool_call_started",
-                "tool_name": "run_shell_command",
-                "tool_call_id": tool_call_id,
-            },
-        ),
     )
     runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
     continue_run = MagicMock(wraps=agent.acontinue_run)
@@ -3555,6 +3548,12 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     ):
         result = await runner._approval_execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(
+                text="Before approval.\n\n🔧 `run_shell_command` [1] ⏳",
+                tool_trace=(
+                    ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", tool_call_id=tool_call_id),
+                ),
+            ),
             execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={tool_call_id: approved},
@@ -3727,6 +3726,7 @@ async def test_agent_continuation_runs_only_approved_calls(
     ):
         await runner._approval_execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={call.tool_call_id: approved for call in plan.calls},
@@ -3825,6 +3825,7 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
     ):
         await runner._approval_execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions=decisions,
@@ -3893,6 +3894,7 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
     ):
         await runner._approval_execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={},
@@ -3977,6 +3979,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
     ):
         await runner._approval_execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={},
@@ -4348,14 +4351,6 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
 
     continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
     assert continuation is not None
-    assert continuation.response_text == paused.response_text
-    assert continuation.response_tool_trace == (
-        {
-            "type": "tool_call_started",
-            "tool_name": "inspect",
-            "tool_call_id": "call-1",
-        },
-    )
     assert continuation.show_tool_calls is turn_visibility
     edit_request = edit_text.await_args.args[0]
     assert edit_request.new_text == paused.response_text
@@ -4365,9 +4360,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
 
 
 @pytest.mark.asyncio
-async def test_pause_republishes_the_acknowledged_interactive_body_but_persists_source(
-    tmp_path: Path,
-) -> None:
+async def test_pause_republishes_the_acknowledged_interactive_body(tmp_path: Path) -> None:
     """Suspension must not replace a rendered question with its canonical fenced JSON."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     await _admit_approval_source(runner.deps.approval_store)
@@ -4426,9 +4419,7 @@ async def test_pause_republishes_the_acknowledged_interactive_body_but_persists_
             show_tool_calls=True,
         )
 
-    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
-    assert continuation is not None
-    assert continuation.response_text == f"{raw_interactive}{marker}"
+    assert await runner.deps.approval_store.approval_continuation_for_source("$source") is not None
     assert edit_text.await_args.args[0].new_text == f"{rendered_interactive}{marker}"
 
 
@@ -4643,7 +4634,7 @@ def test_streaming_pause_handoff_uses_only_transport_committed_presentation() ->
 
 
 def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> None:
-    """Hidden tool state is continuation-only and survives an empty committed presentation."""
+    """Hidden tool state is resume-only and survives an empty committed presentation."""
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect")
     trace = ToolTraceEntry(
         type="tool_call_started",
@@ -4686,7 +4677,6 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
         show_tool_calls=False,
         state=paused.response_presentation_state,
         tool_trace=paused.tool_trace,
-        prior_response_text=paused.response_text,
     )
     assert restored.tool_trace == [trace]
 
@@ -5104,7 +5094,6 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             tool_call_id="call-write",
         ),
     )
-    committed_state: dict[str, object] = {}
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-2",
@@ -5115,7 +5104,6 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         ),
         response_text=("Committed before pause.\n\n🔧 `conditional_read` [1] ⏳\n\n🔧 `conditional_write` [2] ⏳"),
         tool_trace=committed_trace,
-        response_presentation_state=committed_state,
         toolkit_owners={
             ("general", "conditional_read"): "test_toolkit",
             ("general", "conditional_write"): "test_toolkit",
@@ -5156,8 +5144,6 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert persisted.generation == 1
     assert persisted.state == expected_state
     assert persisted.runtime_model_name == "large"
-    assert persisted.response_text == paused.response_text
-    assert persisted.response_presentation_state == committed_state
     assert presentation.response_text == paused.response_text
     assert presentation.approval_pending is (expected_text is not None)
     assert presentation.tool_trace == committed_trace
@@ -5853,7 +5839,9 @@ async def test_continuation_rejects_missing_persisted_execution_identity(tmp_pat
 @pytest.mark.asyncio
 async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Path) -> None:
     """A resumed team must rebuild members from the turn's pinned aliases."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
     target = _target(thread_id="$thread")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5876,13 +5864,14 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
-        state="claimed",
+        state="ready",
         execution_identity={},
         runtime_model_name="large",
         team_member_names=("general",),
         team_member_model_names=(("general", "large"),),
         team_mode="coordinate",
     )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
 
     with (
@@ -5895,13 +5884,14 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         patch("mindroom.response_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
-        result = await runner._continue_entity_call(
-            continuation,
-            request=_plain_request(target, source_event_id="$source"),
-            target=target,
-            tool_trace_collector=[],
-            progress=None,
-        )
+        async with resumed_main_left_approval(bot, continuation) as claimed:
+            result = await runner._continue_entity_call(
+                claimed,
+                request=_plain_request(target, source_event_id="$source"),
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+            )
 
     assert isinstance(result, CompletedApprovalRun)
     assert continued.await_args.kwargs.get("member_model_names") == {"general": "large"}
@@ -6018,7 +6008,9 @@ def test_sparse_approval_continuation_restores_origin(
 @pytest.mark.asyncio
 async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_path: Path) -> None:
     """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -6049,10 +6041,11 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
                 human_approval_required=True,
             ),
         ),
-        state="claimed",
+        state="ready",
         execution_identity={},
         correlation_id="correlation-original",
     )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
     request = replace(
         _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
         correlation_id="correlation-original",
@@ -6091,13 +6084,14 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
             new=continue_run,
         ),
     ):
-        await runner._continue_entity_call(
-            continuation,
-            request=request,
-            target=request.response_envelope.target,
-            tool_trace_collector=[],
-            progress=progress,
-        )
+        async with resumed_main_left_approval(bot, continuation) as claimed:
+            await runner._continue_entity_call(
+                claimed,
+                request=request,
+                target=request.response_envelope.target,
+                tool_trace_collector=[],
+                progress=progress,
+            )
 
     assert observed == ["correlation-original"]
     assert forwarded_progress == [progress]
@@ -9516,13 +9510,12 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         response_event_id="$waiting",
         sources=request.sources,
         calls=(),
-        state="claimed",
-        runtime_generation=runner.deps.approval_runtime_generation,
+        state="ready",
         execution_identity=serialize_tool_execution_identity(identity),
         cli_call={"kind": "agent_cli"},
         show_tool_calls=False,
     )
-    await store.create_approval_continuation(continuation)
+    assert await store.create_approval_continuation(continuation) == continuation
     published = []
     decisions: list[asyncio.Task[None]] = []
 
@@ -9575,7 +9568,6 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         patch.object(runner, "_request_remains_authorized", new=AsyncMock(return_value=True)),
         patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
-        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)),
         patch.object(
             DeliveryGateway,
             "deliver_final",
@@ -9583,19 +9575,20 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         ),
     ):
         completed: list[tuple[FinalDeliveryOutcome, ApprovalContinuation]] = []
+        async with resumed_main_left_approval(bot, continuation) as claimed:
 
-        async def recover_owned() -> None:
-            completed.append(await runner._execute_claimed_approval(continuation, request=request, target=target))
+            async def recover_owned() -> None:
+                completed.append(await runner._execute_claimed_approval(claimed, request=request, target=target))
 
-        recovery = runner.track_inbox_response(
-            recover_owned(),
-            name="approval_recovery_chain",
-            room_id=target.room_id,
-            recovery_proof_ready=lambda: True,
-            source_event_ids=continuation.source_event_ids,
-        )
-        await asyncio.wait_for(recovery, timeout=2)
-        await asyncio.gather(*decisions)
+            recovery = runner.track_inbox_response(
+                recover_owned(),
+                name="approval_recovery_chain",
+                room_id=target.room_id,
+                recovery_proof_ready=lambda: True,
+                source_event_ids=claimed.source_event_ids,
+            )
+            await asyncio.wait_for(recovery, timeout=2)
+            await asyncio.gather(*decisions)
         result, current = completed[0]
     assert result.terminal_status == ("suspended" if suspend else "completed")
     assert published == ([1] if suspend else [1, 2])

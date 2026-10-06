@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,7 +17,9 @@ from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS, LegacyReplyRead
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
+from tests.legacy_reply_helpers import keep_main_paused_answer
 from tests.test_event_journal_store import ROOM, admit
 
 if TYPE_CHECKING:
@@ -94,12 +96,7 @@ async def _row(
         )
 
 
-def _continuation(
-    state: str,
-    *,
-    approval_id: str = "approval-1",
-    text: str = "Reading document",
-) -> ApprovalContinuation:
+def _continuation(state: str, *, approval_id: str = "approval-1") -> ApprovalContinuation:
     return ApprovalContinuation(
         approval_id=approval_id,
         run_id=f"run-{approval_id}",
@@ -113,7 +110,25 @@ def _continuation(
         sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state=state,  # type: ignore[arg-type]
-        response_text=text,
+    )
+
+
+async def _main_continuation(
+    principal: PrincipalStore,
+    continuation: ApprovalContinuation,
+    *,
+    text: str = "Reading document",
+    tool_trace: tuple[ToolTraceEntry, ...] = (),
+    team_state: dict[str, object] | None = None,
+) -> None:
+    """Store a continuation as main left it, with the paused answer kept in its context."""
+    assert await principal.create_approval_continuation(continuation) is not None
+    await keep_main_paused_answer(
+        principal,
+        continuation.approval_id,
+        text=text,
+        tool_trace=tool_trace,
+        team_state=team_state,
     )
 
 
@@ -140,19 +155,34 @@ def _text(presentation: str) -> str:
     return "".join(segment.text for segment in decode_presentation(presentation).segments)
 
 
-async def test_a_waiting_approval_pauses_its_reply_with_what_it_showed(journal_store: EventJournalStore) -> None:
+@pytest.mark.parametrize("entity_kind", ["agent", "team"])
+async def test_a_waiting_approval_pauses_its_reply_with_what_it_showed(
+    journal_store: EventJournalStore,
+    entity_kind: Literal["agent", "team"],
+) -> None:
     """The continuation's kept presentation becomes the paused reply's; the approval runtime stays its owner."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
-    assert await principal.create_approval_continuation(_continuation("waiting")) is not None
+    trace = ToolTraceEntry(type="tool_call_started", tool_name="read_document", tool_call_id="call-1")
+    # Main kept a team's structured document beside its text; an agent's state was empty.
+    team_state: dict[str, object] | None = (
+        {"kind": "team_stream", "version": 2, "members": [], "consensus": "Reading document"}
+        if entity_kind == "team"
+        else None
+    )
+    continuation = replace(_continuation("waiting"), entity_kind=entity_kind)
+    await _main_continuation(principal, continuation, tool_trace=(trace,), team_state=team_state)
 
     assert await _adopt(principal) == ()
     reply = await _only_reply(principal)
     assert reply.state is rl.ReplyState.PAUSED
     assert reply.event_id == "$reply"
     assert reply.approval_id == "approval-1"
-    assert _text(reply.presentation) == "Reading document"
+    (answer,) = decode_presentation(reply.presentation).segments
+    assert answer.text == "Reading document"
+    assert answer.tool_trace == (trace,)
+    assert answer.team_state == team_state
     assert await _spans(principal, reply) == [(rl.SpanKind.TURN, rl.SpanOutcome.PAUSED)]
     # owner_lost leaves a paused reply to its approval.
     assert await principal.replies.owner_lost("gen-new", now_ns=NOW) == ()
@@ -319,12 +349,12 @@ async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJ
     await admit(principal, "$source")
     await admit(principal, "$edit")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
-    assert await principal.create_approval_continuation(_continuation("waiting")) is not None
+    await _main_continuation(principal, _continuation("waiting"))
     newer = replace(
-        _continuation("waiting", approval_id="approval-2", text="Rereading"),
+        _continuation("waiting", approval_id="approval-2"),
         sources=ResponseSources(("$edit",), ("$source",)),
     )
-    assert await principal.create_approval_continuation(newer) is not None
+    await _main_continuation(principal, newer, text="Rereading")
 
     await _adopt(principal)
     reply = await principal.replies.for_event("$reply")
@@ -342,7 +372,7 @@ async def test_a_claimed_resume_is_left_running_for_approval_recovery(journal_st
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
-    assert await principal.create_approval_continuation(_continuation("claimed")) is not None
+    await _main_continuation(principal, _continuation("claimed"))
 
     (reply,) = await _adopt(principal)
     assert reply.state is rl.ReplyState.ACTIVE

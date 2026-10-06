@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -12,14 +13,17 @@ from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.tool_system.events import serialize_tool_trace
 from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from mindroom.bot import AgentBot
-    from mindroom.event_journal import ApprovalContinuation
+    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
+    from mindroom.event_journal.backend import Transaction
+    from mindroom.tool_system.events import ToolTraceEntry
 
 
 async def main_left_reply(
@@ -86,6 +90,37 @@ async def main_left_reply(
     await bot._turn_store.record_pending_turn(record)
     await bot._reply_runtime.start()
     return record
+
+
+async def keep_main_paused_answer(
+    store: PrincipalStore,
+    approval_id: str,
+    *,
+    text: str = "",
+    tool_trace: Sequence[ToolTraceEntry] = (),
+    team_state: Mapping[str, object] | None = None,
+) -> None:
+    """Write the paused answer main kept in a stored continuation's context, as releases before reply records did."""
+
+    def write(transaction: Transaction) -> None:
+        key = (store._principal_id, approval_id)
+        row = transaction.fetchone(
+            "SELECT context_json FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+            key,
+        )
+        assert row is not None
+        context = json.loads(str(row["context_json"]))
+        context.update(
+            response_text=text,
+            response_tool_trace=list(serialize_tool_trace(tool_trace, include_internal=True)),
+            response_presentation_state=dict(team_state or {}),
+        )
+        transaction.execute(
+            "UPDATE approval_continuations SET context_json = ? WHERE principal_id = ? AND approval_id = ?",
+            (json.dumps(context), *key),
+        )
+
+    await store._backend.write(write)
 
 
 async def read_after_sync(bot: AgentBot, visible: ResolvedVisibleMessage | Exception | None) -> AsyncMock:

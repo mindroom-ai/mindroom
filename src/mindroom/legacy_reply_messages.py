@@ -1,12 +1,12 @@
-"""What main left in flight, made into reply records: its presentations, and what only Matrix shows.
+"""What an earlier release left in flight, made into reply records: its presentations, and what only Matrix shows.
 
-``event_journal.legacy_reply_messages`` adopts main's replies from the database
+``event_journal.legacy_reply_messages`` adopts an earlier release's replies from the database
 at the first start with reply records. This module encodes what main stored
 into presentations for it, and reads, after each room syncs, what only the
 reply's Matrix event knows: what it showed, and for a reply its stream
 created directly, which event that was. A read that keeps
 failing gives up with the presentation unknown, which a replay answers with
-main's "unknown attempt" account.
+the "unknown attempt" account.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from mindroom.constants import (
     STREAM_STATUS_INTERRUPTED,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
 )
-from mindroom.event_journal.legacy_reply_messages import LegacyPresentations
+from mindroom.event_journal.legacy_reply_messages import LegacyPausedAnswer, LegacyPresentations
 from mindroom.matrix.client_visible_messages import fetch_latest_visible_message
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.reply_presentation import (
@@ -71,19 +71,19 @@ def _answer(text: str, span_id: str, *, placeholder: str, tool_trace: tuple[Tool
     return encode_presentation(Presentation(segments=(answer,), placeholder=placeholder))
 
 
-def _paused(continuation: ApprovalContinuation, span_id: str) -> str:
-    """What a waiting approval showed: the paused text and trace main kept in its continuation."""
+def _paused(continuation: ApprovalContinuation, answer: LegacyPausedAnswer, span_id: str) -> str:
+    """What a waiting approval showed: the paused text and trace the continuation kept."""
     presentation = Presentation(
         segments=(
             Segment(
                 kind="answer",
-                text=continuation.response_text,
+                text=answer.text,
                 span_id=span_id,
-                tool_trace=tuple(deserialize_tool_trace(continuation.response_tool_trace)),
-                team_state=continuation.response_presentation_state or None,
+                tool_trace=tuple(deserialize_tool_trace(answer.tool_trace)),
+                team_state=answer.team_state,
             ),
         )
-        if continuation.response_text or continuation.response_tool_trace
+        if answer.text or answer.tool_trace
         else (),
         placeholder=TEAM_PLACEHOLDER if continuation.entity_kind == "team" else AGENT_PLACEHOLDER,
         show_tool_calls=continuation.show_tool_calls,
@@ -92,7 +92,7 @@ def _paused(continuation: ApprovalContinuation, span_id: str) -> str:
 
 
 def _answered(delivery: MatrixDelivery, span_id: str) -> str:
-    """What a frozen main-era answer row shows."""
+    """What a frozen answer row of an earlier release shows."""
     content: Mapping[str, object] = delivery.payload
     new_content = content.get("m.new_content")
     if isinstance(new_content, dict):
@@ -115,7 +115,7 @@ def _canonical(source: Mapping[str, Any]) -> bool:
 
 @dataclass
 class LegacyReplyReads:
-    """Read what only Matrix knows about main's replies, after their rooms sync."""
+    """Read what only Matrix knows about an earlier release's replies, after their rooms sync."""
 
     store: PrincipalStore
     client: Callable[[], nio.AsyncClient]
@@ -127,7 +127,7 @@ class LegacyReplyReads:
     _failures: dict[str, int] = field(default_factory=dict, init=False)
 
     async def run(self) -> None:
-        """Read every main-era reply still waiting, giving up on one after a few failed passes."""
+        """Read every earlier-release reply still waiting, giving up on one after a few failed passes."""
         for reply, last in await self.store.legacy_reply_reads():
             read = await self._read(reply, last)
             if read is None:
