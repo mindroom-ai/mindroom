@@ -52,6 +52,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.heap_probe import start_heap_type_probe
 from mindroom.hooks import (
     ConfigReloadedContext,
@@ -485,6 +486,30 @@ class TestAgentBot(AgentBotTestBase):
         state = get_runtime_state()
         assert state.phase == "idle"
         assert state.detail is None
+
+    @pytest.mark.asyncio
+    async def test_a_second_runtime_on_one_storage_root_refuses_to_start(self, tmp_path: Path) -> None:
+        """Only one runtime may own a storage root; the second stops before touching it, and the first releases it."""
+        runtime_paths = self._runtime_paths(tmp_path)
+        lock_path = runtime_paths.storage_root / "tracking" / "runtime.lock"
+        running = try_exclusive_file_lock(lock_path)
+        assert running is not None
+        try:
+            with (
+                patch("mindroom.orchestrator.migrate_private_storage", new=AsyncMock()) as migrate,
+                pytest.raises(PermanentStartupError, match="Another MindRoom is already running"),
+            ):
+                await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+            migrate.assert_not_awaited()
+        finally:
+            release_file_lock(running)
+
+        with patch("mindroom.orchestrator._run_runtime", new=AsyncMock()) as run_runtime:
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+        run_runtime.assert_awaited_once()
+        released = try_exclusive_file_lock(lock_path)
+        assert released is not None
+        release_file_lock(released)
 
     @pytest.mark.asyncio
     async def test_embedded_uvicorn_signal_handler_requests_application_shutdown(self) -> None:

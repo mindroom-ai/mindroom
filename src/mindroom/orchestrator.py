@@ -38,6 +38,7 @@ from mindroom.entity_resolution import (
 )
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.event_loop_stall import EventLoopStallDetector, start_event_loop_stall_detector
+from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.heap_probe import start_heap_type_probe
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
@@ -2993,7 +2994,7 @@ def _start_auxiliary_tasks(
     return tasks
 
 
-async def main(  # noqa: PLR0915
+async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
     *,
@@ -3001,7 +3002,30 @@ async def main(  # noqa: PLR0915
     api_port: int = 8765,
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
-    """Main entry point for the multi-agent bot system."""
+    """Main entry point for the multi-agent bot system; one runtime per storage root.
+
+    Two runtimes on one storage root would both answer every message and take
+    each other's replies over, so the second refuses to start.
+    """
+    runtime_lock = try_exclusive_file_lock(runtime_paths.storage_root / "tracking" / "runtime.lock")
+    if runtime_lock is None:
+        msg = f"Another MindRoom is already running with the storage at {runtime_paths.storage_root}"
+        raise PermanentStartupError(msg)
+    try:
+        await _run_runtime(log_level, runtime_paths, api=api, api_port=api_port, api_host=api_host)
+    finally:
+        release_file_lock(runtime_lock)
+
+
+async def _run_runtime(  # noqa: PLR0915
+    log_level: str,
+    runtime_paths: RuntimePaths,
+    *,
+    api: bool,
+    api_port: int,
+    api_host: str,
+) -> None:
+    """Run the multi-agent bot system until it stops."""
     await migrate_private_storage(runtime_paths)
     await migrate_state_root_records(runtime_paths)
     await migrate_usage_storage(runtime_paths)
