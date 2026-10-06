@@ -3746,15 +3746,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
                 if is_errored_run_output(event):
                     error_text = str(event.content or "Unknown team error")
-                    if run_metadata_collector is not None and event_metadata_content is not None:
-                        run_metadata_collector.update(event_metadata_content)
                     _record_interrupted_team_turn()
                     yield get_user_friendly_error_message(
                         Exception(error_text),
                         team_label,
                         runtime_paths=orchestrator.runtime_paths,
                     )
-                    yield AttemptResolved(HandledAttempt())
+                    yield AttemptResolved(HandledAttempt(metadata_content=event_metadata_content))
                     return
 
                 if event.status == RunStatus.paused:
@@ -3825,26 +3823,30 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if event.team_id and event.team_id != bound_team_id:
                     continue
                 error_text = event.content or "Unknown team error"
-                if run_metadata_collector is not None:
-                    run_metadata_collector.update(
-                        _build_streamed_team_run_metadata_content(
-                            config=config,
-                            prepared_execution=prepared_execution,
-                            completed_run_event=None,
-                            usage=usage,
-                            run_id=event.run_id or attempt_run_id,
-                            session_id=event.session_id or ctx.session_id,
-                            status=RunStatus.error,
-                            tool_count=len(completed_tool_executions),
-                        ),
-                    )
                 _record_interrupted_team_turn()
                 yield get_user_friendly_error_message(
                     Exception(error_text),
                     team_label,
                     runtime_paths=orchestrator.runtime_paths,
                 )
-                yield AttemptResolved(HandledAttempt())
+                yield AttemptResolved(
+                    HandledAttempt(
+                        metadata_content=(
+                            _build_streamed_team_run_metadata_content(
+                                config=config,
+                                prepared_execution=prepared_execution,
+                                completed_run_event=None,
+                                usage=usage,
+                                run_id=event.run_id or attempt_run_id,
+                                session_id=event.session_id or ctx.session_id,
+                                status=RunStatus.error,
+                                tool_count=len(completed_tool_executions),
+                            )
+                            if run_metadata_collector is not None
+                            else None
+                        ),
+                    ),
+                )
                 return
 
             if isinstance(event, TeamRunCancelledEvent):
