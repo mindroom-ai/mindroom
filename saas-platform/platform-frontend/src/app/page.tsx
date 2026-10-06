@@ -159,7 +159,7 @@ const reasons: IconItem[] = [
   },
   {
     title: 'Safe to give real access',
-    body: 'One-tap approval for the actions you choose, plus opt-in sandboxed code execution and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
+    body: 'One-tap approval for the actions you choose, sandboxed code execution (on by default when hosted), and opt-in end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
     icon: Shield,
     href: `${docsUrl}#safe-to-give-real-access`,
   },
@@ -207,7 +207,7 @@ const plans: PricePlan[] = [
     price: '$10',
     description: 'Hosted MindRoom that uses your model API keys, so AI usage is billed by your provider.',
     features: ['Hosted instance', 'Your own model API keys', '10 GB storage'],
-    cta: 'Start 3-day trial',
+    cta: 'Create account',
     href: '/auth/signup?plan=byok',
   },
   {
@@ -215,15 +215,15 @@ const plans: PricePlan[] = [
     price: '$20',
     description: 'Hosted MindRoom with AI usage included, so no API keys needed.',
     features: ['Hosted instance', '$15 of AI credit every month', '10 GB storage'],
-    cta: 'Start 3-day trial',
+    cta: 'Create account',
     href: '/auth/signup?plan=hobby',
   },
   {
     name: 'Pro',
     price: '$200',
     description: 'Larger hosted workspace with ten times the included AI usage.',
-    features: ['Larger instance', '$150 of AI credit every month', 'Priority support'],
-    cta: 'Start 3-day trial',
+    features: ['Larger instance with 25 GB storage', '$150 of AI credit every month', 'Priority support'],
+    cta: 'Create account',
     href: '/auth/signup?plan=pro',
   },
 ]
@@ -680,7 +680,7 @@ export default function LandingPage() {
           <SectionHeading
             eyebrow="Hosted"
             title="Prefer us to host it?"
-            body="Nothing to install: bring your own model keys or include AI usage in your plan, and try any plan free for 3 days."
+            body="Nothing to install: bring your own model keys or include AI usage in your plan, and try MindRoom free for 3 days."
           />
           <div className="mt-10 overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
             {plans.map((plan) => (

@@ -3511,7 +3511,7 @@
     },
     "/my/account/setup": {
       "post": {
-        "description": "Setup free tier account for new user.",
+        "description": "Set up an account without a plan for a new user.",
         "operationId": "setup_account_my_account_setup_post",
         "parameters": [
           {

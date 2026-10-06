@@ -21,7 +21,7 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
     {
       name: 'Documentation',
       description: 'Learn how to use MindRoom',
-      href: 'https://docs.mindroom.app',
+      href: 'https://docs.mindroom.chat/',
       icon: BookOpen,
       external: true,
     },

@@ -4,10 +4,10 @@ import { useState, useEffect } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
-import { PLAN_GRADIENTS, type PlanId } from '@/lib/pricing-config'
+import Link from 'next/link'
+import { type PlanId } from '@/lib/pricing-config'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
-
 
 function formatMonthlyPrice(price: string): string {
   if (price === 'custom') return 'Custom'
@@ -67,6 +67,7 @@ export default function BillingPage() {
   }
 
   const currentTier = (subscription?.tier || 'free') as PlanId
+  const hasPlan = currentTier !== 'free'
   const currentPlan = pricingConfig.plans[currentTier]
   const features = currentPlan?.features || []
   const tierInfo = {
@@ -137,28 +138,37 @@ export default function BillingPage() {
               }`}>
                 {tierInfo.name}
               </span>
-              <span className="text-2xl font-bold">{tierInfo.price}</span>
-              {subscription?.status === 'active' && !subscription?.cancelled_at && (
+              {hasPlan && <span className="text-2xl font-bold">{tierInfo.price}</span>}
+              {hasPlan && subscription?.status === 'active' && !subscription?.cancelled_at && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
                   Active
                 </span>
               )}
-              {subscription?.status === 'trialing' && (
+              {hasPlan && subscription?.status === 'trialing' && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
                   Trial
                 </span>
               )}
-              {subscription?.status === 'past_due' && (
+              {hasPlan && subscription?.status === 'past_due' && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">
                   Past Due
                 </span>
               )}
-              {subscription?.status === 'cancelled' && (
+              {hasPlan && subscription?.status === 'cancelled' && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
                   Cancelled
                 </span>
               )}
             </div>
+
+            {!hasPlan && (
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                Choose a plan to run a hosted MindRoom instance; your first plan starts with a 3-day free trial.{' '}
+                <Link href="/dashboard/billing/upgrade" className="font-semibold text-orange-600 hover:underline dark:text-orange-400">
+                  Choose a plan
+                </Link>
+              </p>
+            )}
 
             {/* Trial/Billing Period Information */}
             {subscription && (

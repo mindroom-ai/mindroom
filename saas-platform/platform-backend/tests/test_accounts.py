@@ -185,7 +185,7 @@ class TestAccountsEndpoints:
         assert data["is_admin"] is False
 
     def test_setup_account_new_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
-        """Test setting up free tier account for new user."""
+        """Test setting up an account without a plan for a new user."""
         # Setup
         # No existing subscription
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
@@ -208,7 +208,7 @@ class TestAccountsEndpoints:
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert "Free tier account created" in data["message"]
+        assert data["message"] == "Account created"
         assert data["account_id"] == "acc_test_123"
         assert data["subscription"]["tier"] == "free"
 

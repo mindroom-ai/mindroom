@@ -223,20 +223,6 @@ export default function UpgradePage() {
                     </div>
                   </div>
                 )}
-                {plan.included_ai_budget_usd && plan.included_ai_budget_usd > 0 ? (
-                  <p className="mt-3 text-xs font-medium text-orange-700 dark:text-orange-300">
-                    Includes ${plan.included_ai_budget_usd}/month AI usage
-                  </p>
-                ) : plan.requires_customer_provider_keys ? (
-                  <p className="mt-3 text-xs font-medium text-gray-600 dark:text-gray-400">
-                    Bring your own model provider keys
-                  </p>
-                ) : null}
-                {plan.resource_profile === 'pro' && (
-                  <p className="mt-1 text-xs font-medium text-purple-700 dark:text-purple-300">
-                    Larger hosted resource profile
-                  </p>
-                )}
               </div>
 
               <ul className="space-y-3">

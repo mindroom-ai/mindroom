@@ -53,6 +53,24 @@ const enterprisePricing = {
   },
 }
 
+const noPlanPricing = {
+  ...enterprisePricing,
+  plans: {
+    free: {
+      name: 'No plan',
+      price_monthly: 0,
+      price_yearly: 0,
+      description: 'Choose a plan to run a hosted MindRoom instance',
+      features: [],
+      limits: { max_agents: 0, max_messages_per_day: 0, storage_gb: 0 },
+      recommended: false,
+      included_ai_budget_usd: 0,
+      requires_customer_provider_keys: true,
+      resource_profile: 'small',
+    },
+  },
+}
+
 describe('BillingPage', () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -77,5 +95,25 @@ describe('BillingPage', () => {
 
     expect(screen.getByText('Custom')).toBeInTheDocument()
     expect(screen.queryByText('custom/month')).not.toBeInTheDocument()
+  })
+
+  it('shows an account without a plan as No plan with a way to choose one', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: { tier: 'free', status: 'active', stripe_subscription_id: null },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue(noPlanPricing)
+
+    render(<BillingPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('No plan')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('$0/month')).not.toBeInTheDocument()
+    expect(screen.queryByText('Active')).not.toBeInTheDocument()
+    expect(screen.queryByText('Plan Includes:')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Choose a plan' })).toHaveAttribute('href', '/dashboard/billing/upgrade')
   })
 })

@@ -509,7 +509,7 @@ export interface paths {
         put?: never;
         /**
          * Setup Account
-         * @description Setup free tier account for new user.
+         * @description Set up an account without a plan for a new user.
          */
         post: operations["setup_account_my_account_setup_post"];
         delete?: never;

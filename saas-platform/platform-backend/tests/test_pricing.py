@@ -117,7 +117,7 @@ class TestPricingConfig:
             assert plan.stripe_price_id_yearly_live is not None
             assert plan.stripe_price_id_yearly_live.startswith("price_")
 
-        # Free and Enterprise should not have Stripe IDs
+        # The no-plan state and Enterprise have no Stripe IDs
         assert model.plans["free"].stripe_price_id_monthly is None
         assert model.plans["enterprise"].stripe_price_id_monthly is None
 

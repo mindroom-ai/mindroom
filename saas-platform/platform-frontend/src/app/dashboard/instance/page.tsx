@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/hooks/useAuth'
+import { useSubscription } from '@/hooks/useSubscription'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
 import { startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { getCachedInstance, loadInstance } from '@/lib/instance-resource'
@@ -21,6 +22,8 @@ export default function InstancePage() {
 
 function InstanceDetails({ userId, authLoading }: { userId: string | null; authLoading: boolean }) {
   const router = useRouter()
+  const { subscription } = useSubscription()
+  const canRunInstances = subscription?.can_run_instances === true
   const cachedInstance = getCachedInstance(userId)
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
@@ -175,13 +178,15 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           <Server className="w-20 h-20 text-gray-400 dark:text-gray-500 mx-auto mb-6" />
           <CardHeader className="mb-3">No Instance Found</CardHeader>
           <p className="text-gray-600 dark:text-gray-400 mb-8 text-lg">
-            You don't have a MindRoom instance yet. Choose a plan, which starts with a 3-day free trial, to get your own instance.
+            {canRunInstances
+              ? "You don't have a MindRoom instance yet. Start it from the dashboard."
+              : "You don't have a MindRoom instance yet. Choose a plan to get your own instance; your first plan starts with a 3-day free trial."}
           </p>
           <button
-            onClick={() => router.push('/dashboard/billing/upgrade')}
+            onClick={() => router.push(canRunInstances ? '/dashboard' : '/dashboard/billing/upgrade')}
             className="px-8 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
           >
-            Upgrade Plan
+            {canRunInstances ? 'Go to dashboard' : 'Choose a plan'}
           </button>
         </Card>
       </div>

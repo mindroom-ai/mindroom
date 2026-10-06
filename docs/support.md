@@ -48,7 +48,7 @@ A hosted instance runs only while its subscription entitles it, and its data is 
 | Subscription state | Instance | Platform OpenRouter key | Data |
 |--------------------|----------|-------------------------|------|
 | `active`, unexpired `trialing`, or `past_due` while Stripe retries a payment | Keeps running | Enabled | Kept |
-| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, free tier, or account pending deletion | Stopped | Disabled | Kept until the teardown date |
+| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, no plan, or account pending deletion | Stopped | Disabled | Kept until the teardown date |
 | Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | Volumes and instance Secrets deleted |
 | Entitled again while stopped | Started, and re-provisioned when the tier changed | Re-enabled with the tier's limit | Kept |
 | Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |

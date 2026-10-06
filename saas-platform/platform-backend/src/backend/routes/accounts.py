@@ -48,7 +48,7 @@ async def check_admin_status(request: Request, user: Annotated[dict, Depends(ver
 @router.post("/my/account/setup", response_model=AccountSetupResponse)
 @limiter.limit("5/minute")
 async def setup_account(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:  # noqa: ARG001
-    """Setup free tier account for new user."""
+    """Set up an account without a plan for a new user."""
     sb = ensure_supabase()
 
     account_id = user["account_id"]
@@ -72,4 +72,4 @@ async def setup_account(request: Request, user: Annotated[dict, Depends(verify_u
     if subscription is not None:
         decorate_subscription_for_response(subscription, plan_limits=limits)
 
-    return {"message": "Free tier account created", "account_id": account_id, "subscription": subscription}
+    return {"message": "Account created", "account_id": account_id, "subscription": subscription}
