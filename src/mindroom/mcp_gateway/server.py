@@ -44,6 +44,7 @@ _MAX_REQUEST_ID_BYTES = 128
 _MAX_PROTOCOL_VERSION_BYTES = 64
 _RESPONSE_ENVELOPE_BYTES = 256
 _PRINCIPAL_SCOPE_KEY = "mcp_gateway_principal"
+_VERSION_PROBE_SCOPE_KEY = "mcp_gateway_version_probe"
 _OPERATION_NAMES = frozenset({"search_tools", "get_tool", "invoke_tool"})
 _PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 logger = get_logger(__name__)
@@ -259,6 +260,8 @@ def _validate_early_response_headers(request: Request, payload: object) -> None:
         return
     version = request.headers.get("mcp-protocol-version")
     if version is not None and version not in SUPPORTED_PROTOCOL_VERSIONS:
+        # Newer clients first probe with their own revision and fall back to the handshake on this rejection.
+        request.scope[_VERSION_PROBE_SCOPE_KEY] = True
         raise HTTPException(400, "Unsupported MCP protocol version")
 
 
@@ -478,12 +481,15 @@ class GatewayServer:
                 await self._handle_http_request(scope, receive, private_send)
             finally:
                 principal = scope.get(_PRINCIPAL_SCOPE_KEY)
-                log = logger.warning if status_code is None or status_code >= 400 else logger.info
+                version_probe = scope.get(_VERSION_PROBE_SCOPE_KEY, False)
+                failed = status_code is None or status_code >= 400
+                log = logger.warning if failed and not version_probe else logger.info
                 log(
                     "mcp_gateway_http_completed",
                     status_code=status_code,
                     requester_id=principal.requester_id if isinstance(principal, GatewayPrincipal) else None,
                     duration_ms=elapsed_ms_since(started),
+                    **({"unsupported_protocol_version": True} if version_probe else {}),
                 )
 
     async def _handle_http_request(self, scope: Scope, receive: Receive, private_send: Send) -> None:
