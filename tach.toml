@@ -2016,6 +2016,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_power",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
 ]
@@ -3358,17 +3359,29 @@ visibility = ["mindroom.custom_tools.matrix_voice_message"]
 
 [[modules]]
 path = "mindroom.matrix.room_reconciliation"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.matrix.room_power"]
 visibility = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
     "mindroom.orchestrator",
+    "mindroom.thread_tags",
     "mindroom.topic_generator",
+]
+
+[[modules]]
+path = "mindroom.matrix.room_power"
+depends_on = []
+visibility = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.personal_rooms",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
 depends_on = [
+    "mindroom.matrix.room_power",
     "mindroom.matrix.room_reconciliation",
     "mindroom.thread_tags",
 ]
@@ -3916,6 +3929,8 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.thread_tags"
 depends_on = [
     "mindroom.matrix.room_history_reads",
+    "mindroom.matrix.room_power",
+    "mindroom.matrix.room_reconciliation",
     "mindroom.logging_config",
 ]
 
