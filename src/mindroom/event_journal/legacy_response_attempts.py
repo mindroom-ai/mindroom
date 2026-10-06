@@ -1,34 +1,50 @@
-"""One-time adoption of response ownership from released snapshots."""
+"""One-time adoption of approval continuation identity from released stores."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from mindroom.handled_turns import TurnRecordCodec
-from mindroom.legacy_delivery_payloads import decode_delivery_result
-from mindroom.response_sources import ResponseAttempt, ResponseSources
-
-from .response_attempts import load_response_attempt, register_response_attempt
 
 if TYPE_CHECKING:
-    from mindroom.turn_record import TurnRecord
+    from collections.abc import Mapping
 
-    from .backend import Row, Transaction
+    from .approval_continuations import ApprovalContinuation
+    from .backend import Transaction
 
-# LEGACY_COMPAT: Response ownership inferred from approval and FINAL snapshots.
-# Legacy format: Approval context and prepared FINAL snapshots carry response source ownership.
-# Last legacy release: v2026.9.137; replacement: the explicit response_attempts schema.
-# Handling: Adopt stable identities once under the backend schema transaction; preserve pending and frozen debt.
-# Coverage: tests/test_response_attempts_migration.py::test_literal_owners_survive_migration_and_reopen.
+# LEGACY_COMPAT: Approval continuations whose reply identity lived outside the continuation.
+# Legacy format: approval_continuations without a span_id column. v2026.10.178 kept each continuation's entity, room,
+# visible event, logical and discovery sources, and edit receipt order in response_attempts and
+# response_attempt_sources, keyed by its first pending source; v2026.9.137 and earlier kept room_id,
+# response_event_id, and any prepared edit record in context_json.
+# Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages name the paused span in
+# approval_continuations.span_id and read the reply's identity from the reply's records.
+# Handling: the schema upgrade adds span_id, copies each continuation's identity into its context once, and drops the
+# response attempt tables; such a continuation is read from that copy until reply classification names its span.
+# Coverage: tests/test_legacy_continuation_identity.py.
+
+_IDENTITY_KEY = "legacy_identity"
+
+
+class LegacyIdentity(TypedDict):
+    """The reply identity a continuation adopted from an earlier release answers."""
+
+    entity_name: str
+    room_id: str
+    thread_id: str | None
+    response_event_id: str
+    logical_source_event_ids: tuple[str, ...]
+    discovery_event_ids: tuple[str, ...]
+    edit_receipt_order: int | None
+
 
 _PAGE_SIZE = 128
 
 
 def _identity_error() -> ValueError:
     """Fail required ownership instead of fabricating or settling a live continuation."""
-    return ValueError("Cannot migrate required response attempt identity")
+    return ValueError("Cannot migrate required approval continuation identity")
 
 
 def _required_text(value: object) -> str:
@@ -38,36 +54,84 @@ def _required_text(value: object) -> str:
     return value
 
 
-def _event_ids(value: object) -> tuple[str, ...]:
+def _event_ids(value: object) -> list[str]:
     """Validate literal historical source arrays before the tolerant turn decoder."""
     if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
         raise _identity_error()
-    return tuple(cast("list[str]", value))
+    return list(cast("list[str]", value))
 
 
-def _prepared_sources(pending: tuple[str, ...], raw: object) -> tuple[ResponseSources, TurnRecord | None]:
-    """Decode historical selection only at the migration boundary."""
+def _attempt_identity(transaction: Transaction, principal_id: str, driving: str) -> dict[str, object] | None:
+    """Read the identity v2026.10.178 stored in its response attempt tables."""
+    attempt = transaction.fetchone(
+        "SELECT * FROM response_attempts WHERE principal_id = ? AND driving_event_id = ?",
+        (principal_id, driving),
+    )
+    if attempt is None or attempt["response_event_id"] is None:
+        return None
+    children = transaction.fetchall(
+        """SELECT event_id, source_kind FROM response_attempt_sources
+        WHERE principal_id = ? AND driving_event_id = ? ORDER BY source_kind, source_ordinal""",
+        (principal_id, driving),
+    )
+    return {
+        "entity_name": str(attempt["entity_name"]),
+        "room_id": str(attempt["room_id"]),
+        "response_event_id": str(attempt["response_event_id"]),
+        "logical_source_event_ids": [str(child["event_id"]) for child in children if child["source_kind"] == "logical"],
+        "discovery_event_ids": [str(child["event_id"]) for child in children if child["source_kind"] == "discovery"],
+        "edit_receipt_order": None if attempt["edit_receipt_order"] is None else int(attempt["edit_receipt_order"]),
+    }
+
+
+def _context_identity(entity_name: str, pending: list[str], context: Mapping[str, object]) -> dict[str, object]:
+    """Read the identity v2026.9.137 and earlier kept in the continuation's context."""
+    room_id = _required_text(context.get("room_id"))
+    response_event_id = _required_text(context.get("response_event_id"))
+    raw = context.get("prepared_edit_record")
     if raw is None:
-        return ResponseSources(pending, pending), None
+        return {
+            "entity_name": entity_name,
+            "room_id": room_id,
+            "response_event_id": response_event_id,
+            "logical_source_event_ids": pending,
+            "discovery_event_ids": [],
+            "edit_receipt_order": None,
+        }
     if not isinstance(raw, dict):
         raise _identity_error()
-    raw = cast("dict[str, object]", raw)
-    prepared = TurnRecordCodec._from_ledger_record(str(raw.get("anchor_event_id", "")), raw)
-    if prepared is None or prepared.latest_edit_receipt_order is None:
+    stored = cast("dict[str, object]", raw)
+    prepared = TurnRecordCodec._from_ledger_record(str(stored.get("anchor_event_id", "")), stored)
+    if (
+        prepared is None
+        or prepared.latest_edit_receipt_order is None
+        or pending[0] not in {revision[1] for revision in (prepared.source_event_revisions or {}).values()}
+        or prepared.response_owner != entity_name
+        or prepared.response_event_id != response_event_id
+        or prepared.conversation_target is None
+        or prepared.conversation_target.room_id != room_id
+    ):
         raise _identity_error()
-    sources = ResponseSources(
-        pending,
-        _event_ids(raw.get("source_event_ids")),
-        _event_ids(raw.get("discovery_event_ids", [])),
-        prepared.latest_edit_receipt_order,
-    )
-    if pending[0] not in {revision[1] for revision in (prepared.source_event_revisions or {}).values()}:
-        raise _identity_error()
-    return sources, prepared
+    return {
+        "entity_name": entity_name,
+        "room_id": room_id,
+        "response_event_id": response_event_id,
+        "logical_source_event_ids": _event_ids(stored.get("source_event_ids")),
+        "discovery_event_ids": _event_ids(stored.get("discovery_event_ids", [])),
+        "edit_receipt_order": prepared.latest_edit_receipt_order,
+    }
 
 
-def _adopt_continuations(transaction: Transaction) -> None:
-    """Live continuation ownership is required, including all pending children."""
+def upgrade_continuation_identity(
+    transaction: Transaction,
+    existing_tables: frozenset[str],
+    continuation_columns: frozenset[str],
+) -> None:
+    """Name the paused span on continuations and adopt released identities, inside the schema transaction."""
+    if "approval_continuations" not in existing_tables or "span_id" in continuation_columns:
+        return
+    transaction.execute("ALTER TABLE approval_continuations ADD COLUMN span_id TEXT")
+    attempts = "response_attempts" in existing_tables
     cursor: tuple[str, str] | None = None
     while True:
         rows = (
@@ -84,215 +148,74 @@ def _adopt_continuations(transaction: Transaction) -> None:
                 (*cursor, _PAGE_SIZE),
             )
         )
-        if not rows:
-            return
         for row in rows:
-            principal = str(row["principal_id"])
+            principal_id, approval_id = str(row["principal_id"]), str(row["approval_id"])
             context = json.loads(str(row["context_json"]))
             if not isinstance(context, dict):
                 raise _identity_error()
-            room = _required_text(context.get("room_id"))
-            response = _required_text(context.get("response_event_id"))
-            entity = _required_text(row["entity_name"])
-            children = transaction.fetchall(
-                """SELECT sources.event_id, sources.source_ordinal, events.membership_epoch FROM approval_continuation_sources AS sources
-                LEFT JOIN journal_events AS events ON events.principal_id = sources.principal_id AND events.event_id = sources.event_id
-                WHERE sources.principal_id = ? AND sources.approval_id = ? ORDER BY sources.source_ordinal""",
-                (principal, str(row["approval_id"])),
-            )
-            if not children or any(
-                child["membership_epoch"] is None or int(child["source_ordinal"]) != ordinal
-                for ordinal, child in enumerate(children)
-            ):
+            pending = [
+                str(source["event_id"])
+                for source in transaction.fetchall(
+                    """SELECT event_id FROM approval_continuation_sources
+                    WHERE principal_id = ? AND approval_id = ? ORDER BY source_ordinal""",
+                    (principal_id, approval_id),
+                )
+            ]
+            if not pending:
                 raise _identity_error()
-            sources, prepared = _prepared_sources(
-                tuple(str(child["event_id"]) for child in children),
-                context.get("prepared_edit_record"),
+            stored = cast("dict[str, object]", context)
+            identity = (attempts and _attempt_identity(transaction, principal_id, pending[0])) or _context_identity(
+                _required_text(row["entity_name"]),
+                pending,
+                stored,
             )
-            if prepared is not None and (
-                prepared.response_owner != entity
-                or prepared.response_event_id != response
-                or prepared.conversation_target is None
-                or prepared.conversation_target.room_id != room
-            ):
-                raise _identity_error()
-            register_response_attempt(
-                transaction,
-                principal,
-                attempt=ResponseAttempt(entity, sources),
-                room_id=room,
-                membership_epoch=int(children[0]["membership_epoch"]),
-                response_event_id=response,
+            stored[_IDENTITY_KEY] = {**identity, "thread_id": stored.get("thread_id")}
+            transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE principal_id = ? AND approval_id = ?",
+                (
+                    json.dumps(stored, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                    principal_id,
+                    approval_id,
+                ),
             )
+        if len(rows) < _PAGE_SIZE:
+            break
         cursor = str(rows[-1]["principal_id"]), str(rows[-1]["approval_id"])
-        final_page = len(rows) < _PAGE_SIZE
-        rows = ()
-        if final_page:
-            return
+    if attempts:
+        transaction.execute("DROP TABLE IF EXISTS response_attempt_sources")
+        transaction.execute("DROP TABLE IF EXISTS response_attempts")
 
 
-def _final_record(transaction: Transaction, row: Row, result: dict[str, object] | None) -> TurnRecord | None:
-    """Prove a historical final's owner from its frozen edit or exact completed turn."""
-    driving = str(row["delivery_id"])
-    if result is not None and result.get("prepared_edit_record") is not None:
-        _, record = _prepared_sources((driving,), result["prepared_edit_record"])
-        return record
-    candidates = transaction.fetchall("SELECT record_json FROM turn_records WHERE index_event_id = ?", (driving,))
-    records = [
-        record
-        for candidate in candidates
-        if (record := TurnRecordCodec._from_ledger_record(driving, json.loads(str(candidate["record_json"]))))
-        is not None
-        and driving in record.source_event_ids
-        and record.completed
-        and record.response_event_id == (row["edits_event_id"] or row["acknowledged_event_id"])
-    ]
-    return replace(records[0], latest_edit_receipt_order=None) if len(records) == 1 else None
+def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, object]:
+    """Return the context entries that keep a continuation's adopted identity until its span is named."""
+    if continuation.span_id is not None:
+        return {}
+    return {
+        _IDENTITY_KEY: {
+            "entity_name": continuation.entity_name,
+            "room_id": continuation.room_id,
+            "thread_id": continuation.thread_id,
+            "response_event_id": continuation.response_event_id,
+            "logical_source_event_ids": list(continuation.sources.logical_source_event_ids),
+            "discovery_event_ids": list(continuation.sources.discovery_event_ids),
+            "edit_receipt_order": continuation.sources.edit_receipt_order,
+        },
+    }
 
 
-def _decode_final_result(row: Row, driving: str) -> dict[str, object] | None:
-    """Decode one historical FINAL while retaining legacy inline precedence."""
-    payload = json.loads(str(row["payload_json"]))
-    if not isinstance(payload, dict):
-        msg = f"Outbox payload for delivery {driving!r} is not an object"
-        raise TypeError(msg)
-    return decode_delivery_result(payload, cast("str | None", row["result_json"]), delivery_id=driving)
-
-
-def _adopt_final(transaction: Transaction, row: Row) -> None:
-    """Adopt one optional FINAL unless it conflicts with required live ownership."""
-    principal, driving = str(row["principal_id"]), str(row["delivery_id"])
-    existing = load_response_attempt(transaction, principal, driving)
-    response = row["edits_event_id"] or row["acknowledged_event_id"]
-    try:
-        result = _decode_final_result(row, driving)
-    except (ValueError, TypeError, KeyError):
-        if existing is not None:
-            raise _identity_error() from None
-        return
-    if existing is not None:
-        if (
-            existing.room_id != row["room_id"]
-            or existing.membership_epoch != row["membership_epoch"]
-            or existing.response_event_id != response
-        ):
-            raise _identity_error()
-        if result is not None and row["result_json"] is None:
-            _store_inline_result(transaction, principal, driving, result)
-        return
-    try:
-        record = _final_record(transaction, row, result)
-    except (ValueError, TypeError, KeyError):
-        return
-    if (
-        record is None
-        or record.response_owner is None
-        or record.conversation_target is None
-        or record.conversation_target.room_id != row["room_id"]
-        or record.response_event_id != response
-    ):
-        return
-    pending = (
-        (driving,)
-        if record.latest_edit_receipt_order is not None
-        else (driving, *(event_id for event_id in record.source_event_ids if event_id != driving))
-    )
-    if not _sources_are_admitted(transaction, row, pending):
-        return
-    sources = ResponseSources(
-        pending,
-        record.source_event_ids,
-        record.discovery_event_ids,
-        record.latest_edit_receipt_order,
-    )
-    register_response_attempt(
-        transaction,
-        principal,
-        attempt=ResponseAttempt(record.response_owner, sources),
-        room_id=str(row["room_id"]),
-        membership_epoch=int(row["membership_epoch"]),
-        response_event_id=None if response is None else str(response),
-    )
-    if result is not None and row["result_json"] is None:
-        _store_inline_result(transaction, principal, driving, result)
-
-
-def _adopt_finals(transaction: Transaction) -> None:
-    """Keep unrelated malformed deliveries outside the response ownership relation."""
-    cursor: tuple[str, str] | None = None
-    while True:
-        rows = (
-            transaction.fetchall(
-                """SELECT * FROM matrix_delivery_outbox WHERE stage = 'final'
-                ORDER BY principal_id, delivery_id LIMIT ?""",
-                (_PAGE_SIZE,),
-            )
-            if cursor is None
-            else transaction.fetchall(
-                """SELECT * FROM matrix_delivery_outbox WHERE stage = 'final'
-                AND (principal_id, delivery_id) > (?, ?)
-                ORDER BY principal_id, delivery_id LIMIT ?""",
-                (*cursor, _PAGE_SIZE),
-            )
-        )
-        if not rows:
-            return
-        for row in rows:
-            _adopt_final(transaction, row)
-        cursor = str(rows[-1]["principal_id"]), str(rows[-1]["delivery_id"])
-        final_page = len(rows) < _PAGE_SIZE
-        rows = ()
-        if final_page:
-            return
-
-
-def _sources_are_admitted(transaction: Transaction, row: Row, pending: tuple[str, ...]) -> bool:
-    """Validate every optional source before any ownership rows are inserted."""
-    for event_id in pending:
-        admitted = transaction.fetchone(
-            "SELECT room_id, membership_epoch FROM journal_events WHERE principal_id = ? AND event_id = ?",
-            (str(row["principal_id"]), event_id),
-        )
-        if (
-            admitted is None
-            or admitted["room_id"] != row["room_id"]
-            or admitted["membership_epoch"] != row["membership_epoch"]
-        ):
-            return False
-    initial = transaction.fetchone(
-        """SELECT room_id, membership_epoch, edits_event_id, acknowledged_event_id FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND delivery_id = ? AND stage = 'initial'""",
-        (str(row["principal_id"]), str(row["delivery_id"])),
-    )
-    return (
-        initial is None
-        or initial["acknowledged_event_id"] is None
-        or (
-            initial["room_id"] == row["room_id"]
-            and initial["membership_epoch"] == row["membership_epoch"]
-            and (initial["edits_event_id"] or initial["acknowledged_event_id"])
-            == (row["edits_event_id"] or row["acknowledged_event_id"])
-        )
-    )
-
-
-def _store_inline_result(transaction: Transaction, principal: str, driving: str, result: dict[str, object]) -> None:
-    """Make existing successful result presence queryable without changing wire bytes."""
-    transaction.execute(
-        "UPDATE matrix_delivery_outbox SET result_json = ? WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'",
-        (json.dumps(result, separators=(",", ":"), ensure_ascii=True), principal, driving),
-    )
-
-
-def migrate_response_attempts(transaction: Transaction, existing_tables: frozenset[str]) -> None:
-    """Backfill once after DDL, within the existing schema lock and transaction."""
-    if (
-        "response_attempts" in existing_tables
-        or "matrix_sync_consumers" not in existing_tables
-        or "approval_continuations" not in existing_tables
-    ):
-        return
-    _adopt_continuations(transaction)
-    transaction.execute("CREATE INDEX legacy_response_attempts_turn_lookup ON turn_records (index_event_id)")
-    _adopt_finals(transaction)
-    transaction.execute("DROP INDEX legacy_response_attempts_turn_lookup")
+def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> LegacyIdentity:
+    """Return the identity a continuation was adopted with, until reply classification names its span."""
+    raw = context.get(_IDENTITY_KEY)
+    if not isinstance(raw, dict):
+        message = f"Approval continuation {approval_id!r} names no paused span"
+        raise ValueError(message)  # noqa: TRY004 - a corrupt row, not a caller's type
+    identity = cast("dict[str, object]", raw)
+    return {
+        "entity_name": _required_text(identity.get("entity_name")),
+        "room_id": _required_text(identity.get("room_id")),
+        "thread_id": cast("str | None", identity.get("thread_id")),
+        "response_event_id": _required_text(identity.get("response_event_id")),
+        "logical_source_event_ids": tuple(_event_ids(identity.get("logical_source_event_ids"))),
+        "discovery_event_ids": tuple(_event_ids(identity.get("discovery_event_ids", []))),
+        "edit_receipt_order": cast("int | None", identity.get("edit_receipt_order")),
+    }

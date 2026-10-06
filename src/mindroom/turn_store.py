@@ -527,29 +527,6 @@ class TurnStore:
         """Return the durable turn that owns one visible response event."""
         return self._ledger.turn_record_for_response_event_id(response_event_id)
 
-    async def _update_response_turn(
-        self,
-        response_event_id: str,
-        update: Callable[[TurnRecord], TurnRecord],
-    ) -> TurnRecord | None:
-        """Durably update the sole turn that owns one visible response."""
-        turn_record = self.turn_record_for_response_event_id(response_event_id)
-        if turn_record is None:
-            return None
-
-        def updated_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            matching_records = {
-                record.indexed_event_ids: record
-                for record in existing_records.values()
-                if response_event_id in {record.response_event_id, record.visible_echo_event_id}
-            }
-            if len(matching_records) != 1:
-                msg = f"Response {response_event_id!r} lost its sole turn owner"
-                raise RuntimeError(msg)
-            return update(next(iter(matching_records.values())))
-
-        return await self._ledger.update_handled_turn(turn_record.indexed_event_ids, updated_record)
-
     def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether these sources already own an incomplete response attempt."""
         return any(

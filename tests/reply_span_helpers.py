@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.event_journal.replies import ReplyRowRequest
-from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation
+from mindroom.event_journal.replies import ClaimLookup, ReplyRowRequest
+from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
 
 if TYPE_CHECKING:
@@ -18,7 +20,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_runner import ResponseRequest, ResponseRunner
     from mindroom.turn_record import TurnRecord
@@ -170,7 +172,12 @@ def response_span(
     *,
     placeholder_event_id: str | None = None,
 ) -> AbstractAsyncContextManager[SpanHandle]:
-    """Run the block in the reply span the runner's bot claims for the request's source."""
+    """Run the block in the reply span the runner's bot claims for the request's source.
+
+    A regeneration's span regenerates the answer the request names, as the
+    runner claims it.
+    """
+    regenerated = request.existing_event_id if request.prepared_edit_record is not None else None
     return reply_span(
         runner.deps.replies.store,
         runtime=runner.deps.replies,
@@ -178,5 +185,118 @@ def response_span(
         room_id=request.room_id,
         thread_id=request.response_envelope.target.resolved_thread_id,
         logical_source_event_ids=request.sources.logical_source_event_ids,
-        placeholder_event_id=placeholder_event_id,
+        placeholder_event_id=None if regenerated is not None else placeholder_event_id,
+        regenerated_event_id=regenerated,
+        edit_receipt_order=request.sources.edit_receipt_order,
+        prepared_edit=request.prepared_edit_record,
     )
+
+
+async def reply_shown_for_approval(principal: PrincipalStore, continuation: ApprovalContinuation) -> rl.Span | None:
+    """Claim a reply span for the continuation's sources and show its response event, as a response does before it pauses.
+
+    ``None`` means the claim could not take the sources.
+    """
+    replies = principal.replies
+    generation = await replies.active_generation()
+    if generation is None:
+        generation = "gen-test"
+        await replies.write_generation(generation, now_ns=time.time_ns())
+    sources = continuation.sources
+    claimed = await replies.claim(
+        rl.ClaimRequest(
+            span_id=uuid4().hex,
+            delivery_id=sources.pending_event_ids[0],
+            sources=rl.SpanSources(
+                pending=sources.pending_event_ids,
+                logical=sources.logical_source_event_ids,
+                discovery=sources.discovery_event_ids,
+            ),
+            bot_generation=generation,
+            now_ns=time.time_ns(),
+            new_reply_id=uuid4().hex,
+            entity_name=continuation.entity_name,
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            membership_epoch=await principal.membership_epoch(continuation.room_id),
+            empty_presentation=encode_presentation(Presentation()),
+        ),
+        ClaimLookup(existing_event_id=continuation.response_event_id),
+    )
+    span = claimed.transition.claimed
+    if span is None:
+        return None
+    reply = claimed.transition.reply
+    assert reply is not None
+    if reply.event_id is None:
+        created = await principal.enqueue_reply_row(
+            request=ReplyRowRequest(
+                reply_id=span.reply_id,
+                span_id=span.span_id,
+                decide=lambda reply, created: rl.enqueue_initial(
+                    reply,
+                    created,
+                    shown=reply.presentation,
+                    placeholder_only=True,
+                    prepared_revision=reply.revision,
+                    now_ns=time.time_ns(),
+                ),
+                placeholder_only=True,
+                stage=rl.WriteStage.INITIAL,
+            ),
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            payload={"msgtype": "m.text", "body": AGENT_PLACEHOLDER},
+        )
+        if created is None or created.transaction_id is None:
+            return None
+        await principal.claim_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.INITIAL)
+        await principal.acknowledge_matrix_delivery(
+            delivery_id=span.delivery_id,
+            stage=DeliveryStage.INITIAL,
+            event_id=continuation.response_event_id,
+            delivered_projections=(),
+        )
+    return span
+
+
+async def pause_shown_reply(
+    principal: PrincipalStore,
+    continuation: ApprovalContinuation,
+    span: rl.Span,
+) -> ApprovalContinuation | None:
+    """Pause the reply ``span`` shows for ``continuation``, in the transaction that creates the continuation."""
+    enqueued = await principal.pause_for_approval(
+        continuation,
+        request=ReplyRowRequest(
+            reply_id=span.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, held: rl.pause(
+                reply,
+                held,
+                rl.PauseWrite(shown=reply.presentation, prepared_revision=reply.revision, stage=None),
+                approval_id=continuation.approval_id,
+                in_place=False,
+                now_ns=time.time_ns(),
+            ),
+        ),
+        room_id=continuation.room_id,
+        thread_id=continuation.thread_id,
+        payload={},
+    )
+    if enqueued is None or not enqueued.transition.applied:
+        return None
+    return await principal.approval_continuation(continuation.approval_id)
+
+
+async def paused_for_approval(
+    principal: PrincipalStore,
+    continuation: ApprovalContinuation,
+) -> ApprovalContinuation | None:
+    """Pause a reply for ``continuation`` the way a response does, and return the continuation the pause created.
+
+    ``None`` means the pause could not take the sources, as
+    ``PrincipalStore.pause_for_approval`` reports it.
+    """
+    span = await reply_shown_for_approval(principal, continuation)
+    return None if span is None else await pause_shown_reply(principal, continuation, span)

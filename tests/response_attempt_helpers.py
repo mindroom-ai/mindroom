@@ -35,9 +35,10 @@ class _DirectResponseOutbox:
         return getattr(self.inner, name)
 
     async def _admit_sources(self, kwargs: dict[str, Any]) -> None:
-        attempt = kwargs.get("response_attempt")
-        if attempt is not None:
-            for event_id in attempt.sources.pending_event_ids:
+        request = kwargs.get("request")
+        span = None if request is None else await self.principal.replies.span(request.span_id)
+        if span is not None:
+            for event_id in span.sources.pending:
                 if await self.principal.load_event(event_id) is None:
                     await self.principal.admit(
                         InboundEvent(
@@ -51,10 +52,6 @@ class _DirectResponseOutbox:
                             source={},
                         ),
                     )
-
-    async def enqueue_matrix_delivery(self, **kwargs: Any) -> str | None:  # noqa: ANN401
-        await self._admit_sources(kwargs)
-        return await self.inner.enqueue_matrix_delivery(**kwargs)
 
     async def enqueue_reply_row(self, **kwargs: Any) -> Any:  # noqa: ANN401
         await self._admit_sources(kwargs)

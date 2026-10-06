@@ -27,7 +27,8 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import unwrap_extracted_collaborator
-from tests.legacy_reply_helpers import adopt_main_left_approval, resumed_main_left_approval
+from tests.legacy_reply_helpers import adopt_main_left_approval, resumed_main_left_approval, store_main_continuation
+from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _plain_request, _target
 
 if TYPE_CHECKING:
@@ -128,7 +129,7 @@ def _ready_continuation() -> ApprovalContinuation:
 async def _seed_ready_continuation(bot: AgentBot) -> ApprovalContinuation:
     """Store a ready continuation without reply records, as main left one, and let the bot's start adopt it."""
     continuation = _ready_continuation()
-    assert await bot.journal_principal().create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(bot.journal_principal(), continuation) == continuation
     await adopt_main_left_approval(bot, continuation)
     return continuation
 
@@ -145,7 +146,7 @@ async def test_final_approval_links_the_delivered_attempt(
     """Live and recovered finals persist the attempt identified by their durable metadata."""
     bot, runner = await _runner_with_source(tmp_path)
     continuation = _ready_continuation()
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(runner.deps.approval_store, continuation)
     target = _target(thread_id="$thread", reply_to_event_id="$source")
     persist_event_id = AsyncMock()
     completed = CompletedApprovalRun(

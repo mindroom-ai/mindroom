@@ -64,6 +64,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from tests.conftest import runtime_paths_for, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 from tests.scheduling_helpers import joined_member_state
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 
@@ -226,7 +227,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         state="waiting",
         runtime_generation="runtime",
     )
-    assert await responder.create_approval_continuation(continuation) is not None
+    assert await paused_for_approval(responder, continuation) is not None
     card = await manager.prepare_detached_approval(
         approval_id="card-" + name,
         continuation_id=name,

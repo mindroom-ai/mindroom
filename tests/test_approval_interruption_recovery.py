@@ -19,7 +19,7 @@ from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from tests.approval_continuation_helpers import claim_continuation
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import unwrap_extracted_collaborator
-from tests.legacy_reply_helpers import read_after_sync
+from tests.legacy_reply_helpers import read_after_sync, store_main_continuation
 from tests.response_runner_helpers import _bot
 from tests.test_response_runner_focused import _admit_approval_source
 
@@ -66,7 +66,7 @@ async def approval(tmp_path: Path) -> tuple[AgentBot, ApprovalContinuation]:
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
     claimed = await claim_continuation(
         store,
         continuation.approval_id,

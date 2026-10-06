@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
-from .legacy_response_attempts import migrate_response_attempts
+from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
     upgrade_approval_argument_digests,
     upgrade_approval_toolkit_origins,
@@ -246,7 +246,10 @@ class SqliteBackend:
             )
             upgrade_approval_toolkit_origins(_SqliteTransaction(connection), call_columns)
             upgrade_approval_argument_digests(_SqliteTransaction(connection), call_columns)
-            migrate_response_attempts(_SqliteTransaction(connection), existing_tables)
+            continuation_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuations)")
+            )
+            upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()

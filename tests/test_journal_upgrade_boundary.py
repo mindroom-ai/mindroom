@@ -29,6 +29,7 @@ from mindroom.event_journal import (
 )
 from tests.approval_continuation_helpers import advance_continuation, claim_continuation
 from tests.conftest import postgres_journal_schema_url
+from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import admit, message
 
@@ -311,7 +312,7 @@ async def test_approval_toolkit_upgrade_fences_unresumable_calls(
     principal = store.principal("agent@alice")
     await _ApprovalContinuations.admit_sources(principal)
     original = replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="runtime-a")
-    assert await principal.create_approval_continuation(original) == original
+    assert await paused_for_approval(principal, original) == original
     await _ApprovalContinuations.remember_card(principal)
     if state != "waiting":
         await principal.resolve_continuation_approval_card(
@@ -386,7 +387,7 @@ async def test_approval_toolkit_upgrade_preserves_compatible_work(
         original = replace(original, calls=(replace(call, decision=ApprovalDecision(case)),))
     elif case == "already_failing":
         original = replace(original, state="failing", failure_reason="cancelled_by_user")
-    assert await principal.create_approval_continuation(original) == original
+    assert await paused_for_approval(principal, original) == original
     if case == "later_generation":
         assert await claim_continuation(principal, "approval-1", runtime_generation="runtime-a") is not None
         advanced = await advance_continuation(
@@ -425,7 +426,7 @@ async def test_approval_toolkit_upgrade_preserves_frozen_final(
     principal = store.principal("agent@alice")
     await _ApprovalContinuations.admit_sources(principal)
     original = _ApprovalContinuations.continuation()
-    assert await principal.create_approval_continuation(original) == original
+    assert await paused_for_approval(principal, original) == original
     claimed = await claim_continuation(principal, "approval-1", runtime_generation="runtime-a")
     assert claimed is not None
     await principal.enqueue_matrix_delivery(
@@ -462,7 +463,7 @@ async def test_approval_argument_digest_upgrade_keeps_calls_unexecutable(legacy_
     await _ApprovalContinuations.admit_sources(principal)
     original = _ApprovalContinuations.continuation()
     original = replace(original, calls=(replace(original.calls[0], toolkit_name="shell"),))
-    assert await principal.create_approval_continuation(original) == original
+    assert await paused_for_approval(principal, original) == original
     await store.close()
     legacy_database.execute("ALTER TABLE approval_continuation_calls DROP COLUMN arguments_digest")
 

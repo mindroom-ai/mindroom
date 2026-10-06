@@ -105,10 +105,12 @@ from tests.bot_helpers import (
     _visible_response_event_id,
     make_mock_agent_user,
     make_test_agent_bot,
+    unique_room_send_responses,
 )
 from tests.conftest import (
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    install_runtime_journal_support,
     message_origin,
     patch_response_runner_module,
     replace_delivery_gateway_deps,
@@ -117,6 +119,7 @@ from tests.conftest import (
     seed_session,
     unwrap_extracted_collaborator,
 )
+from tests.journal_membership_helpers import admit_room_membership
 from tests.legacy_reply_helpers import main_left_reply, read_after_sync
 from tests.participation_helpers import ParticipationModel
 from tests.reply_span_helpers import reply_span, response_span
@@ -3082,6 +3085,11 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        install_direct_response_admission(bot)
+        install_runtime_journal_support(bot)
+        # The answer is delivered through the outbox, which needs the bot in the room.
+        await admit_room_membership(bot.journal_principal(), "!test:localhost", "join")
+        unique_room_send_responses(bot.client)
 
         with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,

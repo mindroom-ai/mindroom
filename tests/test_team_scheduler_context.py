@@ -304,9 +304,10 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: Path) -> None:
-    """Late cancellation should still cancel the team path while post-effects are running."""
+async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effects_finish(tmp_path: Path) -> None:
+    """A cancel that arrives while a visible team answer's post-effects run does not lose the answer or its effects."""
     bot = _make_bot(tmp_path)
+    unique_room_send_responses(bot.client)
     team_agents = _team_agents(bot)
     started = asyncio.Event()
     release = asyncio.Event()
@@ -353,5 +354,4 @@ async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: P
         await started.wait()
         task.cancel()
         release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert await task is not None

@@ -68,6 +68,7 @@ from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - r
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -685,7 +686,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         state="waiting",
         runtime_generation="runtime-a",
     )
-    assert await responder.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(responder, continuation) == continuation
     requested_at = datetime.now(UTC)
     card_content = ApprovalManager._pending_event_content(
         approval_id=card_delivery_id,
@@ -1266,7 +1267,7 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
         state="claimed",
         runtime_generation="old-runtime",
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     await principal.enqueue_matrix_delivery(
         delivery_id=source_event_id,
         stage=DeliveryStage.FINAL,
@@ -1376,7 +1377,7 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
         state="failing",
         failure_reason=reason,
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     notice_content = build_message_content(
         reason,
         thread_event_id="$thread",
@@ -1510,7 +1511,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         state="failing",
         failure_reason=reason,
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     stale_delivery_id = await notice_store.enqueue_unavailable_approval_notice(
         approval_id=approval_id,
         room_id=continuation.room_id,
@@ -1622,7 +1623,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         state="failing",
         failure_reason="Requesting agent 'removed' is no longer available.",
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     await notice_store.admit(
         InboundEvent(
             event_id=continuation.response_event_id,

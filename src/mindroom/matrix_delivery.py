@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal.projection import ProjectedEvent
     from mindroom.event_journal.replies import PostCommitEffect, ReplyRowEnqueue, ReplyRowRequest
     from mindroom.event_journal.views import MatrixDeliveryView
-    from mindroom.response_sources import ResponseAttempt
 
 logger = get_logger(__name__)
 
@@ -189,7 +188,6 @@ class MatrixDeliveryWorker:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: ResponseAttempt | None = None,
         edits_event_id: str | None = None,
         permanent_failure_reason: str | None = None,
     ) -> str | None:
@@ -227,7 +225,6 @@ class MatrixDeliveryWorker:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
-                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 permanent_failure_reason=permanent_failure_reason,
             )
@@ -240,7 +237,6 @@ class MatrixDeliveryWorker:
         room_id: str,
         thread_id: str | None,
         prepare: Callable[[], Awaitable[PreparedReplyRow]],
-        response_attempt: ResponseAttempt | None = None,
         enqueue: ReplyRowEnqueuer | None = None,
         on_enqueued: Callable[[ReplyRowEnqueue], None] | None = None,
     ) -> ReplyRowDelivery:
@@ -265,7 +261,6 @@ class MatrixDeliveryWorker:
                 thread_id=thread_id,
                 payload=prepared.payload,
                 result=prepared.result,
-                response_attempt=response_attempt,
                 event_type=self.event_type,
                 permanent_failure_reason=prepared.permanent_failure_reason,
                 new_text=prepared.new_text,
@@ -315,7 +310,6 @@ class MatrixDeliveryWorker:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None,
-        response_attempt: ResponseAttempt | None,
         edits_event_id: str | None,
         permanent_failure_reason: str | None,
     ) -> _FlushOutcome:
@@ -339,7 +333,6 @@ class MatrixDeliveryWorker:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
-                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=handed_over,
                 permanent_failure_reason=permanent_failure_reason,

@@ -117,7 +117,6 @@ from mindroom.reply_scope import (
 )
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
-from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.stop import send_stop_button
@@ -156,6 +155,7 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
     from mindroom.hooks import MessageEnvelope
+    from mindroom.response_sources import ResponseSources
     from mindroom.streaming import ProgressPublisher, StreamInputChunk, UnfinishedStreamedReply
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
@@ -519,7 +519,6 @@ class SendTextRequest:  # noqa: D101
     delivery_turn_id: str | None = None
     defer_source_handoff: bool = False
     delivery_result: dict[str, object] | None = None
-    response_attempt: ResponseAttempt | None = None
     # Set when this send is a durable write of an agent or team reply.
     reply_write: ReplyWrite | None = None
 
@@ -538,7 +537,6 @@ class EditTextRequest:  # noqa: D101
     delivery_turn_id: str | None = None
     defer_source_handoff: bool = False
     delivery_result: dict[str, object] | None = None
-    response_attempt: ResponseAttempt | None = None
     # Set when this edit is a durable write of an agent or team reply.
     reply_write: ReplyWrite | None = None
 
@@ -1179,7 +1177,6 @@ class DeliveryGateway:
                 content=content,
                 new_text=None,
                 result=request.delivery_result,
-                response_attempt=request.response_attempt,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
         if request.delivery_turn_id is None:
@@ -1232,7 +1229,6 @@ class DeliveryGateway:
                 thread_id=request.target.resolved_thread_id,
                 payload=content,
                 result=delivery_result,
-                response_attempt=request.response_attempt,
                 permanent_failure_reason=(
                     _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
                 ),
@@ -1259,7 +1255,6 @@ class DeliveryGateway:
         content: dict[str, Any],
         new_text: str | None,
         result: dict[str, object] | None,
-        response_attempt: ResponseAttempt | None,
         retry_sync_recovery: bool,
     ) -> MatrixSendOutcome | None:
         """Send one durable write of a reply as its next row, after the reply's earlier rows.
@@ -1345,7 +1340,6 @@ class DeliveryGateway:
                 room_id=target.room_id,
                 thread_id=target.resolved_thread_id,
                 prepare=prepare,
-                response_attempt=response_attempt,
                 enqueue=write.enqueue,
                 on_enqueued=enqueued,
             )
@@ -1846,7 +1840,6 @@ class DeliveryGateway:
                 content=content,
                 new_text=request.new_text,
                 result=request.delivery_result,
-                response_attempt=request.response_attempt,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
         if request.delivery_turn_id is None:
@@ -1920,7 +1913,6 @@ class DeliveryGateway:
                 thread_id=request.target.resolved_thread_id,
                 payload=envelope,
                 result=delivery_result,
-                response_attempt=request.response_attempt,
                 edits_event_id=request.event_id,
                 permanent_failure_reason=(
                     _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
@@ -2069,7 +2061,6 @@ class DeliveryGateway:
                         new_text=display_text,
                         tool_trace=draft.tool_trace,
                         extra_content=delivery_extra_content,
-                        response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
                         retry_sync_recovery=True,
                         delivery_result=delivery_result,
                         reply_write=reply_write,
@@ -2108,7 +2099,6 @@ class DeliveryGateway:
                     tool_trace=draft.tool_trace,
                     extra_content=delivery_extra_content,
                     retry_sync_recovery=True,
-                    response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
                     delivery_result=delivery_result,
                     reply_write=reply_write,
                 ),
@@ -2382,7 +2372,6 @@ class DeliveryGateway:
         reply_hooks = self._reply_stream_hooks(
             handle,
             request.target,
-            ResponseAttempt(self.deps.agent_name, request.identity.sources),
             request.consumes_edit,
         )
         return await send_streaming_response(
@@ -2422,7 +2411,6 @@ class DeliveryGateway:
         self,
         handle: SpanHandle,
         target: MessageTarget,
-        response_attempt: ResponseAttempt,
         consumes_edit: Callable[[], bool] | None,
         *,
         published: dict[str, Presentation] | None = None,
@@ -2495,7 +2483,6 @@ class DeliveryGateway:
                         target=target,
                         response_text="",
                         retry_sync_recovery=retry_sync_recovery,
-                        response_attempt=response_attempt,
                         reply_write=write,
                     ),
                     target.room_id,
@@ -2508,7 +2495,6 @@ class DeliveryGateway:
                         event_id=event_id,
                         new_text=display_text,
                         retry_sync_recovery=retry_sync_recovery,
-                        response_attempt=response_attempt,
                         reply_write=write,
                     ),
                     target.room_id,
@@ -2638,7 +2624,6 @@ class DeliveryGateway:
         hooks = self._reply_stream_hooks(
             handle,
             target,
-            ResponseAttempt(self.deps.agent_name, identity.sources),
             None,
             published=published,
         )

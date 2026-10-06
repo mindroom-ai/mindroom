@@ -36,6 +36,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -182,7 +183,7 @@ async def test_only_policy_pause_offers_timed_approval(
         state="waiting",
         runtime_generation="runtime",
     )
-    assert await responder.create_approval_continuation(continuation) is not None
+    assert await paused_for_approval(responder, continuation) is not None
     try:
         await coordinator.publish_generation(
             continuation,
@@ -267,7 +268,8 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                     source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run"}},
                 ),
             )
-            continuation = await coordinator.create(
+            continuation = await paused_for_approval(
+                responder,
                 ApprovalContinuation(
                     approval_id=name,
                     run_id="run-" + name,
@@ -284,6 +286,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                     runtime_generation="runtime",
                 ),
             )
+            assert continuation is not None
             await coordinator.publish_generation(
                 continuation,
                 plan,
@@ -1266,7 +1269,7 @@ async def _card(
         state="waiting",
         runtime_generation="runtime",
     )
-    assert await responder.create_approval_continuation(continuation) is not None
+    assert await paused_for_approval(responder, continuation) is not None
     card = await manager.prepare_detached_approval(
         approval_id="card-" + name,
         continuation_id=name,

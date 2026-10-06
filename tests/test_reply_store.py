@@ -36,6 +36,7 @@ from mindroom.reply_lifecycle import (
 from mindroom.turn_record import TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
@@ -860,37 +861,14 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
     """When the owner can never settle its approval, the cleanup that releases its sources ends its paused reply too."""
     alice = journal_store.principal("agent@alice")
     await journal_tests.TestApprovalContinuations.admit_sources(alice)
-    await alice.replies.write_generation("gen-1", now_ns=1)
-    claim = (
-        await alice.replies.claim(
-            replace(
-                _request(source="$source-1"),
-                sources=SpanSources(pending=("$source-1", "$source-2"), logical=("$source-1", "$source-2")),
-            ),
-            ClaimLookup(),
-        )
-    ).transition
-    assert claim.reply is not None
-    assert claim.claimed is not None
-    paused = replace(
-        claim.reply,
-        state=ReplyState.PAUSED,
-        approval_id="approval-1",
-        event_id="$waiting",
-        current_span_id=None,
+    continuation = await paused_for_approval(
+        alice,
+        journal_tests.TestApprovalContinuations.continuation(state="waiting"),
     )
-    await journal_store.backend.write(
-        lambda tx: replies.apply(
-            tx,
-            "agent@alice",
-            rl.Transition(
-                outcome=rl.Outcome.APPLIED,
-                reply=paused,
-                spans=(replace(claim.claimed, outcome=SpanOutcome.PAUSED, ended_at_ns=2),),
-            ),
-        ),
-    )
-    await alice.create_approval_continuation(journal_tests.TestApprovalContinuations.continuation(state="waiting"))
+    assert continuation is not None
+    assert continuation.span_id is not None
+    paused = await alice.replies.span(continuation.span_id)
+    assert paused is not None
     assert await alice.request_approval_failure("approval-1", "agent removed", expected_state="waiting") is not None
     router = journal_store.principal("router@alice")
     delivery_id = await router.enqueue_unavailable_approval_notice(
@@ -928,7 +906,21 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
     alice = journal_store.principal("agent@alice")
     await journal_tests.TestApprovalContinuations.admit_sources(alice)
     await alice.replies.write_generation("gen-1", now_ns=1)
-    claim = _first_claim(source="$source-1")
+    continuation = journal_tests.TestApprovalContinuations.continuation(state="ready")
+    claim = rl.claim(
+        replace(
+            _request(source="$source-1"),
+            sources=SpanSources(pending=continuation.source_event_ids, logical=continuation.source_event_ids),
+        ),
+        ClaimContext(
+            reply=None,
+            last_span=None,
+            current_span=None,
+            interactive_span=None,
+            durable_write_debt=False,
+            active_generation="gen-1",
+        ),
+    )
     assert claim.reply is not None
     assert claim.claimed is not None
     waiting = replace(
@@ -936,15 +928,37 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
         kind=kind,
         approval_id="approval-1" if kind is rl.SpanKind.APPROVAL_RESUME else None,
     )
-    paused = replace(claim.reply, state=ReplyState.PAUSED, approval_id="approval-1", event_id="$waiting")
+    shown = replace(claim.reply, event_id="$waiting")
     await journal_store.backend.write(
         lambda tx: replies.apply(
             tx,
             "agent@alice",
-            rl.Transition(outcome=rl.Outcome.APPLIED, reply=paused, spans=(waiting,)),
+            rl.Transition(outcome=rl.Outcome.APPLIED, reply=shown, spans=(waiting,)),
         ),
     )
-    await alice.create_approval_continuation(journal_tests.TestApprovalContinuations.continuation(state="ready"))
+    # The waiter pauses its reply in place: its span keeps running while the approval is decided.
+    enqueued = await alice.pause_for_approval(
+        continuation,
+        request=ReplyRowRequest(
+            reply_id=shown.reply_id,
+            span_id=waiting.span_id,
+            decide=lambda reply, span: rl.pause(
+                reply,
+                span,
+                rl.PauseWrite(shown=reply.presentation, prepared_revision=reply.revision, stage=None),
+                approval_id="approval-1",
+                in_place=True,
+                now_ns=60,
+            ),
+        ),
+        room_id=ROOM,
+        thread_id="$thread",
+        payload={},
+    )
+    assert enqueued is not None
+    paused = await alice.replies.load(shown.reply_id)
+    assert paused is not None
+    assert paused.state is ReplyState.PAUSED
     if taken_over:
         await alice.replies.write_generation("gen-2", now_ns=70)
 

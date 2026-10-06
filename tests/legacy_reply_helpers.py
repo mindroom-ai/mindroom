@@ -8,11 +8,17 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 from mindroom.constants import STREAM_STATUS_APPROVAL_PENDING, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent, ProjectedEvent
+from mindroom.event_journal import (
+    DeliveryStage,
+    EventClass,
+    EventKind,
+    InboundEvent,
+    ProjectedEvent,
+    approval_continuations,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
-from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.tool_system.events import serialize_tool_trace
 from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
@@ -62,14 +68,12 @@ async def main_left_reply(
             redacts_event_id=None,
         ),
     )
-    sources = ResponseSources((source,), (source,))
     await store.enqueue_matrix_delivery(
         delivery_id=source,
         stage=DeliveryStage.INITIAL,
         room_id=room_id,
         thread_id=thread_id,
         payload=payload or {"body": "Thinking...", STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-        response_attempt=ResponseAttempt(owner, sources),
     )
     await store.claim_matrix_delivery(delivery_id=source, stage=DeliveryStage.INITIAL)
     await store.acknowledge_matrix_delivery(
@@ -165,3 +169,47 @@ async def resumed_main_left_approval(
         assert claimed is not None
         assert slot.handle is not None
         yield claimed
+
+
+async def store_main_continuation(store: PrincipalStore, continuation: ApprovalContinuation) -> None:
+    """Store a continuation as an earlier release left it, after the upgrade adopted its reply identity.
+
+    It names no paused span: reply classification gives it one.
+    """
+
+    def write(transaction: Transaction) -> None:
+        context = approval_continuations._context(continuation)
+        transaction.execute(
+            """
+            INSERT INTO approval_continuations (
+                principal_id, approval_id, entity_name, span_id, state,
+                generation, runtime_generation, failure_reason, context_json, created_at_ns
+            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                store._principal_id,
+                continuation.approval_id,
+                continuation.entity_name,
+                continuation.state,
+                continuation.generation,
+                continuation.runtime_generation,
+                continuation.failure_reason,
+                approval_continuations._json(context),
+                len(continuation.approval_id),
+            ),
+        )
+        for ordinal, event_id in enumerate(continuation.source_event_ids):
+            transaction.execute(
+                "INSERT INTO approval_continuation_sources (principal_id, approval_id, event_id, source_ordinal) "
+                "VALUES (?, ?, ?, ?)",
+                (store._principal_id, continuation.approval_id, event_id, ordinal),
+            )
+        approval_continuations._insert_calls(
+            transaction,
+            store._principal_id,
+            continuation.approval_id,
+            continuation.generation,
+            continuation.calls,
+        )
+
+    await store._backend.write(write)

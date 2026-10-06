@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_approval_payloads import resolve_legacy_visibility
-from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.reply_lifecycle import SpanKind
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import membership_state, outbox, response_attempts, turn_records
+from . import membership_state, outbox, reply_messages, reply_spans
 from .legacy_approval_recovery import deleted_delivery_is_terminal
+from .legacy_response_attempts import legacy_identity, legacy_identity_context
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
 type ApprovalContinuationState = Literal["waiting", "ready", "claimed", "failing"]
 
 _CONTINUATION_COLUMNS = """
-    approval_id, entity_name, state, generation,
+    approval_id, entity_name, span_id, state, generation,
     runtime_generation, failure_reason, context_json
 """
 
@@ -197,6 +199,11 @@ class ApprovalContinuation:
     prepared_edit_record: TurnRecord | None = None
     cli_call: dict[str, object] | None = None
     continuation_count: int = 0
+    # The span whose pause created this continuation; it names the reply, and
+    # the reply's records hold the room, thread, event, and sources read here.
+    # A pointer to where those facts live rather than a fact of the run, so it
+    # takes no part in comparing two continuations.
+    span_id: str | None = field(default=None, compare=False)
 
     @property
     def source_event_ids(self) -> tuple[str, ...]:
@@ -212,7 +219,6 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "continuation_count": continuation.continuation_count,
         "session_id": continuation.session_id,
         "entity_kind": continuation.entity_kind,
-        "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
         "delegation_storage_bindings": continuation.delegation_storage_bindings,
         "show_tool_calls": continuation.show_tool_calls,
@@ -242,6 +248,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
             if continuation.prepared_edit_record is not None
             else None
         ),
+        **legacy_identity_context(continuation),
     }
 
 
@@ -286,31 +293,68 @@ def get(
         (principal_id, approval_id, int(row["generation"])),
     )
     pending = tuple(str(source["event_id"]) for source in source_rows)
-    attempt = response_attempts.load_response_attempt(transaction, principal_id, pending[0]) if pending else None
-    return _from_rows(row, call_rows, pending, attempt)
+    return _from_rows(transaction, principal_id, row, call_rows, pending)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplyIdentity:
+    """The reply a continuation answers, as the reply's records name it."""
+
+    entity_name: str
+    room_id: str
+    thread_id: str | None
+    response_event_id: str
+    logical_source_event_ids: tuple[str, ...]
+    discovery_event_ids: tuple[str, ...]
+    edit_receipt_order: int | None
+
+
+def _identity(
+    transaction: Transaction,
+    principal_id: str,
+    row: Row,
+    stored: Mapping[str, object],
+) -> _ReplyIdentity:
+    """Return the reply identity a continuation answers: its paused span's reply, or the identity it was adopted with."""
+    span_id = cast("str | None", row["span_id"])
+    if span_id is None:
+        return _ReplyIdentity(**legacy_identity(stored, approval_id=str(row["approval_id"])))
+    span = reply_spans.load(transaction, principal_id, span_id)
+    reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
+    if span is None or reply is None or reply.event_id is None:
+        message = f"Approval continuation {row['approval_id']!r} lost the reply it paused"
+        raise ValueError(message)
+    return _ReplyIdentity(
+        entity_name=reply.entity_name,
+        room_id=reply.room_id,
+        thread_id=reply.thread_id,
+        response_event_id=reply.event_id,
+        logical_source_event_ids=span.sources.logical,
+        discovery_event_ids=span.sources.discovery,
+        edit_receipt_order=reply.edit_receipt_order if span.kind is SpanKind.REGENERATION else None,
+    )
 
 
 def _from_rows(
+    transaction: Transaction,
+    principal_id: str,
     row: Row,
     call_rows: tuple[Row, ...],
     pending: tuple[str, ...],
-    attempt: response_attempts.StoredResponseAttempt | None,
 ) -> ApprovalContinuation:
     """Decode one normalized continuation aggregate."""
-    if attempt is None or attempt.response_event_id is None:
-        message = "Approval continuation has no response attempt identity"
-        raise ValueError(message)
-    sources = ResponseSources(
-        pending,
-        attempt.logical_source_event_ids,
-        attempt.discovery_event_ids,
-        attempt.edit_receipt_order,
-    )
     context = json.loads(str(row["context_json"]))
     if not isinstance(context, dict):
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
+    identity = _identity(transaction, principal_id, row, stored)
+    sources = ResponseSources(
+        pending,
+        identity.logical_source_event_ids,
+        identity.discovery_event_ids,
+        identity.edit_receipt_order,
+    )
     prepared_edit = stored.get("prepared_edit_record")
     calls = tuple(
         ApprovalCall(
@@ -335,11 +379,11 @@ def _from_rows(
         continuation_count=int(stored.get("continuation_count", 0)),
         session_id=cast("str", stored["session_id"]),
         entity_kind=cast("Literal['agent', 'team']", stored["entity_kind"]),
-        entity_name=attempt.entity_name,
-        room_id=attempt.room_id,
-        thread_id=cast("str | None", stored.get("thread_id")),
+        entity_name=identity.entity_name,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
         requester_id=cast("str", stored["requester_id"]),
-        response_event_id=attempt.response_event_id,
+        response_event_id=identity.response_event_id,
         sources=sources,
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
@@ -387,6 +431,7 @@ def _from_rows(
         )
         if isinstance(prepared_edit, dict)
         else None,
+        span_id=cast("str | None", row["span_id"]),
     )
 
 
@@ -430,7 +475,12 @@ def create(
     principal_id: str,
     continuation: ApprovalContinuation,
 ) -> ApprovalContinuation | None:
-    """Create one paused-run owner only while all of its sources remain pending."""
+    """Create one paused-run owner only while all of its sources remain pending.
+
+    The continuation names the span whose pause creates it, in the same
+    transaction as that pause.
+    """
+    assert continuation.span_id is not None, "every continuation pauses a reply span"
     if not continuation.source_event_ids:
         return None
     # Admission and approval creation must agree which owner receives a
@@ -463,9 +513,9 @@ def create(
     inserted = transaction.fetchone(
         """
         INSERT INTO approval_continuations (
-            principal_id, approval_id, entity_name, state,
+            principal_id, approval_id, entity_name, span_id, state,
             generation, runtime_generation, failure_reason, context_json, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (approval_id) DO NOTHING
         RETURNING approval_id
         """,
@@ -473,6 +523,7 @@ def create(
             principal_id,
             continuation.approval_id,
             continuation.entity_name,
+            continuation.span_id,
             continuation.state,
             continuation.generation,
             continuation.runtime_generation,
@@ -484,14 +535,6 @@ def create(
     if inserted is None:
         existing = get(transaction, principal_id, approval_id=continuation.approval_id)
         return existing if existing == continuation else None
-    response_attempts.register_response_attempt(
-        transaction,
-        principal_id,
-        attempt=ResponseAttempt(continuation.entity_name, continuation.sources),
-        room_id=continuation.room_id,
-        membership_epoch=membership_epoch,
-        response_event_id=continuation.response_event_id,
-    )
     for ordinal, event_id in enumerate(continuation.source_event_ids):
         transaction.execute(
             """
@@ -589,21 +632,12 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
     calls_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
     for call in call_rows:
         calls_by_approval[str(call["approval_id"])].append(call)
-    attempts = response_attempts.load_response_attempts(
-        transaction,
-        tuple(
-            (str(row["principal_id"]), pending[0])
-            for row in rows
-            if (pending := pending_by_approval[str(row["approval_id"])])
-        ),
-    )
     owners = []
     for row in rows:
         principal_id = str(row["principal_id"])
         approval_id = str(row["approval_id"])
         pending = tuple(pending_by_approval[approval_id])
-        attempt = attempts.get((principal_id, pending[0])) if pending else None
-        continuation = _from_rows(row, tuple(calls_by_approval[approval_id]), pending, attempt)
+        continuation = _from_rows(transaction, principal_id, row, tuple(calls_by_approval[approval_id]), pending)
         owners.append((principal_id, continuation))
     return tuple(owners)
 
@@ -919,11 +953,7 @@ def finish(
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
-    if (
-        delivered is None
-        and not deleted_delivery_is_terminal(transaction, principal_id, continuation)
-        and not _settle_superseded_failure_delivery(transaction, principal_id, continuation)
-    ):
+    if delivered is None and not deleted_delivery_is_terminal(transaction, principal_id, continuation):
         return False
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
@@ -944,8 +974,7 @@ def release(
     A restart cut the approved run short before any FINAL, so its reply is still
     the unfinished stream of one turn, which replay adopts and continues like
     any reply a restart left streaming. The failure fence has already stopped
-    execution and the caller has ended the cards. The attempt identity goes
-    too: the replay is a fresh attempt that registers its own with its FINAL.
+    execution and the caller has ended the cards.
     """
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing" or continuation.generation != expected_generation:
@@ -957,63 +986,10 @@ def release(
     if initial is not None and initial.retired:
         return False
     transaction.execute(
-        "DELETE FROM response_attempts WHERE principal_id = ? AND driving_event_id = ?",
-        (principal_id, delivery_id),
-    )
-    transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
     )
     return True
-
-
-def retire_superseded_failure_for_source(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    event_id: str,
-) -> bool:
-    """Fence obsolete approval failure debt before a generic outbox retry can send it."""
-    observed = for_source(transaction, principal_id, event_id=event_id)
-    if observed is None or observed.state != "failing" or observed.source_event_ids[0] != event_id:
-        return False
-    continuation = _get_locked(transaction, principal_id, approval_id=observed.approval_id)
-    return continuation is not None and _settle_superseded_failure_delivery(transaction, principal_id, continuation)
-
-
-def _settle_superseded_failure_delivery(
-    transaction: Transaction,
-    principal_id: str,
-    continuation: ApprovalContinuation,
-) -> bool:
-    """Apply the shared exact disposition while retaining frozen successful debt."""
-    if continuation.state != "failing":
-        return False
-    attempt = response_attempts.load_response_attempt(transaction, principal_id, continuation.source_event_ids[0])
-    if attempt is None:
-        return False
-    current = turn_records.load_record(transaction, attempt.entity_name, attempt.logical_source_event_ids[0])
-    disposition = response_attempts.approval_failure_disposition(
-        transaction,
-        principal_id,
-        attempt=attempt,
-        current_record=current,
-        failure_reason=continuation.failure_reason,
-    )
-    if disposition is not response_attempts.ApprovalFailureDisposition.RETIRE:
-        return False
-    final = outbox.load(transaction, principal_id, delivery_id=attempt.driving_event_id, stage=DeliveryStage.FINAL)
-    if final is None:
-        return True
-    retired = outbox.retire(
-        transaction,
-        principal_id,
-        delivery_id=final.delivery_id,
-        stage=DeliveryStage.FINAL,
-        room_id=final.room_id,
-        membership_epoch=final.membership_epoch,
-    )
-    return retired is not None and (retired.retired or retired.acknowledged_event_id is not None)
 
 
 def discard_unavailable(

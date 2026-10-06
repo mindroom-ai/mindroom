@@ -183,17 +183,32 @@ def with_ended_span(applied: AppliedTransition, span: Span) -> AppliedTransition
     return replace(applied, transition=replace(applied.transition, spans=(span,)))
 
 
+def lock_paused_reply(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: approval_continuations.ApprovalContinuation,
+) -> Reply | None:
+    """Lock the reply a continuation paused, before the continuation itself.
+
+    A departure locks a room's replies before their continuations, so every
+    path that holds both takes them in that order.
+    """
+    if continuation.span_id is None:
+        # Adopted from an earlier release and not yet classified: no reply exists for it.
+        return None
+    span = reply_spans.load(transaction, principal_id, continuation.span_id)
+    return None if span is None else reply_messages.lock(transaction, principal_id, span.reply_id)
+
+
 def approval_finished(
     transaction: Transaction,
     principal_id: str,
     continuation: approval_continuations.ApprovalContinuation,
 ) -> AppliedTransition | None:
     """Apply a finished continuation to the reply it paused."""
-    found = reply_messages.for_event(transaction, principal_id, continuation.response_event_id)
-    if found is None:
+    reply = lock_paused_reply(transaction, principal_id, continuation)
+    if reply is None:
         return None
-    reply = reply_messages.lock(transaction, principal_id, found.reply_id)
-    assert reply is not None
     failed = continuation.state == "failing"
     reason = continuation.failure_reason
     disposition: rl.FailureDisposition | None = None
@@ -229,11 +244,9 @@ def approval_released(
     That is its resume span, or a span it was approved in place in; a reply
     whose span a restart already ended only loses the approval's hold.
     """
-    found = reply_messages.for_event(transaction, principal_id, continuation.response_event_id)
-    if found is None:
+    reply = lock_paused_reply(transaction, principal_id, continuation)
+    if reply is None:
         return None
-    reply = reply_messages.lock(transaction, principal_id, found.reply_id)
-    assert reply is not None
     holds = reply.approval_id == continuation.approval_id
     if reply.current_span_id is None:
         if not holds:

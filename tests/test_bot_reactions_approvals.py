@@ -90,6 +90,7 @@ from tests.conftest import (
 )
 from tests.journal_helpers import admit_dispatch_event
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -1446,7 +1447,7 @@ class TestAgentBot(AgentBotTestBase):
             calls=(),
             state="ready",
         )
-        assert await store.create_approval_continuation(continuation) == continuation
+        assert await paused_for_approval(store, continuation) == continuation
         resume_started = asyncio.Event()
         release_resume = asyncio.Event()
 

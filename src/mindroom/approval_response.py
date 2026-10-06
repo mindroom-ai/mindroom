@@ -25,7 +25,6 @@ from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContin
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
-from mindroom.response_sources import ResponseAttempt
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
@@ -206,14 +205,6 @@ class ApprovalResponseCoordinator:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Finishes a paused run once its FINAL is terminal, settling its turn.
     finish_approval: Callable[[str], Awaitable[bool]]
-
-    async def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
-        """Persist one born-bound paused run against its original sources."""
-        created = await self.store.create_approval_continuation(continuation)
-        if created is None:
-            msg = f"Could not create approval continuation {continuation.approval_id!r}"
-            raise RuntimeError(msg)
-        return created
 
     async def plan_pause(
         self,
@@ -505,7 +496,6 @@ class ApprovalResponseCoordinator:
                 new_text=visible_reason,
                 extra_content={STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED if user_stop else STREAM_STATUS_ERROR},
                 delivery_turn_id=current.source_event_ids[0],
-                response_attempt=ResponseAttempt(current.entity_name, current.sources),
                 defer_source_handoff=True,
             ),
         )

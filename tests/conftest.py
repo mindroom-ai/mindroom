@@ -157,7 +157,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.matrix_rtc.call_manager import CallManager
-    from mindroom.response_sources import ResponseAttempt
     from mindroom.streaming import StreamingResponse
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -1364,7 +1363,6 @@ class FakeOutbox:
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], MatrixDelivery] = {}
-        self.response_attempts: dict[str, ResponseAttempt] = {}
         # What each acknowledgement carried alongside it, so a test can
         # assert the terminal record and the acknowledgement are one write.
         self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
@@ -1404,7 +1402,6 @@ class FakeOutbox:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: "ResponseAttempt | None" = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -1429,11 +1426,6 @@ class FakeOutbox:
         to settle them in; whether the settlement really shares this
         transaction is pinned against the real backends.
         """
-        if response_attempt is not None:
-            existing_attempt = self.response_attempts.setdefault(delivery_id, response_attempt)
-            if existing_attempt != response_attempt:
-                message = "Conflicting response attempt identity"
-                raise ValueError(message)
         if settle_source_event_ids:
             self.handed_over.append(settle_source_event_ids)
         membership_epoch = await self.membership_epoch(room_id)
@@ -1718,7 +1710,6 @@ class DiesAfterAcknowledgement:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: "ResponseAttempt | None" = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -1732,7 +1723,6 @@ class DiesAfterAcknowledgement:
             thread_id=thread_id,
             payload=payload,
             result=result,
-            response_attempt=response_attempt,
             event_type=event_type,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,

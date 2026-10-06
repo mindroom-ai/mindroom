@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
-from .legacy_response_attempts import migrate_response_attempts
+from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
     upgrade_approval_argument_digests,
     upgrade_approval_toolkit_origins,
@@ -178,7 +178,12 @@ class PostgresBackend:
             call_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
             upgrade_approval_toolkit_origins(_PostgresTransaction(cursor), call_columns)
             upgrade_approval_argument_digests(_PostgresTransaction(cursor), call_columns)
-            migrate_response_attempts(_PostgresTransaction(cursor), existing_tables)
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'approval_continuations'",
+            )
+            continuation_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
+            upgrade_continuation_identity(_PostgresTransaction(cursor), existing_tables, continuation_columns)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

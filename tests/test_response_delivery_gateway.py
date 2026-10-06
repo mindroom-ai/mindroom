@@ -57,7 +57,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
@@ -3209,7 +3209,6 @@ class TestTurnDeliverySerialization:
             thread_id: str | None,
             payload: Mapping[str, object],
             result: Mapping[str, object] | None = None,
-            response_attempt: ResponseAttempt | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
             permanent_failure_reason: str | None = None,
@@ -3222,7 +3221,6 @@ class TestTurnDeliverySerialization:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
-                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,
@@ -3283,7 +3281,6 @@ class TestTurnDeliverySerialization:
             thread_id: str | None,
             payload: Mapping[str, object],
             result: Mapping[str, object] | None = None,
-            response_attempt: ResponseAttempt | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
             permanent_failure_reason: str | None = None,
@@ -3296,7 +3293,6 @@ class TestTurnDeliverySerialization:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
-                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,

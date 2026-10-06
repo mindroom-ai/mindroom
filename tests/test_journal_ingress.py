@@ -53,6 +53,7 @@ from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_l
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
+from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import corrupt
 
@@ -2491,7 +2492,7 @@ class TestRoomRetryBackoff:
                 )
                 if not approval_created:
                     approval_created = True
-                    await alice.create_approval_continuation(_ApprovalContinuations.continuation(state="waiting"))
+                    await paused_for_approval(alice, _ApprovalContinuations.continuation(state="waiting"))
                 return page
 
         handled: list[str] = []
@@ -2529,7 +2530,8 @@ class TestRoomRetryBackoff:
             if event.event_id != "$source-1":
                 return True
             if attempts.count("$source-1") == 1:
-                created = await alice.create_approval_continuation(
+                created = await paused_for_approval(
+                    alice,
                     replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation=generation),
                 )
                 assert created is not None

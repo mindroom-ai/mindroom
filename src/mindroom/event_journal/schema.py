@@ -94,33 +94,6 @@ OUTBOX_TABLE = """
 
 _TABLES = (
     """
-    CREATE TABLE IF NOT EXISTS response_attempts (
-        principal_id TEXT NOT NULL,
-        driving_event_id TEXT NOT NULL,
-        entity_name TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        membership_epoch BIGINT NOT NULL,
-        response_event_id TEXT,
-        logical_source_key TEXT NOT NULL,
-        selected_receipt_order BIGINT NOT NULL,
-        edit_receipt_order BIGINT,
-        PRIMARY KEY (principal_id, driving_event_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS response_attempt_sources (
-        principal_id TEXT NOT NULL,
-        driving_event_id TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        source_ordinal BIGINT NOT NULL,
-        source_kind TEXT NOT NULL CHECK (source_kind IN ('logical', 'discovery')),
-        PRIMARY KEY (principal_id, driving_event_id, source_kind, source_ordinal),
-        UNIQUE (principal_id, driving_event_id, source_kind, event_id),
-        FOREIGN KEY (principal_id, driving_event_id)
-            REFERENCES response_attempts (principal_id, driving_event_id) ON DELETE CASCADE
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS approval_grant_locks (
         principal_id TEXT PRIMARY KEY
     )
@@ -413,6 +386,9 @@ _TABLES = (
         principal_id TEXT NOT NULL,
         approval_id TEXT NOT NULL UNIQUE,
         entity_name TEXT NOT NULL,
+        -- The span whose pause created the continuation; null only for one
+        -- adopted from an earlier release until reply classification names it.
+        span_id TEXT,
         state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'claimed', 'failing')),
         generation BIGINT NOT NULL DEFAULT 0,
         runtime_generation TEXT,
@@ -599,16 +575,6 @@ _TABLES = (
 
 
 _INDEXES = (
-    """
-    CREATE INDEX IF NOT EXISTS response_attempt_identity ON response_attempts (
-        principal_id, room_id, membership_epoch, response_event_id, entity_name,
-        edit_receipt_order
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS response_attempt_source_lookup
-        ON response_attempt_sources (principal_id, event_id, driving_event_id)
-    """,
     """
     CREATE INDEX IF NOT EXISTS approval_grants_scope ON approval_grants (principal_id, scope_key, expires_at_ns)
     """,

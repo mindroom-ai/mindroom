@@ -174,8 +174,13 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.history_helpers import RecordingModel
-from tests.legacy_reply_helpers import adopt_main_left_approval, read_after_sync, resumed_main_left_approval
-from tests.reply_span_helpers import reply_span, response_span
+from tests.legacy_reply_helpers import (
+    adopt_main_left_approval,
+    read_after_sync,
+    resumed_main_left_approval,
+    store_main_continuation,
+)
+from tests.reply_span_helpers import paused_for_approval, reply_span, response_span
 from tests.response_runner_helpers import (
     _bot,
     _config,
@@ -1572,20 +1577,6 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.INITIAL,
-        room_id="!room:localhost",
-        thread_id="$thread",
-        payload={"body": "Waiting"},
-    )
-    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
-    await store.acknowledge_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.INITIAL,
-        event_id="$waiting",
-        delivered_projections=(),
-    )
     continuation = ApprovalContinuation(
         approval_id="deleted-approval",
         run_id="run-1",
@@ -1601,7 +1592,7 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
         state=state,
         failure_reason=failure_reason,
     )
-    assert await store.create_approval_continuation(continuation) is not None
+    assert await paused_for_approval(store, continuation) is not None
     await bot._journal_store.backend.write(
         lambda tx: tx.execute(
             "UPDATE matrix_delivery_outbox SET retired = 1 WHERE delivery_id = ? AND stage = 'initial'",
@@ -1673,7 +1664,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
         store,
         continuation.approval_id,
@@ -1751,7 +1742,7 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     owned = await claim_continuation(
         store,
         continuation.approval_id,
@@ -1809,7 +1800,7 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(store, continuation.approval_id, runtime_generation="previous-runtime")
     assert claimed is not None
     edit_text = AsyncMock()
@@ -1865,7 +1856,7 @@ async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
         store,
         continuation.approval_id,
@@ -1948,7 +1939,7 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
     claimed = await claim_continuation(
         store,
         continuation.approval_id,
@@ -2354,7 +2345,7 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
     await adopt_main_left_approval(bot, continuation)
     failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
@@ -2658,7 +2649,7 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
         ),
         state="waiting",
     )
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
     locked_operation = AsyncMock(return_value="$duplicate")
 
     event_id = await runner._run_owned_or_locked_response(
@@ -2693,7 +2684,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         calls=(),
         state="ready",
     )
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(runner.deps.approval_store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
     await adopt_main_left_approval(bot, continuation)
     follow_up_started = asyncio.Event()
@@ -2784,7 +2775,7 @@ async def test_ready_approval_replay_rechecks_current_authorization(
         calls=(),
         state="ready",
     )
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
     if revoked_layer in {"room", "pending"}:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
             current_room_members=True,
@@ -2876,7 +2867,7 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
         team_member_names=("general", "worker"),
         team_mode="coordinate",
     )
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
     runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
         users=[continuation.requester_id],
     )
@@ -2941,7 +2932,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
         ),
         state="ready",
     )
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(runner.deps.approval_store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
     await adopt_main_left_approval(bot, continuation)
     incomplete = FinalDeliveryOutcome(
@@ -4409,7 +4400,7 @@ async def _resumed_streamable_approval(
             ),
         ),
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
     async with resumed_main_left_approval(bot, continuation) as claimed:
         yield claimed
 
@@ -4703,7 +4694,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
     committed_trace = (
         ToolTraceEntry(
             type="tool_call_started",
@@ -4824,7 +4815,7 @@ async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_p
         calls=(),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     current = await claim_continuation(
         store,
         continuation.approval_id,
@@ -5014,7 +5005,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
         store,
         continuation.approval_id,
@@ -5077,7 +5068,7 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
         store,
         continuation.approval_id,
@@ -5149,7 +5140,7 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         state="failing",
         failure_reason="Tool approval continuation failed safely.",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     await store.enqueue_matrix_delivery(
         delivery_id="$source",
         stage=DeliveryStage.FINAL,
@@ -5195,7 +5186,7 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
         store,
         continuation.approval_id,
@@ -5262,7 +5253,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
         await store.enqueue_matrix_delivery(
@@ -5327,7 +5318,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
     await adopt_main_left_approval(bot, continuation)
 
@@ -5400,7 +5391,7 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
         store,
         continuation.approval_id,
@@ -5503,7 +5494,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_member_model_names=(("general", "large"),),
         team_mode="coordinate",
     )
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(runner.deps.approval_store, continuation)
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
 
     with (
@@ -5563,7 +5554,7 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
         message_received_depth=original_envelope.message_received_depth,
         correlation_id="correlation-original",
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(store, continuation) == continuation
     reloaded = await store.approval_continuation(continuation.approval_id)
     assert reloaded is not None
 
@@ -5677,7 +5668,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         execution_identity={},
         correlation_id="correlation-original",
     )
-    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(runner.deps.approval_store, continuation)
     request = replace(
         _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
         correlation_id="correlation-original",
@@ -8703,7 +8694,7 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         runtime_generation="other-process" if cancel_source == "rival" else None,
         cli_call={"kind": "agent_cli"},
     )
-    assert await store.create_approval_continuation(continuation) is not None
+    assert await paused_for_approval(store, continuation) is not None
     runtime = response_runner._PreparedResponseRuntime(
         resolved_target=target,
         response_thread_id=target.resolved_thread_id,
@@ -9128,7 +9119,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         cli_call={"kind": "agent_cli"},
         show_tool_calls=False,
     )
-    assert await store.create_approval_continuation(continuation) == continuation
+    await store_main_continuation(store, continuation)
     published = []
     decisions: list[asyncio.Task[None]] = []
 

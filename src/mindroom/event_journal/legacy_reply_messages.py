@@ -108,6 +108,8 @@ class _Adoption:
     # The earlier release's row the reply now owns, given reply identity so its acknowledgement binds the reply.
     row: MatrixDelivery | None = None
     row_placeholder_only: bool = False
+    # The continuation whose pause the reply's first span is.
+    approval_id: str | None = None
 
 
 def _classified(transaction: Transaction, principal_id: str) -> bool:
@@ -191,6 +193,12 @@ def _write(transaction: Transaction, principal_id: str, adoption: _Adoption) -> 
         principal_id,
         rl.Transition(outcome=rl.Outcome.APPLIED, reply=adoption.reply, spans=adoption.spans),
     )
+    if adoption.approval_id is not None:
+        # The continuation names the span that paused its reply, as one paused now does.
+        transaction.execute(
+            "UPDATE approval_continuations SET span_id = ? WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL",
+            (adoption.spans[0].span_id, principal_id, adoption.approval_id),
+        )
     row = adoption.row
     if row is not None:
         # The reply's first write: its acknowledgement binds the reply, a permanent refusal fails it.
@@ -370,7 +378,7 @@ def _paused_reply(
         legacy_pending=(rl.LegacyPending.PRESENTATION_READ if resumed and continuation.entity_kind != "team" else None),
     )
     if not resumed:
-        return _Adoption(reply=reply, spans=(paused,))
+        return _Adoption(approval_id=continuation.approval_id, reply=reply, spans=(paused,))
     final = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL)
     resume = _span(
         reply_id,
@@ -401,10 +409,15 @@ def _paused_reply(
             approval_id=None,
             legacy_pending=None,
         )
-        return _Adoption(reply=answered, spans=(paused, ended), row=final if owed else None)
+        return _Adoption(
+            approval_id=continuation.approval_id,
+            reply=answered,
+            spans=(paused, ended),
+            row=final if owed else None,
+        )
     # Approval recovery owns a resume a stopped instance left running.
     running = replace(reply, state=rl.ReplyState.ACTIVE, current_span_id=resume.span_id, last_span_id=resume.span_id)
-    return _Adoption(reply=running, spans=(paused, resume))
+    return _Adoption(approval_id=continuation.approval_id, reply=running, spans=(paused, resume))
 
 
 def _unowned_row_delivery_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:

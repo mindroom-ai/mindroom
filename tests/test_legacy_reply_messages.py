@@ -21,7 +21,7 @@ from mindroom.reply_presentation import Presentation, Segment, decode_presentati
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
-from tests.legacy_reply_helpers import keep_main_paused_answer
+from tests.legacy_reply_helpers import keep_main_paused_answer, store_main_continuation
 from tests.test_event_journal_store import ROOM, admit
 
 if TYPE_CHECKING:
@@ -125,7 +125,7 @@ async def _main_continuation(
     team_state: dict[str, object] | None = None,
 ) -> None:
     """Store a continuation as main left it, with the paused answer kept in its context."""
-    assert await principal.create_approval_continuation(continuation) is not None
+    await store_main_continuation(principal, continuation)
     await keep_main_paused_answer(
         principal,
         continuation.approval_id,
@@ -194,6 +194,11 @@ async def test_a_waiting_approval_pauses_its_reply_with_what_it_showed(
     assert answer.tool_trace == (trace,)
     assert answer.team_state == team_state
     assert await _spans(principal, reply) == [(rl.SpanKind.TURN, rl.SpanOutcome.PAUSED)]
+    # The continuation now names the span that paused its reply, which holds its reply's identity.
+    adopted = await principal.approval_continuation("approval-1")
+    assert adopted is not None
+    assert adopted.span_id == reply.last_span_id
+    assert (adopted.response_event_id, adopted.room_id, adopted.source_event_ids) == ("$reply", ROOM, ("$source",))
     # owner_lost leaves a paused reply to its approval.
     assert await principal.replies.owner_lost("gen-new", now_ns=NOW) == ()
 

@@ -36,7 +36,6 @@ from . import (
     replies,
     reply_messages,
     reply_spans,
-    response_attempts,
     scheduled_approvals,
     turn_records,
 )
@@ -96,7 +95,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
-    from mindroom.response_sources import ResponseAttempt
     from mindroom.turn_record import TurnRecord
 
     from .backend import Backend, Transaction
@@ -740,7 +738,6 @@ class PrincipalStore:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -772,7 +769,6 @@ class PrincipalStore:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
-                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,
@@ -787,7 +783,6 @@ class PrincipalStore:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         permanent_failure_reason: str | None = None,
         new_text: str | None = None,
@@ -808,7 +803,6 @@ class PrincipalStore:
                     thread_id=thread_id,
                     payload=payload,
                     result=result,
-                    response_attempt=response_attempt,
                     permanent_failure_reason=permanent_failure_reason,
                     new_text=new_text,
                 ),
@@ -851,23 +845,15 @@ class PrincipalStore:
         sending_device_id: str | None = None,
     ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return the row as it stood."""
-
-        def claim(transaction: Transaction) -> MatrixDelivery | None:
-            if stage is DeliveryStage.FINAL and approval_continuations.retire_superseded_failure_for_source(
-                transaction,
-                self._principal_id,
-                event_id=delivery_id,
-            ):
-                return None
-            return outbox.claim(
+        return await self._backend.write(
+            lambda transaction: outbox.claim(
                 transaction,
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
                 sending_device_id=sending_device_id,
-            )
-
-        return await self._backend.write(claim)
+            ),
+        )
 
     async def record_matrix_delivery_device(
         self,
@@ -1038,18 +1024,6 @@ class PrincipalStore:
                 stage=stage,
                 event_id=event_id,
             )
-            if bound:
-                delivery = transaction.fetchone(
-                    "SELECT edits_event_id FROM matrix_delivery_outbox WHERE principal_id = ? AND delivery_id = ? AND stage = ?",
-                    (self._principal_id, delivery_id, stage.value),
-                )
-                if delivery is not None:
-                    response_attempts.bind_response_target(
-                        transaction,
-                        self._principal_id,
-                        delivery_id,
-                        str(delivery["edits_event_id"] or event_id),
-                    )
             # A caller that lost the acknowledgement must not write the record
             # either. The row already names another event, and a terminal
             # record pointing somewhere else is the disagreement this whole
@@ -1500,19 +1474,6 @@ class PrincipalStore:
             ),
         )
 
-    async def create_approval_continuation(
-        self,
-        continuation: ApprovalContinuation,
-    ) -> ApprovalContinuation | None:
-        """Create one paused-run owner while all original sources remain pending."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.create(
-                transaction,
-                self._principal_id,
-                continuation,
-            ),
-        )
-
     async def pause_for_approval(
         self,
         hold: ApprovalContinuation | ApprovalAdvance,
@@ -1522,7 +1483,6 @@ class PrincipalStore:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         permanent_failure_reason: str | None = None,
         new_text: str | None = None,
@@ -1545,7 +1505,6 @@ class PrincipalStore:
                     thread_id=thread_id,
                     payload=payload,
                     result=result,
-                    response_attempt=response_attempt,
                     permanent_failure_reason=permanent_failure_reason,
                     new_text=new_text,
                 ),
@@ -1693,6 +1652,8 @@ class PrincipalStore:
 
         def release(transaction: Transaction) -> bool:
             continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
+            if continuation is not None:
+                replies.lock_paused_reply(transaction, self._principal_id, continuation)
             if not approval_continuations.release(
                 transaction,
                 self._principal_id,
@@ -1745,6 +1706,8 @@ class PrincipalStore:
 
         def discard(transaction: Transaction) -> bool:
             continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
+            if continuation is not None:
+                replies.lock_paused_reply(transaction, self._principal_id, continuation)
             if not approval_continuations.discard_unavailable(
                 transaction,
                 self._principal_id,
@@ -1859,7 +1822,6 @@ def _enqueue_matrix_delivery(
     thread_id: str | None,
     payload: Mapping[str, object],
     result: Mapping[str, object] | None,
-    response_attempt: ResponseAttempt | None,
     edits_event_id: str | None,
     settle_source_event_ids: tuple[str, ...],
     permanent_failure_reason: str | None,
@@ -1950,32 +1912,6 @@ def _enqueue_matrix_delivery(
     )
     if transaction_id is None:
         return None
-    if response_attempt is not None:
-        if response_attempt.sources.pending_event_ids[0] != delivery_id:
-            message = "Conflicting response attempt identity: driving event"
-            raise ValueError(message)
-        frozen = (
-            transaction.fetchone(
-                """SELECT delivery.edits_event_id FROM matrix_delivery_outbox AS delivery
-                JOIN response_attempts AS attempt
-                  ON attempt.principal_id = delivery.principal_id AND attempt.driving_event_id = delivery.delivery_id
-                WHERE delivery.principal_id = ? AND delivery.delivery_id = ? AND delivery.stage = ?""",
-                (principal_id, delivery_id, stage.value),
-            )
-            if attempted
-            else None
-        )
-        if attempted and (frozen is None or frozen["edits_event_id"] != edits_event_id):
-            message = "Cannot replace an attempted delivery identity"
-            raise ValueError(message)
-        response_attempts.register_response_attempt(
-            transaction,
-            principal_id,
-            attempt=response_attempt,
-            room_id=room_id,
-            membership_epoch=membership_epoch,
-            response_event_id=edits_event_id,
-        )
     journal.settle_many(transaction, principal_id, settle_source_event_ids)
     return transaction_id
 
@@ -2021,6 +1957,8 @@ def _finish_approval_continuation(
 ) -> FinishedApproval | None:
     """Finish a continuation, settle its turn, and apply the outcome to the reply it paused, in one transaction."""
     continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
+    if continuation is not None:
+        replies.lock_paused_reply(transaction, principal_id, continuation)
     if not approval_continuations.finish(transaction, principal_id, approval_id=approval_id):
         return None
     if continuation is None:
@@ -2081,7 +2019,6 @@ def _pause_for_approval(
     thread_id: str | None,
     payload: Mapping[str, object],
     result: Mapping[str, object] | None,
-    response_attempt: ResponseAttempt | None,
     permanent_failure_reason: str | None,
     new_text: str | None,
 ) -> ReplyRowEnqueue:
@@ -2089,7 +2026,7 @@ def _pause_for_approval(
     held = (
         hold.apply(transaction, principal_id)
         if isinstance(hold, ApprovalAdvance)
-        else approval_continuations.create(transaction, principal_id, hold)
+        else approval_continuations.create(transaction, principal_id, replace(hold, span_id=request.span_id))
     )
     if held is None:
         raise _ReplyRowRefusedError
@@ -2102,7 +2039,6 @@ def _pause_for_approval(
         thread_id=thread_id,
         payload=payload,
         result=result,
-        response_attempt=response_attempt,
         permanent_failure_reason=permanent_failure_reason,
         new_text=new_text,
     )
@@ -2166,7 +2102,6 @@ def _enqueue_reply_row(
     thread_id: str | None,
     payload: Mapping[str, object],
     result: Mapping[str, object] | None,
-    response_attempt: ResponseAttempt | None,
     permanent_failure_reason: str | None,
     new_text: str | None = None,
 ) -> ReplyRowEnqueue:
@@ -2237,7 +2172,6 @@ def _enqueue_reply_row(
             thread_id=thread_id,
             payload=payload,
             result=result,
-            response_attempt=response_attempt if stage is DeliveryStage.FINAL else None,
             edits_event_id=edits_event_id,
             settle_source_event_ids=(),
             permanent_failure_reason=permanent_failure_reason,
