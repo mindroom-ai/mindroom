@@ -276,17 +276,24 @@ class ReplyRuntime:
             interactive_span_id=interactive_span_id,
             historical_event_id=historical_event_id,
         )
-        applied = await self.committed(
-            await self.store.replies.claim(
-                request,
-                ClaimLookup(
-                    interactive_span_id=interactive_span_id,
-                    existing_event_id=existing_event_id,
-                    edit_receipt_order=edit_receipt_order,
+        try:
+            applied = await self.committed(
+                await self.store.replies.claim(
+                    request,
+                    ClaimLookup(
+                        interactive_span_id=interactive_span_id,
+                        existing_event_id=existing_event_id,
+                        edit_receipt_order=edit_receipt_order,
+                    ),
                 ),
-            ),
-        )
+            )
+        except BaseException:
+            self.spans.forget(request.span_id)
+            raise
         transition = applied.transition
+        if transition.claimed is None or transition.claimed.span_id != request.span_id:
+            # Deferred, or continuing the span an interactive selection acknowledged.
+            self.spans.forget(request.span_id)
         if transition.claimed is None or transition.reply is None:
             # Earlier writes of this reply are unresolved; their resolution
             # wakes these sources instead of waiting under the conversation lock.
@@ -306,9 +313,15 @@ class ReplyRuntime:
         visibility_policy: rl.VisibilityPolicy,
         empty: Presentation,
     ) -> rl.ClaimRequest:
-        """Return a claim by this bot instance, with fresh identities for the span and any reply it creates."""
+        """Return a claim by this bot instance, with fresh identities for the span and any reply it creates.
+
+        A Stop can reach the span as soon as its claim commits, before its
+        task registers, so the span registry expects it from here.
+        """
+        span_id = _new_id()
+        self.spans.expect(span_id)
         return rl.ClaimRequest(
-            span_id=_new_id(),
+            span_id=span_id,
             delivery_id=delivery_id,
             sources=sources,
             bot_generation=self.generation,
@@ -352,16 +365,22 @@ class ReplyRuntime:
             visibility_policy=rl.VisibilityPolicy.NORMAL,
             empty=empty,
         )
-        claimed, applied = await self.store.claim_approval_resume(
-            continuation.approval_id,
-            runtime_generation=runtime_generation,
-            claim=claim,
-            legacy_show_tool_calls=legacy_show_tool_calls,
-        )
-        if applied is None:
-            return claimed, None
-        transition = (await self.committed(applied)).transition
+        try:
+            claimed, applied = await self.store.claim_approval_resume(
+                continuation.approval_id,
+                runtime_generation=runtime_generation,
+                claim=claim,
+                legacy_show_tool_calls=legacy_show_tool_calls,
+            )
+            if applied is None:
+                self.spans.forget(claim.span_id)
+                return claimed, None
+            transition = (await self.committed(applied)).transition
+        except BaseException:
+            self.spans.forget(claim.span_id)
+            raise
         if claimed is None or transition.claimed is None or transition.reply is None:
+            self.spans.forget(claim.span_id)
             assert transition.reply is not None, "only a reply with earlier writes defers a resume"
             await self._wait_for_rows(transition.reply.reply_id, continuation.room_id, sources.pending_event_ids)
             return None, None
@@ -632,6 +651,7 @@ def approval_note_write(
     shown: Presentation,
     *,
     approval_id: str,
+    state: rl.ReplyState,
     span_has_final: bool,
 ) -> ReplyWrite:
     """Return the note a failed approval shows on the reply it paused, before its finish ends the reply."""
@@ -647,6 +667,7 @@ def approval_note_write(
             owner,
             approval_id=approval_id,
             shown=encoded,
+            state=state,
             prepared_revision=revision,
             span_has_final=span_has_final,
             now_ns=time.time_ns(),

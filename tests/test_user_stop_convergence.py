@@ -94,9 +94,9 @@ class _CountingGateway:
         self.finalized.append(response_event_id)
         return True
 
-    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str) -> _NoReplyStop:
+    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> _NoReplyStop:
         """Return a Stop step for a response no durable reply record owns."""
-        del event_id, receipt_order, room_id
+        del event_id, receipt_order, room_id, may_wait
         return _NoReplyStop()
 
     async def finish_reply_stop(self, _stop: object) -> bool:

@@ -262,22 +262,29 @@ def record_stop(
     assert reply is not None
     span_id = reply.current_span_id or reply.last_span_id
     span = reply_spans.load(transaction, principal_id, span_id)
-    active_generation = reply_messages.active_generation(transaction, principal_id)
-    span_live = (
-        span is not None
-        and not span.ended
-        and span.span_id == reply.current_span_id
-        and span.bot_generation == active_generation
-    )
     return apply(
         transaction,
         principal_id,
         rl.stop(
             reply,
             span,
-            rl.StopFacts(receipt_order=receipt_order, newer_edit=newer_edit, span_live=span_live),
+            rl.StopFacts(
+                receipt_order=receipt_order,
+                newer_edit=newer_edit,
+                span_live=_runs_here(transaction, principal_id, reply, span),
+            ),
             now_ns=time.time_ns(),
         ),
+    )
+
+
+def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:
+    """Return whether this bot instance runs the reply's current span, so a Stop cancels it instead of ending it."""
+    return (
+        span is not None
+        and not span.ended
+        and span.span_id == reply.current_span_id
+        and span.bot_generation == reply_messages.active_generation(transaction, principal_id)
     )
 
 
@@ -333,6 +340,7 @@ def stop_target(
     event_id: str,
     room_id: str,
     receipt_order: int,
+    may_wait: bool,
     now_ns: int,
 ) -> StopTarget:
     """Find the reply a Stop reaches, or store the Stop for a create still unresolved in its room (§6.4 ``stop``)."""
@@ -342,7 +350,7 @@ def stop_target(
             return StopTarget()
         span = reply_spans.load(transaction, principal_id, found.last_span_id)
         return StopTarget(reply=found, turn_id=None if span is None else span.delivery_id)
-    if not reply_messages.has_unresolved_create(transaction, principal_id, room_id):
+    if not may_wait or not reply_messages.has_unresolved_create(transaction, principal_id, room_id):
         return StopTarget()
     reply_messages.record_pending_stop(
         transaction,
@@ -497,7 +505,7 @@ def acknowledge_row(
             rl.StopFacts(
                 receipt_order=receipt_order,
                 newer_edit=False,
-                span_live=current is not None and not current.ended,
+                span_live=_runs_here(transaction, principal_id, bound, current),
             ),
             now_ns=now_ns,
         ),
@@ -633,7 +641,15 @@ class ReplyStore:
 
         return await self._backend.read(read)
 
-    async def stop_target(self, event_id: str, *, room_id: str, receipt_order: int, now_ns: int) -> StopTarget:
+    async def stop_target(
+        self,
+        event_id: str,
+        *,
+        room_id: str,
+        receipt_order: int,
+        may_wait: bool,
+        now_ns: int,
+    ) -> StopTarget:
         """Find the reply a Stop reaches, storing the Stop when the event's create is unresolved."""
         return await self._backend.write(
             lambda transaction: stop_target(
@@ -642,6 +658,7 @@ class ReplyStore:
                 event_id=event_id,
                 room_id=room_id,
                 receipt_order=receipt_order,
+                may_wait=may_wait,
                 now_ns=now_ns,
             ),
         )

@@ -1858,9 +1858,16 @@ class DeliveryGateway:
             if reason in {"cancelled", "error"}:
                 shown_before = replace(shown_before, segments=())
             shown = with_trailing_note(shown_before, note)
-            write = approval_note_write(reply, span, shown, approval_id=approval_id, span_has_final=False)
-            state = ReplyState.CANCELLED.value if reason == "cancelled" else ReplyState.FAILED.value
-            rendered = render(shown, WriteKind.TERMINAL, state=state)
+            state = ReplyState.CANCELLED if reason == "cancelled" else ReplyState.FAILED
+            write = approval_note_write(
+                reply,
+                span,
+                shown,
+                approval_id=approval_id,
+                state=state,
+                span_has_final=False,
+            )
+            rendered = render(shown, WriteKind.TERMINAL, state=state.value)
             try:
                 return (
                     await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
@@ -1933,7 +1940,7 @@ class DeliveryGateway:
             # The reply left active while the button was sent.
             await self.settle_reply_debt(handle.reply_id)
 
-    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str) -> ReplyStop:
+    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> ReplyStop:
         """Return the Stop on a reply that commits with the turn record's Stop (PR-1.md §4.3).
 
         A Stop on an event no reply is bound to yet, while a reply create in
@@ -1944,6 +1951,7 @@ class DeliveryGateway:
             event_id,
             room_id=room_id,
             receipt_order=receipt_order,
+            may_wait=may_wait,
             now_ns=time.time_ns(),
         )
         return ReplyStop(

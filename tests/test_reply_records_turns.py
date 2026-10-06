@@ -570,10 +570,12 @@ class _FlakyHomeserver:
     def __init__(self, failures: int) -> None:
         self.failures = failures
         self.real = send_message_outcome
+        self.refused = asyncio.Event()
 
     async def send(self, *args: object, **kwargs: object) -> object:
         if self.failures > 0:
             self.failures -= 1
+            self.refused.set()
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup")
         return await self.real(*args, **kwargs)
 
@@ -640,13 +642,17 @@ async def test_a_retried_terminal_edit_resolves_to_the_row_it_recorded(tmp_path:
     assert _sent_bodies(bot)[-1] == "Hello there."
 
 
-async def _blocked_stream(bot: AgentBot) -> tuple[asyncio.Task[str | None], asyncio.Event]:
-    """Start a streamed answer that shows ``Partial`` and then waits until cancelled."""
+async def _blocked_stream(
+    bot: AgentBot,
+    first_chunk: str | None = "Partial",
+) -> tuple[asyncio.Task[str | None], asyncio.Event]:
+    """Start a streamed answer that shows ``first_chunk``, if any, and then waits until cancelled."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     streaming = asyncio.Event()
 
     async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        yield "Partial"
+        if first_chunk is not None:
+            yield first_chunk
         streaming.set()
         await asyncio.Event().wait()
         yield "never"
@@ -715,7 +721,10 @@ async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_p
     # The homeserver created the placeholder, but its answers keep failing.
     flaky = _FlakyHomeserver(failures=1_000)
     with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
-        response, _streaming = await _blocked_stream(bot)
+        # The answer shows nothing yet: its first text would be a create this
+        # homeserver refuses, which fails the stream before the Stop arrives.
+        response, _streaming = await _blocked_stream(bot, first_chunk=None)
+        await asyncio.wait_for(flaky.refused.wait(), timeout=5)
         reply = await _reply(bot)
         assert reply.event_id is None
         await _pending_turn(bot)
@@ -738,6 +747,96 @@ async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_p
     assert stopped is not None
     assert stopped.user_stop_receipt_order == 7
     assert stopped.response_event_id == "$sent1"
+
+
+async def test_a_stop_reaches_a_reply_whose_attempt_created_its_event(tmp_path: Path) -> None:
+    """With no placeholder shown, the stream's first text creates the event inside the attempt; its Stop still cancels the span."""
+    bot = await _streaming_bot(tmp_path)
+
+    async def created() -> rl.Reply:
+        while (reply := await _reply(bot)).event_id is None:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        return reply
+
+    # The placeholder's send fails, so the attempt starts without an event.
+    flaky = _FlakyHomeserver(failures=1)
+    with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
+        response, _streaming = await _blocked_stream(bot)
+        reply = await asyncio.wait_for(created(), timeout=5)
+        assert reply.event_id is not None
+        stop = await _stop(bot, reply.event_id, 7)
+        await asyncio.wait_for(response, timeout=5)
+        assert await asyncio.wait_for(stop, timeout=5)
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.CANCELLED
+    assert not reply.unapplied_stop
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.CANCELLED]
+    assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
+
+
+async def test_a_stop_after_the_answer_was_written_changes_nothing(tmp_path: Path) -> None:
+    """A Stop that reaches a reply after its terminal row is satisfied by it: the answer stands, with no note."""
+    bot = await _streaming_bot(tmp_path)
+    await _pending_turn(bot)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
+    answered = await _reply(bot)
+    assert answered.event_id is not None
+    sent = len(bot.client.room_send.await_args_list)
+
+    assert await bot._user_stop_reconciler.finalize(answered.event_id, 7, AsyncMock(), room_id=_target().room_id)
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.stop_receipt_order == 7
+    assert not reply.unapplied_stop
+    assert reply.presentation == answered.presentation
+    assert reply.owed_write is None
+    assert len(bot.client.room_send.await_args_list) == sent
+    stopped = bot._turn_store.get_turn_record("$event")
+    assert stopped is not None
+    assert stopped.user_stop_settled_receipt_order == 7
+
+
+async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tmp_path: Path) -> None:
+    """With no span running it, a Stop cancels the reply at once: the note is owed and sent, the button redacted."""
+    old = await _streaming_bot(tmp_path)
+
+    async def shown_with_button() -> rl.Reply:
+        while (reply := await _reply(old)).stop_button_event_id is None or "Partial" not in _sent_bodies(old):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        return reply
+
+    with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
+        response, _streaming = await _blocked_stream(old)
+        left = await asyncio.wait_for(shown_with_button(), timeout=5)
+    assert left.event_id is not None
+
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._reply_runtime.start()
+    try:
+        # Its source is still pending, so the reply waits for its replay; no span runs it.
+        waiting = await _reply(restarted)
+        assert waiting.state is rl.ReplyState.ACTIVE
+        assert waiting.current_span_id is None
+        stop = await _stop(restarted, left.event_id, 7)
+        assert await asyncio.wait_for(stop, timeout=5)
+        assert (await restarted._delivery_gateway.recover_deliveries()).complete
+
+        reply = await _reply(restarted)
+        assert reply.state is rl.ReplyState.CANCELLED
+        assert not reply.unapplied_stop
+        assert reply.owed_write is None
+        assert reply.stop_button_event_id is None
+        assert reply.redaction_pending == ()
+        assert _sent_bodies(restarted)[-1] == "Partial\n\n**[Response cancelled by user]**"
+        assert [call.args[1] for call in restarted.client.room_redact.await_args_list] == [left.stop_button_event_id]
+        assert not await restarted._reply_runtime.store.is_pending("$event")
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
 
 
 async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tmp_path: Path) -> None:

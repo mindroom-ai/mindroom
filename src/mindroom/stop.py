@@ -452,7 +452,9 @@ class SpanRegistry:
     def __init__(self, graceful_cancel_fallback_seconds: float = _GRACEFUL_CANCEL_FALLBACK_SECONDS) -> None:
         """Initialize an empty registry."""
         self._spans: dict[str, _LiveSpan] = {}
-        # Cancellations of spans whose task had not registered yet (registration recheck).
+        # Spans this instance claimed whose task may still register, and the
+        # cancellations that reached them first (registration recheck).
+        self._expected: set[str] = set()
         self._cancel_on_start: dict[str, TaskCancelSource | None] = {}
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._graceful_cancel_fallback_seconds = graceful_cancel_fallback_seconds
@@ -474,7 +476,8 @@ class SpanRegistry:
         """Cancel exactly the named span's task; a span whose task has not registered is cancelled when it does."""
         live = self._spans.get(span_id)
         if live is None:
-            self._cancel_on_start[span_id] = cancel_source
+            if span_id in self._expected:
+                self._cancel_on_start[span_id] = cancel_source
             return False
         if live.task.done():
             return False
@@ -510,6 +513,11 @@ class SpanRegistry:
         """Return the spans whose task is still running."""
         return frozenset(span_id for span_id, live in self._spans.items() if not live.task.done())
 
+    def expect(self, span_id: str) -> None:
+        """Note a span this instance is claiming, whose task registers once its claim commits."""
+        self._expected.add(span_id)
+
     def forget(self, span_id: str) -> None:
-        """Drop a cancellation that the span ended before registering its task."""
+        """Stop expecting a span: its scope exited, or its claim did not open it."""
+        self._expected.discard(span_id)
         self._cancel_on_start.pop(span_id, None)

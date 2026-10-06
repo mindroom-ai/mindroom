@@ -124,7 +124,13 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if transition.reply is not None:
             self.model.reply = transition.reply
         for span in transition.spans:
-            if before is not None and before.approval_id is not None and span.kind is not SpanKind.APPROVAL_RESUME:
+            if (
+                span.ended
+                and before is not None
+                and before.approval_id is not None
+                and span.kind is not SpanKind.APPROVAL_RESUME
+            ):
+                # It ended while its reply's approval held its sources.
                 self.model.held.add(span.span_id)
             self.model.spans[span.span_id] = span
         for effect in transition.effects:
@@ -741,9 +747,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     @invariant()
     def stop_buttons_go_when_replies_stop_being_active(self) -> None:
-        """I8: only an active reply keeps a Stop button."""
+        """I8: only a reply whose span runs keeps a Stop button: active, or paused while its span waits in place."""
         reply = self.model.reply
-        if reply is not None and reply.state is not ReplyState.ACTIVE:
+        waiting_in_place = reply is not None and reply.state is ReplyState.PAUSED and reply.current_span_id is not None
+        if reply is not None and reply.state is not ReplyState.ACTIVE and not waiting_in_place:
             assert reply.stop_button_event_id is None
 
     @invariant()

@@ -363,8 +363,12 @@ def _visible_event_ids(reply: Reply) -> tuple[str, ...]:
 
 
 def _leaves_active(reply: Reply, new_state: ReplyState) -> Reply:
-    """Queue the Stop button's redaction when the reply stops being active (I8)."""
-    if reply.state is ReplyState.ACTIVE and new_state is not ReplyState.ACTIVE and reply.stop_button_event_id:
+    """Queue the Stop button's redaction when the reply stops being active (I8).
+
+    A span that waits in place for approval keeps running, so its reply keeps
+    the button through the wait (``pause(in_place)`` keeps it).
+    """
+    if new_state is not ReplyState.ACTIVE and reply.stop_button_event_id:
         return replace(_with_redactions(reply, reply.stop_button_event_id), stop_button_event_id=None)
     return reply
 
@@ -657,7 +661,9 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
             # outside the conversation lock and publishes no failure note.
             effects.append(FenceApproval(reply.approval_id, "superseded"))
             effects.append(WakeApproval(reply.approval_id))
-            reply = replace(reply, approval_id=None)
+        # The regeneration's sources are its own: no approval holds them,
+        # including one a stopped in-place wait left still settling.
+        reply = replace(reply, approval_id=None)
         next_reply = reply
         if (
             context.edit_receipt_order is not None
@@ -1230,12 +1236,13 @@ def pause(
     if write.stage is WriteStage.FINAL:
         msg = "A pause is never the reply's terminal write"
         raise _invalid(msg)
-    updated = _set_state(
-        confirm_progress(reply, write.confirms),
-        ReplyState.PAUSED,
-        now_ns,
-        approval_id=approval_id,
-        presentation=write.shown,
+    confirmed = confirm_progress(reply, write.confirms)
+    changes = {"approval_id": approval_id, "presentation": write.shown}
+    updated = (
+        # The waiting span still runs: its reply keeps the Stop button.
+        _bump(confirmed, now_ns, state=ReplyState.PAUSED, **changes)
+        if in_place
+        else _set_state(confirmed, ReplyState.PAUSED, now_ns, **changes)
     )
     row = None
     if write.stage is not None:
@@ -1286,6 +1293,10 @@ def approval_settled(  # noqa: PLR0911
     if not owns:
         return _unchanged(Outcome.STALE, reply)
     if reply.terminal:
+        if reply.approval_id == approval_id:
+            # A span that waited in place ended the reply; its approval, now
+            # finished, holds nothing any more.
+            return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, approval_id=None))
         return _unchanged(Outcome.DUPLICATE, reply)
     if result == "failed":
         if disposition == "superseded":
@@ -1312,11 +1323,17 @@ def approval_failure_note(
     *,
     approval_id: str,
     shown: str,
+    state: ReplyState,
     prepared_revision: int,
     span_has_final: bool,
     now_ns: int,
 ) -> Transition:
-    """Write a failed approval's note while its continuation settles; ``approval_failed`` then ends the reply (§10)."""
+    """Write a failed approval's note, the reply's terminal write, while its continuation settles (§10).
+
+    The note freezes the reply's end: a Stop that arrives later is satisfied
+    by it, as by any terminal row, and the continuation's finish changes
+    nothing on the reply.
+    """
     resumed = span.kind is SpanKind.APPROVAL_RESUME and span.ended and span.approval_id == approval_id
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
@@ -1329,8 +1346,14 @@ def approval_failure_note(
     recompute = _check_revision(reply, prepared_revision)
     if recompute is not None:
         return recompute
+    expected = expected_terminal_state(reply, state)
+    if state is not expected:
+        msg = f"Approval note rendered {state} where the reply requires {expected}"
+        raise _invalid(msg)
     stage = WriteStage.EDIT if span_has_final else WriteStage.FINAL
-    updated = _touch(reply, now_ns, presentation=shown)
+    updated = _set_state(reply, state, now_ns, presentation=shown, approval_id=None)
+    if state is ReplyState.CANCELLED:
+        updated = _stop_applied(updated)
     updated, row = _row(updated, span, stage, shown=shown, settles_sources=False)
     return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
 

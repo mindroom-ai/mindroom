@@ -305,11 +305,23 @@ def _persist_spans(transaction: Transaction, principal_id: str, spans: tuple[Spa
 
 
 def has_unresolved_create(transaction: Transaction, principal_id: str, room_id: str) -> bool:
-    """Return whether a running reply in the room has no event yet, so a Stop may name its create."""
+    """Return whether a running reply in the room offered a create the homeserver has not acknowledged yet.
+
+    Only then can a Stop name an event no reply is bound to: the user saw the
+    event before this bot learned which one it was.
+    """
     row = transaction.fetchone(
         """
-        SELECT 1 AS present FROM reply_messages
-        WHERE principal_id = ? AND room_id = ? AND event_id IS NULL AND state IN ('active', 'paused')
+        SELECT 1 AS present FROM reply_messages AS reply
+        WHERE reply.principal_id = ? AND reply.room_id = ? AND reply.event_id IS NULL
+          AND reply.state IN ('active', 'paused')
+          AND EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS row
+            WHERE row.principal_id = reply.principal_id AND row.reply_id = reply.reply_id
+              AND row.stage IN ('initial', 'final') AND row.edits_event_id IS NULL
+              AND row.attempted = 1 AND row.acknowledged_event_id IS NULL
+              AND row.retired = 0 AND row.permanent_failure_reason IS NULL
+          )
         LIMIT 1
         """,
         (principal_id, room_id),

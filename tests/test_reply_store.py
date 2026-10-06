@@ -435,8 +435,8 @@ async def test_rows_for_a_departed_membership_are_refused_whole(journal_store: E
     assert stored == reply
 
 
-async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_store: EventJournalStore) -> None:
-    """A Stop on an event not yet bound reaches the running span once the create is acknowledged."""
+async def _stop_waiting_for_the_create(journal_store: EventJournalStore) -> PrincipalStore:
+    """Record a Stop on ``$reply`` while the reply's create, which Matrix gives that event, is still unacknowledged."""
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     turns = journal_store.turn_records("agent")
@@ -476,26 +476,55 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
         ),
     )
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    return principal
+
+
+async def _acknowledge_the_create(principal: PrincipalStore) -> tuple[object, ...]:
     acknowledged = await principal.acknowledge_matrix_delivery(
         delivery_id="$source",
         stage=DeliveryStage.INITIAL,
         event_id="$reply",
         delivered_projections=(),
     )
-    assert acknowledged.reply_effects == (
+    return acknowledged.reply_effects
+
+
+async def _assert_the_turn_learned_the_stop(journal_store: EventJournalStore) -> None:
+    # The turn learned the Stop and the reply's event in the same transaction.
+    ((_index, _anchor, record_json),) = await journal_store.turn_records("agent").load_all()
+    stopped = TurnRecordCodec._from_ledger_record("$source", json.loads(record_json))
+    assert stopped is not None
+    assert stopped.response_event_id == "$reply"
+    assert stopped.user_stop_receipt_order == 9
+    assert stopped.user_stop_settled_receipt_order == 9
+
+
+async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_store: EventJournalStore) -> None:
+    """A Stop on an event not yet bound reaches the running span once the create is acknowledged."""
+    principal = await _stop_waiting_for_the_create(journal_store)
+    assert await _acknowledge_the_create(principal) == (
         rl.CancelSpan("span-1", by_stop=True),
         rl.TransferStop(9, "$reply", turn_id="$source"),
     )
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.stop_receipt_order == 9
-    # The turn learned the Stop and the reply's event in the same transaction.
-    ((_index, _anchor, record_json),) = await turns.load_all()
-    stopped = TurnRecordCodec._from_ledger_record("$source", json.loads(record_json))
-    assert stopped is not None
-    assert stopped.response_event_id == "$reply"
-    assert stopped.user_stop_receipt_order == 9
-    assert stopped.user_stop_settled_receipt_order == 9
+    await _assert_the_turn_learned_the_stop(journal_store)
+
+
+async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: EventJournalStore) -> None:
+    """A create acknowledged after a restart ends its span with the Stop: no task here would see a cancel."""
+    principal = await _stop_waiting_for_the_create(journal_store)
+    await principal.replies.write_generation("gen-2", now_ns=70)
+    assert await _acknowledge_the_create(principal) == (rl.TransferStop(9, "$reply", turn_id="$source"),)
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    assert stored.state is ReplyState.CANCELLED
+    assert stored.owed_write == OwedWrite("span-1", rl.NOTE_CANCELLED)
+    ended = await principal.replies.span("span-1")
+    assert ended is not None
+    assert ended.outcome is SpanOutcome.CANCELLED
+    await _assert_the_turn_learned_the_stop(journal_store)
 
 
 async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:

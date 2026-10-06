@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.message_target import MessageTarget
-from mindroom.stop import StopManager
+from mindroom.stop import SpanRegistry, StopManager
 
 
 @pytest.mark.asyncio
@@ -80,3 +80,29 @@ async def test_clear_scheduled_before_replacement_never_redacts_new_stop_button(
     finally:
         release_new.set()
         await asyncio.gather(new_task, *tuple(manager.cleanup_tasks), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_span_stopped_before_its_task_registers_is_cancelled_when_it_does() -> None:
+    """A Stop between a span's claim and its task's registration cancels the task as it registers."""
+    registry = SpanRegistry()
+    registry.expect("span-1")
+    assert not registry.cancel("span-1", cancel_source="user_stop")
+    task = asyncio.create_task(asyncio.Event().wait())
+    registry.register("span-1", task)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_for_a_span_this_instance_does_not_run_is_not_kept() -> None:
+    """Cancels of spans this instance never claimed, or whose scope exited, leave nothing behind."""
+    registry = SpanRegistry()
+    assert not registry.cancel("elsewhere", cancel_source=None)
+    registry.expect("span-1")
+    registry.forget("span-1")
+    assert not registry.cancel("span-1", cancel_source=None)
+    task = asyncio.create_task(asyncio.sleep(0))
+    registry.register("span-1", task)
+    await task
+    assert not task.cancelled()

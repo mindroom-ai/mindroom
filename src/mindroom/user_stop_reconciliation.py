@@ -134,11 +134,18 @@ class UserStopReconciler:
             response_event_id,
             stop_receipt_order,
             room_id=room_id,
+            # A turn that names the event already knows it; only a reply still
+            # creating its event can be the target of a Stop nothing names yet.
+            may_wait=owner is None,
         )
         if reply_stop.pending:
             # Recorded for the event's create, whose acknowledgement applies it.
             return True
         async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
+            if owner is None and not reply_stop.owned and deleted_turn_id is None:
+                # Nothing owns the event: a reaction on someone else's message,
+                # or one whose create resolved elsewhere. There is nothing to stop.
+                return False
             stopped_turn = await self._record(
                 response_event_id,
                 stop_receipt_order,

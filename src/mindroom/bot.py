@@ -104,6 +104,7 @@ from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
+    SUPERSEDED_FAILURE_REASON,
     EventJournalStore,
     EventKind,
     PrincipalStore,
@@ -968,11 +969,13 @@ class AgentBot:
         )
 
     async def _run_reply_effects(self, effects: tuple[object, ...]) -> None:
-        """Run what committed reply transitions left for after their commit."""
+        """Run what committed reply transitions left for after their commit.
+
+        Span cancels run last: the acknowledgement that applies a Stop can run
+        in the span's own task, whose next await the cancel interrupts.
+        """
         for effect in effects:
-            if isinstance(effect, CancelSpan):
-                self._reply_runtime.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
-            elif isinstance(effect, TransferStop):
+            if isinstance(effect, TransferStop):
                 # The acknowledgement already wrote it; the ledger's cache learns it here.
                 await self._turn_store.record_user_stopped_response(
                     effect.target_event_id,
@@ -981,12 +984,29 @@ class AgentBot:
                     turn_id=effect.turn_id,
                 )
             elif isinstance(effect, WakeApproval):
-                # The continuation's source worker runs its failure settlement, as
-                # on main. Its journal sources, not a response-local CLI waiter: a
-                # waiter woken now would only see its own span being cancelled.
-                continuation = await self._reply_runtime.store.approval_continuation(effect.approval_id)
-                if continuation is not None:
-                    self._journal_dispatcher.retry_turn_sources(continuation.room_id, continuation.source_event_ids)
+                await self._wake_fenced_approval(effect.approval_id)
+        for effect in effects:
+            if isinstance(effect, CancelSpan):
+                self._reply_runtime.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
+
+    async def _wake_fenced_approval(self, approval_id: str) -> None:
+        """Run a fenced approval's failure settlement (DESIGN.md §10)."""
+        continuation = await self._reply_runtime.store.approval_continuation(approval_id)
+        if continuation is None:
+            return
+        if continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
+            # Decision 1: nothing of it is shown any more, so its cleanup runs
+            # now, outside the conversation the regeneration holds.
+            create_background_task(
+                self._response_runner.settle_superseded_approval(continuation),
+                name=f"superseded_approval_{approval_id}",
+                owner=self._runtime_view,
+                context=Context(),
+            )
+            return
+        # Its source worker settles it, as on main, once whatever owns the
+        # source lets go of it.
+        self._journal_dispatcher.retry_turn_sources(continuation.room_id, continuation.source_event_ids)
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""

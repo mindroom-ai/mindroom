@@ -50,6 +50,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.event_journal import (
+    SUPERSEDED_FAILURE_REASON,
     ApprovalAdvance,
     ApprovalContinuation,
     ApprovalMemoryTurn,
@@ -3539,6 +3540,12 @@ class ResponseRunner:
             locked_operation=ownership_disappeared,
             signal_queued_message=False,
         )
+
+    async def settle_superseded_approval(self, continuation: ApprovalContinuation) -> None:
+        """Expire a superseded approval's cards and finish it without a note, outside any conversation lock."""
+        if not await self._approval_responses.settle_failure(continuation, SUPERSEDED_FAILURE_REASON):
+            # Its source worker retries what did not settle.
+            self.deps.retry_approval_sources(continuation.room_id, tuple(continuation.source_event_ids))
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
         """Transfer one durable continuation out of the journal lane and into response ownership."""

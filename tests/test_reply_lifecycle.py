@@ -793,6 +793,116 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
     released = rl.stopped(stop.reply, span, None, now_ns=NOW)
     assert not any(isinstance(effect, rl.SettleSources) for effect in released.effects)
 
+    # The continuation's finish releases its hold; a later edit's regeneration owns its sources.
+    ended = _span_after(stopped, span.span_id)
+    settled = rl.approval_settled(
+        stopped.reply,
+        ended,
+        approval_id="approval-1",
+        result="failed",
+        disposition="cancelled_by_user",
+        now_ns=NOW,
+    )
+    assert settled.reply is not None
+    assert settled.reply.state is ReplyState.CANCELLED
+    assert settled.reply.approval_id is None
+    regeneration = rl.claim(
+        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
+        _context(settled.reply, ended),
+    )
+    assert regeneration.reply is not None
+    assert regeneration.claimed is not None
+    assert regeneration.reply.approval_id is None
+    answer = rl.finish(
+        regeneration.reply, regeneration.claimed, _write(regeneration.reply, ReplyState.COMPLETED), now_ns=NOW
+    )
+    assert rl.SettleSources(regeneration.claimed.span_id) in answer.effects
+
+
+def test_a_regeneration_claimed_before_the_stopped_wait_settles_owns_its_sources() -> None:
+    """An edit that claims while the stopped wait's approval still settles takes no hold over its own sources."""
+    reply, span, _transition = _paused(in_place=True)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    stopped = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
+    assert stopped.reply is not None
+    assert stopped.reply.approval_id == "approval-1"
+    regeneration = rl.claim(
+        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
+        _context(stopped.reply, _span_after(stopped, span.span_id)),
+    )
+    assert regeneration.reply is not None
+    assert regeneration.reply.approval_id is None
+    # The old approval's settlement no longer names this reply's approval.
+    late = rl.approval_settled(
+        regeneration.reply,
+        regeneration.claimed,
+        approval_id="approval-1",
+        result="failed",
+        disposition="cancelled_by_user",
+        now_ns=NOW,
+    )
+    assert late.outcome is rl.Outcome.STALE
+
+
+def test_a_wait_in_place_keeps_its_stop_button_until_its_span_ends() -> None:
+    """The waiting span still runs, so the button stays through the wait and goes when the span ends."""
+    reply, span = _turn()
+    reply = replace(reply, event_id="$reply")
+    shown = rl.record_stop_button(reply, event_id="$button", now_ns=NOW)
+    assert shown.reply is not None
+    waiting = rl.pause(
+        shown.reply,
+        span,
+        rl.PauseWrite(shown="paused", prepared_revision=shown.reply.revision, stage=WriteStage.EDIT),
+        approval_id="approval-1",
+        in_place=True,
+        now_ns=NOW,
+    )
+    assert waiting.reply is not None
+    assert waiting.reply.stop_button_event_id == "$button"
+    resumed = rl.resumed_in_place(waiting.reply, span, approval_id="approval-1", now_ns=NOW)
+    assert resumed.reply is not None
+    assert resumed.reply.stop_button_event_id == "$button"
+    stop = rl.stop(waiting.reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    ended = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
+    assert ended.reply is not None
+    assert ended.reply.stop_button_event_id is None
+    assert ended.reply.redaction_pending == ("$button",)
+
+
+def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> None:
+    """The note is the reply's terminal write: a Stop after it is satisfied, and the finish changes nothing."""
+    reply, span, transition = _paused()
+    ended = _span_after(transition, span.span_id)
+    note = rl.approval_failure_note(
+        reply,
+        ended,
+        approval_id="approval-1",
+        shown="failed",
+        state=ReplyState.FAILED,
+        prepared_revision=reply.revision,
+        span_has_final=False,
+        now_ns=NOW,
+    )
+    assert note.reply is not None
+    assert note.reply.state is ReplyState.FAILED
+    assert note.reply.approval_id is None
+    stop = rl.stop(note.reply, ended, StopFacts(receipt_order=9, newer_edit=False, span_live=False), now_ns=NOW)
+    assert stop.reply is not None
+    assert stop.reply.state is ReplyState.FAILED
+    assert not stop.effects
+    finished = rl.approval_settled(
+        stop.reply,
+        ended,
+        approval_id="approval-1",
+        result="failed",
+        disposition="failed",
+        now_ns=NOW,
+    )
+    assert finished.reply is None or finished.reply.state is ReplyState.FAILED
+
 
 def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None:
     """A resume already cancelled leaves its reply to the approval; a newer Stop fences it again, settling nothing."""
