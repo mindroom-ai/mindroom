@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
+from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -35,8 +36,10 @@ from mindroom.streaming import UnfinishedStreamedReply
 from mindroom.tool_system.events import remap_visible_tool_marker_indices
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import AsyncIterator, Callable, Mapping
 
+    from mindroom.cancellation import TaskCancelSource
     from mindroom.event_journal import PrincipalStore
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -126,19 +129,24 @@ class SpanHandle:
 
 
 @dataclass
-class _SpanSlot:
+class SpanSlot:
     """The scope's holder for the span its claim opens; shared with child tasks."""
 
     handle: SpanHandle | None = None
 
 
-_current_slot: ContextVar[_SpanSlot | None] = ContextVar("mindroom_reply_span", default=None)
+_current_slot: ContextVar[SpanSlot | None] = ContextVar("mindroom_reply_span", default=None)
 
 
 def current_span() -> SpanHandle | None:
     """Return the span the current task executes, if any."""
     slot = _current_slot.get()
     return None if slot is None else slot.handle
+
+
+def current_slot() -> SpanSlot | None:
+    """Return the slot of the span scope the current task runs in, if any."""
+    return _current_slot.get()
 
 
 def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
@@ -158,15 +166,35 @@ class ReplyRuntime:
     generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
     clock: Callable[[], int] = field(default=time.time_ns)
+    # The task executing each live span of this bot instance.
+    _tasks: dict[str, asyncio.Task[object]] = field(default_factory=dict, init=False, repr=False)
+
+    def register_task(self, handle: SpanHandle, task: asyncio.Task[object]) -> None:
+        """Remember the task that executes one span, until it finishes."""
+        self._tasks[handle.span_id] = task
+        task.add_done_callback(lambda _task: self._tasks.pop(handle.span_id, None))
+
+    def cancel_span(self, span_id: str, *, cancel_source: TaskCancelSource) -> bool:
+        """Cancel exactly the named span's task, if it runs here; return whether one was cancelled."""
+        task = self._tasks.get(span_id)
+        if task is None or task.done():
+            return False
+        request_task_cancel(task, cancel_source=cancel_source)
+        return True
+
+    def span_is_live(self, span_id: str) -> bool:
+        """Return whether a span's task runs here now."""
+        task = self._tasks.get(span_id)
+        return task is not None and not task.done()
 
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies."""
         await self.store.replies.write_generation(self.generation, now_ns=self.clock())
 
     @asynccontextmanager
-    async def span_scope(self) -> AsyncIterator[_SpanSlot]:
+    async def span_scope(self) -> AsyncIterator[SpanSlot]:
         """Open the slot a claim inside fills, so child tasks share the span."""
-        slot = _SpanSlot()
+        slot = SpanSlot()
         token = _current_slot.set(slot)
         try:
             yield slot
@@ -304,14 +332,18 @@ class ReplyWriteRefusedError(Exception):
 
 @dataclass(frozen=True)
 class ReplyWrite:
-    """One durable write of a span's reply, rendered for the revision it names."""
+    """One durable write of a reply, rendered for the revision it names."""
 
-    handle: SpanHandle
+    reply_id: str
+    # The span the row is written for; its delivery id keys the row.
+    span: rl.Span
     stage: rl.WriteStage
     shown: Presentation
     # Applied inside the enqueue transaction against the reply as it is then.
     decide: Callable[[rl.Reply, rl.Span], rl.Transition]
     placeholder_only: bool = False
+    # The running span that renders this write, which learns what it committed.
+    handle: SpanHandle | None = None
 
     @property
     def shown_json(self) -> str:
@@ -324,6 +356,8 @@ def initial_write(handle: SpanHandle, shown: Presentation, *, placeholder_only: 
     encoded = encode_presentation(shown)
     revision = handle.reply.revision
     return ReplyWrite(
+        reply_id=handle.reply_id,
+        span=handle.span,
         handle=handle,
         stage=rl.WriteStage.INITIAL,
         shown=shown,
@@ -364,9 +398,49 @@ def terminal_write(
         return rl.fail(reply, span, write, phase="delivery", now_ns=now_ns)
 
     return ReplyWrite(
+        reply_id=handle.reply_id,
+        span=handle.span,
         handle=handle,
         stage=rl.WriteStage.FINAL,
         shown=shown,
         placeholder_only=not visible_work(shown),
         decide=decide,
+    )
+
+
+def owed_note_write(reply: rl.Reply, span: rl.Span, shown: Presentation, *, span_has_final: bool) -> ReplyWrite:
+    """Return the row that delivers a note a reply-authored transition owed (DESIGN.md §7.2 staging)."""
+    encoded = encode_presentation(shown)
+    revision = reply.revision
+    return ReplyWrite(
+        reply_id=reply.reply_id,
+        span=span,
+        stage=rl.WriteStage.EDIT if span_has_final else rl.WriteStage.FINAL,
+        shown=shown,
+        decide=lambda current, owner: rl.flush_owed_write(
+            current,
+            owner,
+            shown=encoded,
+            prepared_revision=revision,
+            span_has_final=span_has_final,
+            now_ns=time.time_ns(),
+        ),
+    )
+
+
+def resumed_note_write(handle: SpanHandle, shown: Presentation) -> ReplyWrite:
+    """Return the note a resumed reply shows when its continuation failed before delivering, keeping sources pending."""
+    write = rl.TerminalWrite(
+        shown=encode_presentation(shown),
+        prepared_revision=handle.reply.revision,
+        state=rl.ReplyState.ACTIVE,
+        confirms=handle.unconfirmed_progress,
+    )
+    return ReplyWrite(
+        reply_id=handle.reply_id,
+        span=handle.span,
+        handle=handle,
+        stage=rl.WriteStage.EDIT,
+        shown=shown,
+        decide=lambda reply, span: rl.fail(reply, span, write, phase="pre_delivery", now_ns=time.time_ns()),
     )

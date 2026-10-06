@@ -527,6 +527,7 @@ depends_on = ["mindroom.constants", "mindroom.streaming", "mindroom.tool_system.
 [[modules]]
 path = "mindroom.reply_scope"
 depends_on = [
+    "mindroom.cancellation",
     "mindroom.event_journal",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
@@ -2733,7 +2734,10 @@ depends_on = [
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
+    "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
+    "mindroom.reply_scope",
+    "mindroom.error_handling",
     "mindroom.runtime_resolution",
     "mindroom.ai_runtime",
     "mindroom.mid_turn",
@@ -4170,6 +4174,8 @@ depends_on = [
 path = "mindroom.bot"
 depends_on = [
     "mindroom.model_catalog_receiver",
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_scope",
     "mindroom.knowledge.utils",
     "mindroom.matrix.relation_lookup",
     "mindroom.agents",

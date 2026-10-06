@@ -118,6 +118,13 @@ class UserStopReconciler:
             return False
         async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
             stopped_turn = await self._record(response_event_id, stop_receipt_order, deleted_turn_id=deleted_turn_id)
+        # The reply's records learn the Stop before its span is cancelled, so the
+        # span's exit renders the cancellation rather than an error.
+        reply_owned = await self.deps.delivery_gateway.record_reply_stop(
+            response_event_id,
+            stop_receipt_order,
+            newer_edit=(stopped_turn.latest_edit_receipt_order or 0) > stop_receipt_order,
+        )
         target = stopped_turn.conversation_target
         if target is None:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
@@ -134,7 +141,7 @@ class UserStopReconciler:
                 stop_receipt_order,
                 target,
                 on_current_stop_finalized,
-                approval_settled,
+                approval_settled or reply_owned,
             ),
         )
         if not stopped:

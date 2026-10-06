@@ -34,7 +34,7 @@ class _DirectResponseOutbox:
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         return getattr(self.inner, name)
 
-    async def enqueue_matrix_delivery(self, **kwargs: Any) -> str | None:  # noqa: ANN401
+    async def _admit_sources(self, kwargs: dict[str, Any]) -> None:
         attempt = kwargs.get("response_attempt")
         if attempt is not None:
             for event_id in attempt.sources.pending_event_ids:
@@ -51,7 +51,14 @@ class _DirectResponseOutbox:
                             source={},
                         ),
                     )
+
+    async def enqueue_matrix_delivery(self, **kwargs: Any) -> str | None:  # noqa: ANN401
+        await self._admit_sources(kwargs)
         return await self.inner.enqueue_matrix_delivery(**kwargs)
+
+    async def enqueue_reply_row(self, **kwargs: Any) -> Any:  # noqa: ANN401
+        await self._admit_sources(kwargs)
+        return await self.inner.enqueue_reply_row(**kwargs)
 
 
 def install_direct_response_admission(bot: "AgentBot | TeamBot") -> None:

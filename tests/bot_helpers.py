@@ -336,6 +336,16 @@ def _room_send_response(event_id: str) -> MagicMock:
     return response
 
 
+def unique_room_send_responses(client: MagicMock, *, prefix: str = "$sent") -> None:
+    """Answer every send with its own event ID, as a homeserver does.
+
+    A reply is bound to the event it created, so two replies cannot share one;
+    a fixed mocked response would make every send look like the same event.
+    """
+    counter = iter(range(1, 1_000_000))
+    client.room_send.side_effect = lambda *_args, **_kwargs: _room_send_response(f"{prefix}{next(counter)}")
+
+
 def _matrix_room(
     room_id: str = "!room:localhost",
     own_user_id: str = "@mindroom_test:localhost",

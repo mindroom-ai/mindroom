@@ -34,6 +34,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents as agents_module
 from mindroom import approval_receipt, cli_approval_waits, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
+from mindroom import reply_lifecycle as rl
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
@@ -2929,7 +2930,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
 
 @pytest.mark.asyncio
 async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fails(tmp_path: Path) -> None:
-    """Placeholder cleanup failure must not replace the original setup cancellation."""
+    """A setup cancellation propagates, and the reply's span is released for a retry instead of noted directly."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     setup_started = asyncio.Event()
@@ -2957,7 +2958,14 @@ async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fail
         with pytest.raises(asyncio.CancelledError, match="sync_restart"):
             await response
 
-    cancelled_note.assert_awaited_once()
+    # The reply's records own the early placeholder; main's direct note is not used.
+    cancelled_note.assert_not_awaited()
+    replies = bot._reply_runtime.store.replies
+    reply = await replies.for_sources(("$event",))
+    assert reply is not None
+    assert reply.state is rl.ReplyState.ACTIVE
+    spans = await replies.spans(reply.reply_id)
+    assert [span.outcome for span in spans] == [rl.SpanOutcome.RELEASED]
 
 
 @pytest.mark.asyncio
@@ -8688,12 +8696,15 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
     ):
         result = await coordinator.generate_response(_plain_request(_target()))
 
-    assert result is None
+    # The reply's records write the error note the failed answer left owed.
+    assert result == "$placeholder"
     mock_after.assert_not_awaited()
     mock_cancelled.assert_awaited_once()
     assert mock_cancelled.await_args.kwargs["failure_reason"] == "delivery_failed"
     # The effects step still runs, but receives the error outcome so success effects are gated off.
-    assert effect_outcomes == [error_outcome]
+    assert [(outcome.terminal_status, outcome.failure_reason) for outcome in effect_outcomes] == [
+        ("error", "delivery_failed"),
+    ]
 
 
 @pytest.mark.asyncio

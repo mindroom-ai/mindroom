@@ -94,6 +94,11 @@ class _CountingGateway:
         self.finalized.append(response_event_id)
         return True
 
+    async def record_reply_stop(self, event_id: str, receipt_order: int, *, newer_edit: bool) -> bool:
+        """Report that no durable reply record owns this response."""
+        del event_id, receipt_order, newer_edit
+        return False
+
 
 def _reconciler(store: TurnStore, runner: _SerializingRunner, gateway: _CountingGateway) -> UserStopReconciler:
     return UserStopReconciler(

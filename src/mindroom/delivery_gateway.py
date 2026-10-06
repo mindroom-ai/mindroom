@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import ChainMap
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -17,6 +18,7 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
+from mindroom import reply_lifecycle as rl
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -81,16 +83,30 @@ from mindroom.matrix_delivery import (
     SendDelivery,
     TurnHandoff,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import Outcome as ReplyOutcome
 from mindroom.reply_lifecycle import ProgressConfirmation as ReplyProgressConfirmation
 from mindroom.reply_lifecycle import ReplyState
-from mindroom.reply_presentation import DELIVERY_FAILED_NOTE
+from mindroom.reply_presentation import (
+    DELIVERY_FAILED_NOTE,
+    NoteKind,
+    Presentation,
+    RenderedReply,
+    Segment,
+    WriteKind,
+    decode_presentation,
+    note_segment,
+    render,
+    with_trailing_note,
+)
 from mindroom.reply_scope import (
     ReplyWrite,
     ReplyWriteRefusedError,
     SpanHandle,
     current_span,
     initial_write,
+    owed_note_write,
+    resumed_note_write,
     terminal_write,
 )
 from mindroom.requester_identity import is_access_checked_requester_id
@@ -127,6 +143,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.event_journal.replies import Decide
     from mindroom.history.types import (
         CompactionLifecycleFailure,
         CompactionLifecycleProgress,
@@ -134,8 +151,6 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
     from mindroom.hooks import MessageEnvelope
-    from mindroom.message_target import MessageTarget
-    from mindroom.reply_presentation import Presentation
     from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
     from mindroom.streaming import ProgressPublisher, StreamInputChunk, UnfinishedStreamedReply
     from mindroom.timing import DispatchPipelineTiming
@@ -186,6 +201,41 @@ def _segment_transaction_id(base_transaction_id: str, index: int) -> str:
 
 
 _REPLY_ROW_NEW_TEXT_KEY = "io.mindroom.reply_new_text"
+
+
+def _refused_reply_outcome(
+    refused: ReplyWriteRefusedError,
+    request: FinalDeliveryRequest,
+    draft: ResponseDraft,
+) -> FinalDeliveryOutcome:
+    """Report an answer the reply's rules refused: a Stop to apply first, or a span that no longer owns it."""
+    stopped = refused.transition.outcome in {ReplyOutcome.RECOMPUTE, ReplyOutcome.STOPPED}
+    return FinalDeliveryOutcome(
+        terminal_status="cancelled" if stopped else "error",
+        event_id=request.existing_event_id,
+        is_visible_response=request.existing_event_id is not None,
+        cancel_source="user_stop" if stopped else None,
+        failure_reason=cancel_failure_reason("user_stop") if stopped else "reply_write_refused",
+        tool_trace=tuple(draft.tool_trace or ()),
+        extra_content=draft.extra_content,
+    )
+
+
+def _shown_before(reply: rl.Reply, handle: SpanHandle | None) -> Presentation:
+    """Return what the reply may show now, as its latest write recorded it."""
+    stored = reply.possibly_shown if reply.possibly_shown is not None else reply.presentation
+    shown = decode_presentation(stored)
+    if handle is not None:
+        shown = replace(shown, placeholder=handle.base.placeholder, show_tool_calls=handle.base.show_tool_calls)
+    return shown
+
+
+def _terminal_status_for_reply_state(state: ReplyState) -> Literal["completed", "cancelled", "error"]:
+    if state is ReplyState.COMPLETED:
+        return "completed"
+    if state is ReplyState.CANCELLED:
+        return "cancelled"
+    return "error"
 
 
 def _reply_state_for_stream_status(status: object) -> ReplyState:
@@ -665,6 +715,22 @@ class DeliveryGateway:
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome:
         """Remove a completed placeholder-only streamed event before returning no-visible-response."""
+        handle = self._live_span()
+        if handle is not None:
+            # The reply's records remove the placeholder (DESIGN.md §6.4 ``suppress``).
+            confirms = handle.unconfirmed_progress
+            now_ns = time.time_ns()
+            await self.end_reply_span(
+                handle,
+                lambda reply, span: rl.suppress(reply, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
+            )
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=None,
+                failure_reason=failure_reason,
+                tool_trace=tuple(tool_trace or ()),
+                extra_content=extra_content,
+            )
         if streamed_event_id is not None:
             cleanup_failure = await self._redact_visible_response_event(
                 room_id=room_id,
@@ -754,6 +820,16 @@ class DeliveryGateway:
         request: _PlaceholderFailureUpdateRequest,
     ) -> FinalDeliveryOutcome:
         """Order fallback eligibility and transport with FINAL and INITIAL cleanup."""
+        if self._live_span() is not None:
+            # A reply's answer row stays owed; only its permanent refusal writes the failure note.
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=request.event_id,
+                is_visible_response=True,
+                failure_reason=request.failure_reason,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
+            )
         turn_id = request.identity.response_envelope.source_event_id
         worker = self._recovery_worker()
         async with worker._delivery_lock(turn_id):
@@ -1422,7 +1498,6 @@ class DeliveryGateway:
         transaction; a rule that refuses raises ``ReplyWriteRefusedError``
         and nothing is written.
         """
-        handle = write.handle
         requested: DeliveredMatrixEvent | None = None
         predicted: dict[str, object] = {}
 
@@ -1434,13 +1509,13 @@ class DeliveryGateway:
             return delivered.event_id
 
         async def prepare() -> PreparedReplyRow:
-            reply = await self.deps.outbox.replies.load(handle.reply_id)
-            assert reply is not None, "a span's reply exists while the span writes it"
+            reply = await self.deps.outbox.replies.load(write.reply_id)
+            assert reply is not None, "a reply exists while its rows are written"
             stage = DeliveryStage(write.stage.value)
             delivery_id = (
-                edit_delivery_id(handle.span.delivery_id, reply.reply_sequence + 1)
+                edit_delivery_id(write.span.delivery_id, reply.reply_sequence + 1)
                 if stage is DeliveryStage.EDIT
-                else handle.span.delivery_id
+                else write.span.delivery_id
             )
             predicted["delivery_id"] = delivery_id
             edits = stage is not DeliveryStage.INITIAL and reply.event_id is not None
@@ -1476,8 +1551,8 @@ class DeliveryGateway:
         try:
             delivery = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver_reply_row(
                 ReplyRowRequest(
-                    reply_id=handle.reply_id,
-                    span_id=handle.span_id,
+                    reply_id=write.reply_id,
+                    span_id=write.span.span_id,
                     decide=write.decide,
                     placeholder_only=write.placeholder_only,
                 ),
@@ -1489,7 +1564,8 @@ class DeliveryGateway:
         except _DeliveryRefusedError:
             return None
         if delivery.enqueue is not None:
-            handle.note(delivery.enqueue.applied)
+            if write.handle is not None:
+                write.handle.note(delivery.enqueue.applied)
             await self._run_reply_effects((*delivery.enqueue.applied.post_commit, *delivery.reply_effects))
             if not delivery.enqueue.transition.applied:
                 raise ReplyWriteRefusedError(delivery.enqueue.transition)
@@ -1503,6 +1579,143 @@ class DeliveryGateway:
         """Run the work a committed reply transition left for after its commit."""
         if effects and self.deps.reply_effects is not None:
             await self.deps.reply_effects(effects)
+
+    @staticmethod
+    def _live_span() -> SpanHandle | None:
+        """Return the span this task writes, while it has not ended."""
+        handle = current_span()
+        return None if handle is None or handle.exited else handle
+
+    async def end_reply_span(self, handle: SpanHandle, decide: Decide) -> None:
+        """Apply a span exit that writes nothing itself, then settle what it left owed."""
+        applied = await handle.runtime.decide(handle, decide)
+        await self._run_reply_effects(applied.post_commit)
+        await self.settle_reply_debt(handle.reply_id)
+
+    async def end_reply_span_with_note(
+        self,
+        handle: SpanHandle,
+        target: MessageTarget,
+        *,
+        state: ReplyState,
+        note: Segment,
+    ) -> FinalDeliveryOutcome:
+        """End a span with its terminal row: what the reply may show, plus one note."""
+        reply = await self.deps.outbox.replies.load(handle.reply_id)
+        assert reply is not None, "a span's reply exists while the span ends"
+        shown = with_trailing_note(_shown_before(reply, handle), note)
+        if state is ReplyState.ACTIVE:
+            write = resumed_note_write(handle, shown)
+            rendered = render(shown, WriteKind.TERMINAL, state=ReplyState.FAILED.value)
+        else:
+            write = terminal_write(handle, shown, state=state)
+            rendered = render(shown, WriteKind.TERMINAL, state=state.value)
+        delivered = await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
+        return FinalDeliveryOutcome(
+            terminal_status=_terminal_status_for_reply_state(state),
+            event_id=reply.event_id or delivered,
+            is_visible_response=(reply.event_id or delivered) is not None,
+            final_visible_body=rendered.body if delivered is not None else None,
+            delivery_kind=None if delivered is None else ("edited" if reply.event_id else "sent"),
+            failure_reason=None if state is ReplyState.COMPLETED else note.note.value if note.note else None,
+            tool_trace=rendered.tool_trace,
+        )
+
+    async def _deliver_rendered_reply_write(
+        self,
+        write: ReplyWrite,
+        target: MessageTarget,
+        rendered: RenderedReply,
+        *,
+        event_id: str | None,
+    ) -> str | None:
+        """Send one rendered reply row as an edit of the reply's event, or as its create."""
+        extra_content: dict[str, Any] = {}
+        if rendered.stream_status is not None:
+            extra_content[constants.STREAM_STATUS_KEY] = rendered.stream_status
+        tool_trace = list(rendered.tool_trace) or None
+        try:
+            if event_id is None:
+                return await self.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=rendered.body,
+                        tool_trace=tool_trace,
+                        extra_content=extra_content,
+                        retry_sync_recovery=True,
+                        reply_write=write,
+                    ),
+                )
+            edited = await self.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=event_id,
+                    new_text=rendered.body,
+                    tool_trace=tool_trace,
+                    extra_content=extra_content,
+                    retry_sync_recovery=True,
+                    reply_write=write,
+                ),
+            )
+        except ReplyWriteRefusedError:
+            return None
+        return event_id if edited else None
+
+    async def record_reply_stop(self, event_id: str, receipt_order: int, *, newer_edit: bool) -> bool:
+        """Record a Stop on the reply bound to one event; return whether a reply owns that event.
+
+        A live span is cancelled after the commit and writes its own cancelled
+        row; a reply with no running span is cancelled here and gets its note.
+        """
+        applied = await self.deps.outbox.replies.record_stop(
+            event_id=event_id,
+            receipt_order=receipt_order,
+            newer_edit=newer_edit,
+        )
+        if applied is None:
+            return False
+        await self._run_reply_effects(applied.post_commit)
+        reply = applied.transition.reply
+        if reply is not None:
+            await self.settle_reply_debt(reply.reply_id)
+        return True
+
+    async def settle_reply_debt(self, reply_id: str) -> None:
+        """Redact what a reply owes removed and deliver the note it owes, if any."""
+        reply = await self.deps.outbox.replies.load(reply_id)
+        if reply is None:
+            return
+        if reply.redaction_pending:
+            done = [
+                event_id
+                for event_id in reply.redaction_pending
+                if await self.deps.redact_message_event(room_id=reply.room_id, event_id=event_id, reason="Reply removed")
+            ]
+            if done:
+                await self.deps.outbox.replies.update(
+                    reply_id,
+                    lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
+                )
+        if reply.owed_write is not None:
+            await self._flush_owed_write(reply)
+
+    async def _flush_owed_write(self, reply: rl.Reply) -> None:
+        """Render and send the note a reply-authored transition owed."""
+        owed = reply.owed_write
+        assert owed is not None
+        span = await self.deps.outbox.replies.span(owed.span_id)
+        assert span is not None, "an owed write names a span of its reply"
+        note = note_segment(NoteKind(owed.note), owed.text)
+        if note.note in {NoteKind.DELIVERY_FAILED, NoteKind.APPROVAL_FAILED}:
+            # These notes replace the reply's body, as main writes them.
+            shown = with_trailing_note(Presentation(), note)
+        else:
+            shown = with_trailing_note(_shown_before(reply, None), note)
+        final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
+        write = owed_note_write(reply, span, shown, span_has_final=final is not None)
+        rendered = render(shown, WriteKind.TERMINAL, state=reply.state.value)
+        target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
+        await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -1734,7 +1947,7 @@ class DeliveryGateway:
         except asyncio.CancelledError as error:
             failure_reason = self._cancelled_error_failure_reason(error)
             cancel_source = classify_cancel_source(error)
-            if current_task_is_process_shutdown():
+            if current_task_is_process_shutdown() or self._live_span() is not None:
                 raise
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
@@ -1757,6 +1970,9 @@ class DeliveryGateway:
             raise
         except Exception as error:
             failure_reason = str(error)
+            handle = self._live_span()
+            if handle is not None:
+                return await self._reply_hook_failed(request, handle, failure_reason=failure_reason or "hook_failed")
             if request.identity.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND and (
                 request.existing_event_id is None or request.existing_event_is_placeholder
             ):
@@ -1828,6 +2044,9 @@ class DeliveryGateway:
                 correlation_id=request.identity.correlation_id,
                 suppression_reason=suppression_reason,
             )
+            handle = self._live_span()
+            if handle is not None:
+                return await self._reply_suppressed(handle, draft, suppression_reason=suppression_reason)
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
@@ -1896,23 +2115,37 @@ class DeliveryGateway:
                 "interactive": metadata.to_metadata() if metadata is not None else None,
             }
 
+        handle = self._live_span()
+        reply_write = (
+            None
+            if handle is None
+            else terminal_write(
+                handle,
+                handle.presentation(display_text, tuple(draft.tool_trace or ())),
+                state=ReplyState.COMPLETED,
+            )
+        )
         if request.existing_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
-            edited = await self.edit_text(
-                EditTextRequest(
-                    target=request.target,
-                    event_id=request.existing_event_id,
-                    new_text=display_text,
-                    tool_trace=draft.tool_trace,
-                    extra_content=delivery_extra_content,
-                    delivery_turn_id=request.identity.response_envelope.source_event_id,
-                    response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
-                    retry_sync_recovery=True,
-                    defer_source_handoff=request.defer_source_handoff,
-                    delivery_result=delivery_result,
-                ),
-            )
+            try:
+                edited = await self.edit_text(
+                    EditTextRequest(
+                        target=request.target,
+                        event_id=request.existing_event_id,
+                        new_text=display_text,
+                        tool_trace=draft.tool_trace,
+                        extra_content=delivery_extra_content,
+                        delivery_turn_id=request.identity.response_envelope.source_event_id,
+                        response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
+                        retry_sync_recovery=True,
+                        defer_source_handoff=request.defer_source_handoff,
+                        delivery_result=delivery_result,
+                        reply_write=reply_write,
+                    ),
+                )
+            except ReplyWriteRefusedError as refused:
+                return _refused_reply_outcome(refused, request, draft)
             if edited:
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
@@ -1925,7 +2158,7 @@ class DeliveryGateway:
                     interactive_metadata=interactive_response.interactive_metadata,
                 )
 
-            if request.existing_event_is_placeholder:
+            if request.existing_event_is_placeholder and handle is None:
                 return await self._finish_placeholder_delivery_failure(
                     _PlaceholderFailureUpdateRequest(
                         target=request.target,
@@ -1936,6 +2169,8 @@ class DeliveryGateway:
                         extra_content=delivery_extra_content,
                     ),
                 )
+            # A reply's answer row stays owed when Matrix did not take it now;
+            # recovery resends it, and only a permanent refusal changes the reply.
             return FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id=request.existing_event_id,
@@ -1944,23 +2179,27 @@ class DeliveryGateway:
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=delivery_extra_content,
             )
-        event_id = await self.send_text(
-            SendTextRequest(
-                target=request.target,
-                response_text=display_text,
-                skip_mentions=request.skip_mentions,
-                tool_trace=draft.tool_trace,
-                extra_content=delivery_extra_content,
-                retry_sync_recovery=True,
-                # The Matrix event that caused this turn. The handled-turn
-                # ledger already keys on it, and it re-derives to the same
-                # value after a restart, which a generated ID would not.
-                delivery_turn_id=request.identity.response_envelope.source_event_id,
-                response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
-                defer_source_handoff=request.defer_source_handoff,
-                delivery_result=delivery_result,
-            ),
-        )
+        try:
+            event_id = await self.send_text(
+                SendTextRequest(
+                    target=request.target,
+                    response_text=display_text,
+                    skip_mentions=request.skip_mentions,
+                    tool_trace=draft.tool_trace,
+                    extra_content=delivery_extra_content,
+                    retry_sync_recovery=True,
+                    # The Matrix event that caused this turn. The handled-turn
+                    # ledger already keys on it, and it re-derives to the same
+                    # value after a restart, which a generated ID would not.
+                    delivery_turn_id=request.identity.response_envelope.source_event_id,
+                    response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
+                    defer_source_handoff=request.defer_source_handoff,
+                    delivery_result=delivery_result,
+                    reply_write=reply_write,
+                ),
+            )
+        except ReplyWriteRefusedError as refused:
+            return _refused_reply_outcome(refused, request, draft)
         if event_id is None:
             return FinalDeliveryOutcome(
                 terminal_status="error",
@@ -1980,6 +2219,68 @@ class DeliveryGateway:
             interactive_metadata=interactive_response.interactive_metadata,
         )
 
+    async def _reply_hook_failed(
+        self,
+        request: FinalDeliveryRequest,
+        handle: SpanHandle,
+        *,
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """A before-response hook raised for a reply span (DESIGN.md §6.4 ``hook_failed``)."""
+        reply = await self.deps.outbox.replies.load(handle.reply_id)
+        silent = request.identity.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+        if silent and reply is not None and (reply.event_id is None or reply.placeholder_only):
+            # A silent schedule reports its failure durably, as main does.
+            note = note_segment(NoteKind.ERROR, _BEFORE_RESPONSE_HOOK_FAILURE_TEXT)
+            outcome = await self.end_reply_span_with_note(
+                handle,
+                request.target,
+                state=ReplyState.FAILED,
+                note=note,
+            )
+            return replace(outcome, failure_reason=failure_reason)
+        now_ns = time.time_ns()
+        confirms = handle.unconfirmed_progress
+        await self.end_reply_span(
+            handle,
+            lambda current, span: rl.suppress(current, span, reason="hook_failed", confirms=confirms, now_ns=now_ns),
+        )
+        event_id = None if reply is None or reply.placeholder_only else reply.event_id
+        return FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id=event_id,
+            is_visible_response=event_id is not None,
+            failure_reason=failure_reason,
+            tool_trace=tuple(request.tool_trace or ()),
+            extra_content=request.extra_content,
+        )
+
+    async def _reply_suppressed(
+        self,
+        handle: SpanHandle,
+        draft: ResponseDraft,
+        *,
+        suppression_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """A hook suppressed a reply span's answer (DESIGN.md §6.4 ``suppress``)."""
+        reply = await self.deps.outbox.replies.load(handle.reply_id)
+        now_ns = time.time_ns()
+        confirms = handle.unconfirmed_progress
+        await self.end_reply_span(
+            handle,
+            lambda current, span: rl.suppress(current, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
+        )
+        event_id = None if reply is None or reply.placeholder_only else reply.event_id
+        return FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=event_id,
+            is_visible_response=event_id is not None,
+            failure_reason=suppression_reason,
+            suppressed=True,
+            tool_trace=tuple(draft.tool_trace or ()),
+            extra_content=draft.extra_content,
+        )
+
     async def deliver_cancelled_visible_note(
         self,
         request: CancelledVisibleNoteRequest,
@@ -1988,7 +2289,8 @@ class DeliveryGateway:
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
         extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
-        if current_task_is_process_shutdown():
+        if current_task_is_process_shutdown() or self._live_span() is not None:
+            # A reply span's exit writes its cancellation through the reply's records.
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=request.event_id,
@@ -2807,6 +3109,31 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
+    async def _end_resumed_reply_span(
+        self,
+        request: FinalizeStreamedResponseRequest,
+        handle: SpanHandle,
+    ) -> FinalDeliveryOutcome:
+        """End a resumed reply's continuation that stopped before streaming anything below it."""
+        stream_outcome = request.stream_transport_outcome
+        failure_reason = stream_outcome.failure_reason or "interrupted"
+        if stream_outcome.terminal_status == "cancelled" and cancel_source_from_failure_reason(failure_reason) == "user_stop":
+            outcome = await self.end_reply_span_with_note(
+                handle,
+                request.target,
+                state=ReplyState.CANCELLED,
+                note=note_segment(NoteKind.CANCELLED),
+            )
+        else:
+            # The note shows below the recovered content and the sources stay for a retry.
+            outcome = await self.end_reply_span_with_note(
+                handle,
+                request.target,
+                state=ReplyState.ACTIVE,
+                note=note_segment(NoteKind.ERROR, format_stream_error_note(failure_reason)),
+            )
+        return replace(outcome, terminal_status=stream_outcome.terminal_status, failure_reason=failure_reason)
+
     async def finalize_streamed_response(
         self,
         request: FinalizeStreamedResponseRequest,
@@ -2842,6 +3169,9 @@ class DeliveryGateway:
                 and stream_outcome.terminal_status in {"cancelled", "error"}
                 and stream_outcome.visible_body_state == "none"
             ):
+                handle = self._live_span()
+                if handle is not None:
+                    return await self._end_resumed_reply_span(request, handle)
                 return await self._end_resumed_reply_before_continuation(
                     request,
                     event_id=request.existing_event_id,

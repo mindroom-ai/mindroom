@@ -52,6 +52,8 @@ class ResponseAttemptRequest:
     user_id: str | None = None
     run_id: str | None = None
     on_cancelled: Callable[[str], None] | None = None
+    # Told the attempt task as soon as it exists, so a reply span can be cancelled exactly.
+    on_task_started: Callable[[asyncio.Task[None]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,11 +150,13 @@ class ResponseAttemptRunner:
                 error=str(error),
             )
 
-    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:  # noqa: C901
+    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:  # noqa: C901, PLR0912
         """Run one response coroutine under visible message tracking."""
         with bound_log_context(**request.target.log_context):
             message_id = request.existing_event_id
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
+            if request.on_task_started is not None:
+                request.on_task_started(task)
             tracked_message_id = message_id or f"__pending_response__:{id(task)}"
             show_stop_button = False
             process_shutdown = False

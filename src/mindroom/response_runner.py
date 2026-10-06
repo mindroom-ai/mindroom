@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -17,6 +18,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from nio.exceptions import EncryptionError, RemoteProtocolError
 
+from mindroom import reply_lifecycle as rl
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
@@ -48,6 +50,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.event_journal import (
     ApprovalContinuation,
     ApprovalMemoryTurn,
@@ -90,7 +93,16 @@ from mindroom.orchestration.runtime import (
 from mindroom.participation import ParticipationGate
 from mindroom.participation_judgment import create_participation_decider
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
-from mindroom.reply_presentation import APPROVAL_START_FAILED_NOTE
+from mindroom.reply_presentation import (
+    AGENT_PLACEHOLDER,
+    APPROVAL_START_FAILED_NOTE,
+    TEAM_PLACEHOLDER,
+    NoteKind,
+    Presentation,
+    format_error_note,
+    note_segment,
+)
+from mindroom.reply_scope import SpanHandle, SpanSlot, current_slot, current_span, initial_write
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_shutdown_diagnostics import (
     ResponseShutdownPhase,
@@ -218,6 +230,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
+    from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
@@ -765,9 +778,12 @@ class PostLockRequestPreparationError(RuntimeError):
         message: str = "Post-lock request preparation failed",
         *,
         placeholder_event_id: str | None = None,
+        reply_owned: bool = False,
     ) -> None:
         super().__init__(message)
         self.placeholder_event_id = placeholder_event_id
+        # The reply's records already own the visible failure notice.
+        self.reply_owned = reply_owned
 
 
 @dataclass
@@ -884,6 +900,8 @@ class ResponseRunnerDeps:
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
     redacted_history_events: Callable[[MessageTarget, tuple[str, ...]], Awaitable[Mapping[str, str | None]]]
+    # This bot instance's owner of durable reply records.
+    replies: ReplyRuntime | None = None
 
 
 @dataclass(frozen=True)
@@ -2829,62 +2847,143 @@ class ResponseRunner:
         try:
             resolved_target = request.response_envelope.target
             early_placeholder = _EarlyPlaceholderState()
-            try:
-                return await self._lifecycle_coordinator.run_locked_response(
-                    target=resolved_target,
-                    response_envelope=request.response_envelope,
-                    pipeline_timing=request.pipeline_timing,
-                    mid_turn_gate=_mid_turn_for_request(
-                        request,
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                        on_defer=acknowledge_deferred,
-                    ),
-                    locked_operation=lambda target: self._run_owned_or_locked_response(
-                        request,
-                        target=target,
-                        early_placeholder=early_placeholder,
-                        locked_operation=locked_operation,
-                    ),
-                    signal_queued_message=(
-                        signal_queued_message
-                        and request.sync_restart_retry_source_event_id is None
-                        and not _is_silent_schedule_response(request)
-                    ),
+            async with self._reply_span_scope() as span_slot:
+                return await self._run_locked_response_in_span(
+                    request,
+                    span_slot=span_slot,
+                    resolved_target=resolved_target,
+                    early_placeholder=early_placeholder,
+                    response_kind=response_kind,
+                    locked_operation=locked_operation,
+                    signal_queued_message=signal_queued_message,
+                    acknowledge_deferred=acknowledge_deferred,
                 )
-            except asyncio.CancelledError as error:
-                if current_task_is_process_shutdown():
-                    raise
-                if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
-                    await self._finalize_early_placeholder_cancellation(
-                        early_placeholder,
-                        error,
-                        response_kind=response_kind,
-                    )
-                raise
-            except Exception as error:
-                already_linked = (
-                    isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
-                )
-                if (
-                    isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
-                    or early_placeholder.placeholder_event_id is None
-                    or early_placeholder.settlement_started
-                    or already_linked
-                ):
-                    raise
-                cause = (
-                    error.__cause__
-                    if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
-                    else error
-                )
-                raise PostLockRequestPreparationError(
-                    placeholder_event_id=early_placeholder.placeholder_event_id,
-                ) from cause
         finally:
             self._admission_gate.response_identities.remove(identity)
             self._in_flight_response_count -= 1
             self._admission_gate.release()
+
+    @asynccontextmanager
+    async def _reply_span_scope(self) -> AsyncIterator[SpanSlot | None]:
+        """Open the slot a claim fills, when this bot keeps durable reply records."""
+        if self.deps.replies is None:
+            yield None
+            return
+        async with self.deps.replies.span_scope() as slot:
+            yield slot
+
+    async def _run_locked_response_in_span(
+        self,
+        request: ResponseRequest,
+        *,
+        span_slot: SpanSlot | None,
+        resolved_target: MessageTarget,
+        early_placeholder: _EarlyPlaceholderState,
+        response_kind: str,
+        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+        signal_queued_message: bool,
+        acknowledge_deferred: Callable[[str, str], Awaitable[None]],
+    ) -> str | None:
+        """Run the locked response and end any span it claimed that has not ended itself."""
+        try:
+            result = await self._run_locked_response_operation(
+                request,
+                resolved_target=resolved_target,
+                early_placeholder=early_placeholder,
+                response_kind=response_kind,
+                locked_operation=locked_operation,
+                signal_queued_message=signal_queued_message,
+                acknowledge_deferred=acknowledge_deferred,
+                span_claimed=lambda: span_slot is not None and span_slot.handle is not None,
+            )
+        except BaseException as error:
+            handle = None if span_slot is None else span_slot.handle
+            # A process stop leaves the span exactly as a crash would; the next
+            # bot instance ends it as lost and replays its sources.
+            if handle is not None and not handle.exited and not current_task_is_process_shutdown():
+                await run_coroutine_until_complete(self._exit_span_on_error(handle, error, target=resolved_target))
+            raise
+        handle = None if span_slot is None else span_slot.handle
+        if handle is not None and not handle.exited:
+            # Every exit path is meant to end its span; one that did not is a bug,
+            # and releasing keeps the reply's sources for a retry.
+            self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
+            await self.deps.delivery_gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.release(reply, span, now_ns=time.time_ns(), confirms=handle.unconfirmed_progress),
+            )
+        return result
+
+    async def _run_locked_response_operation(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        early_placeholder: _EarlyPlaceholderState,
+        response_kind: str,
+        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+        signal_queued_message: bool,
+        acknowledge_deferred: Callable[[str, str], Awaitable[None]],
+        span_claimed: Callable[[], bool],
+    ) -> str | None:
+        """Run one response under its conversation lock, mapping early failures as main does."""
+        try:
+            return await self._lifecycle_coordinator.run_locked_response(
+                target=resolved_target,
+                response_envelope=request.response_envelope,
+                pipeline_timing=request.pipeline_timing,
+                mid_turn_gate=_mid_turn_for_request(
+                    request,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    on_defer=acknowledge_deferred,
+                ),
+                locked_operation=lambda target: self._run_owned_or_locked_response(
+                    request,
+                    target=target,
+                    early_placeholder=early_placeholder,
+                    locked_operation=locked_operation,
+                ),
+                signal_queued_message=(
+                    signal_queued_message
+                    and request.sync_restart_retry_source_event_id is None
+                    and not _is_silent_schedule_response(request)
+                ),
+            )
+        except asyncio.CancelledError as error:
+            if current_task_is_process_shutdown():
+                raise
+            if (
+                early_placeholder.placeholder_event_id is not None
+                and not early_placeholder.settlement_started
+                and not span_claimed()
+            ):
+                await self._finalize_early_placeholder_cancellation(
+                    early_placeholder,
+                    error,
+                    response_kind=response_kind,
+                )
+            raise
+        except Exception as error:
+            already_linked = (
+                isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
+            )
+            if (
+                isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
+                or early_placeholder.placeholder_event_id is None
+                or early_placeholder.settlement_started
+                or already_linked
+            ):
+                raise
+            cause = (
+                error.__cause__
+                if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
+                else error
+            )
+            raise PostLockRequestPreparationError(
+                placeholder_event_id=early_placeholder.placeholder_event_id,
+                reply_owned=span_claimed(),
+            ) from cause
 
     async def _run_owned_or_locked_response(
         self,
@@ -2947,6 +3046,138 @@ class ResponseRunner:
                 or owned.generation <= claimed.generation
             ):
                 return event_id
+
+    async def _exit_span_on_error(self, handle: SpanHandle, error: BaseException, *, target: MessageTarget) -> None:
+        """End a span whose locked response raised before ending it (PR-1.md §6.2 scope exits)."""
+        gateway = self.deps.delivery_gateway
+        confirms = handle.unconfirmed_progress
+        now_ns = time.time_ns()
+        if isinstance(error, asyncio.CancelledError):
+            if not current_task_is_process_shutdown():
+                cancel_source = classify_cancel_source(error)
+                reply = await self.deps.approval_store.replies.load(handle.reply_id)
+                if cancel_source == "user_stop" and reply is not None and reply.unapplied_stop:
+                    await gateway.end_reply_span_with_note(
+                        handle,
+                        target,
+                        state=rl.ReplyState.CANCELLED,
+                        note=note_segment(NoteKind.CANCELLED),
+                    )
+                    return
+                if reply is not None and reply.event_id is not None:
+                    # An early placeholder shows why it stopped; the sources stay for the retry.
+                    await gateway.end_reply_span_with_note(
+                        handle,
+                        target,
+                        state=rl.ReplyState.ACTIVE,
+                        note=note_segment(
+                            NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED,
+                        ),
+                    )
+                    return
+            # Other cancellations leave the sources for a retry, without touching Matrix.
+            await gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
+            )
+            return
+        if isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError)):
+            await gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.release(
+                    reply,
+                    span,
+                    now_ns=now_ns,
+                    outcome=rl.SpanOutcome.SUPERSEDED,
+                    confirms=confirms,
+                ),
+            )
+            return
+        if isinstance(error, PostLockRequestPreparationError):
+            cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
+            error_text = get_user_friendly_error_message(cause, self.deps.agent_name, runtime_paths=self.deps.runtime_paths)
+            await gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.dispatch_failed(
+                    rl.confirm_progress(reply, confirms),
+                    span if not span.ended else None,
+                    error_text=error_text,
+                    now_ns=now_ns,
+                ),
+            )
+            return
+        await gateway.end_reply_span(
+            handle,
+            lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
+        )
+
+    def _claims_reply_records(self, request: ResponseRequest, history_scope: HistoryScope) -> bool:
+        """Return whether this response path writes its reply through durable records.
+
+        Paths move to records as every write on them is ported; the rest keep
+        main's behavior with no span claimed.
+        """
+        return (
+            self.deps.replies is not None
+            and history_scope.kind == "agent"
+            and request.prepared_edit_record is None
+            and request.existing_event_id is None
+        )
+
+    async def _claim_reply_span(
+        self,
+        request: ResponseRequest,
+        *,
+        history_scope: HistoryScope,
+    ) -> ResponseRequest | None:
+        """Claim the reply this request answers, after main's first source gate passed (PR-1.md §6.1).
+
+        ``None`` means earlier writes of the reply are unresolved; the claim
+        retries the sources once they resolve.
+        """
+        replies = self.deps.replies
+        slot = current_slot()
+        if replies is None or slot is None or not self._claims_reply_records(request, history_scope):
+            return request
+        legacy_initial = await self.deps.approval_store.load_matrix_delivery(
+            delivery_id=request.response_envelope.source_event_id,
+            stage=DeliveryStage.INITIAL,
+        )
+        if legacy_initial is not None and legacy_initial.reply_id is None:
+            # A reply started before durable records exist keeps main's path
+            # until the startup migration adopts it.
+            return request
+        handle = await replies.claim(
+            delivery_id=request.response_envelope.source_event_id,
+            sources=rl.SpanSources(
+                pending=request.sources.pending_event_ids,
+                logical=request.sources.logical_source_event_ids,
+                discovery=request.sources.discovery_event_ids,
+            ),
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            requester_id=request.response_envelope.requester_id,
+            visibility_policy=(
+                rl.VisibilityPolicy.SILENT_SCHEDULE
+                if _is_silent_schedule_response(request)
+                else rl.VisibilityPolicy.NORMAL
+            ),
+            placeholder=TEAM_PLACEHOLDER if history_scope.kind == "team" else AGENT_PLACEHOLDER,
+            show_tool_calls=self._show_tool_calls(),
+            existing_event_id=request.existing_event_id,
+        )
+        if handle is None:
+            return None
+        slot.handle = handle
+        event_id = handle.reply.event_id
+        return replace(
+            request,
+            existing_event_id=event_id,
+            existing_event_is_placeholder=event_id is not None,
+            # Records decide what a stopped attempt showed; Matrix is not read back.
+            existing_event_is_recovered=False,
+            resumed_reply=handle.resumed,
+        )
 
     async def _settle_unauthorized_approval_continuation(
         self,
@@ -3575,7 +3806,10 @@ class ResponseRunner:
         )
         if prepared_request is None:
             return None
-        request = prepared_request
+        claimed_request = await self._claim_reply_span(prepared_request, history_scope=history_scope)
+        if claimed_request is None:
+            return None
+        request = claimed_request
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
             agent_names=request.participating_agent_names or (self.deps.agent_name,),
@@ -3600,6 +3834,9 @@ class ResponseRunner:
         the message with the new attempt streaming below them, and the same
         account goes into the new attempt's prompt, where later turns keep it.
         """
+        handle = current_span()
+        if handle is not None:
+            return self._with_recorded_interrupted_attempt(request, handle)
         event_id = request.existing_event_id
         if event_id is None or not request.existing_event_is_recovered:
             return request
@@ -3648,6 +3885,31 @@ class ResponseRunner:
             resumed_reply=unfinished,
         )
 
+    def _with_recorded_interrupted_attempt(self, request: ResponseRequest, handle: SpanHandle) -> ResponseRequest:
+        """Tell a replay what its stopped attempt may have shown, from the reply's records (DESIGN.md §5.4)."""
+        if handle.span.kind is not rl.SpanKind.REPLAY:
+            return request
+        unfinished = handle.resumed
+        if unfinished is not None:
+            completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
+            attempt = render_stopped_attempt(
+                partial_text=strip_team_display(unfinished.partial_text),
+                completed_tools=completed_tools,
+                interrupted_tools=interrupted_tools,
+            )
+            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+        else:
+            # The attempt showed nothing of its work, which is not proof it did none.
+            instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
+        self.deps.logger.info(
+            "interrupted_attempt_resumed",
+            response_event_id=request.existing_event_id,
+            attempt_shown=unfinished is not None,
+        )
+        account = render_enrichment_block([EnrichmentItem(key="interrupted_attempt", text=instruction)])
+        model_prompt = request.model_prompt if request.model_prompt is not None else request.prompt
+        return replace(request, model_prompt=f"{model_prompt.rstrip()}\n\n{account}", resumed_reply=unfinished)
+
     async def _prepare_locked_source(
         self,
         request: ResponseRequest,
@@ -3661,7 +3923,20 @@ class ResponseRunner:
             if request.prepare_source_turn is not None
             else False
         )
+        handle = current_span()
         if preparation is EditPreparation.REBUILD:
+            if handle is not None and not handle.exited:
+                confirms = handle.unconfirmed_progress
+                await self.deps.delivery_gateway.end_reply_span(
+                    handle,
+                    lambda reply, span: rl.release(
+                        reply,
+                        span,
+                        now_ns=time.time_ns(),
+                        outcome=rl.SpanOutcome.SUPERSEDED,
+                        confirms=confirms,
+                    ),
+                )
             return None
         if preparation:
             self.deps.logger.info(
@@ -3671,7 +3946,9 @@ class ResponseRunner:
             source_deleted = await self.deps.delivery_gateway.cleanup_deleted_response(
                 request.response_envelope.source_event_id,
             )
-            if not source_deleted and request.existing_event_id is not None and request.existing_event_is_placeholder:
+            if handle is not None and not handle.exited:
+                await self._end_span_for_terminal_source(handle, resolved_target, source_deleted=source_deleted)
+            elif not source_deleted and request.existing_event_id is not None and request.existing_event_is_placeholder:
                 await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=resolved_target,
@@ -3688,6 +3965,36 @@ class ResponseRunner:
                 await request.on_source_turn_suppressed()
             return None
         return request
+
+    async def _end_span_for_terminal_source(
+        self,
+        handle: SpanHandle,
+        target: MessageTarget,
+        *,
+        source_deleted: bool,
+    ) -> None:
+        """End a claimed span whose source became terminal before it ran (PR-1.md §6.2 second gate)."""
+        gateway = self.deps.delivery_gateway
+        now_ns = time.time_ns()
+        if source_deleted:
+            await gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.sources_deleted(reply, span, now_ns=now_ns),
+            )
+            return
+        reply = await self.deps.approval_store.replies.load(handle.reply_id)
+        if reply is not None and reply.unapplied_stop:
+            await gateway.end_reply_span_with_note(
+                handle,
+                target,
+                state=rl.ReplyState.CANCELLED,
+                note=note_segment(NoteKind.CANCELLED),
+            )
+            return
+        await gateway.end_reply_span(
+            handle,
+            lambda reply, span: rl.sources_settled_without_reply(reply, span, now_ns=now_ns),
+        )
 
     async def _prepare_admitted_locked_turn(
         self,
@@ -3711,6 +4018,7 @@ class ResponseRunner:
                 execution_identity=execution_identity,
             )
         ):
+            handle = current_span()
             placeholder_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=resolved_target,
@@ -3721,6 +4029,15 @@ class ResponseRunner:
                     # could duplicate into two answers in the room.
                     delivery_turn_id=request.response_envelope.source_event_id,
                     delivery_stage=DeliveryStage.INITIAL,
+                    reply_write=(
+                        None
+                        if handle is None
+                        else initial_write(
+                            handle,
+                            Presentation(placeholder=placeholder_message, show_tool_calls=handle.base.show_tool_calls),
+                            placeholder_only=True,
+                        )
+                    ),
                 ),
             )
             if placeholder_event_id is not None:
@@ -4089,6 +4406,14 @@ class ResponseRunner:
         if final_delivery_outcome is None:
             msg = "Response generation did not settle a delivery outcome"
             raise RuntimeError(msg)
+        handle = current_span()
+        if handle is not None and not handle.exited:
+            final_delivery_outcome = await self._end_span_after_outcome(
+                handle,
+                final_delivery_outcome,
+                target=target,
+                delivery_started=progress.stage_started,
+            )
         final_outcome = await self._finalize_locked_outcome(
             lifecycle,
             final_delivery_outcome,
@@ -4125,6 +4450,80 @@ class ResponseRunner:
                 await request.on_deferred_outcome_handled(response_event_id)
             raise deferred_error
         return final_outcome.final_visible_event_id if source_handled else None
+
+    async def _end_span_after_outcome(
+        self,
+        handle: SpanHandle,
+        outcome: FinalDeliveryOutcome,
+        *,
+        target: MessageTarget,
+        delivery_started: bool,
+    ) -> FinalDeliveryOutcome:
+        """End a span whose settled outcome wrote no terminal row (PR-1.md §6.2)."""
+        gateway = self.deps.delivery_gateway
+        confirms = handle.unconfirmed_progress
+        now_ns = time.time_ns()
+        if outcome.terminal_status == "suspended":
+            # The approval continuation owns the sources until its resume claims the reply.
+            await gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
+            )
+            return outcome
+        if outcome.terminal_status == "completed" or outcome.suppressed:
+            # Nothing was answered: a placeholder goes, substantive content stays.
+            await gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.suppress(reply, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
+            )
+            return outcome
+        if outcome.terminal_status == "cancelled" and outcome.resolved_cancel_source == "user_stop":
+            noted = await gateway.end_reply_span_with_note(
+                handle,
+                target,
+                state=rl.ReplyState.CANCELLED,
+                note=note_segment(NoteKind.CANCELLED),
+            )
+            return replace(noted, cancel_source=outcome.cancel_source, failure_reason=outcome.failure_reason)
+        if outcome.terminal_status == "error" and not delivery_started:
+            if handle.resumed is not None:
+                # A resumed reply shows the interruption below its recovered content; the sources are retried.
+                noted = await gateway.end_reply_span_with_note(
+                    handle,
+                    target,
+                    state=rl.ReplyState.ACTIVE,
+                    note=note_segment(NoteKind.ERROR, format_error_note(outcome.failure_reason or "interrupted")),
+                )
+                return replace(noted, terminal_status="error", failure_reason=outcome.failure_reason)
+            await gateway.end_reply_span(
+                handle,
+                lambda reply, span: rl.fail(reply, span, None, phase="pre_delivery", confirms=confirms, now_ns=now_ns),
+            )
+            return outcome
+        if outcome.terminal_status == "cancelled":
+            reply = await self.deps.approval_store.replies.load(handle.reply_id)
+            if reply is not None and reply.event_id is None:
+                # Interrupted before anything was visible: nothing to note, and the sources are retried.
+                await gateway.end_reply_span(
+                    handle,
+                    lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
+                )
+                return outcome
+        note = (
+            note_segment(NoteKind.RESTART)
+            if outcome.resolved_cancel_source == "sync_restart"
+            else note_segment(NoteKind.INTERRUPTED)
+            if outcome.terminal_status == "cancelled"
+            else note_segment(NoteKind.ERROR, format_error_note(outcome.failure_reason or ""))
+        )
+        # A non-user interruption or an error during delivery ends the reply with its note.
+        noted = await gateway.end_reply_span_with_note(handle, target, state=rl.ReplyState.FAILED, note=note)
+        return replace(
+            noted,
+            terminal_status=outcome.terminal_status,
+            cancel_source=outcome.cancel_source,
+            failure_reason=outcome.failure_reason,
+        )
 
     def _build_lifecycle(
         self,
@@ -4843,8 +5242,15 @@ class ResponseRunner:
                 user_id=user_id,
                 run_id=run_id,
                 on_cancelled=on_cancelled,
+                on_task_started=self._register_span_task,
             ),
         )
+
+    def _register_span_task(self, task: asyncio.Task[None]) -> None:
+        """Let a Stop on the current span cancel exactly this attempt."""
+        handle = current_span()
+        if handle is not None:
+            handle.runtime.register_task(handle, task)
 
     @timed("prepare_response_runtime")
     async def prepare_response_runtime(

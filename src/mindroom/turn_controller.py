@@ -2178,12 +2178,17 @@ class TurnController:
                     )
             except PostLockRequestPreparationError as error:
                 failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
-                response_event_id = await self._finalize_dispatch_failure(
-                    target=dispatch.target,
-                    error=failure,
-                    existing_event_id=error.placeholder_event_id,
-                    on_visible_response=record_visible_response,
-                    delivery_turn_id=handled_turn.anchor_event_id,
+                response_event_id = (
+                    # The reply's records already settled the sources and owe the notice.
+                    error.placeholder_event_id
+                    if error.reply_owned
+                    else await self._finalize_dispatch_failure(
+                        target=dispatch.target,
+                        error=failure,
+                        existing_event_id=error.placeholder_event_id,
+                        on_visible_response=record_visible_response,
+                        delivery_turn_id=handled_turn.anchor_event_id,
+                    )
                 )
                 await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),

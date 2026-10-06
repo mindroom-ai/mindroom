@@ -133,6 +133,8 @@ from .matrix.room_member_joins import (
 )
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
+from .reply_lifecycle import CancelSpan
+from .reply_scope import ReplyRuntime
 from .response_admission import admitted_response_decision
 from .response_delivery_recovery import ResponseDeliveryRecovery
 from .response_payload_preparation import ResponsePayloadPreparer
@@ -634,6 +636,13 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
             ),
         )
+        self._reply_runtime = ReplyRuntime(
+            store=self._journal_store.principal(self._journal_principal_id),
+            entity_name=self.agent_name,
+            generation=self._approval_runtime_generation,
+            # Resolved late: the dispatcher is built after the reply runtime.
+            retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
+        )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
                 runtime=self._runtime_view,
@@ -670,6 +679,7 @@ class AgentBot:
                     event_id,
                     record,
                 ),
+                reply_effects=self._run_reply_effects,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -763,6 +773,7 @@ class AgentBot:
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
                 redacted_history_events=self._turn_store.redacted_history_events,
+                replies=self._reply_runtime,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -932,6 +943,12 @@ class AgentBot:
             )
             == "room"
         )
+
+    async def _run_reply_effects(self, effects: tuple[object, ...]) -> None:
+        """Run what committed reply transitions left for after their commit."""
+        for effect in effects:
+            if isinstance(effect, CancelSpan):
+                self._reply_runtime.cancel_span(effect.span_id, cancel_source="user_stop")
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""
@@ -1841,6 +1858,8 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
+            # This bot instance now owns its replies; spans of earlier instances can no longer write.
+            await self._reply_runtime.start()
             client = self.client
             assert client is not None
 

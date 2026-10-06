@@ -179,6 +179,45 @@ def claim(
 
 
 # ---------------------------------------------------------------------------
+# Stop
+
+
+def record_stop(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    event_id: str,
+    receipt_order: int,
+    newer_edit: bool,
+) -> AppliedTransition | None:
+    """Record a Stop on the reply bound to one event; ``None`` when no reply is bound to it."""
+    found = reply_messages.for_event(transaction, principal_id, event_id)
+    if found is None:
+        return None
+    reply = reply_messages.lock(transaction, principal_id, found.reply_id)
+    assert reply is not None
+    span_id = reply.current_span_id or reply.last_span_id
+    span = reply_spans.load(transaction, principal_id, span_id)
+    active_generation = reply_messages.active_generation(transaction, principal_id)
+    span_live = (
+        span is not None
+        and not span.ended
+        and span.span_id == reply.current_span_id
+        and span.bot_generation == active_generation
+    )
+    return apply(
+        transaction,
+        principal_id,
+        rl.stop(
+            reply,
+            span,
+            rl.StopFacts(receipt_order=receipt_order, newer_edit=newer_edit, span_live=span_live),
+            now_ns=time.time_ns(),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Rows
 
 
@@ -390,6 +429,27 @@ class ReplyStore:
                 reply_id=reply_id,
                 span_id=span_id,
                 decide=decide,
+            ),
+        )
+
+    async def update(self, reply_id: str, decide: Callable[[Reply], Transition]) -> AppliedTransition | None:
+        """Apply one reply-only rule to the locked reply, in a transaction of its own."""
+
+        def write(transaction: Transaction) -> AppliedTransition | None:
+            reply = reply_messages.lock(transaction, self._principal_id, reply_id)
+            return None if reply is None else apply(transaction, self._principal_id, decide(reply))
+
+        return await self._backend.write(write)
+
+    async def record_stop(self, *, event_id: str, receipt_order: int, newer_edit: bool) -> AppliedTransition | None:
+        """Record a Stop on the reply bound to one event."""
+        return await self._backend.write(
+            lambda transaction: record_stop(
+                transaction,
+                self._principal_id,
+                event_id=event_id,
+                receipt_order=receipt_order,
+                newer_edit=newer_edit,
             ),
         )
 
