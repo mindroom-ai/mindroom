@@ -281,6 +281,7 @@ Matrix sync callback
 ## Persistent State
 
 Persistent state lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
+
 - `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, such as an agent's traces in `agents/<agent>/sessions/<agent>.db`, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
 - `agents/*/learning/` – Per-agent Agno Learning data when learning is enabled
 - `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
