@@ -44,8 +44,6 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
-
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
@@ -100,18 +98,9 @@ def _check_homeassistant_configured(tool_name: str, ha_creds: dict[str, Any] | N
     return False
 
 
-def _required_fields_stored(
-    tool: dict[str, Any],
-    credentials: dict[str, Any] | None,
-    *,
-    excluded_fields: Collection[str] = (),
-) -> bool:
-    """Return whether every required config field, except excluded_fields, is present in credentials."""
-    required_fields = [
-        field["name"]
-        for field in tool.get("config_fields") or []
-        if field.get("required", True) and field["name"] not in excluded_fields
-    ]
+def _required_fields_stored(tool: dict[str, Any], credentials: dict[str, Any] | None) -> bool:
+    """Return whether every required config field is present in credentials."""
+    required_fields = [field["name"] for field in tool.get("config_fields") or [] if field.get("required", True)]
     return all(field in (credentials or {}) for field in required_fields)
 
 
@@ -433,14 +422,7 @@ async def _update_tools_statuses(
             )
             # An OAuth connection alone cannot construct a tool whose own required settings are missing.
             # Without a registered OAuth provider, the required fields live in the provider credentials already checked above.
-            if auth_configured and (
-                provider is None
-                or _required_fields_stored(
-                    tool,
-                    get_credentials(tool_name),
-                    excluded_fields=tool.get("oauth_fallback_fields") or (),
-                )
-            ):
+            if auth_configured and (provider is None or _required_fields_stored(tool, get_credentials(tool_name))):
                 tool["status"] = "available"
             continue
 

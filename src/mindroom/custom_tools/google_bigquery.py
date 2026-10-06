@@ -23,7 +23,7 @@ _MAX_ERROR_DETAIL = 500
 _DEFAULT_MAX_ROWS = 100
 _MAX_ROWS_LIMIT = 1000
 # api_core prefixes REST errors with the request, as in `POST https://bigquery.googleapis.com/...?prettyPrint=false: `.
-_REST_REQUEST_PREFIX = re.compile(r"[A-Z]+ \S+: ")
+_REST_REQUEST_PREFIX = re.compile(r"\A[A-Z]+ \S+: ")
 # A query may open with parentheses, as in `(SELECT 1) UNION ALL (SELECT 2)`, but must start with SELECT or WITH.
 _READ_ONLY_START = re.compile(r"[\s(]*(select|with)\b", re.IGNORECASE)
 _MAX_STRING_PREFIX = 2

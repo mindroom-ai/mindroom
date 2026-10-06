@@ -180,7 +180,7 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
-        runtime_config: Config | None = None,
+        runtime_config: Config | None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         provided_creds = kwargs.pop("creds", None)

@@ -202,6 +202,15 @@ def test_run_sql_query_strips_the_rest_request_prefix_from_bad_request_messages(
     assert result == {"error": "Google BigQuery request failed (HTTP 400): Unrecognized name: missing at [1:8]"}
 
 
+def test_run_sql_query_keeps_bad_request_messages_without_a_request_prefix(tmp_path: Path) -> None:
+    tool, client = _tool(tmp_path)
+    client.error = google_exceptions.BadRequest("Invalid ARRAY literal: expected INT64")
+
+    result = json.loads(tool.run_sql_query("SELECT [1, 'a']"))
+
+    assert result == {"error": "Google BigQuery request failed (HTTP 400): Invalid ARRAY literal: expected INT64"}
+
+
 def test_run_sql_query_hides_other_provider_text(tmp_path: Path) -> None:
     tool, client = _tool(tmp_path)
     client.error = google_exceptions.Forbidden("provider-controlled-secret")

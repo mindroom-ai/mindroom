@@ -81,6 +81,7 @@ def _tool(tmp_path: Path, **kwargs: Any) -> _ProbeCloudTools:  # noqa: ANN401
         runtime_paths=paths,
         credentials_manager=get_runtime_credentials_manager(paths),
         worker_target=None,
+        runtime_config=None,
         **kwargs,
     )
 
@@ -139,7 +140,12 @@ def test_clients_are_built_per_requester_from_that_requesters_stored_credentials
             credentials_manager=manager,
             worker_target=target,
         )
-    tool = _ProbeCloudTools(runtime_paths=paths, credentials_manager=manager, worker_target=alice_target)
+    tool = _ProbeCloudTools(
+        runtime_paths=paths,
+        credentials_manager=manager,
+        worker_target=alice_target,
+        runtime_config=None,
+    )
 
     def call_as(identity: ToolExecutionIdentity) -> dict[str, str]:
         with tool_execution_identity(identity):
@@ -206,6 +212,7 @@ def test_final_401_on_stored_connection_requires_reconnect(tmp_path: Path) -> No
         runtime_paths=paths,
         credentials_manager=manager,
         worker_target=None,
+        runtime_config=None,
         error=google_exceptions.Unauthenticated("provider-controlled-401"),
     )
 
