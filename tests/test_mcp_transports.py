@@ -193,8 +193,9 @@ async def test_open_streamable_http_interpolates_headers_and_passes_timeouts_on_
         url: str,
         *,
         http_client: httpx2.AsyncClient,
+        max_sse_event_size: int | None,
     ) -> AsyncIterator[tuple[object, object]]:
-        captured.update(url=url, http_client_closed=http_client.is_closed)
+        captured.update(url=url, http_client_closed=http_client.is_closed, max_sse_event_size=max_sse_event_size)
         assert isinstance(http_client._transport, ServerFetchAsyncHTTPX2Transport)
         assert http_client.headers["X-Token"] == "secret-token"
         assert http_client.timeout == httpx2.Timeout(3.5, read=4.5)
@@ -214,7 +215,7 @@ async def test_open_streamable_http_interpolates_headers_and_passes_timeouts_on_
     async with handle.opener() as streams:
         assert streams == (read_stream, write_stream)
 
-    assert captured == {"url": "https://mcp.example/mcp", "http_client_closed": False}
+    assert captured == {"url": "https://mcp.example/mcp", "http_client_closed": False, "max_sse_event_size": None}
 
 
 @pytest.mark.asyncio
@@ -231,6 +232,7 @@ async def test_remote_transport_latches_http_401_without_response_content(
         _url: str,
         *,
         http_client: httpx2.AsyncClient,
+        max_sse_event_size: int | None,  # noqa: ARG001
     ) -> AsyncIterator[tuple[object, object]]:
         captured.update(http_client=http_client)
         yield object(), object()

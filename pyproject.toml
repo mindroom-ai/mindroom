@@ -496,6 +496,7 @@ dev = [
 # uv resolves this group with the application's exact NIO pin in the same lockfile.
 desktop-helper = [
   "certifi",
+  "httpx>=0.27",
   "mcp[cli]>=2.3,<3",
   "mindroom-nio[e2e]",
   "pillow>=10.2",

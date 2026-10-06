@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import httpx2
@@ -621,14 +621,16 @@ async def test_request_id_cannot_expand_an_ordinary_response_beyond_limit() -> N
         assert calls == []
 
 
-async def test_response_limit_includes_valid_request_id_and_jsonrpc_envelope() -> None:
+@pytest.mark.parametrize("modern", [False, True])
+async def test_response_limit_includes_valid_request_id_and_jsonrpc_envelope(modern: bool) -> None:
     """A result near the payload ceiling cannot overflow through its response envelope."""
 
     async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
         return {"result": "x" * 65460}
 
+    payload, headers = _modern(_call("a" * 126)) if modern else (_call("a" * 126), {})
     async with _client(dispatch) as client:
-        response = await client.post("/mcp", json=_call("a" * 126))
+        response = await client.post("/mcp", json=payload, headers=headers)
         assert response.status_code == 200
         assert len(response.content) <= 131072
 
@@ -750,6 +752,46 @@ async def test_unknown_tool_name_never_enters_sdk_logs(caplog: pytest.LogCapture
         response = await client.post("/mcp", json=_call(name="harmless-tool-name-marker"))
         assert response.json()["result"]["structuredContent"]["error"]["code"] == "tool_not_found"
     assert "harmless-tool-name-marker" not in caplog.text
+
+
+@pytest.mark.parametrize("modern", [False, True])
+async def test_trace_metadata_never_enters_logs(caplog: pytest.LogCaptureFixture, modern: bool) -> None:
+    """Client-supplied trace propagation fields are not parsed into SDK or OpenTelemetry logs."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result": "ok"}
+
+    payload, headers = _modern(_call()) if modern else (_call(), {})
+    params = cast("dict[str, Any]", payload["params"])
+    params["_meta"] = {
+        **params.get("_meta", {}),
+        "baggage": "harmless-baggage-marker",
+        "traceparent": "harmless-traceparent-marker",
+        "tracestate": "harmless-tracestate-marker",
+    }
+    caplog.set_level("DEBUG")
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        async with _client(dispatch) as client:
+            response = await client.post("/mcp", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert "harmless-" not in caplog.text
+    assert "harmless-" not in json.dumps(logs)
+
+
+@pytest.mark.parametrize("modern", [False, True])
+async def test_non_ascii_results_fit_the_response_limit(modern: bool) -> None:
+    """The response limit holds for each revision's wire encoding, which escapes non-ASCII on 2026-07-28."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result": "é" * 20000}
+
+    payload, headers = _modern(_call()) if modern else (_call(), {})
+    async with _client(dispatch) as client:
+        response = await client.post("/mcp", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert len(response.content) <= 131072
+    error = response.json()["result"]["structuredContent"].get("error")
+    assert (error or {}).get("code") == ("result_too_large" if modern else None)
 
 
 @pytest.mark.parametrize("arguments", [{}, {"arguments": None}, {"arguments": {}}])

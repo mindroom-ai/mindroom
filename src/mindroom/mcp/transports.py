@@ -161,7 +161,8 @@ async def _streamable_http_client(
     """Open streamable HTTP on a factory-built client, matching `sse_client`'s client construction."""
     async with (
         httpx_client_factory(headers=headers, timeout=httpx2.Timeout(timeout, read=sse_read_timeout)) as http_client,
-        streamable_http_client(url, http_client=http_client) as streams,
+        # Tool results may exceed the SDK's default 1 MiB per-event cap, which 1.x did not have.
+        streamable_http_client(url, http_client=http_client, max_sse_event_size=None) as streams,
     ):
         yield streams
 

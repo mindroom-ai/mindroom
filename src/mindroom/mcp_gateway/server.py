@@ -16,7 +16,6 @@ from mcp import types
 from mcp.server import Server, ServerRequestContext
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
-from mcp.shared.inbound import ERROR_CODE_HTTP_STATUS
 from mcp.types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
@@ -177,7 +176,7 @@ def _error(code: GatewayErrorCode, message: str) -> GatewayErrorResponse:
     return {"error": {"code": code, "message": message}}
 
 
-def _result(payload: Mapping[str, object]) -> types.CallToolResult:
+def _result(payload: Mapping[str, object], *, modern: bool = False) -> types.CallToolResult:
     structured_content = dict(payload)
     text = json.dumps(structured_content, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     result = types.CallToolResult(
@@ -185,7 +184,13 @@ def _result(payload: Mapping[str, object]) -> types.CallToolResult:
         structured_content=structured_content,
         is_error="error" in structured_content,
     )
-    if len(result.model_dump_json(by_alias=True).encode()) > _MAX_RESPONSE_BYTES - _RESPONSE_ENVELOPE_BYTES:
+    # Measure the encoding each revision is sent in: 2026-07-28 responses escape non-ASCII characters.
+    wire = (
+        json.dumps(result.model_dump(mode="json", by_alias=True, exclude_none=True), separators=(",", ":"))
+        if modern
+        else result.model_dump_json(by_alias=True)
+    )
+    if len(wire.encode()) > _MAX_RESPONSE_BYTES - _RESPONSE_ENVELOPE_BYTES:
         return _result(
             _error(GatewayErrorCode.RESULT_TOO_LARGE, "The tool response exceeds the gateway response limit."),
         )
@@ -241,10 +246,10 @@ def _validate_message(payload: object, *, modern: bool) -> Response | None:
             id=envelope.id,
             error=types.ErrorData(code=-32602, message="Invalid request parameters"),
         )
-        # The 2026-07-28 revision maps JSON-RPC errors to HTTP statuses; earlier revisions answer them with 200.
+        # The 2026-07-28 revision answers invalid parameters with HTTP 400; earlier revisions answer them with 200.
         return JSONResponse(
             error.model_dump(by_alias=True, mode="json", exclude_none=True),
-            status_code=ERROR_CODE_HTTP_STATUS.get(error.error.code, 200) if modern else 200,
+            status_code=400 if modern else 200,
         )
     return None
 
@@ -371,6 +376,8 @@ class GatewayServer:
             on_list_tools=self._list_tools,
             on_call_tool=self._handle_call_request,
         )
+        # The default tracing middleware parses client `_meta` trace fields and logs malformed ones verbatim.
+        self._server.middleware.clear()
         origin = urlsplit(public_url)
         security = TransportSecuritySettings(
             allowed_hosts=[origin.netloc],
@@ -443,7 +450,7 @@ class GatewayServer:
     ) -> types.CallToolResult:
         if name not in _OPERATION_NAMES:
             return _result(_error(GatewayErrorCode.TOOL_NOT_FOUND, "Unknown gateway operation."))
-        schema = next(tool.input_schema for tool in _meta_tools() if tool.name == name)
+        schema = _input_schema(name)
         if not Draft202012Validator(schema).is_valid(arguments):
             return _result(_error(GatewayErrorCode.INVALID_ARGUMENTS, "Gateway operation arguments are invalid."))
         identity = _request_identity(ctx)
@@ -470,7 +477,10 @@ class GatewayServer:
         try:
             with _disconnect_cancellation(ctx, request, lease), execution_scope(lease):
                 async with asyncio.timeout(self._timeout):
-                    return _result(await self._dispatch(request, name, arguments))
+                    return _result(
+                        await self._dispatch(request, name, arguments),
+                        modern=ctx.protocol_version in MODERN_PROTOCOL_VERSIONS,
+                    )
         except TimeoutError:
             return _result(
                 _error(
