@@ -750,18 +750,22 @@ class ConversationHydrator:
         same contract every other hydration failure follows, and the reason
         there is no retry state to leak.
 
-        An event the walk fetched but could not read is not such a failure for
-        a prompt. Reaching the start of the room still proves the gap was
-        fetched, and a missing key may never arrive, so refusing there would
-        fail every read in the room for as long as the key stays missing. A
-        new encrypted room routinely holds such an event: the router encrypts
-        its welcome before it has seen the agent's device. Live sync drops an
-        undecryptable event without refusing anything either. What the walk
-        cannot say is which thread the event belonged to, so the settlement
-        records the room conversation as incomplete and revokes every thread's
-        marker, and each thread's own next walk decides whether it is complete.
-        A caller that needs completeness still refuses, exactly as its own walk
-        of a conversation does.
+        An event the walk fetched but could not read is not such a failure.
+        Reaching the start of the room still proves the gap was fetched, and a
+        missing key may never arrive, so refusing there would fail every read
+        in the room for as long as the key stays missing -- an export of every
+        thread included, not only the thread the event belongs to. A new
+        encrypted room routinely holds such an event: the router encrypts its
+        welcome before it has seen the agent's device. Live sync drops an
+        undecryptable event without refusing anything either.
+
+        What the walk cannot always say is which thread the event belonged to:
+        an unreadable edit names only its target and a malformed event names
+        nothing. So the settlement records the room conversation as incomplete
+        and revokes every thread's marker, and each thread's own next walk
+        decides whether it is complete. That walk is also where a caller that
+        needs completeness refuses, for exactly the threads that hold an event
+        it could not read.
         """
         if await self.store.room_history_recovery(recovery.room_id) != recovery:
             # Another reader already settled this. `_shared` only joins readers
@@ -795,12 +799,6 @@ class ConversationHydrator:
                 walk_complete=False,
             )
             return HistoryRecoveryOutcome.SUPERSEDED
-        if self.require_complete and walk.exhausted_server and walk.unreadable:
-            msg = (
-                f"Could not prove complete readable history for {recovery.room_id!r}: "
-                f"unreadable events remain ({walk.unreadable.describe()})"
-            )
-            raise _HydrationError(msg)
         outcome = await self.store.settle_room_history_recovery(
             recovery,
             exhausted_server=walk.exhausted_server,

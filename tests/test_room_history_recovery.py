@@ -561,18 +561,33 @@ async def test_reader_holding_a_settled_recovery_does_not_walk_again(
     assert await bodies(principal) == ["one"]
 
 
-async def test_unreadable_server_exhaustion_settles_a_prompt_repair(principal: PrincipalStore) -> None:
-    """A missing room key leaves the room readable but no longer complete.
+def caller_hydrator(principal: PrincipalStore, client: PagedClient, *, require_complete: bool) -> ConversationHydrator:
+    """Build a prompt hydrator, or an export one when it requires complete history."""
+    policy = HydrationPolicy.EXPORT if require_complete else HydrationPolicy.PROMPT
+    return hydrator(principal, client, require_complete=require_complete, policy=policy)
+
+
+@pytest.mark.parametrize("require_complete", [False, True])
+async def test_unreadable_server_exhaustion_settles_the_repair(
+    principal: PrincipalStore,
+    *,
+    require_complete: bool,
+) -> None:
+    """A missing room key leaves the room readable but no longer complete, for every caller.
 
     Reaching the start of the room fetched everything the gap skipped. The
     event nobody could read is missing from the room conversation, the same as
     live sync would have left it, and refusing over it would fail every read in
-    the room for as long as the key stays missing.
+    the room for as long as the key stays missing. An export refuses in each
+    thread's own walk instead, for the threads that hold such an event.
     """
     client = PagedClient(pages=[([raw("$readable", "readable", ts=2_000), UNDECRYPTABLE], "older"), ([], None)])
     await principal.record_room_history_recovery(ROOM)
 
-    await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+    await caller_hydrator(principal, client, require_complete=require_complete).ensure_hydrated(
+        room_id=ROOM,
+        thread_id=None,
+    )
 
     assert client.calls == 2
     assert await principal.room_history_recovery(ROOM) is None
@@ -582,25 +597,11 @@ async def test_unreadable_server_exhaustion_settles_a_prompt_repair(principal: P
     assert await principal.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
 
 
-async def test_unreadable_server_exhaustion_fails_a_complete_history_caller(principal: PrincipalStore) -> None:
-    """Exhaustion proves nothing to an export when the walk could not read every fetched event."""
-    client = PagedClient(pages=[([UNDECRYPTABLE], "older"), ([UNDECRYPTABLE], None)])
-    recovery = await principal.record_room_history_recovery(ROOM)
-    export = hydrator(principal, client, require_complete=True, policy=HydrationPolicy.EXPORT)
-
-    with pytest.raises(_HydrationError, match="unreadable") as failure:
-        await export.ensure_hydrated(room_id=ROOM, thread_id=None)
-
-    assert "encrypted_events=2" in str(failure.value)
-    assert "encrypted_sessions=1" in str(failure.value)
-    assert ROOM in str(failure.value)
-    assert await principal.room_history_recovery(ROOM) == recovery
-    assert await bodies(principal) == []
-    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
-
-
-async def test_bad_event_at_server_exhaustion_stays_repairable_for_a_complete_history_caller(
+@pytest.mark.parametrize("require_complete", [False, True])
+async def test_bad_event_at_server_exhaustion_settles_without_completeness(
     principal: PrincipalStore,
+    *,
+    require_complete: bool,
 ) -> None:
     """A malformed event is unreadable evidence, not proof that the room is whole."""
     malformed = nio.Event.parse_event({"event_id": "$bad", "type": "m.room.message"})
@@ -619,17 +620,16 @@ async def test_bad_event_at_server_exhaustion_stays_repairable_for_a_complete_hi
             self.calls += 1
             return nio.RoomMessagesResponse(ROOM, [malformed], "start", None)  # type: ignore[list-item]
 
-    recovery = await principal.record_room_history_recovery(ROOM)
-    export = hydrator(principal, BadEventClient(pages=[]), require_complete=True, policy=HydrationPolicy.EXPORT)
+    await principal.record_room_history_recovery(ROOM)
 
-    with pytest.raises(_HydrationError, match="unreadable") as failure:
-        await export.ensure_hydrated(room_id=ROOM, thread_id=None)
+    await caller_hydrator(principal, BadEventClient(pages=[]), require_complete=require_complete).ensure_hydrated(
+        room_id=ROOM,
+        thread_id=None,
+    )
 
-    assert "invalid_events=1" in str(failure.value)
-    assert "encrypted_events=0" in str(failure.value)
-    assert "historical encryption keys" not in str(failure.value)
-    assert await principal.room_history_recovery(ROOM) == recovery
-    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert await principal.room_history_recovery(ROOM) is None
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
 @pytest.mark.parametrize("old_event_type", ["encrypted_file", "cleared_avatar"])

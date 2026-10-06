@@ -2210,6 +2210,23 @@ class TestEncryptedRelations:
             ),
         )
 
+    @classmethod
+    def _readable_thread_beside_an_unreadable_welcome(cls) -> FakeClient:
+        """Return a room whose thread is readable and whose welcome this device has no key for."""
+        client = cls._thread_of_encrypted_replies(readable=True)
+        client.pages = [
+            (
+                [
+                    *reversed(client.relations["$root"]),
+                    client.events["$root"],
+                    encrypted("$welcome", sender=BOB, ts=500),
+                ],
+                None,
+            ),
+        ]
+        client.repeat_last = True
+        return client
+
     async def test_a_thread_whose_replies_could_not_be_read_is_not_complete(
         self,
         alice: PrincipalStore,
@@ -2255,16 +2272,15 @@ class TestEncryptedRelations:
     ) -> None:
         """Missing keys must not permanently spend the export walk's allowance."""
         client = self._thread_of_encrypted_replies(readable=False)
-        recovery = None
         if recover_room:
             client.history = [client.events["$root"], *client.relations["$root"]]
             client.repeat_last = True
             client.pages = [(client.history, None)]
-            recovery = await alice.record_room_history_recovery(ROOM)
+            await alice.record_room_history_recovery(ROOM)
         strict = hydrator(alice, client, **EXPORT_CALLER)
         with pytest.raises(RuntimeError, match="unreadable events remain"):
             await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
-        assert await alice.room_history_recovery(ROOM) == recovery
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
         client.room_keys = self._thread_of_encrypted_replies(readable=True).room_keys
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
@@ -2288,14 +2304,7 @@ class TestEncryptedRelations:
         which holds the unreadable event, stops calling itself complete. An
         export still refuses it.
         """
-        client = self._thread_of_encrypted_replies(readable=True)
-        history = [
-            *reversed(client.relations["$root"]),
-            client.events["$root"],
-            encrypted("$welcome", sender=BOB, ts=500),
-        ]
-        client.pages = [(history, None)]
-        client.repeat_last = True
+        client = self._readable_thread_beside_an_unreadable_welcome()
         await alice.record_room_history_recovery(ROOM)
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
@@ -2307,6 +2316,21 @@ class TestEncryptedRelations:
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
         with pytest.raises(_HydrationError, match="unreadable events remain"):
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_an_export_reads_a_thread_past_an_unreadable_event_outside_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An export refuses the threads holding an unreadable event, not every thread in the room."""
+        client = self._readable_thread_beside_an_unreadable_welcome()
+        await alice.record_room_history_recovery(ROOM)
+
+        await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.history_pages == 1
+        assert await alice.room_history_recovery(ROOM) is None
+        assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
     async def test_a_repair_past_an_unreadable_event_makes_warm_threads_prove_themselves_again(
         self,
