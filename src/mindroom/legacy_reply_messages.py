@@ -136,7 +136,12 @@ class LegacyReplyReads:
     async def run(self) -> None:
         """Read every earlier-release reply still waiting, giving up on one after a few failed passes."""
         for reply, last in await self.store.legacy_reply_reads():
-            read = await self._read(reply, last)
+            try:
+                read = await self._read(reply, last)
+            except Exception:
+                # A room history the bot cannot read must not hold up the rest of its recovery.
+                self.logger.exception("legacy_reply_read_failed", reply_id=reply.reply_id)
+                read = None
             if read is None:
                 failures = self._failures.get(reply.reply_id, 0) + 1
                 self._failures[reply.reply_id] = failures

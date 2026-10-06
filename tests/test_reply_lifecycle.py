@@ -315,6 +315,15 @@ def test_interactive_span_is_adopted_or_replayed_when_lost() -> None:
     assert replayed.claimed is not None
     assert replayed.claimed.kind is SpanKind.REPLAY
 
+    stopped = replace(created.reply, state=ReplyState.CANCELLED)
+    refused = rl.claim(
+        _request("ignored", interactive_span_id="ack-span"),
+        _context(stopped, ack, interactive_span=ack),
+    )
+    # A Stop ended the selection's reply first: the selection runs nothing.
+    assert refused.outcome is Outcome.DUPLICATE
+    assert refused.claimed is None
+
 
 # --- writes ----------------------------------------------------------------
 
@@ -700,6 +709,42 @@ def _paused(*, in_place: bool = False) -> tuple[Reply, Span, rl.Transition]:
     )
     assert transition.reply is not None
     return transition.reply, span, transition
+
+
+def test_a_failed_approval_ends_a_resume_an_older_instance_left_current() -> None:
+    """Nothing runs that resume any more: the failure ends it lost, and the reply no longer names the approval."""
+    reply, _span, _transition = _paused()
+    resume = rl.claim(
+        _request("resume", delivery_id="$source", approval_id="approval-1"),
+        _context(reply, _span),
+    )
+    assert resume.reply is not None
+    assert resume.claimed is not None
+    orphan = replace(resume.claimed, bot_generation=OLD_GEN)
+    settled = rl.approval_settled(
+        resume.reply,
+        orphan,
+        approval_id="approval-1",
+        result="failed",
+        disposition="cancelled_by_user",
+        now_ns=NOW,
+    )
+    assert settled.reply is not None
+    assert settled.reply.state is ReplyState.CANCELLED
+    assert settled.reply.approval_id is None
+    assert settled.reply.current_span_id is None
+    assert _span_after(settled, "resume").outcome is SpanOutcome.LOST
+
+
+def test_sources_settled_with_a_stop_recorded_end_the_reply_cancelled() -> None:
+    """A Stop recorded before the sources settled decides the end, not the interruption note."""
+    reply, span = _interrupted()
+    stopped = replace(reply, stop_receipt_order=4)
+    ended = rl.sources_settled_without_reply(stopped, span, now_ns=NOW)
+    assert ended.reply is not None
+    assert ended.reply.state is ReplyState.CANCELLED
+    assert not ended.reply.unapplied_stop
+    assert ended.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_CANCELLED)
 
 
 def test_pause_ends_the_span_and_writes_an_edit_row() -> None:
@@ -1202,7 +1247,7 @@ def test_deleting_every_source_cancels_the_running_span() -> None:
 
 
 def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> None:
-    """Before the regeneration showed anything, the answer the edit was replacing stands; afterwards the reply goes."""
+    """Before the regeneration wrote anything, the answer the edit was replacing stands; afterwards the reply goes."""
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
     reply = replace(reply, state=ReplyState.COMPLETED, presentation="answer", event_id="$reply")
@@ -1216,7 +1261,8 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert kept.reply.redaction_pending == ()
     assert CancelSpan("span-2") in kept.effects
     assert _span_after(kept, "span-2").outcome is SpanOutcome.RESTORED
-    shown = replace(regeneration.reply, confirmed_seq=regeneration.reply.reply_sequence + 1)
+    # Written ahead, so Matrix may show it though no confirmation says so yet.
+    shown = replace(regeneration.reply, possibly_shown_seq=regeneration.reply.reply_sequence + 1)
     removed = rl.sources_deleted(shown, regeneration.claimed, now_ns=NOW)
     assert removed.reply is not None
     assert removed.reply.state is ReplyState.GONE
@@ -1405,14 +1451,13 @@ def test_terminal_write_failed_on_a_placeholder() -> None:
     """Delivery failures on a placeholder owe the retry note; other failures remove it."""
     reply, span = _turn()
     on_placeholder = replace(reply, event_id="$reply", placeholder_only=True)
-    delivery = rl._terminal_write_failed(on_placeholder, span, reason="delivery_failed", first_create=False, now_ns=NOW)
+    # However Matrix refused it, as for an answer too large to send, the placeholder says delivery failed.
+    delivery = rl._terminal_write_failed(on_placeholder, span, first_create=False, now_ns=NOW)
     assert delivery.reply is not None
+    assert delivery.reply.state is ReplyState.FAILED
     assert delivery.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
-    other = rl._terminal_write_failed(on_placeholder, span, reason="too large", first_create=False, now_ns=NOW)
-    assert other.reply is not None
-    assert other.reply.state is ReplyState.GONE
-    assert other.reply.redaction_pending == ("$reply",)
-    first_create = rl._terminal_write_failed(reply, span, reason="x", first_create=True, now_ns=NOW)
+    assert delivery.reply.redaction_pending == ()
+    first_create = rl._terminal_write_failed(reply, span, first_create=True, now_ns=NOW)
     assert first_create.reply is not None
     assert first_create.reply.state is ReplyState.GONE
 
@@ -1490,7 +1535,7 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
     assert final.reply is not None
     assert not final.reply.placeholder_only
     ended = _span_after(final, span.span_id)
-    failed = rl._terminal_write_failed(final.reply, ended, reason="delivery_failed", first_create=False, now_ns=NOW)
+    failed = rl._terminal_write_failed(final.reply, ended, first_create=False, now_ns=NOW)
     assert failed.reply is not None
     assert failed.reply.owed_write is None
     assert failed.reply.state is ReplyState.FAILED

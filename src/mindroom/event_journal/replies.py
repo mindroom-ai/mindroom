@@ -140,7 +140,18 @@ def decide_on_span(
         raise RuntimeError(msg)
     if retired(transaction, principal_id, span):
         return AppliedTransition(transition=rl.Transition(outcome=rl.Outcome.STALE, reply=reply), post_commit=())
-    return apply(transaction, principal_id, decide(reply, span))
+    return with_ended_span(apply(transaction, principal_id, decide(reply, span)), span)
+
+
+def with_ended_span(applied: AppliedTransition, span: Span) -> AppliedTransition:
+    """Return a refused decision carrying its span when that span already ended, so the task running it learns so.
+
+    A deletion or departure ends a running span from outside; the span's own
+    exits are then refused, and must stop trying.
+    """
+    if applied.transition.applied or not span.ended or applied.transition.spans:
+        return applied
+    return replace(applied, transition=replace(applied.transition, spans=(span,)))
 
 
 def approval_finished(
@@ -584,9 +595,10 @@ def acknowledge_row(
     if pending_stop is None:
         return applied
     receipt_order, _room_id = pending_stop
-    current = (
-        None if bound.current_span_id is None else reply_spans.load(transaction, principal_id, bound.current_span_id)
-    )
+    # An interactive selection's acknowledgement span is not current yet, but the Stop ends it too.
+    current = reply_spans.load(transaction, principal_id, bound.current_span_id or bound.last_span_id)
+    if current is not None and current.ended:
+        current = None
     stopped = apply(
         transaction,
         principal_id,

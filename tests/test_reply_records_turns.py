@@ -417,6 +417,32 @@ async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_
     assert await bot._reply_runtime.store.replies.with_pending_work() == ()
 
 
+async def test_a_redaction_of_an_event_already_gone_is_done(tmp_path: Path) -> None:
+    """An event the homeserver no longer has needs no redaction, so the reply stops owing one."""
+    bot = await _streaming_bot(tmp_path)
+    bot.client.room_redact = AsyncMock(return_value=nio.RoomRedactError("Event not found", status_code="M_NOT_FOUND"))
+    assert await bot._redact_message_event(room_id=_target().room_id, event_id="$gone", reason="Reply removed")
+    bot.client.room_redact = AsyncMock(return_value=nio.RoomRedactError("Forbidden", status_code="M_FORBIDDEN"))
+    assert not await bot._redact_message_event(room_id=_target().room_id, event_id="$kept", reason="Reply removed")
+
+
+async def test_a_note_that_could_not_be_prepared_yet_stays_owed(tmp_path: Path) -> None:
+    """Only the outbox's refusal drops an owed note; one the gateway could not prepare is retried later."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    owed = rl.OwedWrite(answered.last_span_id, rl._NOTE_RESTART)
+    await bot._reply_runtime.store.replies.update(
+        answered.reply_id,
+        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
+    )
+    gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
+    with patch.object(type(gateway), "_deliver_rendered_reply_write", new=AsyncMock(return_value=None)):
+        await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+
+    assert (await _reply(bot)).owed_write == owed
+
+
 async def test_regeneration_replaces_the_answer_of_the_same_reply(tmp_path: Path) -> None:
     """An edit regenerates the reply in place: one reply, a regeneration span, and the new answer as its body."""
     bot = await _streaming_bot(tmp_path)
@@ -1017,10 +1043,14 @@ async def test_deleting_the_prompt_mid_stream_removes_its_reply(tmp_path: Path) 
         _inbound_event(room.room_id, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
         _projected_event(room.room_id, redaction, EventKind.REDACTION, self_sender=room.own_user_id),
     )
-    await bot._on_redaction(room, redaction)
-    # The callback stopped the span itself; nothing else would end the blocked stream.
-    done, _pending = await asyncio.wait({response}, timeout=5)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with patch.object(runner.deps.logger, "error") as logged_error:
+        await bot._on_redaction(room, redaction)
+        # The callback stopped the span itself; nothing else would end the blocked stream.
+        done, _pending = await asyncio.wait({response}, timeout=5)
     assert response in done
+    # The span's task learned its span ended, so it does not report it as left running.
+    assert "reply_span_left_unended" not in [call.args[0] for call in logged_error.call_args_list]
 
     async def redacted() -> None:
         while (await _reply(bot)).redaction_pending:  # noqa: ASYNC110

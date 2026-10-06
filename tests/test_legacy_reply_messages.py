@@ -463,6 +463,30 @@ async def test_a_claimed_resume_is_left_running_for_approval_recovery(
     assert await principal.replies.owner_lost("gen-new", now_ns=NOW) == ()
 
 
+async def test_a_read_that_raises_counts_as_a_failed_pass_and_gives_up(journal_store: EventJournalStore) -> None:
+    """A room history the bot cannot read neither escapes the pass nor keeps the reply waiting forever."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    (reply,) = await _adopt(principal)
+    resolved: list[str] = []
+    reads = LegacyReplyReads(
+        store=principal,
+        client=MagicMock,
+        response_sender=lambda: "@agent:example.org",
+        trusted_sender_ids=tuple,
+        logger=MagicMock(),
+        resolved=resolved.append,
+    )
+    fetch = AsyncMock(side_effect=RuntimeError("M_FORBIDDEN"))
+    with patch("mindroom.legacy_reply_messages.fetch_latest_visible_message", new=fetch):
+        for _ in range(3):
+            await reads.run()
+    assert resolved == [reply.reply_id]
+    assert (await _only_reply(principal)).legacy_pending is None
+
+
 async def test_reads_after_sync_record_what_the_event_showed(journal_store: EventJournalStore) -> None:
     """A read that fails is retried on later passes; one that lands releases the reply."""
     principal = journal_store.principal(PRINCIPAL)

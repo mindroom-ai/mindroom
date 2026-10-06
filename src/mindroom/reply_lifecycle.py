@@ -426,6 +426,15 @@ def _had_acknowledged_write(reply: Reply, span: Span) -> bool:
     return reply.confirmed_seq is not None and reply.confirmed_seq > span.base_sequence
 
 
+def _wrote_anything(reply: Reply, span: Span) -> bool:
+    """Return whether the span recorded any write, which Matrix may show though no confirmation says so yet.
+
+    Rules a span's own exit applies learn its last confirmation first; rules
+    applied from outside the span cannot, so they count every recorded write.
+    """
+    return reply.possibly_shown_seq is not None and reply.possibly_shown_seq > span.base_sequence
+
+
 def _restore(reply: Reply, span: Span, now_ns: int) -> Reply:
     """Restore a regeneration's rollback snapshot.
 
@@ -606,8 +615,11 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
 
     interactive = context.interactive_span
     if request.interactive_span_id is not None and interactive is not None and reply is not None:
-        if interactive.outcome is None:
+        if interactive.outcome is None and not reply.terminal:
             return claimed(_make_current(reply, interactive, request.now_ns), interactive)
+        if interactive.outcome is None:
+            # A Stop ended the selection's reply before its claim: nothing runs for it.
+            return _unchanged(Outcome.DUPLICATE, reply)
         if interactive.outcome is not SpanOutcome.LOST:
             # A Stop that reached the reply first ended the selection's span;
             # Stops do not wait for the conversation lock claims hold.
@@ -837,14 +849,6 @@ class FailedWrite:
     reason: str
 
 
-_DELIVERY_FAILURE_REASONS = frozenset({"delivery_failed", "terminal_update_cancelled", "terminal_update_failed"})
-
-
-def _is_delivery_failure_reason(reason: str) -> bool:
-    """Return whether a failure came from Matrix delivery itself rather than the run."""
-    return reason in _DELIVERY_FAILURE_REASONS or reason.startswith("terminal_update_exception:")
-
-
 def write_failed(reply: Reply, span: Span, failure: FailedWrite, *, now_ns: int) -> Transition:
     """Apply a permanent row failure."""
     write = failure.write
@@ -852,7 +856,6 @@ def write_failed(reply: Reply, span: Span, failure: FailedWrite, *, now_ns: int)
         return _terminal_write_failed(
             reply,
             span,
-            reason=failure.reason,
             first_create=reply.event_id is None,
             now_ns=now_ns,
         )
@@ -900,7 +903,7 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     )
 
 
-def _terminal_write_failed(reply: Reply, span: Span, *, reason: str, first_create: bool, now_ns: int) -> Transition:
+def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, now_ns: int) -> Transition:
     """A span's terminal row failed for good after the span ended; its outcome stays."""
     if span.span_id != reply.last_span_id:
         # A later span claimed the reply only after this row resolved, so this cannot be its row.
@@ -909,14 +912,12 @@ def _terminal_write_failed(reply: Reply, span: Span, *, reason: str, first_creat
     if first_create:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.GONE, now_ns))
     if reply.placeholder_only:
-        if _is_delivery_failure_reason(reason):
-            owed = OwedWrite(span.span_id, _NOTE_DELIVERY_FAILED)
-            return Transition(
-                outcome=Outcome.APPLIED,
-                reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
-            )
-        updated = _with_redactions(_set_state(reply, ReplyState.GONE, now_ns), *_visible_event_ids(reply))
-        return Transition(outcome=Outcome.APPLIED, reply=updated)
+        # The answer never replaced the placeholder, which says so instead.
+        owed = OwedWrite(span.span_id, _NOTE_DELIVERY_FAILED)
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
+        )
     if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(reply, span, now_ns))
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.FAILED, now_ns))
@@ -1311,22 +1312,48 @@ def approval_settled(  # noqa: PLR0911
             return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, approval_id=None))
         return _unchanged(Outcome.DUPLICATE, reply)
     if result == "failed":
-        if disposition == "superseded":
-            return _unchanged(Outcome.DUPLICATE, reply)
-        if reply.state is ReplyState.PAUSED or (reply.state is ReplyState.ACTIVE and resumed):
-            stopped_by_user = disposition == "cancelled_by_user" or reply.unapplied_stop
-            state = ReplyState.CANCELLED if stopped_by_user else ReplyState.FAILED
-            updated = _set_state(reply, state, now_ns, approval_id=None)
-            if state is ReplyState.CANCELLED:
-                updated = _stop_applied(updated)
-            return Transition(outcome=Outcome.APPLIED, reply=updated)
-        return _unchanged(Outcome.STALE, reply)
+        return _approval_failed(reply, last_span, approval_id=approval_id, disposition=disposition, now_ns=now_ns)
     if reply.state is ReplyState.ACTIVE and resumed and last_span is not None:
         state = _state_for_span_outcome(last_span.outcome)
         if state is None:
             return _unchanged(Outcome.STALE, reply)
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, state, now_ns, approval_id=None))
     return _unchanged(Outcome.STALE, reply)
+
+
+def _approval_failed(
+    reply: Reply,
+    last_span: Span | None,
+    *,
+    approval_id: str,
+    disposition: FailureDisposition | None,
+    now_ns: int,
+) -> Transition:
+    """End the reply a failed continuation held; a superseded one leaves it to the regeneration."""
+    if disposition == "superseded":
+        return _unchanged(Outcome.DUPLICATE, reply)
+    resume = last_span if last_span is not None and last_span.kind is SpanKind.APPROVAL_RESUME else None
+    # A resume an older instance left current runs nowhere: the failure ends it.
+    orphaned = (
+        resume is not None
+        and not resume.ended
+        and resume.approval_id == approval_id
+        and reply.current_span_id == resume.span_id
+    )
+    resumed = resume is not None and resume.ended
+    if not (reply.state is ReplyState.PAUSED or (reply.state is ReplyState.ACTIVE and (resumed or orphaned))):
+        return _unchanged(Outcome.STALE, reply)
+    stopped_by_user = disposition == "cancelled_by_user" or reply.unapplied_stop
+    state = ReplyState.CANCELLED if stopped_by_user else ReplyState.FAILED
+    spans: tuple[Span, ...] = ()
+    updated = reply
+    if orphaned and resume is not None:
+        spans = (_end(resume, SpanOutcome.LOST, now_ns),)
+        updated = _clear_current(updated, resume.span_id)
+    updated = _set_state(updated, state, now_ns, approval_id=None)
+    if state is ReplyState.CANCELLED:
+        updated = _stop_applied(updated)
+    return Transition(outcome=Outcome.APPLIED, reply=updated, spans=spans)
 
 
 def approval_failure_note(
@@ -1549,11 +1576,19 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     updated = _clear_current(reply, span.span_id)
     if not span.ended:
         spans = (_end(span, SpanOutcome.SUPPRESSED, now_ns),)
-    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
+    if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _wrote_anything(reply, span):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, span, now_ns), spans=spans)
     if reply.event_id is None or (reply.placeholder_only and reply.confirmed):
-        gone = _with_redactions(_set_state(updated, ReplyState.GONE, now_ns), *_visible_event_ids(reply))
+        gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans)
+    if reply.unapplied_stop:
+        # A Stop recorded before the sources settled decides how the reply ends.
+        owed = OwedWrite(span.span_id, _NOTE_CANCELLED)
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed),
+            spans=spans,
+        )
     # What the reply showed stays, ended by the interrupted note; nothing else
     # would replace the in-progress status it shows. An edit Matrix has not
     # confirmed may show more than the placeholder, so it stays too.
@@ -1615,7 +1650,7 @@ def sources_deleted(reply: Reply, current: Span | None, *, now_ns: int) -> Trans
         and current.kind is SpanKind.REGENERATION
         and current.rollback is not None
         and current.rollback.state in _TERMINAL_STATES
-        and not _had_acknowledged_write(reply, current)
+        and not _wrote_anything(reply, current)
     ):
         # The answer an edit was regenerating stands, as when the regeneration
         # fails before showing anything: a finished answer is kept.

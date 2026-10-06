@@ -26,7 +26,7 @@ from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
@@ -3052,7 +3052,7 @@ async def main(
     Two runtimes on one storage root would both answer every message and take
     each other's replies over, so the second refuses to start.
     """
-    runtime_lock = try_exclusive_file_lock(runtime_paths.storage_root / "tracking" / "runtime.lock")
+    runtime_lock = try_exclusive_file_lock(tracking_dir(runtime_paths) / "runtime.lock")
     if runtime_lock is None:
         msg = f"Another MindRoom is already running with the storage at {runtime_paths.storage_root}"
         raise PermanentStartupError(msg)

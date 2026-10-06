@@ -2054,14 +2054,24 @@ class DeliveryGateway:
                     continue
                 return
             current = await self.deps.outbox.replies.load(reply_id)
-            if current is not None and current.owed_write == owed:
-                # Recording the row would have cleared it: the outbox refused the row itself.
+            if current is not None and current.owed_write == owed and await self._owed_row_refused(span, current):
                 self.deps.logger.warning("reply_owed_write_refused", reply_id=reply_id, note=owed.note)
                 await self.deps.outbox.replies.update(
                     reply_id,
                     lambda latest, owed=owed: rl.owed_write_refused(latest, owed, now_ns=time.time_ns()),
                 )
             return
+
+    async def _owed_row_refused(self, span: rl.Span, reply: rl.Reply) -> bool:
+        """Return whether the outbox refuses any row of the span: its room's membership ended or its delivery retired.
+
+        A note that stays owed for another reason, such as a payload that could
+        not be prepared yet, is retried by the next recovery pass.
+        """
+        if not await self.deps.outbox.turn_membership_is_current(turn_id=span.delivery_id, room_id=reply.room_id):
+            return True
+        initial = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.INITIAL)
+        return initial is not None and initial.retired
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""

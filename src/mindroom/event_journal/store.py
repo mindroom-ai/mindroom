@@ -2231,7 +2231,7 @@ def _enqueue_reply_row(
     reply, span, transition = decided
     if not transition.applied or transition.row is None:
         return ReplyRowEnqueue(
-            applied=replies.apply(transaction, principal_id, transition),
+            applied=replies.with_ended_span(replies.apply(transaction, principal_id, transition), span),
             settled_event_ids=replies.settled_event_ids(transaction, principal_id, transition),
         )
     row = transition.row
