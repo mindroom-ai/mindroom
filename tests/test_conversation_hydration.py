@@ -2270,6 +2270,44 @@ class TestEncryptedRelations:
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
+    async def test_a_room_repair_reads_past_an_event_this_device_has_no_key_for(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One undecryptable event must not fail every prompt read in its room.
+
+        A new encrypted room has exactly this shape. The router encrypts its
+        welcome before it has seen the agent's device, so that room key never
+        reaches the agent, and the agent's join leaves a repairable obligation
+        because sync could not prove where its history began. The repair walks
+        the whole room, welcome included, and refusing at that one event failed
+        every threaded follow-up in the room for as long as the key was missing.
+
+        Live sync drops an undecryptable event and claims nothing about it, so
+        the repair does the same: it settles, and only the room conversation,
+        which holds the unreadable event, stops calling itself complete. An
+        export still refuses it.
+        """
+        client = self._thread_of_encrypted_replies(readable=True)
+        history = [
+            *reversed(client.relations["$root"]),
+            client.events["$root"],
+            encrypted("$welcome", sender=BOB, ts=500),
+        ]
+        client.pages = [(history, None)]
+        client.repeat_last = True
+        await alice.record_room_history_recovery(ROOM)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await alice.room_history_recovery(ROOM) is None
+        assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+        with pytest.raises(_HydrationError, match="unreadable events remain"):
+            await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=None)
+
     @pytest.mark.parametrize("thread_id", [None, "$root"])
     async def test_strict_history_reports_encrypted_events_and_sessions(
         self,

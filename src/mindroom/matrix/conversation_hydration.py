@@ -738,8 +738,8 @@ class ConversationHydrator:
 
         The prompt window is the wrong bound for this job: a busy room can fill
         it entirely with post-gap tail while the missing interval remains on
-        the next page. The proof walk therefore continues to readable server
-        exhaustion, while the raw-event and request ceilings still bound cost.
+        the next page. The proof walk therefore continues to server exhaustion,
+        while the raw-event and request ceilings still bound cost.
 
         Each fetched page is projected and installed before the next request.
         That write claims this exact recovery and membership epoch, so a retry
@@ -749,6 +749,16 @@ class ConversationHydrator:
         obligation stays repairable, and the next read tries again -- which is the
         same contract every other hydration failure follows, and the reason
         there is no retry state to leak.
+
+        An event the walk fetched but could not read is not such a failure for
+        a prompt. Reaching the start of the room still proves the gap was
+        fetched, and a missing key may never arrive, so refusing there failed
+        every read in the room for as long as the key stayed missing -- in a
+        new encrypted room, from the first follow-up on. Live sync drops an
+        undecryptable event without refusing anything either, so the room
+        conversation only stops calling itself complete. A caller that needs
+        completeness still refuses, exactly as its own walk of a conversation
+        does.
         """
         if await self.store.room_history_recovery(recovery.room_id) != recovery:
             # Another reader already settled this. `_shared` only joins readers
@@ -782,7 +792,7 @@ class ConversationHydrator:
                 walk_complete=False,
             )
             return HistoryRecoveryOutcome.SUPERSEDED
-        if walk.exhausted_server and walk.unreadable:
+        if self.require_complete and walk.exhausted_server and walk.unreadable:
             msg = (
                 f"Could not prove complete readable history for {recovery.room_id!r}: "
                 f"unreadable events remain ({walk.unreadable.describe()})"
@@ -791,6 +801,7 @@ class ConversationHydrator:
         outcome = await self.store.settle_room_history_recovery(
             recovery,
             exhausted_server=walk.exhausted_server,
+            unreadable=bool(walk.unreadable),
             attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
         )

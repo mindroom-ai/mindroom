@@ -266,6 +266,7 @@ class HydrationView(Protocol):
         recovery: RoomHistoryRecovery,
         *,
         exhausted_server: bool,
+        unreadable: bool,
         attempted_policy_rank: int,
         expected_membership_epoch: int,
     ) -> HistoryRecoveryOutcome:

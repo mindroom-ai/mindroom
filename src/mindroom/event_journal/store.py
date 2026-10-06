@@ -675,16 +675,24 @@ class PrincipalStore:
         recovery: RoomHistoryRecovery,
         *,
         exhausted_server: bool,
+        unreadable: bool,
         attempted_policy_rank: int,
         expected_membership_epoch: int,
     ) -> HistoryRecoveryOutcome:
-        """Publish an installed recovery and settle its exact obligation once."""
+        """Publish an installed recovery and settle its exact obligation once.
+
+        ``exhausted_server`` alone decides the obligation, because a walk that
+        reached the start of the room fetched everything the gap skipped.
+        ``unreadable`` only keeps the room conversation from calling itself
+        complete, the same as an ordinary room walk that met such an event.
+        """
         return await self._backend.write(
             lambda transaction: _settle_history_recovery(
                 transaction,
                 self._principal_id,
                 recovery,
                 exhausted_server=exhausted_server,
+                unreadable=unreadable,
                 attempted_policy_rank=attempted_policy_rank,
                 expected_membership_epoch=expected_membership_epoch,
             ),
@@ -1843,6 +1851,7 @@ def _settle_history_recovery(
     recovery: RoomHistoryRecovery,
     *,
     exhausted_server: bool,
+    unreadable: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> HistoryRecoveryOutcome:
@@ -1861,7 +1870,7 @@ def _settle_history_recovery(
         principal_id,
         room_id=recovery.room_id,
         thread_id=None,
-        complete=exhausted_server,
+        complete=exhausted_server and not unreadable,
         attempted_policy_rank=attempted_policy_rank,
         membership_epoch=expected_membership_epoch,
     )
