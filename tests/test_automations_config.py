@@ -84,7 +84,7 @@ def test_an_agent_cannot_list_automations_it_cannot_run(agent: AgentConfig, mess
     ],
 )
 def test_invalid_entries_fail_config_load(entry: object) -> None:
-    """Unknown built-ins, bad cron, reversed bounds, and unknown fields are rejected."""
+    """Unknown built-ins, bad cron, reversed bounds, a min_reduction above the per-file bound, and unknown fields are rejected."""
     with pytest.raises(ValidationError):
         _mind(automations=[entry])
 

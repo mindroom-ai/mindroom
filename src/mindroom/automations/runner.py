@@ -138,13 +138,14 @@ class AutomationRunner:
     async def _run(self) -> None:
         while True:
             now = datetime.now(UTC)
+            # Cleared before ticking, so a verify the tick starts still wakes the next pass.
+            self._wake.clear()
             await self._tick(now)
             deadlines = [due for _schedule, due in self._next_due.values()] + [
                 p.deadline for p in self._pending.values()
             ]
-            # A held automation keeps its past due time; response_finished wakes the loop instead of a busy poll.
+            # A held automation keeps its past due time; starting its last prompt's verify wakes the loop instead.
             sleep = min([_MAX_SLEEP_SECONDS, *((d - now).total_seconds() for d in deadlines if d > now)])
-            self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=max(sleep, 1.0))
             except TimeoutError:
