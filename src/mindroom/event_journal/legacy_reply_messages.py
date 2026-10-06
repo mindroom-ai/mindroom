@@ -125,9 +125,10 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # reply_messages and reply_spans and give its outbox rows reply identity.
 # Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
 # reply per newest continuation (older ones are superseded), the state a frozen unacknowledged FINAL implies, a lost
-# span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, and an
-# adoption scan for a pending turn whose stream created its reply directly; an unsettled Stop is applied to the reply
-# it names. What only Matrix knows is marked legacy_pending and read after the room syncs.
+# span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
+# its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; an
+# unsettled Stop is applied to the reply it names. What only Matrix knows is marked legacy_pending and read after the
+# room syncs.
 # Coverage: tests/test_legacy_reply_messages.py.
 def classify(
     transaction: Transaction,
@@ -492,8 +493,11 @@ def _reply_of_rows(
         # Answered, or retired by a departure or a deleted source: their existing owners finish it.
         return None
     stopped = record.user_stop_receipt_order is not None
+    # That release finished a settled Stop and shows it; its turn record turns
+    # the replay of any source it left pending away.
+    stop_settled = stopped and (record.user_stop_settled_receipt_order or 0) >= (record.user_stop_receipt_order or 0)
     historical = initial.created_at_ns < now_ns - _HISTORICAL_STREAM_NS
-    if not sources.pending and (initial.acknowledged_event_id is None or stopped or historical):
+    if stop_settled or (not sources.pending and (initial.acknowledged_event_id is None or stopped or historical)):
         return None
     span = _span(
         reply_id,

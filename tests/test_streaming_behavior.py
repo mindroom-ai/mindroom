@@ -52,6 +52,7 @@ from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
+    ProgressPermission,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingLifecycleSuspensionError,
@@ -243,6 +244,44 @@ async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_pat
     assert shutdown_error is None
     mock_client.room_send.assert_awaited_once()
     assert mock_client.room_send.await_args.kwargs["content"]["body"] == "latest body"
+
+
+@pytest.mark.asyncio
+async def test_a_progress_edit_its_records_defer_is_skipped_not_failed(tmp_path: Path) -> None:
+    """While an earlier durable write of the reply is unresolved, progress waits; a later edit shows it."""
+    mock_client = _make_matrix_client_mock()
+    mock_response = MagicMock()
+    mock_response.__class__ = nio.RoomSendResponse
+    mock_response.event_id = "$edit"
+    mock_client.room_send.return_value = mock_response
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    permissions = [ProgressPermission.DEFER, ProgressPermission.SEND]
+
+    async def write_ahead(_progress: object) -> ProgressPermission:
+        return permissions.pop(0)
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        update_interval=10.0,
+        min_update_interval=10.0,
+        interval_ramp_seconds=0.0,
+        update_char_threshold=1,
+        min_update_char_threshold=1,
+        min_char_update_interval=0.0,
+        progress_write_ahead=write_ahead,
+    )
+    streaming.event_id = "$reply"
+    streaming.accumulated_text = "progress"
+    streaming.chars_since_last_update = len(streaming.accumulated_text)
+
+    assert await streaming._send_or_edit_message(mock_client)
+    mock_client.room_send.assert_not_awaited()
+    streaming.accumulated_text = "more progress"
+    assert await streaming._send_or_edit_message(mock_client)
+    mock_client.room_send.assert_awaited_once()
+    assert mock_client.room_send.await_args.kwargs["content"]["m.new_content"]["body"] == "more progress"
 
 
 @pytest.fixture

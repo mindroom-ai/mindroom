@@ -526,6 +526,82 @@ async def test_deleted_initial_cleanup_waits_until_the_reply_ends(journal_store:
     assert initial.delivery_id == "$source"
 
 
+async def test_progress_waits_for_the_replys_earlier_durable_writes(journal_store: EventJournalStore) -> None:
+    """An unresolved row, such as a pause whose send failed once, holds progress back: sent later, it would win."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, span: rl.enqueue_initial(
+                reply,
+                span,
+                shown="ph",
+                placeholder_only=True,
+                prepared_revision=reply.revision,
+                now_ns=60,
+            ),
+            placeholder_only=True,
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "Thinking..."},
+    )
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+
+    async def progress() -> rl.Outcome:
+        applied = await principal.replies.write_ahead(
+            reply_id="reply-1",
+            span_id="span-1",
+            shown="more",
+            previous=None,
+            active_generation="gen-1",
+            now_ns=80,
+        )
+        return applied.transition.outcome
+
+    assert await progress() is rl.Outcome.DEFERRED
+    await _acknowledge_the_create(principal)
+    assert await progress() is rl.Outcome.APPLIED
+
+
+async def test_a_retired_instance_neither_claims_nor_writes(journal_store: EventJournalStore) -> None:
+    """After another instance takes the replies over, the old one's claims and running spans change nothing."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    await principal.replies.write_generation("gen-2", now_ns=70)
+
+    await admit(principal, "$other")
+    refused = await principal.replies.claim(_request("span-old", reply_id="reply-old", source="$other"), ClaimLookup())
+    assert refused.transition.outcome is rl.Outcome.STALE
+    assert await principal.replies.load("reply-old") is None
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert enqueued is not None
+    assert enqueued.applied.transition.outcome is rl.Outcome.STALE
+    assert enqueued.delivery_id is None
+    progress = await principal.replies.decide(
+        reply_id=reply.reply_id,
+        span_id=span.span_id,
+        decide=lambda current, live: rl.write_ahead(
+            current,
+            live,
+            shown="more",
+            previous=None,
+            active_generation="gen-1",
+            durable_write_debt=False,
+            now_ns=80,
+        ),
+    )
+    assert progress.transition.outcome is rl.Outcome.STALE
+    assert await principal.replies.load(reply.reply_id) == reply
+
+
 async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_store: EventJournalStore) -> None:
     """Retention drops an old finished reply and its spans; one still owing Matrix a note is kept."""
     principal = journal_store.principal(PRINCIPAL)

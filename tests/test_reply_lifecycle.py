@@ -329,6 +329,7 @@ def test_write_ahead_allocates_the_next_sequence_and_confirms_the_previous_edit(
         shown="p1",
         previous=None,
         active_generation=GEN,
+        durable_write_debt=False,
         now_ns=NOW,
     )
     assert first.reply is not None
@@ -340,6 +341,7 @@ def test_write_ahead_allocates_the_next_sequence_and_confirms_the_previous_edit(
         shown="p2",
         previous=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False),
         active_generation=GEN,
+        durable_write_debt=False,
         now_ns=NOW,
     )
     assert second.reply is not None
@@ -358,6 +360,7 @@ def test_write_ahead_of_an_older_generation_is_refused() -> None:
         shown="p",
         previous=None,
         active_generation="gen-3",
+        durable_write_debt=False,
         now_ns=NOW,
     )
     assert transition.outcome is Outcome.STALE
@@ -511,7 +514,15 @@ def test_stop_after_a_regenerations_progress_edit_landed_cancels_instead_of_rest
         _write(stop.reply, ReplyState.CANCELLED, shown="new partial"),
         confirms=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False),
     )
-    ahead = rl.write_ahead(stop.reply, span, shown="new partial", previous=None, active_generation=GEN, now_ns=NOW)
+    ahead = rl.write_ahead(
+        stop.reply,
+        span,
+        shown="new partial",
+        previous=None,
+        active_generation=GEN,
+        durable_write_debt=False,
+        now_ns=NOW,
+    )
     assert ahead.reply is not None
     transition = rl.stopped(ahead.reply, span, replace(write, prepared_revision=ahead.reply.revision), now_ns=NOW)
     assert transition.reply is not None
@@ -1194,9 +1205,16 @@ def test_deleting_every_source_cancels_the_running_span() -> None:
 
 
 def test_deleting_sources_keeps_paused_and_completed_replies() -> None:
-    """Paused replies and finished answers survive their sources' deletion."""
+    """Replies an approval holds and finished answers survive their sources' deletion.
+
+    That includes one whose resume already ended while its approval's
+    settlement is still to come.
+    """
     reply, _span, _transition = _paused()
     assert rl.sources_deleted(reply, None, now_ns=NOW).outcome is Outcome.DUPLICATE
+    settling = replace(reply, state=ReplyState.ACTIVE, current_span_id=None)
+    assert settling.approval_id is not None
+    assert rl.sources_deleted(settling, None, now_ns=NOW).outcome is Outcome.DUPLICATE
     completed = replace(reply, state=ReplyState.COMPLETED)
     assert rl.sources_deleted(completed, None, now_ns=NOW).outcome is Outcome.DUPLICATE
 
@@ -1432,7 +1450,15 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
         now_ns=NOW,
     )
     assert acked.reply is not None
-    progress = rl.write_ahead(acked.reply, span, shown="p1", previous=None, active_generation=GEN, now_ns=NOW)
+    progress = rl.write_ahead(
+        acked.reply,
+        span,
+        shown="p1",
+        previous=None,
+        active_generation=GEN,
+        durable_write_debt=False,
+        now_ns=NOW,
+    )
     assert progress.reply is not None
     final = rl.finish(
         progress.reply,

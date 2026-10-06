@@ -36,6 +36,7 @@ _CONTINUATION_COLUMNS = """
 
 # The failure reason of an approval an edit superseded.
 SUPERSEDED_FAILURE_REASON = "superseded"
+_FENCEABLE = ("waiting", "ready", "claimed")
 # The failure reason of a resume a shutdown cut short, which the next instance
 # hands back to replay.
 INTERRUPTED_FAILURE_REASON = "Tool approval continuation was interrupted before final delivery and denied safely."
@@ -860,13 +861,17 @@ def fence(
     """Fence a continuation for failure on behalf of its reply, in whatever state it holds.
 
     A Stop on a paused reply and an edit superseding it fence the approval in
-    their own transaction; a frozen successful FINAL still wins.
+    their own transaction; a frozen successful FINAL still wins. Supersession
+    also replaces a failure still settling: the regeneration owns the reply, so
+    the old approval's cleanup publishes nothing.
     """
+    states = ("waiting", "ready", "claimed", "failing") if reason == SUPERSEDED_FAILURE_REASON else _FENCEABLE
+    placeholders = ", ".join("?" for _ in states)
     updated = transaction.fetchone(
-        """
+        f"""
         UPDATE approval_continuations
         SET state = 'failing', failure_reason = ?
-        WHERE principal_id = ? AND approval_id = ? AND state IN ('waiting', 'ready', 'claimed')
+        WHERE principal_id = ? AND approval_id = ? AND state IN ({placeholders})
           AND NOT EXISTS (
             SELECT 1 FROM matrix_delivery_outbox AS final
             WHERE final.principal_id = approval_continuations.principal_id
@@ -880,8 +885,8 @@ def fence(
               AND final.permanent_failure_reason IS NULL
           )
         RETURNING approval_id
-        """,
-        (reason, principal_id, approval_id),
+        """,  # noqa: S608 - fixed placeholders
+        (reason, principal_id, approval_id, *states),
     )
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 

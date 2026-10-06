@@ -582,6 +582,10 @@ def _rollback_of(reply: Reply, *, presentation_known: bool = True) -> Rollback:
 def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: C901, PLR0911, PLR0912, PLR0915
     """Claim a reply for one span."""
     reply = context.reply
+    if request.bot_generation != context.active_generation:
+        # A bot instance that no longer owns the principal's replies; the one
+        # that does replays these sources.
+        return _unchanged(Outcome.STALE, reply)
     changed: list[Span] = []
     effects: list[Effect] = []
     if reply is not None and context.current_span is not None:
@@ -767,14 +771,21 @@ def write_ahead(
     shown: str,
     previous: ProgressConfirmation | None,
     active_generation: str,
+    durable_write_debt: bool,
     now_ns: int,
 ) -> Transition:
-    """Record the presentation of the next direct progress edit before it is sent."""
+    """Record the presentation of the next direct progress edit before it is sent.
+
+    While an earlier durable write of the reply is unresolved the edit waits:
+    sent later, that write would replace newer progress with what it shows.
+    """
     if span.bot_generation != active_generation:
         return _unchanged(Outcome.STALE, reply)
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
+    if durable_write_debt:
+        return _unchanged(Outcome.DEFERRED, reply)
     updated, sequence = _next_sequence(confirm_progress(reply, previous))
     updated = _touch(updated, now_ns, possibly_shown=shown, possibly_shown_seq=sequence)
     return Transition(outcome=Outcome.APPLIED, reply=updated)
@@ -1602,10 +1613,13 @@ def replay_dropped(reply: Reply, last: Span, *, sources_pending: bool, now_ns: i
 
 
 def sources_deleted(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
-    """Every logical source of the reply's current work was deleted."""
-    if reply.terminal or reply.state is ReplyState.PAUSED:
-        return _unchanged(Outcome.DUPLICATE, reply)
-    if current is not None and current.kind is SpanKind.APPROVAL_RESUME:
+    """Every logical source of the reply's current work was deleted.
+
+    A reply an approval holds, paused, resuming, or settling a resume that
+    ended, is its approval's: the card stays the consent surface, and the
+    approval's settlement ends the reply and settles its sources.
+    """
+    if reply.terminal or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)
     effects: list[Effect] = []
     spans: tuple[Span, ...] = ()
@@ -1722,15 +1736,13 @@ class LegacyRead:
 
 
 def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pending: bool, now_ns: int) -> Transition:
-    """Record what an earlier-release reply showed; a stream that release stopped ends here.
+    """Record what an earlier-release reply showed; a stream an earlier release stopped after its sources settled ends here.
 
-    An event whose status says the reply ended is history: the reply ends in
-    that state with its sources, which nothing continues. Otherwise a stream
-    whose sources settled gets the restart note when it was still streaming
-    within the stale-stream window, as that release's startup cleanup gave it,
-    or keeps what its event shows. A stream with pending sources, and a reply
-    an approval holds, keep their owners: the replay claim and the approval
-    runtime, which waited for this read.
+    That stream gets the restart note when it was still streaming within
+    the stale-stream window, as that release's startup cleanup gave it; otherwise
+    the reply keeps what its event shows. Replies with pending sources or an
+    approval keep their owners: the replay claim and the approval runtime,
+    which waited for this read.
     """
     if reply.legacy_pending is None:
         return _unchanged(Outcome.DUPLICATE, reply)
@@ -1740,20 +1752,17 @@ def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pend
     if read.shown is not None:
         updated = replace(updated, presentation=read.shown, possibly_shown=read.shown, placeholder_only=False)
     updated = _bump(updated, now_ns)
-    stopped_stream = (
+    stream_main_stopped = (
         reply.state is ReplyState.ACTIVE
         and reply.current_span_id is None
         and reply.approval_id is None
         and last.outcome is SpanOutcome.LOST
+        and not sources_pending
     )
-    if not stopped_stream:
+    if not stream_main_stopped:
         return Transition(outcome=Outcome.APPLIED, reply=updated)
     if read.ended_as is not None:
-        ended = _set_state(replace(updated, placeholder_only=False), read.ended_as, now_ns)
-        effects: tuple[Effect, ...] = (SettleSources(last.span_id),) if sources_pending else ()
-        return Transition(outcome=Outcome.APPLIED, reply=ended, effects=effects)
-    if sources_pending:
-        return Transition(outcome=Outcome.APPLIED, reply=updated)
+        return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, read.ended_as, now_ns))
     owed = OwedWrite(last.span_id, _NOTE_RESTART) if read.recent else None
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed))
 

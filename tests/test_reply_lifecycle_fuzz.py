@@ -266,8 +266,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     @rule(previous_ok=st.booleans())
     def write_ahead(self, previous_ok: bool) -> None:
         """Write ahead."""
-        if self.model.rows:
-            return
         span = self._live()
         assert span is not None
         self._apply(
@@ -277,6 +275,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 shown="progress",
                 previous=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False) if previous_ok else None,
                 active_generation=self.generation,
+                durable_write_debt=bool(self.model.rows),
                 now_ns=self._now(),
             ),
         )

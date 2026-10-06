@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
@@ -81,6 +82,7 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "FinalTextTransform",
+    "ProgressPermission",
     "ProgressPublisher",
     "ProgressState",
     "ProgressWriteAhead",
@@ -583,7 +585,16 @@ class ProgressState:
     untransformed_text: str | None = None
 
 
-type ProgressWriteAhead = Callable[[ProgressState], Awaitable[bool]]
+class ProgressPermission(Enum):
+    """What a reply's records allow for one direct progress edit."""
+
+    SEND = "send"
+    # An earlier durable write of the reply is unresolved; a later edit shows this progress.
+    DEFER = "defer"
+    REFUSE = "refuse"
+
+
+type ProgressWriteAhead = Callable[[ProgressState], Awaitable[ProgressPermission]]
 type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 # The same contract for a stream whose answer is its first visible event: no
 # placeholder was sent, so the terminal update is a send rather than an edit.
@@ -642,8 +653,9 @@ class StreamingResponse:
     # Set when the stream writes a durable reply: the first visible create and
     # every terminal update (an answer, a cancellation, or an error) are
     # durable rows, and each direct progress edit is recorded before it is
-    # sent. ``progress_write_ahead`` returns False when the reply's records
-    # refuse the edit, which fails the stream like a refused edit.
+    # sent. ``progress_write_ahead`` defers an edit the reply's records hold
+    # back, and refuses one they reject, which fails the stream like a
+    # refused edit.
     initial_send: TerminalSend | None = None
     progress_write_ahead: ProgressWriteAhead | None = None
     progress_delivered: Callable[[ProgressState, str], None] | None = None
@@ -1183,12 +1195,12 @@ class StreamingResponse:
         if (
             not is_final
             and not is_initial_send
-            and self.progress_write_ahead is not None
-            and not await self.progress_write_ahead(_progress_state(prepared_delivery.committed_state))
+            and not await self._progress_permitted(
+                prepared_delivery,
+                capture_completions,
+            )
         ):
-            _complete_capture_completions(capture_completions)
-            msg = "The reply's records refused this progress edit"
-            raise RuntimeError(msg)
+            return True
         capture = None
         if not is_final:
             capture = asyncio.get_running_loop().create_future()
@@ -1233,6 +1245,23 @@ class StreamingResponse:
         else:
             self.placeholder_progress_sent = False
         return True
+
+    async def _progress_permitted(
+        self,
+        prepared_delivery: _PreparedStreamingDelivery,
+        capture_completions: tuple[asyncio.Future[None], ...],
+    ) -> bool:
+        """Ask the reply's records about one progress edit: ``False`` defers it, and a refusal fails the stream."""
+        if self.progress_write_ahead is None:
+            return True
+        permission = await self.progress_write_ahead(_progress_state(prepared_delivery.committed_state))
+        if permission is ProgressPermission.SEND:
+            return True
+        _complete_capture_completions(capture_completions)
+        if permission is ProgressPermission.REFUSE:
+            msg = "The reply's records refused this progress edit"
+            raise RuntimeError(msg)
+        return False
 
     def _should_send_prepared_nonterminal_edit(
         self,

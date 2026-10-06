@@ -16,6 +16,7 @@ from mindroom.approval_manager import initialize_approval_store
 from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.reply_presentation import NoteKind, Segment, decode_presentation, encode_presentation, note_segment
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.tool_system.events import ToolTraceEntry
@@ -382,6 +383,36 @@ async def test_a_chained_pause_pauses_the_resume_span_and_the_next_resume_answer
         assert _sent_bodies(bot) == ["Thinking...", "Reading document", "Reading the second document", "Both read."]
 
 
+async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_path: Path) -> None:
+    """A replay that paused continues below the stopped attempt it showed; the approved answer keeps that above it."""
+    earlier = Segment(kind="answer", text="Earlier partial", span_id="earlier-span")
+    async with _approval_bot(tmp_path, requires_human=False) as bot:
+        runtime_type = type(bot._reply_runtime)
+        claim = runtime_type.claim_approval_resume
+
+        async def claim_below_an_earlier_attempt(runtime: object, *args: object, **kwargs: object) -> object:
+            def below_earlier(current: rl.Reply) -> rl.Transition:
+                shown = decode_presentation(current.presentation)
+                prefixed = encode_presentation(
+                    replace(shown, segments=(earlier, note_segment(NoteKind.RESTART), *shown.segments)),
+                )
+                return rl.Transition(
+                    outcome=rl.Outcome.APPLIED,
+                    reply=replace(current, presentation=prefixed, possibly_shown=prefixed),
+                )
+
+            await bot._reply_runtime.store.replies.update((await _reply(bot)).reply_id, below_earlier)
+            return await claim(runtime, *args, **kwargs)  # type: ignore[arg-type]
+
+        with patch.object(runtime_type, "claim_approval_resume", claim_below_an_earlier_attempt):
+            await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
+
+        final = _sent_bodies(bot)[-1]
+        assert final.startswith("Earlier partial")
+        assert final.endswith("Approved answer.")
+        assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
+
+
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:
     """A resume continues the source answer and trace its reply's records keep, not what Matrix showed."""
     trace = ToolTraceEntry(type="tool_call_started", tool_name="read_document", tool_call_id="call-run-1")
@@ -421,14 +452,24 @@ async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: 
         ]
 
 
-async def test_an_edit_supersedes_the_approval_of_the_reply_it_regenerates(tmp_path: Path) -> None:
-    """Decision 1: the old approval settles without a note while the regeneration still runs."""
+@pytest.mark.parametrize("already_failing", [False, True])
+async def test_an_edit_supersedes_the_approval_of_the_reply_it_regenerates(
+    tmp_path: Path,
+    already_failing: bool,
+) -> None:
+    """Decision 1: the old approval settles without a note while the regeneration still runs.
+
+    That holds for an approval whose failure was still settling: the
+    regeneration owns the reply, so no failure note follows.
+    """
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
         old = await bot.journal_principal().approval_continuation_for_source("$event")
         assert old is not None
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
+        if already_failing:
+            assert await runner._approval_responses.request_failure(old, "Approval card creation failed") is not None
         answering, release = asyncio.Event(), asyncio.Event()
 
         async def slow_answer(*_args: object, **_kwargs: object) -> str:

@@ -219,26 +219,22 @@ async def test_an_interrupted_stream_with_pending_sources_waits_for_its_read_the
     assert _text(read.possibly_shown or "") == "Partial"
 
 
-async def test_a_stream_whose_event_shows_it_ended_keeps_it_though_its_source_is_pending(
-    journal_store: EventJournalStore,
-) -> None:
-    """A Stop the earlier release showed just before a crash stands; nothing replays the source it left pending."""
+async def test_a_stop_the_earlier_release_finished_gets_no_reply(journal_store: EventJournalStore) -> None:
+    """A Stop shown just before a crash stands, though the source it left pending replays: that turn ignores it."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
-    await _turn(journal_store, "$source")
+    record = await _turn(journal_store, "$source", stop_order=5)
+    settled = canonicalize_turn_record(record, user_stop_receipt_order=5, user_stop_settled_receipt_order=5)
+    assert settled.anchor_event_id is not None
+    await journal_store.turn_records(ENTITY).upsert(
+        index_event_ids=settled.indexed_event_ids,
+        anchor_event_id=settled.anchor_event_id,
+        record_json=json.dumps(TurnRecordCodec._to_ledger_record(settled)),
+    )
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
 
-    (reply,) = await _adopt(principal)
-    await principal.finish_legacy_reply_read(
-        reply.reply_id,
-        rl.LegacyRead(event_id="$reply", ended_as=rl.ReplyState.CANCELLED),
-        now_ns=NOW,
-    )
-    ended = await _only_reply(principal)
-    assert ended.state is rl.ReplyState.CANCELLED
-    assert ended.redaction_pending == ()
-    assert ended.owed_write is None
-    assert not await principal.is_pending("$source")
+    assert await _adopt(principal) == ()
+    assert await principal.replies.for_sources(("$source",)) is None
 
 
 async def test_a_stream_main_stopped_after_its_sources_settled_gets_the_restart_note(

@@ -107,6 +107,7 @@ from mindroom.reply_presentation import (
     decode_presentation,
     note_segment,
     render,
+    render_body,
     with_trailing_note,
 )
 from mindroom.reply_scope import (
@@ -130,6 +131,7 @@ from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     USER_STOP_CANCEL_MSG,
     FinalTextTransform,
+    ProgressPermission,
     ProgressState,
     StreamingResponse,
     TerminalEdit,
@@ -2420,13 +2422,18 @@ class DeliveryGateway:
         if request.existing_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
+            # The reply shows its whole presentation: a resume continues below
+            # what earlier spans showed, which this answer alone would replace.
+            shown_text, shown_trace = (
+                (display_text, draft.tool_trace) if reply_write is None else render_body(reply_write.shown)
+            )
             try:
                 edited = await self.edit_text(
                     EditTextRequest(
                         target=request.target,
                         event_id=request.existing_event_id,
-                        new_text=display_text,
-                        tool_trace=draft.tool_trace,
+                        new_text=shown_text,
+                        tool_trace=list(shown_trace) if shown_trace else None,
                         extra_content=delivery_extra_content,
                         delivery_turn_id=request.identity.response_envelope.source_event_id,
                         response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
@@ -3083,7 +3090,7 @@ class DeliveryGateway:
                 retry_sync_recovery=retry_sync_recovery,
             )
 
-        async def progress_write_ahead(progress: ProgressState) -> bool:
+        async def progress_write_ahead(progress: ProgressState) -> ProgressPermission:
             return await handle.runtime.write_ahead(handle, shown(progress))
 
         def progress_delivered(progress: ProgressState, event_id: str) -> None:

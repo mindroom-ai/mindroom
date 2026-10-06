@@ -3426,6 +3426,11 @@ class ResponseRunner:
                 source_event_id=request.response_envelope.source_event_id,
             )
             return None
+        if handle is ClaimRefused.RETIRED:
+            # The instance that took the replies over replays these sources.
+            if request.source_handoff is not None:
+                request.source_handoff.set()
+            return None
         if handle is ClaimRefused.DEFERRED:
             # The reply's earlier writes resolve first, and their resolution
             # retries these sources: they stay pending, owned by that wake.

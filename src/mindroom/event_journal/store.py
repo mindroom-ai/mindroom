@@ -2196,7 +2196,11 @@ def _decide_reply_row(
         earlier = _span_row(transaction, principal_id, reply, span, request.stage)
         if earlier is not None:
             return earlier
-        transition = request.decide(reply, span)
+        transition = (
+            rl.Transition(outcome=rl.Outcome.STALE, reply=reply)
+            if replies.retired(transaction, principal_id, span)
+            else request.decide(reply, span)
+        )
     return reply, span, transition
 
 

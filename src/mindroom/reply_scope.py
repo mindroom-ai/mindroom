@@ -35,7 +35,7 @@ from mindroom.reply_presentation import (
     with_answer,
 )
 from mindroom.stop import SpanRegistry
-from mindroom.streaming import UnfinishedStreamedReply
+from mindroom.streaming import ProgressPermission, UnfinishedStreamedReply
 from mindroom.tool_system.events import remap_visible_tool_marker_indices
 
 if TYPE_CHECKING:
@@ -168,6 +168,8 @@ class ClaimRefused(Enum):
     DEFERRED = "deferred"
     # A retried regeneration whose edit the reply already answered.
     ANSWERED = "answered"
+    # Another bot instance took this principal's replies over; it replays the sources.
+    RETIRED = "retired"
 
 
 # As long as the handled-turn ledger keeps a turn: nothing reaches a finished
@@ -364,6 +366,8 @@ class ReplyRuntime:
         if transition.claimed is None or transition.claimed.span_id != request.span_id:
             # Refused, or continuing the span an interactive selection acknowledged.
             self.spans.forget(request.span_id)
+        if transition.outcome is rl.Outcome.STALE:
+            return ClaimRefused.RETIRED
         if transition.outcome is rl.Outcome.DUPLICATE:
             return ClaimRefused.ANSWERED
         if transition.claimed is None or transition.reply is None:
@@ -452,6 +456,9 @@ class ReplyRuntime:
             raise
         if claimed is None or transition.claimed is None or transition.reply is None:
             self.spans.forget(claim.span_id)
+            if transition.outcome is rl.Outcome.STALE:
+                # Another instance took the replies over; its approval recovery resumes this.
+                return None, None
             assert transition.reply is not None, "only a reply with earlier writes defers a resume"
             await self._wait_for_rows(transition.reply.reply_id, continuation.room_id, sources.pending_event_ids)
             return None, None
@@ -488,27 +495,24 @@ class ReplyRuntime:
             handle,
         )
 
-    async def write_ahead(self, handle: SpanHandle, presentation: Presentation) -> bool:
-        """Record the presentation of the next direct progress edit; ``False`` refuses the edit."""
-        previous = handle.unconfirmed_progress
-        applied = await self.store.replies.decide(
+    async def write_ahead(self, handle: SpanHandle, presentation: Presentation) -> ProgressPermission:
+        """Record the presentation of the next direct progress edit, and say whether to send it."""
+        applied = await self.store.replies.write_ahead(
             reply_id=handle.reply_id,
             span_id=handle.span_id,
-            decide=lambda reply, span: rl.write_ahead(
-                reply,
-                span,
-                shown=encode_presentation(presentation),
-                previous=previous,
-                active_generation=self.generation,
-                now_ns=self.clock(),
-            ),
+            shown=encode_presentation(presentation),
+            previous=handle.unconfirmed_progress,
+            active_generation=self.generation,
+            now_ns=self.clock(),
         )
+        if applied.transition.outcome is rl.Outcome.DEFERRED:
+            return ProgressPermission.DEFER
         if not applied.transition.applied:
             await self.run_effects(applied.post_commit)
-            return False
+            return ProgressPermission.REFUSE
         await self.committed(applied, handle)
         handle.unconfirmed_progress = None
-        return True
+        return ProgressPermission.SEND
 
 
 def _new_id() -> str:

@@ -110,6 +110,20 @@ def _run(
             raise NotImplementedError(msg)
 
 
+def retired(transaction: Transaction, principal_id: str, span: Span) -> bool:
+    """Return whether a running span belongs to a bot instance that no longer owns the principal's replies.
+
+    Such a span writes nothing more: the instance that took over replays its
+    sources, and the retired one shuts down once it notices. A resume an older
+    instance left running is the exception: the owner's approval recovery
+    ends it, and once ended it refuses the old instance's writes too.
+    """
+    if span.ended or span.kind is rl.SpanKind.APPROVAL_RESUME:
+        return False
+    active = reply_messages.active_generation(transaction, principal_id)
+    return active is not None and span.bot_generation != active
+
+
 def decide_on_span(
     transaction: Transaction,
     principal_id: str,
@@ -124,6 +138,8 @@ def decide_on_span(
     if reply is None or span is None:
         msg = f"Reply {reply_id} or span {span_id} does not exist"
         raise RuntimeError(msg)
+    if retired(transaction, principal_id, span):
+        return AppliedTransition(transition=rl.Transition(outcome=rl.Outcome.STALE, reply=reply), post_commit=())
     return apply(transaction, principal_id, decide(reply, span))
 
 
@@ -685,6 +701,35 @@ class ReplyStore:
                 reply_id=reply_id,
                 span_id=span_id,
                 decide=decide,
+            ),
+        )
+
+    async def write_ahead(
+        self,
+        *,
+        reply_id: str,
+        span_id: str,
+        shown: str,
+        previous: rl.ProgressConfirmation | None,
+        active_generation: str,
+        now_ns: int,
+    ) -> AppliedTransition:
+        """Record a span's next direct progress edit, deferring it while earlier durable writes are unresolved."""
+        return await self._backend.write(
+            lambda transaction: decide_on_span(
+                transaction,
+                self._principal_id,
+                reply_id=reply_id,
+                span_id=span_id,
+                decide=lambda reply, span: rl.write_ahead(
+                    reply,
+                    span,
+                    shown=shown,
+                    previous=previous,
+                    active_generation=active_generation,
+                    durable_write_debt=has_unresolved_rows(transaction, self._principal_id, reply_id),
+                    now_ns=now_ns,
+                ),
             ),
         )
 
