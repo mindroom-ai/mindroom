@@ -2104,7 +2104,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2266,6 +2266,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ):
                 yield AttemptResolved(skipped)
             else:
+                error_metadata = _build_interrupted_metadata(
+                    state,
+                    RunStatus.error,
+                    attempt.attempt_run_id,
+                    session_id,
+                )
+                if run_metadata_collector is not None and error_metadata is not None:
+                    run_metadata_collector.update(error_metadata)
                 yield get_user_friendly_error_message(run_error, agent_name, runtime_paths=runtime_paths)
                 yield AttemptResolved(HandledAttempt())
             return

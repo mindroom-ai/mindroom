@@ -1996,6 +1996,51 @@ class TestUserIdPassthrough:
         assert str(friendly_error) == "Agent run failed (type=APITimeoutError, id=timeout-1)"
 
     @pytest.mark.asyncio
+    async def test_stream_agent_response_errored_run_keeps_request_usage(self, tmp_path: Path) -> None:
+        """A run that fails after model requests still reports their tokens in the run metadata."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=500,
+                output_tokens=60,
+                total_tokens=560,
+            )
+            yield RunErrorEvent(content="provider failed")
+
+        mock_agent.arun = MagicMock(return_value=failing_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error"),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_metadata_collector=run_metadata,
+                )
+            ]
+
+        assert chunks == ["friendly-error"]
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["status"] == "error"
+        assert payload["usage"]["input_tokens"] == 500
+        assert payload["usage"]["output_tokens"] == 60
+
+    @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:
         """Test that user_id defaults to None when not provided (backward compatibility)."""
         mock_agent = MagicMock()
