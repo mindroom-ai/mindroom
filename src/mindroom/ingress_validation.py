@@ -6,7 +6,6 @@ from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
@@ -96,17 +95,10 @@ class IngressValidator:
         """Return the effective requester for reply-permission checks."""
         source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
         content = source_dict.get("content") if source_dict is not None else None
-        requester_id: str
+        requester_id = sender
         if isinstance(content, dict):
             original_sender = content.get(ORIGINAL_SENDER_KEY)
-            if not isinstance(original_sender, str):
-                requester_id = get_effective_sender_id_for_reply_permissions(
-                    sender,
-                    source_dict,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                )
-            else:
+            if isinstance(original_sender, str):
                 source_kind = source_kind_from_content(content)
                 trusted_requester = requester_id_from_trusted_original_sender(
                     original_sender=original_sender,
@@ -122,14 +114,8 @@ class IngressValidator:
                         source_kind=source_kind,
                     ),
                 )
-                requester_id = trusted_requester if trusted_requester is not None else sender
-        else:
-            requester_id = get_effective_sender_id_for_reply_permissions(
-                sender,
-                source_dict,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            )
+                if trusted_requester is not None:
+                    requester_id = trusted_requester
         return resolve_human_requester_alias(
             requester_id,
             self.deps.runtime.config,

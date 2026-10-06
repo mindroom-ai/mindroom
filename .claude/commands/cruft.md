@@ -8,7 +8,7 @@ argument-hint: [file_or_directory]
 
 ## CRITICAL: Scope Analysis
 **Current feature diff from main:**
-!`git diff origin/main`
+!`git diff --merge-base origin/main`
 
 ## ⚠️ STRICT SCOPE LIMITATION ⚠️
 **ONLY modify code that is part of the current feature shown in the diff above!**
@@ -63,7 +63,7 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 
 ## Action Items (ONLY for files in the current diff):
 
-1. **Check scope first** - Is this file in `git diff origin/main`? If NO, STOP.
+1. **Check scope first** - Is this file in `git diff --merge-base origin/main`? If NO, STOP.
 2. Read and apply ALL principles from AGENTS.md
 3. Identify cruft ONLY in the current feature's code
 4. Propose deletions, not additions

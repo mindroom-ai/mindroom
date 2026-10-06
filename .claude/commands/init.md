@@ -17,8 +17,8 @@ $ARGUMENTS
 
 ## Current Development Context
 - Current branch: !`git branch --show-current`
-- Changes from main: !`git diff origin/main --stat`
-- Full diff: !`git diff origin/main`
+- Changes from main: !`git diff --merge-base origin/main --stat`
+- Full diff: !`git diff --merge-base origin/main`
 
 **Note**: If there are no changes from main, we're starting fresh. Otherwise, understand the current feature being developed from the diff above.
 

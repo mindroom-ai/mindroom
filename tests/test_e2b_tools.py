@@ -14,6 +14,8 @@ import httpx
 import pytest
 from agno.agent import Agent
 from e2b import ConnectionConfig
+from e2b.envd.process import process_pb2
+from e2b.sandbox_sync.commands.command_handle import CommandHandle
 from e2b_code_interpreter.models import Execution, Result
 
 import mindroom.custom_tools.e2b as e2b_module
@@ -26,6 +28,8 @@ from tests.conftest import test_runtime_paths
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
+
+    from e2b.sandbox.commands.command_handle import CommandResult
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nfake"
 _CHART = {
@@ -44,6 +48,7 @@ _CHART = {
 
 
 _ENVD_URL = "https://49983-sandbox.e2b.test"
+_JUPYTER_URL = "https://49999-sandbox.e2b.test"
 _ENVD_TOKEN = "envd-token"  # noqa: S105
 _CHUNK = 1 << 20
 
@@ -77,8 +82,38 @@ class _FakeFiles:
 
 
 @dataclass
+class _FakeCommands:
+    """Run commands through the SDK's own handle, which keeps every output chunk until the command ends."""
+
+    stdout_bytes: int = 0
+    served: int = 0
+
+    def run(
+        self,
+        _cmd: str,
+        *,
+        background: bool,
+        on_stdout: Callable[[str], None] | None = None,
+        on_stderr: Callable[[str], None] | None = None,
+    ) -> CommandResult:
+        assert not background
+        handle = CommandHandle(pid=1, handle_kill=lambda: True, events=self._events())
+        return handle.wait(on_stdout=on_stdout, on_stderr=on_stderr)
+
+    def _events(self) -> Iterator[process_pb2.StartResponse]:
+        for offset in range(0, self.stdout_bytes, _CHUNK):
+            chunk = b"x" * min(_CHUNK, self.stdout_bytes - offset)
+            self.served += len(chunk)
+            data = process_pb2.ProcessEvent.DataEvent(stdout=chunk)
+            yield process_pb2.StartResponse(event=process_pb2.ProcessEvent(data=data))
+        end = process_pb2.ProcessEvent.EndEvent(exit_code=0, exited=True)
+        yield process_pb2.StartResponse(event=process_pb2.ProcessEvent(end=end))
+
+
+@dataclass
 class _FakeSandbox:
     files: _FakeFiles = field(default_factory=_FakeFiles)
+    commands: _FakeCommands = field(default_factory=_FakeCommands)
     envd_api_url: str = _ENVD_URL
     connection_config: ConnectionConfig = field(
         default_factory=lambda: ConnectionConfig(api_key="test", extra_sandbox_headers={"X-Access-Token": _ENVD_TOKEN}),
@@ -87,6 +122,9 @@ class _FakeSandbox:
     @classmethod
     def create(cls, **_kwargs: object) -> _FakeSandbox:
         return cls()
+
+    def get_host(self, port: int) -> str:
+        return f"{port}-sandbox.e2b.test"
 
 
 def _serve_files(files: _FakeFiles) -> Callable[..., object]:
@@ -101,6 +139,12 @@ def _serve_files(files: _FakeFiles) -> Callable[..., object]:
         if path not in files.stored and path not in files.sparse:
             return httpx.Response(404, json={"message": f"path '{path}' does not exist"})
         return httpx.Response(200, content=files.chunks(path))
+
+    return _mock_stream(handle)
+
+
+def _mock_stream(handle: Callable[[httpx.Request], httpx.Response]) -> Callable[..., object]:
+    """Stand in for ``httpx.stream`` with responses from ``handle``."""
 
     @contextmanager
     def stream(method: str, url: str, *, proxy: object, **kwargs: object) -> Iterator[httpx.Response]:
@@ -382,6 +426,87 @@ def test_read_file_content_refuses_oversized_file_while_streaming(
 
     assert "64 MiB transfer limit" in _error(tool.read_file_content("/tmp/huge.log"))  # noqa: S108
     assert _files(tool).served <= MAX_READ_BYTES + _CHUNK
+
+
+def test_run_command_refuses_output_past_the_limit_while_streaming(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """A command's output is refused once it passes the limit, before the SDK can keep the rest."""
+    tool = make_tool(workspace)
+    assert isinstance(tool.sandbox, _FakeSandbox)
+    commands = tool.sandbox.commands
+    commands.stdout_bytes = 5
+
+    assert json.loads(tool.run_command("printf xxxxx")) == ["STDOUT:\nxxxxx"]
+
+    commands.stdout_bytes = MAX_READ_BYTES + 4 * _CHUNK
+    commands.served = 0
+    assert "64 MiB transfer limit" in _error(tool.run_command("yes"))
+    assert commands.served <= MAX_READ_BYTES + _CHUNK
+
+
+def test_run_python_code_refuses_output_past_the_limit_while_streaming(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cell's output is refused once it passes the limit, even as the one line the SDK would read whole."""
+    tool = make_tool(workspace)
+    served = 0
+
+    def cell_output(code: str) -> Iterator[bytes]:
+        nonlocal served
+        yield b'{"type": "stdout", "text": "hi\\n", "timestamp": "2026-10-05T00:00:00Z"}\n'
+        if code == "huge()":
+            yield b'{"type": "stdout", "timestamp": "2026-10-05T00:00:00Z", "text": "'
+            for _ in range((8 << 30) // _CHUNK):
+                served += _CHUNK
+                yield b"x" * _CHUNK
+            yield b'"}\n'
+        yield b'{"type": "result", "text": "2", "is_main_result": true}\n'
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url == f"{_JUPYTER_URL}/execute"
+        assert request.headers["X-Access-Token"] == _ENVD_TOKEN
+        return httpx.Response(200, content=cell_output(json.loads(request.content)["code"]))
+
+    monkeypatch.setattr(httpx, "stream", _mock_stream(handle))
+
+    assert json.loads(tool.run_python_code("small()")) == [
+        "Logs:\nLogs(stdout: ['hi\\n'], stderr: [])",
+        "Result 1: 2",
+    ]
+    previous = tool.last_execution
+
+    assert "64 MiB transfer limit" in _error(tool.run_python_code("huge()"))
+    assert served <= MAX_READ_BYTES + _CHUNK
+    assert tool.last_execution is previous
+
+
+@pytest.mark.parametrize(
+    ("timeout", "message"),
+    [
+        (httpx.ReadTimeout("timed out"), "Execution timed out"),
+        (httpx.ConnectTimeout("timed out"), "Request timed out"),
+    ],
+)
+def test_run_python_code_reports_timeouts_like_the_sdk(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: httpx.TimeoutException,
+    message: str,
+) -> None:
+    """A cell that stays silent too long, or a sandbox that cannot be reached, reports the SDK's timeout message."""
+    tool = make_tool(workspace)
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        raise timeout
+
+    monkeypatch.setattr(httpx, "stream", _mock_stream(handle))
+
+    assert message in _error(tool.run_python_code("train()"))
 
 
 @pytest.mark.parametrize(
