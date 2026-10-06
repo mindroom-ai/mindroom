@@ -858,8 +858,9 @@ async def _latest_shared_canvas_state(
 ) -> tuple[object, object, str] | str | None:
     """Return the page state, kept inputs, and time of the newest copy the requester's Chat shared.
 
-    The newest copy is the answer: when it cannot be read, the reason is returned instead of an
-    older copy, so the agent never takes superseded choices for current ones. None means no copy.
+    The newest copy still in the room is the answer: when it cannot be read, the reason is returned
+    instead of an older copy, so the agent never takes superseded choices for current ones. None means
+    no copy.
     """
     relations = client.room_get_event_relations(
         room_id,
@@ -885,7 +886,8 @@ async def _latest_shared_canvas_state(
                 if event is None:
                     return "The newest copy could not be decrypted yet; try again later."
             if isinstance(event, nio.RedactedEvent):
-                return "The user deleted the newest copy."
+                # A deleted copy is gone; servers drop it from the relations anyway, so the next one counts.
+                continue
             source = event.source if isinstance(event.source, dict) else {}
             if (
                 getattr(event, "type", None) != _CANVAS_STATE_EVENT_TYPE

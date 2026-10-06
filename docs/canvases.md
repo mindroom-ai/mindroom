@@ -173,7 +173,7 @@ The copy never starts the agent's turn and never enters its conversation; the ag
 chat_ui.read_canvas_state(canvas_event_id="$canvas-event")
 ```
 
-It returns the state, the inputs, and when the user's Chat shared them, or says nothing was shared yet; when the newest copy cannot be read, it returns an error rather than an older copy.
+It returns the state, the inputs, and when the user's Chat shared them, or says nothing was shared yet; when the newest copy in the room cannot be read, it returns an error rather than an older copy.
 Sharing is decided when a canvas is first shown, and its updates keep it; the panel tells the user "Saved in this room: *agent* and others here can read what you enter."
 Each copy stays in the room's history like a message, and logging out does not remove it.
 

@@ -1251,6 +1251,7 @@ async def test_reading_a_canvas_state_returns_the_requesters_newest_copy(tmp_pat
     assert result["inputs"] == {"#rate": "7"}
     assert result["shared_at"] == "1970-01-01T00:00:03+00:00"
     assert relations.call_args.args[:3] == (ROOM_ID, "$canvas", RelationshipType.reference)
+    assert relations.call_args.kwargs["direction"] == nio.MessageDirection.back
 
 
 @pytest.mark.asyncio
@@ -1331,12 +1332,13 @@ async def test_an_unreadable_newest_copy_is_reported_never_replaced_by_an_older_
     assert result["status"] == "error"
     assert "could not be decrypted" in result["message"]
 
+    # A deleted copy is gone (servers drop it from the relations), so the one before it is current.
     deleted = _context(tmp_path)
     _serve_event(deleted, _canvas_source(deleted, share_state=True))
     redacted = MagicMock(spec=nio.RedactedEvent)
     redacted.sender = REQUESTER_ID
     _serve_relations(deleted, redacted, older)
-    assert "deleted the newest copy" in (await _read(deleted))["message"]
+    assert (await _read(deleted))["state"] == {"done": []}
 
     unread = _context(tmp_path)
     _serve_event(unread, _canvas_source(unread, share_state=True))
