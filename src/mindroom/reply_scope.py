@@ -318,8 +318,6 @@ class ReplyRuntime:
         sources: rl.SpanSources,
         room_id: str,
         thread_id: str | None,
-        requester_id: str,
-        visibility_policy: rl.VisibilityPolicy,
         placeholder: str = AGENT_PLACEHOLDER,
         show_tool_calls: bool = True,
         driving_edit_id: str | None = None,
@@ -338,8 +336,6 @@ class ReplyRuntime:
                 sources=sources,
                 room_id=room_id,
                 thread_id=thread_id,
-                requester_id=requester_id,
-                visibility_policy=visibility_policy,
                 empty=empty,
             ),
             driving_edit_id=driving_edit_id,
@@ -385,8 +381,6 @@ class ReplyRuntime:
         sources: rl.SpanSources,
         room_id: str,
         thread_id: str | None,
-        requester_id: str,
-        visibility_policy: rl.VisibilityPolicy,
         empty: Presentation,
     ) -> rl.ClaimRequest:
         """Return a claim by this bot instance, with fresh identities for the span and any reply it creates.
@@ -407,8 +401,6 @@ class ReplyRuntime:
             room_id=room_id,
             thread_id=thread_id,
             membership_epoch=await self.store.membership_epoch(room_id),
-            requester_id=requester_id,
-            visibility_policy=visibility_policy,
             empty_presentation=encode_presentation(empty),
         )
 
@@ -436,8 +428,6 @@ class ReplyRuntime:
             ),
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,
-            requester_id=continuation.requester_id,
-            visibility_policy=rl.VisibilityPolicy.NORMAL,
             empty=empty,
         )
         try:
@@ -473,7 +463,6 @@ class ReplyRuntime:
         discovery: tuple[str, ...],
         room_id: str,
         thread_id: str | None,
-        requester_id: str,
         text: str,
     ) -> ReplyWrite:
         """Return an interactive selection's acknowledgement, the row that creates its reply."""
@@ -482,8 +471,6 @@ class ReplyRuntime:
             sources=rl.SpanSources(pending=pending, logical=logical, discovery=discovery),
             room_id=room_id,
             thread_id=thread_id,
-            requester_id=requester_id,
-            visibility_policy=rl.VisibilityPolicy.NORMAL,
             empty=Presentation(),
         )
         return _acknowledgement_write(claim, Presentation(placeholder=text))

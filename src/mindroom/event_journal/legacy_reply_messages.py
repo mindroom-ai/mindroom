@@ -236,7 +236,6 @@ def _reply(
     entity_name: str,
     room_id: str,
     thread_id: str | None,
-    requester_id: str,
     state: rl.ReplyState,
     span: rl.Span,
     presentation: str,
@@ -254,8 +253,6 @@ def _reply(
             if membership_epoch is None
             else membership_epoch
         ),
-        requester_id=requester_id,
-        visibility_policy=rl.VisibilityPolicy.NORMAL,
         state=state,
         last_span_id=span.span_id,
         presentation=presentation,
@@ -355,7 +352,6 @@ def _paused_reply(
         entity_name=entity_name,
         room_id=continuation.room_id,
         thread_id=continuation.thread_id,
-        requester_id=continuation.requester_id,
         state=rl.ReplyState.PAUSED,
         span=paused,
         presentation=shown,
@@ -459,7 +455,6 @@ def _reply_of_rows(
         "entity_name": entity_name,
         "room_id": target.room_id,
         "thread_id": target.resolved_thread_id,
-        "requester_id": record.requester_id or "",
         "now_ns": now_ns,
     }
     if final is not None and _owed_final(final):
@@ -581,7 +576,6 @@ def _stream_created_reply(
         entity_name=entity_name,
         room_id=record.conversation_target.room_id,
         thread_id=record.conversation_target.resolved_thread_id,
-        requester_id=record.requester_id or "",
         state=rl.ReplyState.ACTIVE,
         span=span,
         presentation=presentations.empty(team),

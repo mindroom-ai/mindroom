@@ -174,8 +174,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             room_id="!room",
             thread_id=None,
             membership_epoch=1,
-            requester_id="@user",
-            visibility_policy=rl.VisibilityPolicy.NORMAL,
             empty_presentation="empty",
             driving_edit_id=edit,
             approval_id=approval_id,

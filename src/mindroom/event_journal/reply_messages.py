@@ -15,7 +15,6 @@ from mindroom.reply_lifecycle import (
     Reply,
     ReplyState,
     SettleSources,
-    VisibilityPolicy,
     departed,
     sources_deleted,
 )
@@ -30,8 +29,8 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 _REPLY_COLUMNS = """
-    reply_id, entity_name, room_id, thread_id, membership_epoch, requester_id, visibility_policy,
-    event_id, continuation_event_ids_json, state, current_span_id, last_span_id, presentation_json,
+    reply_id, entity_name, room_id, thread_id, membership_epoch,
+    event_id, state, current_span_id, last_span_id, presentation_json,
     frozen_display_json, possibly_shown_json, possibly_shown_seq, confirmed_seq, revision, legacy_pending,
     placeholder_only, stop_receipt_order, stop_applied_receipt_order, stop_button_event_id,
     redaction_pending_json, owed_write_json, reply_sequence, approval_id, created_at_ns, updated_at_ns
@@ -90,8 +89,6 @@ def _reply(row: Row) -> Reply:
         room_id=str(row["room_id"]),
         thread_id=cast("str | None", row["thread_id"]),
         membership_epoch=int(row["membership_epoch"]),
-        requester_id=str(row["requester_id"]),
-        visibility_policy=VisibilityPolicy(str(row["visibility_policy"])),
         state=ReplyState(str(row["state"])),
         last_span_id=str(row["last_span_id"]),
         presentation=str(row["presentation_json"]),
@@ -100,7 +97,6 @@ def _reply(row: Row) -> Reply:
         created_at_ns=int(row["created_at_ns"]),
         updated_at_ns=int(row["updated_at_ns"]),
         event_id=cast("str | None", row["event_id"]),
-        continuation_event_ids=_ids(row["continuation_event_ids_json"]),
         current_span_id=cast("str | None", row["current_span_id"]),
         frozen_display=cast("str | None", row["frozen_display_json"]),
         possibly_shown=cast("str | None", row["possibly_shown_json"]),
@@ -268,7 +264,7 @@ def waiting_to_replay(transaction: Transaction, principal_id: str, event_ids: tu
 
 
 def ended_by_deletion(transaction: Transaction, principal_id: str, event_id: str) -> tuple[Reply, ...]:
-    """Return the replies deleting this source ended, their last span cancelled with them."""
+    """Return the replies deleting this source ended or put back to their earlier answer, with their last span."""
     rows = transaction.fetchall(
         """
         SELECT DISTINCT reply.reply_id FROM reply_span_sources AS source
@@ -277,7 +273,7 @@ def ended_by_deletion(transaction: Transaction, principal_id: str, event_id: str
             ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id
             AND reply.last_span_id = span.span_id
         WHERE source.principal_id = ? AND source.role = 'logical' AND source.event_id = ?
-            AND span.outcome = 'cancelled' AND reply.state = 'gone'
+            AND ((span.outcome = 'cancelled' AND reply.state = 'gone') OR span.outcome = 'restored')
         ORDER BY reply.reply_id
         """,
         (principal_id, event_id),
@@ -389,16 +385,14 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
     transaction.execute(
         """
         INSERT INTO reply_messages (
-            principal_id, reply_id, entity_name, room_id, thread_id, membership_epoch, requester_id,
-            visibility_policy, event_id, continuation_event_ids_json, state, current_span_id, last_span_id,
-            presentation_json, frozen_display_json, possibly_shown_json, possibly_shown_seq, confirmed_seq,
-            revision, legacy_pending, placeholder_only, stop_receipt_order, stop_applied_receipt_order,
-            stop_button_event_id, redaction_pending_json, owed_write_json, reply_sequence, approval_id,
-            created_at_ns, updated_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            principal_id, reply_id, entity_name, room_id, thread_id, membership_epoch, event_id, state,
+            current_span_id, last_span_id, presentation_json, frozen_display_json, possibly_shown_json,
+            possibly_shown_seq, confirmed_seq, revision, legacy_pending, placeholder_only, stop_receipt_order,
+            stop_applied_receipt_order, stop_button_event_id, redaction_pending_json, owed_write_json,
+            reply_sequence, approval_id, created_at_ns, updated_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
             event_id = excluded.event_id,
-            continuation_event_ids_json = excluded.continuation_event_ids_json,
             state = excluded.state,
             current_span_id = excluded.current_span_id,
             last_span_id = excluded.last_span_id,
@@ -426,10 +420,7 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             reply.room_id,
             reply.thread_id,
             reply.membership_epoch,
-            reply.requester_id,
-            reply.visibility_policy.value,
             reply.event_id,
-            _ids_json(reply.continuation_event_ids),
             reply.state.value,
             reply.current_span_id,
             reply.last_span_id,

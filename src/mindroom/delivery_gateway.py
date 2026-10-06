@@ -2009,6 +2009,15 @@ class DeliveryGateway:
                 if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
                     # The reply changed after this note was rendered; render what it owes now.
                     continue
+                return
+            current = await self.deps.outbox.replies.load(reply_id)
+            if current is not None and current.owed_write == owed:
+                # Recording the row would have cleared it: the outbox refused the row itself.
+                self.deps.logger.warning("reply_owed_write_refused", reply_id=reply_id, note=owed.note)
+                await self.deps.outbox.replies.update(
+                    reply_id,
+                    lambda latest, owed=owed: rl.owed_write_refused(latest, owed, now_ns=time.time_ns()),
+                )
             return
 
     async def send_text(self, request: SendTextRequest) -> str | None:

@@ -90,13 +90,6 @@ class WriteStage(StrEnum):
     EDIT = "edit"
 
 
-class VisibilityPolicy(StrEnum):
-    """Whether a reply is posted normally or only reported by a silent schedule."""
-
-    NORMAL = "normal"
-    SILENT_SCHEDULE = "silent_schedule"
-
-
 class LegacyPending(StrEnum):
     """A one-time Matrix read a reply adopted from an earlier release still needs."""
 
@@ -138,8 +131,6 @@ class Rollback:
     presentation: str
     frozen_display: str | None
     state: ReplyState
-    # A historical reply whose presentation was never recorded restores state only.
-    presentation_known: bool = True
     # The span an active reply was waiting to continue (a retry or replay).
     last_span_id: str | None = None
 
@@ -194,8 +185,6 @@ class Reply:
     room_id: str
     thread_id: str | None
     membership_epoch: int
-    requester_id: str
-    visibility_policy: VisibilityPolicy
     state: ReplyState
     last_span_id: str
     presentation: str
@@ -204,7 +193,6 @@ class Reply:
     created_at_ns: int
     updated_at_ns: int
     event_id: str | None = None
-    continuation_event_ids: tuple[str, ...] = ()
     current_span_id: str | None = None
     frozen_display: str | None = None
     possibly_shown: str | None = None
@@ -294,7 +282,6 @@ class _RowIntent:
     stage: WriteStage
     sequence: int
     span_id: str
-    settles_sources: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,9 +348,7 @@ def _with_redactions(reply: Reply, *event_ids: str | None) -> Reply:
 
 
 def _visible_event_ids(reply: Reply) -> tuple[str, ...]:
-    if reply.event_id is None:
-        return ()
-    return (reply.event_id, *reply.continuation_event_ids)
+    return () if reply.event_id is None else (reply.event_id,)
 
 
 def _leaves_active(reply: Reply, new_state: ReplyState) -> Reply:
@@ -408,12 +393,11 @@ def _row(
     stage: WriteStage,
     *,
     shown: str,
-    settles_sources: bool,
 ) -> tuple[Reply, _RowIntent]:
     """Allocate the next write sequence for one durable row and record what it may show."""
     reply, sequence = _next_sequence(reply)
     reply = replace(reply, possibly_shown=shown, possibly_shown_seq=sequence)
-    return reply, _RowIntent(stage=stage, sequence=sequence, span_id=span.span_id, settles_sources=settles_sources)
+    return reply, _RowIntent(stage=stage, sequence=sequence, span_id=span.span_id)
 
 
 def _require_current(reply: Reply, span: Span) -> None:
@@ -494,8 +478,6 @@ class ClaimRequest:
     room_id: str
     thread_id: str | None
     membership_epoch: int
-    requester_id: str
-    visibility_policy: VisibilityPolicy
     empty_presentation: str
     # Set for edit regenerations: the edit event that drives this run.
     driving_edit_id: str | None = None
@@ -530,8 +512,6 @@ def _new_reply(request: ClaimRequest, *, state: ReplyState, event_id: str | None
         room_id=request.room_id,
         thread_id=request.thread_id,
         membership_epoch=request.membership_epoch,
-        requester_id=request.requester_id,
-        visibility_policy=request.visibility_policy,
         state=state,
         last_span_id=request.span_id,
         presentation=request.empty_presentation,
@@ -569,12 +549,11 @@ def _make_current(reply: Reply, span: Span, now_ns: int, **changes: object) -> R
     return _touch(reply, now_ns, current_span_id=span.span_id, last_span_id=span.span_id, **changes)
 
 
-def _rollback_of(reply: Reply, *, presentation_known: bool = True) -> Rollback:
+def _rollback_of(reply: Reply) -> Rollback:
     return Rollback(
         presentation=reply.presentation,
         frozen_display=reply.frozen_display,
         state=reply.state,
-        presentation_known=presentation_known,
         last_span_id=reply.last_span_id if reply.state is ReplyState.ACTIVE else None,
     )
 
@@ -630,8 +609,9 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         if interactive.outcome is None:
             return claimed(_make_current(reply, interactive, request.now_ns), interactive)
         if interactive.outcome is not SpanOutcome.LOST:
-            msg = f"Interactive span {interactive.span_id} already ended {interactive.outcome}"
-            raise _invalid(msg)
+            # A Stop that reached the reply first ended the selection's span;
+            # Stops do not wait for the conversation lock claims hold.
+            return _unchanged(Outcome.DUPLICATE, reply)
         # The acknowledgement's bot instance is gone: the selection continues as a replay.
         span = _new_span(request, reply, SpanKind.REPLAY)
         return claimed(_make_current(reply, span, request.now_ns), span)
@@ -644,7 +624,7 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
                 request,
                 historical,
                 SpanKind.REGENERATION,
-                rollback=_rollback_of(historical, presentation_known=False),
+                rollback=_rollback_of(historical),
             )
             return claimed(
                 _make_current(_set_state(historical, ReplyState.ACTIVE, request.now_ns), span, request.now_ns),
@@ -699,6 +679,10 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         # A retry of the edit the last span already answered, as a sync
         # restart retries a regeneration that finished: nothing runs again.
         return _unchanged(Outcome.DUPLICATE, reply)
+    if reply.terminal and request.driving_edit_id is None:
+        # A Stop that does not wait for the conversation lock ended the reply
+        # between the source gate and this claim: nothing runs for it.
+        return _unchanged(Outcome.DUPLICATE, reply)
     if reply.state is not ReplyState.ACTIVE or reply.current_span_id is not None or last is None or not last.ended:
         msg = f"Reply {reply.reply_id} in state {reply.state} cannot be claimed again"
         raise _invalid(msg)
@@ -719,7 +703,7 @@ def interactive_acknowledgement(request: ClaimRequest, *, shown: str) -> Transit
     """Create a selection's reply, its first span not yet current, and the acknowledgement's ``INITIAL`` row."""
     created = replace(_new_reply(request, state=ReplyState.ACTIVE), placeholder_only=True)
     span = _new_span(request, created, SpanKind.TURN)
-    created, row = _row(created, span, WriteStage.INITIAL, shown=shown, settles_sources=False)
+    created, row = _row(created, span, WriteStage.INITIAL, shown=shown)
     return Transition(outcome=Outcome.APPLIED, reply=created, spans=(span,), row=row)
 
 
@@ -810,7 +794,7 @@ def enqueue_initial(
     recompute = _check_revision(reply, prepared_revision)
     if recompute is not None:
         return recompute
-    updated, row = _row(reply, span, WriteStage.INITIAL, shown=shown, settles_sources=False)
+    updated, row = _row(reply, span, WriteStage.INITIAL, shown=shown)
     updated = _touch(updated, now_ns, placeholder_only=placeholder_only)
     return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
 
@@ -983,7 +967,7 @@ def _terminal_row(
         approval_id=None if resume else updated.approval_id,
     )
     shown = write.shown if write.frozen_display is None else write.frozen_display
-    updated, row = _row(updated, span, stage, shown=shown, settles_sources=settles)
+    updated, row = _row(updated, span, stage, shown=shown)
     effects: tuple[Effect, ...] = (SettleSources(span.span_id),) if settles else ()
     return Transition(
         outcome=Outcome.APPLIED,
@@ -1009,6 +993,10 @@ def finish(reply: Reply, span: Span, write: TerminalWrite, *, now_ns: int) -> Tr
         return recompute
     expected = _expected_terminal_state(reply, ReplyState.COMPLETED)
     if write.state is not expected:
+        if expected is ReplyState.CANCELLED:
+            # The span learned the Stop's revision from one of its own writes
+            # before the Stop reached it: the payload renders again, cancelled.
+            return _unchanged(Outcome.RECOMPUTE, reply)
         msg = f"Terminal write rendered {write.state} where the reply requires {expected}"
         raise _invalid(msg)
     if expected is ReplyState.CANCELLED:
@@ -1125,7 +1113,7 @@ def fail(  # noqa: C901, PLR0911
         # A resumed reply shows its interruption below the recovered content
         # without settling its sources.
         updated = _bump(updated, now_ns, presentation=write.shown)
-        updated, row = _row(updated, span, WriteStage.EDIT, shown=write.shown, settles_sources=False)
+        updated, row = _row(updated, span, WriteStage.EDIT, shown=write.shown)
         return Transition(outcome=Outcome.APPLIED, reply=updated, spans=(ended,), row=row)
     if write is None:
         msg = "A failure during delivery needs its terminal note"
@@ -1270,7 +1258,7 @@ def pause(
     )
     row = None
     if write.stage is not None:
-        updated, row = _row(updated, span, write.stage, shown=write.shown, settles_sources=False)
+        updated, row = _row(updated, span, write.stage, shown=write.shown)
     if in_place:
         return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
     updated = _clear_current(updated, span.span_id)
@@ -1378,7 +1366,7 @@ def approval_failure_note(
     updated = _set_state(reply, state, now_ns, presentation=shown, approval_id=None)
     if state is ReplyState.CANCELLED:
         updated = _stop_applied(updated)
-    updated, row = _row(updated, span, stage, shown=shown, settles_sources=False)
+    updated, row = _row(updated, span, stage, shown=shown)
     return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
 
 
@@ -1512,7 +1500,7 @@ def flush_owed_write(
         raise _invalid(msg)
     stage = WriteStage.EDIT if span_has_final else WriteStage.FINAL
     updated = _touch(reply, now_ns, owed_write=None, presentation=shown)
-    updated, row = _row(updated, span, stage, shown=shown, settles_sources=False)
+    updated, row = _row(updated, span, stage, shown=shown)
     return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
 
 
@@ -1621,6 +1609,22 @@ def sources_deleted(reply: Reply, current: Span | None, *, now_ns: int) -> Trans
     """
     if reply.terminal or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)
+    if (
+        current is not None
+        and not current.ended
+        and current.kind is SpanKind.REGENERATION
+        and current.rollback is not None
+        and current.rollback.state in _TERMINAL_STATES
+        and not _had_acknowledged_write(reply, current)
+    ):
+        # The answer an edit was regenerating stands, as when the regeneration
+        # fails before showing anything: a finished answer is kept.
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_restore(reply, current, now_ns),
+            spans=(_end(current, SpanOutcome.RESTORED, now_ns),),
+            effects=(CancelSpan(current.span_id), SettleSources(current.span_id)),
+        )
     effects: list[Effect] = []
     spans: tuple[Span, ...] = ()
     updated = reply
@@ -1716,6 +1720,13 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=tuple(spans))
     if last.kind is SpanKind.REGENERATION and last.rollback is not None:
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, last, now_ns), spans=tuple(spans))
+    if reply.event_id is None and reply.possibly_shown_seq is None:
+        # It never wrote anything: a restart note would be a message of its own.
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_set_state(updated, ReplyState.GONE, now_ns),
+            spans=tuple(spans),
+        )
     owed = OwedWrite(last.span_id, _NOTE_RESTART)
     updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=tuple(spans))
@@ -1790,6 +1801,13 @@ def removed_entity(reply: Reply, current: Span | None, *, now_ns: int) -> Transi
         ),
         spans=spans,
     )
+
+
+def owed_write_refused(reply: Reply, owed: OwedWrite, *, now_ns: int) -> Transition:
+    """The outbox refused the row an owed write needs, as in a room the bot left: nothing can send it."""
+    if reply.owed_write != owed:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, owed_write=None))
 
 
 def redactions_done(reply: Reply, event_ids: tuple[str, ...], *, now_ns: int) -> Transition:

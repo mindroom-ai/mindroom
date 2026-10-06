@@ -331,12 +331,15 @@ def _require_frozen_tool_visibility(show_tool_calls: bool | None) -> bool:
     return show_tool_calls
 
 
-def _interruption_note_landed(final_outcome: FinalDeliveryOutcome) -> bool:
-    """Return whether a cancellation ended its turn with the interruption note visible in Matrix.
+def _interruption_note_landed(final_outcome: FinalDeliveryOutcome, handle: SpanHandle | None) -> bool:
+    """Return whether a cancellation ended its turn with the interruption note.
 
-    That note is the turn's terminal outcome, since nothing resumes it; a note
-    that never landed leaves the turn to replay.
+    That note is the turn's terminal outcome, since nothing resumes it. A span
+    that ended with the note recorded settled its sources even before Matrix
+    acknowledged it; one released without it leaves the turn to replay.
     """
+    if handle is not None and handle.span.outcome in {rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED}:
+        return True
     if final_outcome.terminal_status != "cancelled" or final_outcome.delivery_kind is None:
         return False
     note = (
@@ -3464,12 +3467,6 @@ class ResponseRunner:
             ),
             room_id=request.room_id,
             thread_id=request.thread_id,
-            requester_id=request.response_envelope.requester_id,
-            visibility_policy=(
-                rl.VisibilityPolicy.SILENT_SCHEDULE
-                if _is_silent_schedule_response(request)
-                else rl.VisibilityPolicy.NORMAL
-            ),
             placeholder=TEAM_PLACEHOLDER if history_scope.kind == "team" else AGENT_PLACEHOLDER,
             show_tool_calls=self._show_tool_calls(),
             driving_edit_id=request.response_envelope.source_event_id if regeneration else None,
@@ -4697,7 +4694,7 @@ class ResponseRunner:
             request.on_deferred_outcome_handled is None
             or cancel_source is None
             or cancel_source == "user_stop"
-            or _interruption_note_landed(final_outcome)
+            or _interruption_note_landed(final_outcome, current_span())
         )
         await self._record_user_stop_handled(
             request,
@@ -6202,6 +6199,21 @@ class ResponseRunner:
                 raise
             participation.decline("preparation_failed")
             self.deps.logger.exception("Response preparation skipped before participation", error=str(error))
+            handle = current_span()
+            if handle is not None and not handle.exited:
+                # The declined turn shows nothing; its reply ends while the conversation is still held.
+                confirms = handle.unconfirmed_progress
+                now_ns = time.time_ns()
+                await self.deps.delivery_gateway.end_reply_span(
+                    handle,
+                    lambda reply, span: rl.suppress(
+                        reply,
+                        span,
+                        reason="suppressed",
+                        confirms=confirms,
+                        now_ns=now_ns,
+                    ),
+                )
             lifecycle = self._build_lifecycle(
                 identity=self._response_identity(request, response_kind="ai"),
                 request=request,

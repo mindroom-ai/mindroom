@@ -38,7 +38,7 @@ Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`
 
 A rule returns one outcome: `applied`, `stale` (the span is no longer current), `duplicate` (already true), `deferred` (earlier writes are unresolved), `recompute` (a Stop, deletion, or departure committed after the caller rendered), or `stopped`.
 A rule that can never apply raises `InvalidTransitionError`; callers treat it as a bug and settle the sources with a dispatch error instead of retrying.
-Effects run in the rule's transaction (`SettleSources`, `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, `TransferStop`); post-commit effects are best effort because the records already say what must happen.
+Effects run in the rule's transaction (`SettleSources`, `FenceApproval`, and `TransferStop`, which writes the turn record's Stop) or after it commits (`CancelSpan`, `WakeApproval`, and the turn ledger's cache learning a transferred Stop); post-commit effects are best effort because the records already say what must happen.
 
 Callers render a payload from the reply's revision before the transaction; a rule that would choose different content returns `recompute`, writes nothing, and the caller renders again.
 
@@ -76,11 +76,12 @@ A response-local CLI approval waits in place: its span stays current through the
 
 ## Lifetime
 
-Each bot instance writes a fresh generation for its principal at start, then adopts replies an earlier release left once, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note, and replies whose sources are pending wait for their replay.
+Each bot instance writes a fresh generation for its principal at start, then adopts replies an earlier release left once, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
 A membership departure ends the room's replies `gone` inside the departure fence and cancels their spans afterwards.
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
+A bot instance that another took over writes nothing more: its claims and its running spans' writes are refused against the principal's persisted generation, except resumes an older instance left, which the owner's approval recovery ends.
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
-Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit; the bot then cancels its running span and redacts what it showed, while a paused reply, an approval resume, and a written answer are kept.
+Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit; the bot then cancels its running span and redacts what it showed, while a reply an approval holds and a written answer are kept, including the answer an edit was regenerating before the regeneration showed anything.
 An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
 

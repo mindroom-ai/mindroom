@@ -226,7 +226,6 @@ class VisibleResponseReconciler:
         handled_turn: TurnRecord,
         *,
         target: MessageTarget,
-        requester_id: str,
         response_text: str,
         delivery_turn_id: str,
     ) -> tuple[str | None, str | None]:
@@ -250,7 +249,6 @@ class VisibleResponseReconciler:
                     discovery=handled_turn.discovery_event_ids,
                     room_id=target.room_id,
                     thread_id=target.resolved_thread_id,
-                    requester_id=requester_id,
                     text=response_text,
                 ),
             ),

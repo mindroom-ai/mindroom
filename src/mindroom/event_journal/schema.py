@@ -487,11 +487,8 @@ _TABLES = (
         room_id TEXT NOT NULL,
         thread_id TEXT,
         membership_epoch BIGINT NOT NULL,
-        requester_id TEXT NOT NULL,
-        visibility_policy TEXT NOT NULL CHECK (visibility_policy IN ('normal', 'silent_schedule')),
         -- Bound by the first acknowledged create, in any state.
         event_id TEXT,
-        continuation_event_ids_json TEXT,
         state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'completed', 'cancelled', 'failed', 'gone')),
         current_span_id TEXT,
         last_span_id TEXT NOT NULL,

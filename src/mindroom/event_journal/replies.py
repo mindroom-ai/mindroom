@@ -817,7 +817,7 @@ class ReplyStore:
         )
 
     async def ended_by_deletion(self, event_id: str) -> tuple[Reply, ...]:
-        """Return the replies deleting this source ended, their last span cancelled with them."""
+        """Return the replies deleting this source ended or put back to their earlier answer, with their last span."""
         return await self._backend.read(
             lambda transaction: reply_messages.ended_by_deletion(transaction, self._principal_id, event_id),
         )

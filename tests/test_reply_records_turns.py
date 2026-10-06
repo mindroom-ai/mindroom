@@ -12,6 +12,7 @@ import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom.config.participation import ParticipationConfig
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.hooks import FinalResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
@@ -232,6 +233,32 @@ async def test_setup_failure_after_the_placeholder_shows_the_dispatch_error(tmp_
     assert held_at_exit == [True]
 
 
+async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behind(tmp_path: Path) -> None:
+    """The declined turn's reply ends while the conversation is held, and a restart sends nothing for it."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = replace(_plain_request(_target()), participation=ParticipationConfig())
+    with (
+        patch.object(ResponseRunner, "prepare_response_runtime", new=AsyncMock(side_effect=RuntimeError("down"))),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        assert await runner.generate_response(request) is None
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.GONE
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.SUPPRESSED]
+    assert _sent_bodies(bot) == []
+
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._reply_runtime.start()
+    assert (await restarted._delivery_gateway.recover_deliveries()).complete
+    assert _sent_bodies(restarted) == []
+
+
 async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp_path: Path) -> None:
     """A failure before anything streamed keeps the placeholder; the retry answers into it as a replay."""
     bot = await _streaming_bot(tmp_path)
@@ -272,8 +299,8 @@ async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp
     assert not await bot._reply_runtime.store.is_pending("$event")
 
 
-async def test_a_claim_the_rules_refuse_settles_with_a_dispatch_error(tmp_path: Path) -> None:
-    """Sources that reach a terminal reply again are a lookup bug: the dispatch fails rather than add a second reply."""
+async def test_sources_that_reach_an_ended_reply_again_run_nothing(tmp_path: Path) -> None:
+    """A Stop can end the reply between the source gate and the claim: the turn adds neither an answer nor an error."""
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with patch_response_runner_module(
@@ -283,12 +310,11 @@ async def test_a_claim_the_rules_refuse_settles_with_a_dispatch_error(tmp_path: 
     ):
         await runner.generate_response(_plain_request(_target()))
         completed = await _reply(bot)
-        with pytest.raises(PostLockRequestPreparationError) as raised:
-            await runner.generate_response(_plain_request(_target()))
+        sends = len(_sent_bodies(bot))
+        assert await runner.generate_response(_plain_request(_target())) is None
 
-    assert not raised.value.reply_owned
-    assert raised.value.placeholder_event_id is None
     assert await _reply(bot) == completed
+    assert len(_sent_bodies(bot)) == sends
 
 
 async def test_team_answer_completes_its_reply(tmp_path: Path) -> None:
@@ -370,6 +396,27 @@ async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) ->
         return await runner.generate_response(request)
 
 
+async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_path: Path) -> None:
+    """In a room the bot left, an owed note has no row to become; the reply stops owing it."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
+    owed = rl.OwedWrite(answered.last_span_id, rl._NOTE_RESTART)
+    await bot._reply_runtime.store.replies.update(
+        answered.reply_id,
+        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
+    )
+    sends = len(_sent_bodies(bot))
+
+    await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+
+    reply = await _reply(bot)
+    assert reply.owed_write is None
+    assert len(_sent_bodies(bot)) == sends
+    assert await bot._reply_runtime.store.replies.with_pending_work() == ()
+
+
 async def test_regeneration_replaces_the_answer_of_the_same_reply(tmp_path: Path) -> None:
     """An edit regenerates the reply in place: one reply, a regeneration span, and the new answer as its body."""
     bot = await _streaming_bot(tmp_path)
@@ -430,7 +477,6 @@ async def _acknowledge_selection(bot: AgentBot) -> tuple[str | None, str | None]
     return await bot._visible_responses.deliver_selection_acknowledgement(
         TurnRecord.create(["$event"], requester_id="@user:localhost"),
         target=_target(),
-        requester_id="@user:localhost",
         response_text="You selected: 1 Yes\n\nProcessing your response...",
         delivery_turn_id="$event",
     )

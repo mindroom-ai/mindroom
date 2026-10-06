@@ -47,8 +47,6 @@ def _request(span_id: str = "span-1", *, reply_id: str = "reply-1", source: str 
         room_id=ROOM,
         thread_id="$thread",
         membership_epoch=3,
-        requester_id="@user:example.org",
-        visibility_policy=rl.VisibilityPolicy.NORMAL,
         empty_presentation='{"version":1}',
     )
 
@@ -83,7 +81,6 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
     reply = replace(
         transition.reply,
         event_id="$reply",
-        continuation_event_ids=("$segment",),
         frozen_display='{"frozen":true}',
         possibly_shown='{"shown":true}',
         possibly_shown_seq=4,
@@ -115,7 +112,7 @@ async def test_span_outcome_is_write_once_and_rollback_round_trips(journal_store
     transition = _first_claim()
     await _apply(journal_store, transition)
     assert transition.claimed is not None
-    rollback = Rollback(presentation="old", frozen_display=None, state=ReplyState.COMPLETED, presentation_known=False)
+    rollback = Rollback(presentation="old", frozen_display=None, state=ReplyState.COMPLETED)
     regen = replace(transition.claimed, span_id="span-2", kind=SpanKind.REGENERATION, rollback=rollback)
     await journal_store.backend.write(lambda tx: reply_spans.save(tx, PRINCIPAL, regen))
     assert await principal.replies.span("span-2") == regen
@@ -857,6 +854,9 @@ async def test_owner_lost_ends_what_an_older_instance_left_running(journal_store
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$pending")
     orphan = _first_claim()
+    assert orphan.reply is not None
+    # It showed an event, which the restart note ends.
+    orphan = replace(orphan, reply=replace(orphan.reply, event_id="$reply-1"))
     waiting = _first_claim(span_id="span-2", reply_id="reply-2", source="$pending")
     for transition in (orphan, waiting):
         await _apply(journal_store, transition)
