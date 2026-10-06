@@ -45,7 +45,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
 )
-from mindroom.handled_turns import TurnRecord, with_user_stop
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
@@ -97,7 +97,6 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.bot import AgentBot
-    from mindroom.delivery_gateway import ReplyStop
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -2449,6 +2448,8 @@ class TestAgentBot(AgentBotTestBase):
         event = _reaction_event("🛑", "$stop-reaction")
 
         with (
+            # A running reply owns the Stop.
+            patch.object(bot._user_stop_reconciler, "accepts_reply_stop", new=AsyncMock(return_value=True)),
             patch.object(
                 bot._user_stop_reconciler,
                 "finalize",
@@ -2466,360 +2467,16 @@ class TestAgentBot(AgentBotTestBase):
         await _cancel_dispatch_retry(bot)
         pending = await bot._journal_dispatcher.store.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
-        stop_receipt_order = pending[0].receipt_order
 
         restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         await restarted._turn_store.warm()
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
 
-        with patch(
-            "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-            new=AsyncMock(return_value=True),
-        ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
+        await restarted._journal_dispatcher.drain_once()
 
-        finalize_stopped_response.assert_awaited_once_with(target, "$response")
-        assert unexpected_hooks == []
-        assert restarted._turn_store.is_handled("$source") is True
-        stopped_record = restarted._turn_store.get_turn_record("$source")
-        assert stopped_record is not None
-        assert stopped_record.user_stop_receipt_order == stop_receipt_order
-        assert await restarted._journal_dispatcher.store.pending() == ()
-
-    @pytest.mark.ledger_loads_from_disk
-    @pytest.mark.asyncio
-    async def test_interrupted_stop_claim_suppresses_preceding_edit_after_restart(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A STOP claimed before cancellation must durably cover earlier edits."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        await bot._turn_store.warm()
-        bot.client = make_matrix_client_mock()
-        target = MessageTarget.resolve("!test:localhost", None, "$source")
-        await bot._turn_store.record_turn(
-            TurnRecord.create(
-                ["$source"],
-                response_event_id="$response",
-                response_owner=bot.agent_name,
-                requester_id="@user:localhost",
-                conversation_target=target,
-            ),
-        )
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        event = _reaction_event("🛑", "$stop-reaction")
-
-        with (
-            # A running reply owns the Stop: the turn already names its answer.
-            patch.object(bot._user_stop_reconciler, "accepts_reply_stop", new=AsyncMock(return_value=True)),
-            patch.object(
-                bot._user_stop_reconciler,
-                "finalize",
-                new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
-            ),
-        ):
-            await admit_dispatch_event(
-                bot._journal_dispatcher,
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
-        pending = await bot._journal_dispatcher.store.pending()
-        stop_receipt_order = pending[0].receipt_order
-
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        await restarted._turn_store.warm()
-        restarted.client = make_matrix_client_mock()
-        unexpected_hooks = _install_reaction_recorder(restarted)
-        with patch(
-            "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-            new=AsyncMock(return_value=True),
-        ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
-
-        finalize_stopped_response.assert_awaited_once_with(target, "$response")
-        stopped_record = restarted._turn_store.get_turn_record("$source")
-        assert stopped_record is not None
-        assert stopped_record.user_stop_receipt_order == stop_receipt_order
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
-
-    @pytest.mark.ledger_loads_from_disk
-    @pytest.mark.asyncio
-    async def test_stop_replay_preserves_visible_partial_finalized_by_live_cancellation(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A live cancellation's partial terminal body must not be replaced on replay."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        await bot._turn_store.warm()
-        bot.client = make_matrix_client_mock()
-        target = MessageTarget.resolve("!test:localhost", None, "$source")
-        pending_turn = TurnRecord.create(
-            ["$source"],
-            response_event_id="$response",
-            completed=False,
-            response_owner=bot.agent_name,
-            requester_id="@user:localhost",
-            conversation_target=target,
-        )
-        await bot._turn_store.record_pending_turn(pending_turn)
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        event = _reaction_event("🛑", "$stop-reaction")
-
-        with (
-            patch.object(
-                bot._user_stop_reconciler,
-                "finalize",
-                new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
-            ),
-        ):
-            await admit_dispatch_event(
-                bot._journal_dispatcher,
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
-        pending = await bot._journal_dispatcher.store.pending()
-        stop_receipt_order = pending[0].receipt_order
-        await bot._turn_store.record_turn(
-            with_user_stop(
-                pending_turn,
-                "$response",
-                stop_receipt_order,
-                delivery_settled=True,
-            ),
-        )
-
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        await restarted._turn_store.warm()
-        restarted.client = make_matrix_client_mock()
-        with patch(
-            "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-            new=AsyncMock(return_value=True),
-        ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
-
-        finalize_stopped_response.assert_not_awaited()
-        stopped_record = restarted._turn_store.get_turn_record("$source")
-        assert stopped_record is not None
-        assert stopped_record.user_stop_receipt_order is not None
-        assert stopped_record.user_stop_settled_receipt_order == stopped_record.user_stop_receipt_order
-        assert await restarted._journal_dispatcher.store.pending() == ()
-
-    @pytest.mark.ledger_loads_from_disk
-    @pytest.mark.asyncio
-    async def test_failed_stop_delivery_suppresses_model_recovery_and_retries_after_restart(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Durable STOP truth must precede its retryable visible terminal edit."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        await bot._turn_store.warm()
-        bot.client = make_matrix_client_mock()
-        target = MessageTarget.resolve("!test:localhost", None, "$source")
-        await bot._turn_store.record_pending_turn(
-            TurnRecord.create(
-                ["$source"],
-                response_event_id="$response",
-                completed=False,
-                response_owner=bot.agent_name,
-                requester_id="@user:localhost",
-                conversation_target=target,
-            ),
-        )
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        event = _reaction_event("🛑", "$stop-reaction")
-
-        with (
-            patch(
-                "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-                new=AsyncMock(return_value=False),
-            ),
-        ):
-            await admit_dispatch_event(
-                bot._journal_dispatcher,
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
-
-        pending = await bot._journal_dispatcher.store.pending()
-        stop_receipt_order = pending[0].receipt_order
-        stopped_record = bot._turn_store.get_turn_record("$source")
-        assert stopped_record is not None
-        assert stopped_record.completed is True
-        assert stopped_record.user_stop_receipt_order == stop_receipt_order
-        assert stopped_record.user_stop_settled_receipt_order is None
-        assert await bot._turn_store.prepare_pending_response_source(
-            target=target,
-            source_event_ids=("$source",),
-            terminal_source_event_ids=("$source",),
-        )
-        assert len(pending) == 1
-        assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
-
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        await restarted._turn_store.warm()
-        restarted.client = make_matrix_client_mock()
-        unexpected_hooks = _install_reaction_recorder(restarted)
-        with patch(
-            "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-            new=AsyncMock(return_value=True),
-        ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
-
-        finalize_stopped_response.assert_awaited_once_with(target, "$response")
-        assert unexpected_hooks == []
-        finalized_record = restarted._turn_store.get_turn_record("$source")
-        assert finalized_record is not None
-        assert finalized_record.user_stop_settled_receipt_order == stop_receipt_order
-        assert await restarted._journal_dispatcher.store.pending() == ()
-
-    @pytest.mark.asyncio
-    async def test_older_stop_leaves_a_later_edit_without_a_cancellation_note(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A delayed older STOP makes the turn terminal without writing its cancellation over a later edit."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.client = make_matrix_client_mock()
-        target = MessageTarget.resolve("!test:localhost", None, "$source")
-        await bot._turn_store.record_pending_turn(
-            TurnRecord.create(
-                ["$source"],
-                response_event_id="$response",
-                completed=False,
-                response_owner=bot.agent_name,
-                requester_id="@user:localhost",
-                conversation_target=target,
-            ),
-        )
-        assert not await bot._turn_store._prepare_edit_response_source(
-            target=target,
-            source_event_ids=("$source",),
-            response_event_id="$response",
-            edit_receipt_order=3,
-        )
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        event = _reaction_event("🛑", "$stale-stop-reaction")
-        with (
-            patch.object(
-                unwrap_extracted_collaborator(bot._journal_dispatcher),
-                "receipt_order",
-                new=AsyncMock(return_value=2),
-            ),
-            patch(
-                "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-                new=AsyncMock(return_value=True),
-            ) as finalize_stopped_response,
-        ):
-            await admit_dispatch_event(
-                bot._journal_dispatcher,
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
-
-        finalize_stopped_response.assert_not_awaited()
-        bot.client.room_redact.assert_not_awaited()
-        stopped = bot._turn_store.get_turn_record("$source")
-        assert stopped is not None
-        assert stopped.user_stop_settled_receipt_order == 2
-
-    @pytest.mark.asyncio
-    async def test_stop_finalizes_post_reconciliation_source_identity(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """STOP finalizes the turn it names after a redacted alias is reassigned."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.client = make_matrix_client_mock()
-        target = MessageTarget.resolve("!test:localhost", None, "$second")
-        await bot._turn_store.record_pending_turn(
-            TurnRecord.create(
-                ["$first", "$second"],
-                redacted_source_event_ids=["$first"],
-                response_event_id="$response-a",
-                completed=False,
-                response_owner=bot.agent_name,
-                requester_id="@user:localhost",
-                conversation_target=target,
-            ),
-        )
-        reconciler = bot._user_stop_reconciler
-        turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        original_record_user_stop = reconciler._record
-        alias_claimed = False
-
-        async def record_after_alias_claim(
-            response_event_id: str,
-            stop_receipt_order: int,
-            *,
-            delivery_settled: bool = False,
-            deleted_turn_id: str | None = None,
-            reply_stop: ReplyStop | None = None,
-        ) -> TurnRecord:
-            nonlocal alias_claimed
-            if not alias_claimed:
-                alias_claimed = True
-                await turn_store.record_turn(
-                    TurnRecord.create(
-                        ["$first", "$other"],
-                        response_event_id="$response-b",
-                        latest_edit_receipt_order=3,
-                    ),
-                )
-            return await original_record_user_stop(
-                response_event_id,
-                stop_receipt_order,
-                delivery_settled=delivery_settled,
-                deleted_turn_id=deleted_turn_id,
-                reply_stop=reply_stop,
-            )
-
-        with (
-            patch.object(reconciler, "_record", side_effect=record_after_alias_claim),
-            patch(
-                "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
-                new=AsyncMock(return_value=True),
-            ) as finalize_stopped_response,
-        ):
-            assert await reconciler.finalize("$response-a", 2, room_id="!test:localhost")
-
-        stopped = turn_store.turn_record_for_response_event_id("$response-a")
-        assert stopped is not None
-        assert stopped.source_event_ids == ("$second",)
-        assert stopped.user_stop_settled_receipt_order == 2
-        assert turn_store.get_turn_record("$first").response_event_id == "$response-b"
-        finalize_stopped_response.assert_awaited_once_with(target, "$response-a")
 
     @pytest.mark.asyncio
     async def test_interrupted_config_reaction_replays_only_its_durable_consumer(

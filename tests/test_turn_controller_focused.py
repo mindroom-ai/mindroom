@@ -285,6 +285,9 @@ class _RecordingDeliveryGateway:
     sent: list[SendTextRequest] = field(default_factory=list)
     edited: list[EditTextRequest] = field(default_factory=list)
     edit_succeeds: bool = True
+    # Whether a reply owns the event a dispatch failure names, as one owns every acknowledgement.
+    replies_own_events: bool = False
+    failed_dispatches: list[tuple[str, str]] = field(default_factory=list)
 
     async def supersede_replay(self, _source_event_ids: tuple[str, ...]) -> bool | None:
         """No reply has the sources in this recording-only delivery fixture."""
@@ -303,9 +306,12 @@ class _RecordingDeliveryGateway:
         self.edited.append(request)
         return self.edit_succeeds
 
-    async def fail_reply_dispatch(self, _event_id: str, _error_text: str) -> bool:
-        """No reply records exist in this recording-only delivery fixture."""
-        return False
+    async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
+        """Record the failure a reply shows, when the fixture says a reply owns the event."""
+        if not self.replies_own_events:
+            return False
+        self.failed_dispatches.append((event_id, error_text))
+        return True
 
 
 @dataclass
@@ -4665,7 +4671,8 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     assert ack_request.response_text.startswith("You selected: 1 Option 1")
     assert ack_request.target.resolved_thread_id == selection.thread_id
     assert ack_request.target.reply_to_event_id == selection.question_event_id
-    assert ack_request.delivery_turn_id == "$selection:localhost"
+    assert ack_request.reply_write is not None
+    assert ack_request.reply_write.span.delivery_id == "$selection:localhost"
 
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]
@@ -4879,7 +4886,10 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
 
     # The retry sends the acknowledgement under the same delivery id, which the
     # outbox resolves to the row its first attempt recorded.
-    assert [request.delivery_turn_id for request in harness.gateway.sent] == [selection_event_id, selection_event_id]
+    assert [request.reply_write.span.delivery_id for request in harness.gateway.sent] == [
+        selection_event_id,
+        selection_event_id,
+    ]
     assert len(harness.runner.requests) == 2
     assert harness.turn_store.is_handled(selection.question_event_id) is True
 
@@ -5124,9 +5134,9 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An attachment-resolution failure visibly terminates the processing acknowledgment."""
+    """An attachment-resolution failure visibly terminates the processing acknowledgment through its reply."""
     harness = _build_harness(config, tmp_path)
-    harness.gateway.edit_succeeds = True
+    harness.gateway.replies_own_events = True
 
     async def fail_attachment_resolution(
         _normalizer: InboundTurnNormalizer,
@@ -5160,72 +5170,12 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
 
     assert harness.runner.requests == []
     assert len(harness.gateway.sent) == 1
-    assert len(harness.gateway.edited) == 1
-    edit_request = harness.gateway.edited[0]
-    assert edit_request.event_id == "$sent-1:localhost"
-    assert edit_request.new_text == "[general] ⚠️ Error: attachment lookup failed"
-    assert edit_request.extra_content == {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_ERROR}
+    assert harness.gateway.failed_dispatches == [("$sent-1:localhost", "[general] ⚠️ Error: attachment lookup failed")]
     handled_turn = harness.turn_store.get_turn_record(selection.question_event_id)
     assert handled_turn is not None
     assert handled_turn.response_event_id == "$sent-1:localhost"
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
-
-
-@pytest.mark.asyncio
-async def test_interactive_selection_failure_leaves_the_notice_to_the_outbox(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed ack edit leaves the notice to the outbox and stays retryable.
-
-    The selection's ack is a placeholder its turn owns, so the error edit goes
-    through the outbox. When that edit fails there is deliberately no second
-    message: recovery resends the frozen replacement and the placeholder
-    becomes the notice. Until that lands the selection has no terminal
-    outcome, so it must raise rather than record one.
-    """
-    harness = _build_harness(config, tmp_path)
-    harness.gateway.edit_succeeds = False
-
-    async def fail_attachment_resolution(
-        _normalizer: InboundTurnNormalizer,
-        _request: object,
-    ) -> object:
-        msg = "attachment lookup failed"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(
-        InboundTurnNormalizer,
-        "build_dispatch_payload_with_attachments",
-        fail_attachment_resolution,
-    )
-    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
-    selection = interactive.InteractiveSelection(
-        question_event_id="$question:localhost",
-        question_text="Process the attached report?",
-        selection_key="1",
-        selected_label="Yes",
-        selected_value="Yes",
-        thread_id="$thread-root:localhost",
-    )
-
-    with pytest.raises(RuntimeError, match="has no durable terminal outcome"):
-        await harness.controller._handle_interactive_selection(
-            room,
-            selection=selection,
-            transport_sender_id=_SENDER,
-            requester_user_id=_SENDER,
-            source_event_id="$selection:localhost",
-        )
-
-    # Only the ack itself was sent: the failed edit is owed by the outbox.
-    assert len(harness.gateway.sent) == 1
-    pending_turn = harness.turn_store.get_turn_record(selection.question_event_id)
-    assert pending_turn is not None
-    assert pending_turn.completed is False
-    assert pending_turn.response_event_id == "$sent-1:localhost"
 
 
 @pytest.mark.asyncio

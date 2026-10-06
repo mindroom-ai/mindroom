@@ -2686,7 +2686,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         replace(
             user_stop_reconciler.deps,
             turn_store=rebuilt_changes["turn_store"],
-            response_runner=rebuilt_changes["response_runner"],
             delivery_gateway=rebuilt_changes["delivery_gateway"],
         ),
     )
@@ -2701,7 +2700,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         runtime_paths=rebuilt.deps.runtime_paths,
         agent_name=rebuilt.deps.agent_name,
         turn_policy=rebuilt.deps.turn_policy,
-        turn_store=rebuilt.deps.turn_store,
         user_stop_reconciler=bot._user_stop_reconciler,
         ingress=rebuilt.deps.ingress,
         reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,

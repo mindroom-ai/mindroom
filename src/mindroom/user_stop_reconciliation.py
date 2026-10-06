@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway, ReplyStop
     from mindroom.handled_turns import TurnRecord
-    from mindroom.message_target import MessageTarget
-    from mindroom.response_runner import ResponseRunner
     from mindroom.turn_store import TurnStore
 
 
@@ -18,7 +16,6 @@ class UserStopReconcilerDeps:
     """Collaborators for durable stop settlement."""
 
     turn_store: TurnStore
-    response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
 
 
@@ -38,15 +35,12 @@ class UserStopReconciler:
         response_event_id: str,
         stop_receipt_order: int,
         *,
-        delivery_settled: bool = False,
-        deleted_turn_id: str | None = None,
         reply_stop: ReplyStop | None = None,
     ) -> TurnRecord:
         stopped = await self.deps.turn_store.record_user_stopped_response(
             response_event_id,
             stop_receipt_order,
-            delivery_settled=delivery_settled,
-            deleted_turn_id=deleted_turn_id,
+            delivery_settled=True,
             turn_id=None if reply_stop is None else reply_stop.turn_id,
             also=reply_stop,
         )
@@ -59,36 +53,6 @@ class UserStopReconciler:
             msg = f"User-stopped response {response_event_id!r} did not become durable"
             raise RuntimeError(msg)
         return stopped
-
-    async def _finalize_under_lock(
-        self,
-        response_event_id: str,
-        stop_receipt_order: int,
-        target: MessageTarget,
-        approval_settled: bool,
-    ) -> bool:
-        async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
-            stopped = await self._record(response_event_id, stop_receipt_order, deleted_turn_id=deleted_turn_id)
-            newer_edit_exists = (stopped.latest_edit_receipt_order or 0) > stop_receipt_order
-            if not self._is_settled(stopped, stop_receipt_order):
-                if (
-                    not newer_edit_exists
-                    and not approval_settled
-                    and deleted_turn_id is None
-                    and not await self.deps.delivery_gateway.finalize_user_stopped_response(
-                        target,
-                        response_event_id,
-                    )
-                ):
-                    msg = f"Failed to finalize user-stopped response {response_event_id!r}"
-                    raise RuntimeError(msg)
-                stopped = await self._record(
-                    response_event_id,
-                    stop_receipt_order,
-                    delivery_settled=True,
-                    deleted_turn_id=deleted_turn_id,
-                )
-        return self._is_settled(stopped, stop_receipt_order)
 
     async def accepts_reply_stop(self, response_event_id: str, room_id: str) -> bool:
         """Return whether a Stop on this event reaches a reply record in the room."""
@@ -111,8 +75,7 @@ class UserStopReconciler:
         transaction that records it on the turn, so no terminal row slips
         between them, and the span's exit, the approval's failure settlement,
         or the owed cancel note shows it. Nothing waits for the conversation.
-        A Stop on an event no reply owns, a turn an earlier release left, finalizes under the
-        conversation's lock.
+        An event no reply owns has nothing to stop.
         """
         owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
         if owner is not None and owner.conversation_target is None:
@@ -128,41 +91,12 @@ class UserStopReconciler:
         if reply_stop.pending:
             # Recorded for the event's create, whose acknowledgement applies it.
             return True
-        async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
-            if owner is None and not reply_stop.owned and deleted_turn_id is None:
-                # Nothing owns the event: a reaction on someone else's message,
-                # or one whose create resolved elsewhere. There is nothing to stop.
-                return False
-            stopped_turn = await self._record(
-                response_event_id,
-                stop_receipt_order,
-                delivery_settled=reply_stop.owned,
-                deleted_turn_id=deleted_turn_id,
-                reply_stop=reply_stop,
-            )
-        if await self.deps.delivery_gateway.finish_reply_stop(reply_stop):
-            if not self._is_settled(stopped_turn, stop_receipt_order):
-                # The reply's create bound its event after the Stop looked.
-                await self._record(response_event_id, stop_receipt_order, delivery_settled=True)
-            return True
-        target = stopped_turn.conversation_target
-        if target is None:
-            msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
-            raise RuntimeError(msg)
-        source_event_id = stopped_turn.indexed_event_ids[0]
-        stopped = await self.deps.response_runner.finalize_user_stop(
-            response_event_id,
-            source_event_id,
-            target,
-            stop_receipt_order,
-            lambda approval_settled: self._finalize_under_lock(
-                response_event_id,
-                stop_receipt_order,
-                target,
-                approval_settled,
-            ),
-        )
-        if not stopped:
-            msg = f"User-stopped response {response_event_id!r} did not become durable"
-            raise RuntimeError(msg)
+        if not reply_stop.owned:
+            # A reaction on someone else's message, or one whose create resolved elsewhere.
+            return False
+        stopped_turn = await self._record(response_event_id, stop_receipt_order, reply_stop=reply_stop)
+        await self.deps.delivery_gateway.finish_reply_stop(reply_stop)
+        if not self._is_settled(stopped_turn, stop_receipt_order):
+            # The reply's create bound its event after the Stop looked.
+            await self._record(response_event_id, stop_receipt_order)
         return True

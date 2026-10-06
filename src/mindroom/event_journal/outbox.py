@@ -661,16 +661,6 @@ def claim_active_delivery_ownership(
     return ownership if membership_is_current and locked_ownership == ownership else None
 
 
-def initial_response_delivery_id(transaction: Transaction, principal_id: str, event_id: str) -> str | None:
-    """Resolve an exact INITIAL ACK, retaining identity after deleted-response retirement."""
-    row = transaction.fetchone(
-        """SELECT delivery_id FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND stage = 'initial' AND acknowledged_event_id = ?""",
-        (principal_id, event_id),
-    )
-    return None if row is None else str(row["delivery_id"])
-
-
 def approval_owns_delivery(transaction: Transaction, principal_id: str, delivery_id: str) -> bool:
     """Read approval ownership without loading its persisted run payload."""
     return (

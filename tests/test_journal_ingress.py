@@ -50,6 +50,7 @@ from mindroom.matrix.journal_ingress import (
 )
 from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS, PendingEventWorker
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
+from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
@@ -2534,7 +2535,7 @@ class TestRoomRetryBackoff:
                 assert created is not None
                 await _ApprovalContinuations.remember_card(alice)
             else:
-                claimed = await alice.claim_approval_continuation("approval-1", runtime_generation=generation)
+                claimed = await claim_continuation(alice, "approval-1", runtime_generation=generation)
                 assert claimed is not None
                 assert claimed.state == "claimed"
             return False

@@ -240,8 +240,6 @@ class VisibleResponseReconciler:
             SendTextRequest(
                 target=target,
                 response_text=response_text,
-                delivery_turn_id=delivery_turn_id,
-                delivery_stage=DeliveryStage.INITIAL,
                 reply_write=await replies.acknowledgement(
                     delivery_id=delivery_turn_id,
                     pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),

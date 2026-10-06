@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -14,13 +14,13 @@ import pytest_asyncio
 from agno.models.response import ToolExecution
 
 from mindroom.approval_manager import initialize_approval_store
-from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, response_attempts
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
@@ -31,9 +31,11 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, Response
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
+from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.reply_span_helpers import reply_span, response_span
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
-from tests.test_response_runner_focused import _admit_approval_source, _visible_event_response
+from tests.test_response_runner_focused import _admit_approval_source
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
@@ -124,7 +126,6 @@ class _ApprovalCase:
                     approval_store=MagicMock(
                         spec=type(self.principal),
                         wraps=self.principal,
-                        claim_approval_continuation=AsyncMock(return_value=None),
                     ),
                 ),
             ),
@@ -138,7 +139,7 @@ class _ApprovalCase:
         return newer
 
     async def stop(self, order: int = 4) -> None:
-        reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.runner, self.gateway))
+        reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.gateway))
         assert await reconciler.finalize("$answer", order, room_id=self.room.room_id)
         await self.settle_woken_sources()
 
@@ -175,7 +176,8 @@ class _ApprovalCase:
 
     async def freeze_final(self) -> ApprovalContinuation:
         await self.approve()
-        claimed = await self.principal.claim_approval_continuation(
+        claimed = await claim_continuation(
+            self.principal,
             self.approval.approval_id,
             runtime_generation=self.runner.deps.approval_runtime_generation,
         )
@@ -392,7 +394,6 @@ async def _paused_case(  # noqa: PLR0915
                     approval_store=MagicMock(
                         spec=type(principal),
                         wraps=principal,
-                        claim_approval_continuation=AsyncMock(return_value=None),
                     ),
                 ),
             ),
@@ -645,23 +646,12 @@ class TestEditApprovalOwnership:
 
 @pytest.mark.asyncio
 @pytest.mark.ledger_loads_from_disk
-@pytest.mark.parametrize("started", [False, True])
-@pytest.mark.parametrize("transport_fails", [False, True])
-async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: PLR0915
+async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     tmp_path: Path,
     journal_store: EventJournalStore,
-    started: bool,
-    transport_fails: bool,
 ) -> None:
-    """A visible error settles delivery without claiming the edited request was answered."""
+    """A regeneration whose pause fails keeps the answer it regenerated without claiming the edit was answered."""
     bot = _bot(tmp_path)
-    bot.client.room_send.return_value = nio.RoomSendResponse("$terminal-edit", "!room:localhost")
-    if transport_fails:
-        bot.client.room_send.side_effect = RuntimeError("Transport unavailable")
-    bot.client.room_get_event.return_value = _visible_event_response(
-        sender=bot.matrix_id.full_id,
-        body="Partial edited answer",
-    )
     runner = unwrap_extracted_collaborator(bot._response_runner)
     principal = journal_store.principal("general@@mindroom_general:localhost")
     await _admit_approval_source(principal, event_id="$source")
@@ -711,7 +701,7 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: 
         identity=runner._response_identity(request, response_kind="ai"),
         request=request,
     )
-    progress = _DeliveryProgress(tracked_event_id="$waiting", stage_started=started)
+    progress = _DeliveryProgress(tracked_event_id="$waiting")
     pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
     async def fail_handoff(_paused: PausedAttempt) -> None:
@@ -719,44 +709,35 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: 
         raise RuntimeError(message)
 
     with patch.object(runner, "_run_cancellable_response", AsyncMock(side_effect=pause)):
-        await runner._run_and_settle_locked_response(
-            request,
-            target=request.response_envelope.target,
-            lifecycle=lifecycle,
-            progress=progress,
-            response_function=AsyncMock(),
-            user_id=request.user_id,
-            run_id="run",
-            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
-            approval_suspension_handler=fail_handoff,
-            show_tool_calls=False,
-        )
+        async with reply_span(
+            principal,
+            runtime=runner.deps.replies,
+            source_event_id="$edit",
+            room_id=request.room_id,
+            thread_id=request.response_envelope.target.resolved_thread_id,
+            logical_source_event_ids=("$source",),
+            regenerated_event_id="$waiting",
+            edit_receipt_order=3,
+        ):
+            await runner._run_and_settle_locked_response(
+                request,
+                target=request.response_envelope.target,
+                lifecycle=lifecycle,
+                progress=progress,
+                response_function=AsyncMock(),
+                user_id=request.user_id,
+                run_id="run",
+                build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+                post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
+                approval_suspension_handler=fail_handoff,
+                show_tool_calls=False,
+            )
     assert progress.delivery_outcome is not None
     assert progress.delivery_outcome.terminal_status == "error"
-    assert progress.delivery_outcome.is_visible_response
-    final = await runner.deps.approval_store.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
-    assert final is not None
-    attempt = await journal_store.backend.read(
-        lambda tx: response_attempts.load_response_attempt(
-            tx,
-            principal.principal_id,
-            "$edit",
-        ),
-    )
-    assert attempt is not None
-    assert attempt.logical_source_event_ids == ("$source",)
-    assert attempt.response_event_id == "$waiting"
-    if transport_fails:
-        assert final.acknowledged_event_id is None
-        assert progress.delivery_outcome.delivery_kind is None
-        assert progress.delivery_outcome.final_visible_body is None
-        bot.client.room_send.side_effect = None
-        assert (await runner.deps.delivery_gateway.recover_deliveries()).recovered == 1
-        final = await runner.deps.approval_store.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
-        assert final is not None
-    assert final.acknowledged_event_id is not None
-    assert final.payload["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    assert progress.delivery_outcome.event_id == "$waiting"
+    # The regeneration wrote nothing, so its reply shows the answer it regenerated.
+    assert await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL) is None
+    bot.client.room_send.assert_not_awaited()
     assert not await principal.is_pending("$edit")
     assert not await principal.is_pending("$source")
     _reset_handled_turn_ledger_runtime()
@@ -770,16 +751,25 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: 
 
 
 @pytest.mark.asyncio
-async def test_failed_pause_without_visible_response_keeps_no_event_outcome(tmp_path: Path) -> None:
-    """A failure before any visible send retains the existing no-event terminal behavior."""
+async def test_failed_pause_without_visible_response_shows_the_approval_failure(tmp_path: Path) -> None:
+    """A pause that fails before anything of the reply is visible tells the user in a new message."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target())
-    outcome = await runner._finalize_failed_approval_handoff(
-        target=request.response_envelope.target,
-        request=request,
-        progress=_DeliveryProgress(),
-        failure_reason="failed",
-    )
+    sent: list[dict[str, Any]] = []
+
+    async def send(_client: object, _room_id: str, content: dict[str, Any], **_kwargs: object) -> DeliveredMatrixEvent:
+        sent.append(content)
+        return DeliveredMatrixEvent("$note", content)
+
+    with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
+        async with response_span(runner, request):
+            outcome = await runner._finalize_failed_approval_handoff(
+                target=request.response_envelope.target,
+                request=request,
+                progress=_DeliveryProgress(),
+                failure_reason="failed",
+            )
     assert outcome.terminal_status == "error"
-    assert outcome.event_id is None
-    assert not outcome.is_visible_response
+    assert outcome.event_id == "$note"
+    assert outcome.failure_reason == "failed"
+    assert [content["body"] for content in sent] == ["Tool approval could not be started. Please try again."]

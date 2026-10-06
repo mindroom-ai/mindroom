@@ -368,13 +368,12 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         pending_text: str,
-        reply_pause: _ReplyPause | None = None,
+        reply_pause: _ReplyPause,
     ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation.
 
-        ``reply_pause`` records the advance with the reply's pause row, when
-        reply records own the reply; it returns the advanced continuation and
-        whether its pause row reached Matrix.
+        ``reply_pause`` records the advance with the reply's pause row and
+        returns the advanced continuation and whether its pause row reached Matrix.
         """
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
@@ -398,43 +397,19 @@ class ApprovalResponseCoordinator:
             delegation_storage_bindings=paused.delegation_storage_bindings,
             cli_call=paused.cli_call,
         )
-        shown_with_pause: bool | None = None
-        if reply_pause is None:
-            publishing = await self.store.advance_approval_continuation(
-                advance.approval_id,
-                claimant_generation=advance.claimant_generation,
-                run_id=advance.run_id,
-                session_id=advance.session_id,
-                calls=advance.calls,
-                runtime_model_name=advance.runtime_model_name,
-                continuation_count=advance.continuation_count,
-                delegation_storage_bindings=advance.delegation_storage_bindings,
-                cli_call=advance.cli_call,
-            )
-        else:
-            publishing, shown_with_pause = await reply_pause(
-                advance,
-                paused,
-                visible_text=visible_text,
-                stream_status=stream_status,
-                tool_trace=visible_tool_trace,
-                waiting_text=plan.waiting_text,
-            )
+        publishing, shown_with_pause = await reply_pause(
+            advance,
+            paused,
+            visible_text=visible_text,
+            stream_status=stream_status,
+            tool_trace=visible_tool_trace,
+            waiting_text=plan.waiting_text,
+        )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
         failure_reason = "Chained approval publication failed"
         try:
-            if shown_with_pause is None:
-                shown_with_pause = await self.delivery_gateway.edit_text(
-                    EditTextRequest(
-                        target=target,
-                        event_id=current.response_event_id,
-                        new_text=visible_text,
-                        extra_content={STREAM_STATUS_KEY: stream_status},
-                        tool_trace=list(visible_tool_trace) or None,
-                    ),
-                )
             _require_successful_edit(shown_with_pause, failure_reason)
             await self.publish_generation(
                 publishing,

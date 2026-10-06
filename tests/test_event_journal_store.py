@@ -78,6 +78,7 @@ from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
+from tests.approval_continuation_helpers import advance_continuation, claim_continuation
 from tests.conftest import postgres_journal_schema_url
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
@@ -6474,9 +6475,10 @@ class TestApprovalContinuations:
         assert loaded is not None
         assert loaded.continuation_count == 2
         assert loaded.state == "ready", loaded.failure_reason
-        claimed = await reopened.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        claimed = await claim_continuation(reopened, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
-        advanced = await reopened.advance_approval_continuation(
+        advanced = await advance_continuation(
+            reopened,
             "approval-1",
             claimant_generation=claimed.generation,
             run_id="run-next",
@@ -6560,9 +6562,10 @@ class TestApprovalContinuations:
         }
         created = await alice.create_approval_continuation(replace(self.continuation(), cli_call=payload))
         assert created.cli_call == payload
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="live")
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="live")
         assert claimed.cli_call == payload
-        advanced = await alice.advance_approval_continuation(
+        advanced = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=0,
             run_id="run-2",
@@ -6912,7 +6915,8 @@ class TestApprovalContinuations:
 
         await alice._backend.write(remove_visibility)
 
-        claimed = await alice.claim_approval_continuation(
+        claimed = await claim_continuation(
+            alice,
             "approval-1",
             runtime_generation="runtime-a",
             legacy_show_tool_calls=current_policy,
@@ -6929,8 +6933,8 @@ class TestApprovalContinuations:
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
 
-        winner = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
-        loser = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b")
+        winner = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
+        loser = await claim_continuation(alice, "approval-1", runtime_generation="runtime-b")
 
         assert winner is not None
         assert winner.state == "claimed"
@@ -7016,7 +7020,7 @@ class TestApprovalContinuations:
         """A restart recovers delivery debt without replaying the coalesced source twice."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
 
         assert list(await alice.pending(runtime_generation="runtime-a")) == []
         recovered = await alice.pending(runtime_generation="runtime-b")
@@ -7026,7 +7030,7 @@ class TestApprovalContinuations:
         """A transient FINAL failure re-enters only to reconcile its frozen outbox payload."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         await alice.enqueue_matrix_delivery(
             delivery_id="$source-1",
             stage=DeliveryStage.FINAL,
@@ -7046,7 +7050,7 @@ class TestApprovalContinuations:
         """A stale lifecycle cannot replace a newer chained approval pause."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         calls = (
             ApprovalCall(
                 tool_call_id="call-2",
@@ -7056,14 +7060,16 @@ class TestApprovalContinuations:
             ),
         )
 
-        stale = await alice.advance_approval_continuation(
+        stale = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=1,
             run_id="run-2",
             session_id="session-1",
             calls=calls,
         )
-        advanced = await alice.advance_approval_continuation(
+        advanced = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=0,
             run_id="run-2",
@@ -7086,7 +7092,7 @@ class TestApprovalContinuations:
         """A restart cannot execute a chained generation before its presentation is acknowledged."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         calls = (
             ApprovalCall(
@@ -7098,7 +7104,8 @@ class TestApprovalContinuations:
             ),
         )
 
-        publishing = await alice.advance_approval_continuation(
+        publishing = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=claimed.generation,
             run_id="run-2",
@@ -7109,7 +7116,7 @@ class TestApprovalContinuations:
         assert publishing is not None
         assert publishing.state == "waiting"
         assert publishing.runtime_generation == "runtime-a"
-        assert await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b") is None
+        assert await claim_continuation(alice, "approval-1", runtime_generation="runtime-b") is None
 
         activated = await alice.activate_approval_continuation(
             "approval-1",
@@ -7589,7 +7596,7 @@ class TestApprovalContinuations:
         """The successful FINAL debt atomically outranks a concurrent failure request."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         await alice.enqueue_matrix_delivery(
             delivery_id="$source-1",
@@ -7616,7 +7623,7 @@ class TestApprovalContinuations:
         """A definitive Matrix refusal is terminal for its paused-run owner too."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         await alice.enqueue_matrix_delivery(
             delivery_id="$source-1",
@@ -7999,7 +8006,7 @@ class TestApprovalContinuations:
         """A paused run cannot disappear before its frozen final answer is visible."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
 
         assert await alice.finish_approval_continuation("approval-1") is False
         assert await alice.is_pending("$source-1")
@@ -8030,7 +8037,7 @@ class TestApprovalContinuations:
         """A run a restart cut short gives its still-pending sources back to ordinary replay as a fresh attempt."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
 
         # Only a fenced continuation can be released; a live claim may still be running.
@@ -8066,7 +8073,7 @@ class TestApprovalContinuations:
         """A FINAL already owes the reply its terminal text, so the continuation settles instead."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         failing = await alice.request_approval_failure(
             "approval-1",
@@ -8097,7 +8104,7 @@ class TestApprovalContinuations:
         await admit_room_membership(responder, ROOM, "join")
         await self.admit_sources(responder)
         await responder.create_approval_continuation(self.continuation())
-        await responder.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await claim_continuation(responder, "approval-1", runtime_generation="runtime-a")
         await responder.enqueue_matrix_delivery(
             delivery_id="$source-1",
             stage=DeliveryStage.FINAL,

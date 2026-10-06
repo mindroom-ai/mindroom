@@ -42,7 +42,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
@@ -94,7 +93,6 @@ from mindroom.participation_judgment import create_participation_decider
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
-    APPROVAL_START_FAILED_NOTE,
     TEAM_PLACEHOLDER,
     NoteKind,
     Presentation,
@@ -121,7 +119,7 @@ from mindroom.response_shutdown_diagnostics import (
     context_with_response_shutdown_trace,
     response_shutdown_phase,
 )
-from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.response_sources import ResponseSources
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     TerminalFailureStatus,
@@ -138,9 +136,7 @@ from mindroom.runtime_shutdown import (
 from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
-    INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
-    RESTART_INTERRUPTED_RESPONSE_NOTE,
     TEAM_PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
@@ -331,24 +327,14 @@ def _require_frozen_tool_visibility(show_tool_calls: bool | None) -> bool:
     return show_tool_calls
 
 
-def _interruption_note_landed(final_outcome: FinalDeliveryOutcome, handle: SpanHandle | None) -> bool:
+def _interruption_note_landed(handle: SpanHandle | None) -> bool:
     """Return whether a cancellation ended its turn with the interruption note.
 
     That note is the turn's terminal outcome, since nothing resumes it. A span
     that ended with the note recorded settled its sources even before Matrix
     acknowledged it; one released without it leaves the turn to replay.
     """
-    if handle is not None and handle.span.outcome in {rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED}:
-        return True
-    if final_outcome.terminal_status != "cancelled" or final_outcome.delivery_kind is None:
-        return False
-    note = (
-        RESTART_INTERRUPTED_RESPONSE_NOTE
-        if final_outcome.resolved_cancel_source == "sync_restart"
-        else INTERRUPTED_RESPONSE_NOTE
-    )
-    body = final_outcome.final_visible_body
-    return body is not None and body.rstrip().endswith(note)
+    return handle is not None and handle.span.outcome in {rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED}
 
 
 def _replaceable_placeholder(request: ResponseRequest) -> bool:
@@ -825,10 +811,10 @@ class _ShownPause:
     response_event_id: str | None
     delivery_kind: Literal["sent", "edited"] | None
     final_visible_body: str | None
-    # With reply records: the span, its paused presentation, and the stage of
-    # the row that shows it with the continuation (``None`` when already shown).
-    handle: SpanHandle | None = None
-    reply_pause: Presentation | None = None
+    # The span, its paused presentation, and the stage of the row that shows
+    # it with the continuation (``None`` when its create already showed it).
+    handle: SpanHandle
+    reply_pause: Presentation
     reply_stage: rl.WriteStage | None = None
 
 
@@ -1484,7 +1470,7 @@ class ResponseRunner:
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
         )
 
-    async def _suspend_for_approval(  # noqa: C901 - exact live CLI handoff reuses native suspension
+    async def _suspend_for_approval(
         self,
         paused: PausedAttempt,
         *,
@@ -1545,9 +1531,7 @@ class ResponseRunner:
             shown = await self._show_pause(
                 paused,
                 waiting_text=plan.waiting_text,
-                request=request,
                 target=target,
-                progress=progress,
                 visible_text=visible_text,
                 stream_status=stream_status,
                 visible_tool_trace=visible_tool_trace,
@@ -1608,24 +1592,21 @@ class ResponseRunner:
                 ),
                 runtime_generation=(self.deps.approval_runtime_generation if continuation_state == "waiting" else None),
             )
-            if shown.handle is None or shown.reply_pause is None:
-                continuation = await self._approval_responses.create(draft)
-            else:
-                if not await self._pause_reply(
-                    shown.handle,
-                    draft,
-                    shown=shown.reply_pause,
-                    stage=shown.reply_stage,
-                    # A response-local CLI wait keeps its span running while it waits.
-                    in_place=paused.cli_call is not None,
-                    target=target,
-                    text=visible_text,
-                    stream_status=stream_status,
-                    tool_trace=visible_tool_trace,
-                ):
-                    msg = "Could not publish the suspended approval response"
-                    raise RuntimeError(msg)  # noqa: TRY301
-                continuation = await self.deps.approval_store.approval_continuation(approval_id)
+            if not await self._pause_reply(
+                shown.handle,
+                draft,
+                shown=shown.reply_pause,
+                stage=shown.reply_stage,
+                # A response-local CLI wait keeps its span running while it waits.
+                in_place=paused.cli_call is not None,
+                target=target,
+                text=visible_text,
+                stream_status=stream_status,
+                tool_trace=visible_tool_trace,
+            ):
+                msg = "Could not publish the suspended approval response"
+                raise RuntimeError(msg)  # noqa: TRY301
+            continuation = await self.deps.approval_store.approval_continuation(approval_id)
             if continuation is None or continuation.state != continuation_state:
                 msg = "Approval continuation lost its journal source ownership"
                 raise RuntimeError(msg)  # noqa: TRY301
@@ -1661,9 +1642,7 @@ class ResponseRunner:
         paused: PausedAttempt,
         *,
         waiting_text: str | None,
-        request: ResponseRequest,
         target: MessageTarget,
-        progress: _DeliveryProgress,
         visible_text: str,
         stream_status: str,
         visible_tool_trace: tuple[ToolTraceEntry, ...],
@@ -1675,46 +1654,29 @@ class ResponseRunner:
             response_text=visible_text,
             extra_content={STREAM_STATUS_KEY: stream_status},
             tool_trace=list(visible_tool_trace) or None,
-            delivery_turn_id=request.response_envelope.source_event_id,
-            delivery_stage=DeliveryStage.INITIAL,
         )
         handle = current_span()
-        if handle is not None and not handle.exited:
-            # The reply's records show the pause; its row is written with the continuation.
-            reply_pause = _paused_presentation(handle, paused, waiting_text=waiting_text)
-            reply = await handle.runtime.store.replies.load(handle.reply_id)
-            assert reply is not None, "a span's reply exists while it pauses"
-            if reply.event_id is None:
-                # The pause is the reply's first visible message, so its create shows it.
-                created = await self.deps.delivery_gateway.send_text(
-                    replace(initial, reply_write=initial_write(handle, reply_pause, placeholder_only=False)),
-                )
-                return _ShownPause(created, "sent", visible_text, handle=handle, reply_pause=reply_pause)
-            if not shows_text:
-                return _ShownPause(reply.event_id, None, None, handle=handle, reply_pause=reply_pause)
-            return _ShownPause(
-                reply.event_id,
-                "edited",
-                visible_text,
-                handle=handle,
-                reply_pause=reply_pause,
-                reply_stage=rl.WriteStage.EDIT,
+        assert handle is not None, "a pause runs in its reply's span"
+        # The reply's records show the pause; its row is written with the continuation.
+        reply_pause = _paused_presentation(handle, paused, waiting_text=waiting_text)
+        reply = await handle.runtime.store.replies.load(handle.reply_id)
+        assert reply is not None, "a span's reply exists while it pauses"
+        if reply.event_id is None:
+            # The pause is the reply's first visible message, so its create shows it.
+            created = await self.deps.delivery_gateway.send_text(
+                replace(initial, reply_write=initial_write(handle, reply_pause, placeholder_only=False)),
             )
-        response_event_id = progress.tracked_event_id
-        if response_event_id is None:
-            return _ShownPause(await self.deps.delivery_gateway.send_text(initial), "sent", visible_text)
+            return _ShownPause(created, "sent", visible_text, handle=handle, reply_pause=reply_pause)
         if not shows_text:
-            return _ShownPause(response_event_id, None, None)
-        edited = await self.deps.delivery_gateway.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=response_event_id,
-                new_text=visible_text,
-                extra_content={STREAM_STATUS_KEY: stream_status},
-                tool_trace=list(visible_tool_trace) or None,
-            ),
+            return _ShownPause(reply.event_id, None, None, handle=handle, reply_pause=reply_pause)
+        return _ShownPause(
+            reply.event_id,
+            "edited",
+            visible_text,
+            handle=handle,
+            reply_pause=reply_pause,
+            reply_stage=rl.WriteStage.EDIT,
         )
-        return _ShownPause(response_event_id if edited else None, "edited", visible_text)
 
     async def _advance_reply_pause(
         self,
@@ -1767,12 +1729,7 @@ class ResponseRunner:
     ) -> ApprovalContinuation | None:
         """Claim a ready continuation for the response waiting on it, resuming its reply in place."""
         handle = current_span()
-        if handle is None or handle.exited:
-            return await self.deps.approval_store.claim_approval_continuation(
-                current.approval_id,
-                runtime_generation=self.deps.approval_runtime_generation,
-                legacy_show_tool_calls=legacy_show_tool_calls,
-            )
+        assert handle is not None, "a response-local wait runs in its reply's span"
         claimed, applied = await self.deps.approval_store.claim_approval_in_place(
             current.approval_id,
             runtime_generation=self.deps.approval_runtime_generation,
@@ -1792,22 +1749,20 @@ class ResponseRunner:
     ) -> None:
         """Record the next pause of a run that waits in place, with its reply's pause row."""
         handle = current_span()
+        assert handle is not None, "a response-local wait runs in its reply's span"
         await self._approval_responses.advance_pause(
             current,
             paused,
             target=target,
             pending_text=PROGRESS_PLACEHOLDER,
-            reply_pause=(
-                None
-                if handle is None or handle.exited
-                else partial(self._advance_reply_pause, handle, target, in_place=True)
-            ),
+            reply_pause=partial(self._advance_reply_pause, handle, target, in_place=True),
         )
 
     async def _end_expired_in_place_wait(self, current: ApprovalContinuation) -> None:
         """End the span of a response-local wait that expired; the reply waits for the decision."""
         handle = current_span()
-        if handle is None or handle.exited:
+        assert handle is not None, "a response-local wait runs in its reply's span"
+        if handle.exited:
             return
         reply = await handle.runtime.store.replies.load(handle.reply_id)
         assert reply is not None
@@ -2038,14 +1993,13 @@ class ResponseRunner:
                 current,
             )
         handle = current_span()
+        assert handle is not None, "an approval resume runs in its reply's resume span"
         presentation = await self._approval_responses.advance_pause(
             current,
             result,
             target=target,
             pending_text=PROGRESS_PLACEHOLDER,
-            reply_pause=(
-                None if handle is None or handle.exited else partial(self._advance_reply_pause, handle, target)
-            ),
+            reply_pause=partial(self._advance_reply_pause, handle, target),
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
@@ -2913,78 +2867,6 @@ class ResponseRunner:
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until one canonical room/thread has no active response turn."""
         await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
-
-    async def _settle_user_stopped_approval(
-        self,
-        *,
-        response_event_id: str,
-        source_event_id: str,
-        target: MessageTarget,
-    ) -> bool | None:
-        """Settle a stopped approval, returning ``None`` while frozen success remains unresolved."""
-        continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
-        if continuation is None:
-            final_delivery = await self.deps.approval_store.load_matrix_delivery(
-                delivery_id=source_event_id,
-                stage=DeliveryStage.FINAL,
-            )
-            return bool(
-                final_delivery is not None
-                and final_delivery.acknowledged_event_id is not None
-                and response_event_id in {final_delivery.edits_event_id, final_delivery.acknowledged_event_id},
-            )
-        if continuation.state == "claimed":
-            owns_final, event_id = await self._recover_frozen_approval_final(
-                continuation,
-                target=target,
-            )
-            if owns_final:
-                return True if event_id is not None else None
-        failing = await self._approval_responses.request_failure(
-            continuation,
-            "cancelled_by_user",
-        )
-        if failing is None:
-            failing = await self.deps.approval_store.approval_continuation(continuation.approval_id)
-        if failing is None:
-            return False
-        return True if await self._approval_responses.settle_failure(failing, "cancelled_by_user") else None
-
-    async def finalize_user_stop(
-        self,
-        message_id: str,
-        source_event_id: str,
-        target: MessageTarget,
-        stop_receipt_order: int,
-        finalize: Callable[[bool], Awaitable[bool]],
-    ) -> bool:
-        """Durably finalize a Stop on an event no reply owns, under its conversation's lock."""
-
-        async def finalize_locked() -> bool:
-            edited_sources = await self.deps.approval_store.edited_approval_sources_for_user_stop(
-                room_id=target.room_id,
-                response_event_id=message_id,
-                source_event_id=source_event_id,
-                stop_receipt_order=stop_receipt_order,
-            )
-            approval_settled = False
-            unresolved_final = False
-            for approval_source in dict.fromkeys((*edited_sources, source_event_id)):
-                settled = await self._settle_user_stopped_approval(
-                    response_event_id=message_id,
-                    source_event_id=approval_source,
-                    target=target,
-                )
-                if settled is None:
-                    unresolved_final = True
-                else:
-                    approval_settled |= settled
-            return False if unresolved_final else await finalize(approval_settled)
-
-        return await self._lifecycle_coordinator.run_locked_target_operation(
-            target=target,
-            locked_operation=finalize_locked,
-        )
 
     def reserve_waiting_human_message(
         self,
@@ -4113,11 +3995,7 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        prepared_request = await self._prepare_locked_source(
-            request,
-            resolved_target=resolved_target,
-            history_scope=history_scope,
-        )
+        prepared_request = await self._prepare_locked_source(request, resolved_target=resolved_target)
         if prepared_request is None:
             return None
         claimed_request = await self._claim_reply_span(prepared_request, history_scope=history_scope)
@@ -4176,7 +4054,6 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-        history_scope: HistoryScope,
     ) -> ResponseRequest | None:
         """Apply the owner gate to this exact request history, before and after refresh."""
         preparation = (
@@ -4207,31 +4084,13 @@ class ResponseRunner:
             source_deleted = await self.deps.delivery_gateway.cleanup_deleted_response(
                 request.response_envelope.source_event_id,
             )
-            reply_owned = handle is not None and not handle.exited
-            if handle is not None and reply_owned:
+            if handle is not None and not handle.exited:
                 await self._end_span_for_terminal_source(handle, resolved_target, source_deleted=source_deleted)
             else:
-                reply_owned = await self.deps.delivery_gateway.settle_unclaimed_reply(
+                # Before the claim, the reply an earlier attempt left ends through its records.
+                await self.deps.delivery_gateway.settle_unclaimed_reply(
                     (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
                     source_deleted=source_deleted,
-                )
-            if (
-                not reply_owned
-                and not source_deleted
-                and request.existing_event_id is not None
-                and request.existing_event_is_placeholder
-            ):
-                await self.deps.delivery_gateway.deliver_cancelled_visible_note(
-                    CancelledVisibleNoteRequest(
-                        target=resolved_target,
-                        event_id=request.existing_event_id,
-                        existing_event_is_placeholder=True,
-                        cancel_source="interrupted",
-                        identity=self._response_identity(
-                            request,
-                            response_kind="team" if history_scope.kind == "team" else "agent",
-                        ),
-                    ),
                 )
             if request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
@@ -4291,6 +4150,7 @@ class ResponseRunner:
             )
         ):
             handle = current_span()
+            assert handle is not None, "a placeholder is its reply's create"
             placeholder_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=resolved_target,
@@ -4299,16 +4159,10 @@ class ResponseRunner:
                     # A streamed answer creates its visible message here and
                     # only edits it afterwards, so this send is the one a crash
                     # could duplicate into two answers in the room.
-                    delivery_turn_id=request.response_envelope.source_event_id,
-                    delivery_stage=DeliveryStage.INITIAL,
-                    reply_write=(
-                        None
-                        if handle is None
-                        else initial_write(
-                            handle,
-                            Presentation(placeholder=placeholder_message, show_tool_calls=handle.base.show_tool_calls),
-                            placeholder_only=True,
-                        )
+                    reply_write=initial_write(
+                        handle,
+                        Presentation(placeholder=placeholder_message, show_tool_calls=handle.base.show_tool_calls),
+                        placeholder_only=True,
                     ),
                 ),
             )
@@ -4330,11 +4184,7 @@ class ResponseRunner:
             exclude_history_event_id=placeholder_event_id,
         )
         request = self._request_with_locked_target(request, resolved_target)
-        prepared_request = await self._prepare_locked_source(
-            request,
-            resolved_target=resolved_target,
-            history_scope=history_scope,
-        )
+        prepared_request = await self._prepare_locked_source(request, resolved_target=resolved_target)
         if prepared_request is None:
             return None
         return self._with_interrupted_attempt(prepared_request)
@@ -4368,90 +4218,22 @@ class ResponseRunner:
             early_placeholder_state=early_placeholder_state,
         )
 
-    async def _finalize_pre_delivery_terminal(
+    def _settle_missing_delivery_outcome(
         self,
-        *,
-        target: MessageTarget,
-        request: ResponseRequest,
-        identity: ResponseIdentity,
         progress: _DeliveryProgress,
-        terminal_status: TerminalFailureStatus,
-        failure_reason: str,
-    ) -> FinalDeliveryOutcome:
-        """Finalize one turn that terminated before a delivery outcome settled.
-
-        The real pending-visible shape decides what the gateway may touch: a
-        non-placeholder existing event (for example a prior answer being
-        regenerated) must never be treated as a redactable placeholder.
-        """
-        if current_span() is not None:
-            # The span's exit decides the reply; a placeholder stays for the retry.
-            return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-                terminal_status=terminal_status,
-                failure_reason=failure_reason,
-            )
-        # Pre-delivery, a tracked event with no adopted existing event is a
-        # message this turn created on its own, so classify it as the run
-        # message for placeholder cleanup instead of leaving it dangling.
-        placeholder_run_message_id = progress.tracked_event_id if request.existing_event_id is None else None
-        pending = PendingVisibleResponse(
-            tracked_event_id=progress.tracked_event_id,
-            run_message_id=placeholder_run_message_id,
-            existing_event_id=request.existing_event_id,
-            existing_event_is_placeholder=_replaceable_placeholder(request),
-        )
-        if pending.terminal_event_id is None:
-            return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-                terminal_status=terminal_status,
-                failure_reason=failure_reason,
-            )
-        return await self.deps.delivery_gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=target,
-                stream_transport_outcome=build_terminal_stream_transport_outcome(
-                    pending,
-                    terminal_status=terminal_status,
-                    failure_reason=failure_reason,
-                    placeholder_body=PROGRESS_PLACEHOLDER,
-                ),
-                initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                identity=identity,
-                tool_trace=None,
-                extra_content=None,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=_replaceable_placeholder(request),
-                resumed=request.resumed_reply,
-            ),
-        )
-
-    async def _settle_missing_delivery_outcome(
-        self,
         *,
-        target: MessageTarget,
-        request: ResponseRequest,
-        identity: ResponseIdentity,
-        progress: _DeliveryProgress,
         terminal_status: TerminalFailureStatus,
         failure_reason: str,
     ) -> None:
-        """Settle a missing outcome without touching content after delivery starts."""
+        """Settle a turn that ended before a delivery outcome; its span's exit decides the reply."""
         if progress.delivery_outcome is not None:
             return
-        if progress.stage_started:
-            delivery_outcome = self.deps.delivery_gateway.terminal_outcome_without_visible_event(
+        progress.settle(
+            self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                 terminal_status=terminal_status,
                 failure_reason=failure_reason,
-            )
-        else:
-            delivery_outcome = await self._finalize_pre_delivery_terminal(
-                target=target,
-                request=request,
-                identity=identity,
-                progress=progress,
-                terminal_status=terminal_status,
-                failure_reason=failure_reason,
-            )
-        progress.settle(delivery_outcome)
+            ),
+        )
 
     async def _finalize_failed_approval_handoff(
         self,
@@ -4463,7 +4245,8 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Replace an unowned pause with durable failure, even after streaming began."""
         handle = current_span()
-        if handle is not None and not handle.exited:
+        assert handle is not None, "an approval handoff runs in its reply's span"
+        if not handle.exited:
             # The pause never took: the span ends failed with the note instead of its answer.
             noted = await self.deps.delivery_gateway.end_reply_span_with_note(
                 handle,
@@ -4473,40 +4256,13 @@ class ResponseRunner:
             )
             # A Stop recorded meanwhile ends it cancelled instead.
             return noted if noted.terminal_status == "cancelled" else replace(noted, failure_reason=failure_reason)
-        if handle is not None:
-            # The pause committed: the reply is its approval's, whose failure
-            # settlement writes what it shows.
-            return FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=progress.tracked_event_id or request.existing_event_id,
-                is_visible_response=False,
-                failure_reason=failure_reason,
-            )
-        event_id = progress.tracked_event_id or request.existing_event_id
-        text = APPROVAL_START_FAILED_NOTE
-        extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
-        delivered = False
-        if event_id is not None:
-            # Only completed answers consume prepared edit revisions. This
-            # error settles delivery without claiming the edit was answered.
-            delivered = await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=event_id,
-                    new_text=text,
-                    extra_content=extra_content,
-                    delivery_turn_id=request.response_envelope.source_event_id,
-                    response_attempt=ResponseAttempt(self.deps.agent_name, request.sources),
-                ),
-            )
+        # The pause committed: the reply is its approval's, whose failure
+        # settlement writes what it shows.
         return FinalDeliveryOutcome(
             terminal_status="error",
-            event_id=event_id,
-            is_visible_response=event_id is not None,
-            final_visible_body=text if delivered else None,
-            delivery_kind="edited" if delivered else None,
+            event_id=progress.tracked_event_id or request.existing_event_id,
+            is_visible_response=False,
             failure_reason=failure_reason,
-            extra_content=extra_content,
         )
 
     async def _finalize_locked_outcome(
@@ -4602,11 +4358,8 @@ class ResponseRunner:
             if current_task_is_process_shutdown():
                 raise
             progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
-            await self._settle_missing_delivery_outcome(
-                target=target,
-                request=request,
-                identity=lifecycle.identity,
-                progress=progress,
+            self._settle_missing_delivery_outcome(
+                progress,
                 terminal_status="cancelled",
                 failure_reason=progress.failure_reason or "interrupted",
             )
@@ -4640,11 +4393,7 @@ class ResponseRunner:
             else:
                 progress.failure_reason = str(error) or "delivery_failed_before_start"
                 progress.settle(
-                    await self._finalize_pre_delivery_terminal(
-                        target=target,
-                        request=request,
-                        identity=lifecycle.identity,
-                        progress=progress,
+                    self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                         terminal_status="error",
                         failure_reason=progress.failure_reason,
                     ),
@@ -4652,11 +4401,8 @@ class ResponseRunner:
                 deferred_error = error
 
         if progress.delivery_outcome is None and (progress.cancelled or progress.failure_reason is not None):
-            await self._settle_missing_delivery_outcome(
-                target=target,
-                request=request,
-                identity=lifecycle.identity,
-                progress=progress,
+            self._settle_missing_delivery_outcome(
+                progress,
                 terminal_status="cancelled" if progress.cancelled else "error",
                 failure_reason=progress.failure_reason or "interrupted",
             )
@@ -4694,7 +4440,7 @@ class ResponseRunner:
             request.on_deferred_outcome_handled is None
             or cancel_source is None
             or cancel_source == "user_stop"
-            or _interruption_note_landed(final_outcome, current_span())
+            or _interruption_note_landed(current_span())
         )
         await self._record_user_stop_handled(
             request,

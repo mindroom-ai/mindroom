@@ -524,16 +524,6 @@ class ResponseLifecycleCoordinator:
                 queued_signal=queued_signal,
             )
 
-    async def run_locked_target_operation(
-        self,
-        *,
-        target: MessageTarget,
-        locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
-    ) -> _LockedResponseResult:
-        """Run a non-response operation under one target's response lock."""
-        async with self._response_lifecycle_lock(target):
-            return await locked_operation()
-
 
 @dataclass(frozen=True)
 class _SessionStartedWatch:

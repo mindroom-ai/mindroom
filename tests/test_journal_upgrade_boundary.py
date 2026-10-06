@@ -27,6 +27,7 @@ from mindroom.event_journal import (
     postgres_backend,
     sqlite_backend,
 )
+from tests.approval_continuation_helpers import advance_continuation, claim_continuation
 from tests.conftest import postgres_journal_schema_url
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import admit, message
@@ -320,7 +321,7 @@ async def test_approval_toolkit_upgrade_fences_unresumable_calls(
             metadata=ApprovalDecisionMetadata(),
         )
     if state == "claimed":
-        assert await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a") is not None
+        assert await claim_continuation(principal, "approval-1", runtime_generation="runtime-a") is not None
     original = await principal.approval_continuation("approval-1")
     assert original is not None
     assert original.state == state
@@ -362,7 +363,7 @@ async def test_approval_toolkit_upgrade_fences_unresumable_calls(
             assert clicked.resolution is not None
             assert clicked.resolution["status"] == "denied"
             assert clicked.resolution["resolution_reason"] == loaded.failure_reason
-        assert await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-b") is None
+        assert await claim_continuation(principal, "approval-1", runtime_generation="runtime-b") is None
     finally:
         await store.close()
 
@@ -387,8 +388,9 @@ async def test_approval_toolkit_upgrade_preserves_compatible_work(
         original = replace(original, state="failing", failure_reason="cancelled_by_user")
     assert await principal.create_approval_continuation(original) == original
     if case == "later_generation":
-        assert await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a") is not None
-        advanced = await principal.advance_approval_continuation(
+        assert await claim_continuation(principal, "approval-1", runtime_generation="runtime-a") is not None
+        advanced = await advance_continuation(
+            principal,
             "approval-1",
             claimant_generation=0,
             run_id="run-2",
@@ -424,7 +426,7 @@ async def test_approval_toolkit_upgrade_preserves_frozen_final(
     await _ApprovalContinuations.admit_sources(principal)
     original = _ApprovalContinuations.continuation()
     assert await principal.create_approval_continuation(original) == original
-    claimed = await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+    claimed = await claim_continuation(principal, "approval-1", runtime_generation="runtime-a")
     assert claimed is not None
     await principal.enqueue_matrix_delivery(
         delivery_id="$source-1",

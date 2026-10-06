@@ -10,7 +10,6 @@ import pytest
 from agno.models.response import ToolExecution
 
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
-from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.response_runner import _DeliveryProgress
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt
@@ -18,7 +17,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_response_runner_focused import _admit_approval_source, _ordered_pause
+from tests.test_response_runner_focused import _admit_approval_source, _in_reply_span, _ordered_pause
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -92,21 +91,21 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
     )
 
     with (
-        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$waiting")),
         patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-explicit-edit")),
         patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
-        await runner._suspend_for_approval(
-            paused,
-            request=request,
-            target=request.response_envelope.target,
-            progress=_DeliveryProgress(),
-            execution_identity=identity,
-            entity_kind="agent",
-            history_scope=runner.deps.state_writer.history_scope(),
-            show_tool_calls=True,
-        )
+        async with _in_reply_span(runner, request, placeholder_event_id=None):
+            await runner._suspend_for_approval(
+                paused,
+                request=request,
+                target=request.response_envelope.target,
+                progress=_DeliveryProgress(),
+                execution_identity=identity,
+                entity_kind="agent",
+                history_scope=runner.deps.state_writer.history_scope(),
+                show_tool_calls=True,
+            )
 
     continuation = await principal.approval_continuation("approval-explicit-edit")
     assert continuation is not None

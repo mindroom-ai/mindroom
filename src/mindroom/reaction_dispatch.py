@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
-    from mindroom.turn_store import TurnStore
     from mindroom.user_stop_reconciliation import UserStopReconciler
 
 
@@ -43,7 +42,6 @@ class ReactionDispatcherDeps:
     journal_dispatcher: JournalDispatcher
     agent_reply_memberships: AgentReplyMembershipIndex
     turn_policy: TurnPolicy
-    turn_store: TurnStore
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
@@ -114,21 +112,9 @@ class ReactionDispatcher:
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
             ).current_entity_name_for_user_id(event.sender)
-            turn_record = self.deps.turn_store.turn_record_for_response_event_id(event.reacts_to)
-            # A visible voice echo owns an event before any response exists, so
-            # only a turn with a conversation target has a response to stop.
-            # A reaction names its target by event ID alone, so only a turn in
-            # the reaction's own room can be stopped by it.
-            has_stoppable_turn = (
-                turn_record is not None
-                and not turn_record.completed
-                and turn_record.conversation_target is not None
-                and turn_record.conversation_target.room_id == room.room_id
-            )
             if sender_agent_name or not (
-                has_stoppable_turn
-                # A running reply, including one whose create is still unacknowledged.
-                or await self.deps.user_stop_reconciler.accepts_reply_stop(event.reacts_to, room.room_id)
+                # A running reply in the reaction's room, including one whose create is still unacknowledged.
+                await self.deps.user_stop_reconciler.accepts_reply_stop(event.reacts_to, room.room_id)
             ):
                 return False
             await self.deps.journal_dispatcher.claim_semantic_consumer(

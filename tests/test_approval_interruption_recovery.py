@@ -16,6 +16,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
+from tests.approval_continuation_helpers import claim_continuation
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import unwrap_extracted_collaborator
 from tests.legacy_reply_helpers import read_after_sync
@@ -66,7 +67,8 @@ async def approval(tmp_path: Path) -> tuple[AgentBot, ApprovalContinuation]:
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    claimed = await store.claim_approval_continuation(
+    claimed = await claim_continuation(
+        store,
         continuation.approval_id,
         runtime_generation=runner.deps.approval_runtime_generation,
     )

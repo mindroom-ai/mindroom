@@ -104,6 +104,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
+from tests.reply_span_helpers import final_in_span, reply_span
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
 from tests.turn_dispatch_helpers import dispatch_test_turn
@@ -2612,88 +2613,17 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_finalize_dispatch_failure_edit_carries_the_turn(
+    async def test_finalize_dispatch_failure_sends_directly_when_no_reply_owns_the_event(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """The failure notice is the turn's answer, so it belongs to the outbox.
-
-        Editing the placeholder into an error message is the delivery that
-        makes this turn terminal. Routing it through the outbox settles the
-        journal sources inside the enqueue, so the handled-turn record the
-        caller writes immediately afterwards cannot land while the journal
-        still reports the turn unfinished.
-        """
+        """Without a reply to show it, nothing else will deliver the notice."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._delivery_gateway.edit_text = AsyncMock(return_value=True)
-        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
-        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
-
-        resolution = await bot._turn_controller._finalize_dispatch_failure(
-            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-            error=RuntimeError("boom"),
-            existing_event_id="$placeholder",
-            delivery_turn_id="$turn",
-        )
-
-        assert resolution == "$placeholder"
-        bot._delivery_gateway.send_text.assert_not_awaited()
-        edited = bot._delivery_gateway.edit_text.await_args.args[0]
-        assert edited.delivery_turn_id == "$turn"
-
-    @pytest.mark.asyncio
-    async def test_finalize_dispatch_failure_leaves_a_turn_owning_edit_to_the_outbox(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A failed edit that carried a turn must not be followed by a direct send.
-
-        By the time this runs the edit has been offered to the outbox, so
-        either the enqueue was refused by the membership fence -- and the room
-        is one the bot has left -- or the row exists unacknowledged and the
-        next recovery pass resends the frozen replacement, turning the
-        placeholder into this notice. Sending as well races that pass with no
-        crash involved, and acknowledgement is first-writer-wins, so the room
-        would keep two notices while durable state names one.
-        """
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
-        bot.logger = MagicMock()
-        bot._delivery_gateway.edit_text = AsyncMock(return_value=False)
-        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
-        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
-
-        resolution = await bot._turn_controller._finalize_dispatch_failure(
-            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-            error=RuntimeError("boom"),
-            existing_event_id="$placeholder",
-            delivery_turn_id="$turn",
-        )
-
-        assert resolution is None
-        bot._delivery_gateway.send_text.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_finalize_dispatch_failure_sends_directly_when_no_turn_owns_the_edit(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Without a durable owner there is no row to race, and nothing else will deliver."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
-        bot.logger = MagicMock()
-        bot._delivery_gateway.edit_text = AsyncMock(return_value=False)
         bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
 
@@ -2719,7 +2649,6 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._delivery_gateway.edit_text = AsyncMock(return_value=False)
         bot._delivery_gateway.send_text = AsyncMock(return_value="$fallback-error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
         persisted_event_ids: list[str] = []
@@ -3109,22 +3038,32 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        outcome = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                existing_event_id="$existing",
-                existing_event_is_placeholder=False,
-                response_text="Updated answer",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-deliver-suppress-existing",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
+        async with reply_span(
+            gateway.deps.outbox,
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            thread_id="$thread123",
+            regenerated_event_id="$existing",
+        ):
+            outcome = await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                    existing_event_id="$existing",
+                    existing_event_is_placeholder=False,
+                    response_text="Updated answer",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=response_envelope,
+                        correlation_id="corr-deliver-suppress-existing",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
                 ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+            )
 
         assert outcome.terminal_status == "cancelled"
         assert outcome.suppressed is True
@@ -3210,7 +3149,9 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        outcome = await gateway.deliver_final(
+        outcome = await final_in_span(
+            gateway,
+            gateway.deps.outbox,
             FinalDeliveryRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
                 existing_event_id="$thinking",
@@ -3228,59 +3169,11 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         assert outcome.terminal_status == "error"
+        assert outcome.event_id is None
         gateway.deps.redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$thinking",
-            reason="Failed placeholder response before delivery",
-        )
-        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_deliver_final_before_response_cancellation_cleans_placeholder(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A cancelled before-response hook must redact the placeholder and propagate cancellation."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            redact_message_event=AsyncMock(return_value=True),
-            response_hooks=SimpleNamespace(
-                _apply_before_response=AsyncMock(side_effect=asyncio.CancelledError("hook cancelled")),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
-            ),
-        )
-
-        with pytest.raises(asyncio.CancelledError, match="hook cancelled"):
-            await gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                    existing_event_id="$thinking",
-                    existing_event_is_placeholder=True,
-                    response_text="Updated answer",
-                    identity=ResponseIdentity(
-                        response_kind="ai",
-                        response_envelope=response_envelope,
-                        correlation_id="corr-deliver-before-hook-cancel",
-                        sources=ResponseSources(
-                            (response_envelope.source_event_id,),
-                            (response_envelope.source_event_id,),
-                        ),
-                    ),
-                    tool_trace=None,
-                    extra_content=None,
-                ),
-            )
-
-        gateway.deps.redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$thinking",
-            reason="Cancelled placeholder response",
+            reason="Reply removed",
         )
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 

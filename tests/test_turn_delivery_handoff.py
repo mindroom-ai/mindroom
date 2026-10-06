@@ -19,7 +19,6 @@ restart would resend the frozen answer *and* run the model again for it.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -37,7 +36,7 @@ from mindroom.event_journal import (
 )
 from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.message_target import MessageTarget
@@ -772,113 +771,3 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
 
         assert sends == []
         assert await pending_ids(bot) == []
-
-
-@dataclass
-class _RefusesTheFirstAttempts:
-    """A homeserver that rejects the opening deliveries and then behaves normally.
-
-    Refusing by call order rather than by shape is deliberate. The refused
-    attempt and its recovery resend carry the same frozen payload, so any
-    discriminator built from the content would let a fix pass for having
-    accidentally changed the bytes rather than for resolving the ownership.
-    """
-
-    refusals: int = 1
-    attempts: int = 0
-    delivered: list[str] = field(default_factory=list)
-
-    async def __call__(
-        self,
-        _client: object,
-        _room_id: str,
-        content: dict[str, Any],
-        **_kwargs: object,
-    ) -> DeliveredMatrixEvent | MatrixDeliveryFailure:
-        self.attempts += 1
-        if self.attempts <= self.refusals:
-            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "test refusal")
-        event_id = f"$visible{len(self.delivered)}"
-        self.delivered.append(event_id)
-        return DeliveredMatrixEvent(event_id, content)
-
-
-async def final_row(bot: AgentBot, turn_id: str) -> MatrixDelivery | None:
-    """Return the FINAL outbox row for one turn, without claiming it."""
-    return await bot._delivery_gateway.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.FINAL)
-
-
-class TestAFailedFinalEditLeavesOneOwner:
-    """A failure notice the outbox can still deliver must not also be sent directly.
-
-    Turning a dispatch setup failure into a visible message goes through the
-    turn's FINAL row, so the notice is recoverable like any other answer. When
-    that edit does not land, the row is attempted and unacknowledged, which is
-    the outbox saying it still owes this turn an answer -- and the next
-    recovery pass resends the frozen envelope. Sending the notice directly as
-    well races that pass, with no crash required, and acknowledgement is
-    first-writer-wins, so the room keeps both messages while durable state
-    names only one.
-
-    Refusal is the other half. Only the membership fence refuses an enqueue,
-    and it surfaces as the same false return, so a direct send there puts an
-    old turn's error in front of whoever is in the room now.
-    """
-
-    async def test_a_refused_final_edit_sends_nothing_and_leaves_the_row_owning_it(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """The notice stays the outbox's to deliver, and recovery delivers it once."""
-        bot = _make_bot(tmp_path)
-        # Production records the authenticated device when the bot starts.
-        # This test constructs the runtime without login, but its recovery
-        # premise is specifically that the same device can safely reuse the
-        # frozen transaction ID.
-        bot._sending_device_id = bot.client.device_id
-        await admit(journal(bot), text_event("$cause"))
-        await adopt(bot, ["$cause"])
-        homeserver = _RefusesTheFirstAttempts()
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", homeserver):
-            resolution = await bot._turn_controller._finalize_dispatch_failure(
-                target=MessageTarget.resolve(ROOM, None, "$cause"),
-                error=RuntimeError("boom"),
-                existing_event_id="$placeholder",
-                delivery_turn_id="$cause",
-            )
-            assert resolution is None, "a turn-owned notice must not be sent outside the outbox"
-            assert homeserver.delivered == [], "the failed edit was followed by a direct send"
-
-            outcome = await bot._delivery_gateway.recover_deliveries()
-
-        assert outcome.complete, "recovery left work behind"
-        assert homeserver.delivered == ["$visible0"], "recovery owed the notice and had to deliver it"
-        row = await final_row(bot, "$cause")
-        assert row is not None
-        assert row.acknowledged_event_id == "$visible0", "the row that delivered it must name it"
-
-    async def test_a_notice_with_no_durable_owner_is_still_sent(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """The rule is about not racing an owner, not about staying silent.
-
-        An edit that never carried a turn has no row behind it, so nothing else
-        will ever put this notice in the room. Refusing to send here would drop
-        the error entirely.
-        """
-        bot = _make_bot(tmp_path)
-        await admit(journal(bot), text_event("$cause"))
-        homeserver = _RefusesTheFirstAttempts(refusals=0)
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", homeserver):
-            resolution = await bot._turn_controller._finalize_dispatch_failure(
-                target=MessageTarget.resolve(ROOM, None, "$cause"),
-                error=RuntimeError("boom"),
-                existing_event_id=None,
-                delivery_turn_id=None,
-            )
-
-        assert resolution == "$visible0"
-        assert homeserver.delivered == ["$visible0"]

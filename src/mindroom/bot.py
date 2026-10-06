@@ -865,7 +865,6 @@ class AgentBot:
         self._user_stop_reconciler = UserStopReconciler(
             UserStopReconcilerDeps(
                 turn_store=self._turn_store,
-                response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
             ),
         )
@@ -908,7 +907,6 @@ class AgentBot:
                 journal_dispatcher=self._journal_dispatcher,
                 agent_reply_memberships=self._runtime_view.agent_reply_memberships,
                 turn_policy=self._turn_policy,
-                turn_store=self._turn_store,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,

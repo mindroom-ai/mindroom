@@ -31,7 +31,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     RuntimePaths,
 )
-from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
@@ -1750,7 +1750,6 @@ class TurnController:
                     selection_handled_turn,
                     event_id,
                 ),
-                delivery_turn_id=source_event_id,
             )
             if response_event_id is not None:
                 await self.deps.turn_store.record_responded_turn(
@@ -1889,78 +1888,29 @@ class TurnController:
         error: Exception,
         existing_event_id: str | None = None,
         on_visible_response: Callable[[str], Awaitable[None]] | None = None,
-        delivery_turn_id: str | None = None,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message.
 
-        The edit carries the turn when the caller has one, which puts this
-        failure notice behind the same durable row an answer would use: the
-        journal sources settle inside the enqueue, so the terminal record the
-        caller writes next cannot land while the journal still calls this turn
-        unfinished.
-
-        A failed durable edit is not followed by a direct send, and that is the
-        whole of the ownership rule here. Once the edit has been offered to the
-        outbox, exactly one of two things is true and neither wants another
-        message in the room.
-
-        Either the enqueue was refused, which only the membership fence does,
-        and the conversation this notice belongs to is one the bot has left.
-        Sending anyway puts an old turn's error in front of whoever is in that
-        room now. Or the row exists, attempted and unacknowledged, and the
-        outbox still owes this turn an answer: the next recovery pass resends
-        the frozen envelope and the placeholder becomes the error notice, which
-        is the outcome this method wanted. Sending as well races that pass --
-        no crash required -- and the loser is invisible, because
-        acknowledgement is first-writer-wins, so the room keeps both notices
-        while durable state names only one.
-
-        An earlier version sent anyway and then tried to adopt the message as
-        the row's outcome. Adoption cannot win that race, and it could not tell
-        a fence refusal from a Matrix failure either, because both surface as a
-        false return.
-
-        The remaining direct send is for the case with no durable owner at all:
-        no placeholder to edit, or an edit that never belonged to a turn. There
-        is no row to race and nothing else will ever put this notice in the
-        room.
+        A reply that owns ``existing_event_id`` shows the failure through its
+        records, which settle the journal sources and own the notice until it
+        is delivered. Otherwise nothing durable owns the notice, so it is sent
+        directly.
         """
         error_text = get_user_friendly_error_message(
             error,
             self.deps.agent_name,
             runtime_paths=self.deps.runtime_paths,
         )
-        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
         if existing_event_id is not None and await self.deps.delivery_gateway.fail_reply_dispatch(
             existing_event_id,
             error_text,
         ):
-            # The reply's records show the failure and settle its sources.
             return existing_event_id
-        if existing_event_id is not None:
-            edited = await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=existing_event_id,
-                    new_text=error_text,
-                    extra_content=terminal_extra_content,
-                    delivery_turn_id=delivery_turn_id,
-                ),
-            )
-            if edited:
-                return existing_event_id
-            if delivery_turn_id is not None:
-                self.deps.logger.info(
-                    "dispatch_failure_notice_left_to_the_outbox",
-                    turn_id=delivery_turn_id,
-                    existing_event_id=existing_event_id,
-                )
-                return None
         response_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text=error_text,
-                extra_content=terminal_extra_content,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
             ),
         )
         if response_event_id is None:
@@ -2174,7 +2124,6 @@ class TurnController:
                         error=failure,
                         existing_event_id=error.placeholder_event_id,
                         on_visible_response=record_visible_response,
-                        delivery_turn_id=handled_turn.anchor_event_id,
                     )
                 )
                 if response_event_id is not None or not error.reply_owned:

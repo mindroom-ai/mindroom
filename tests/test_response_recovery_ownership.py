@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -13,7 +13,6 @@ import pytest
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import ResponseIdentity, _PlaceholderFailureUpdateRequest
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
@@ -56,7 +55,6 @@ from tests.test_response_delivery_gateway import _gateway, _response_recovery_bo
 from tests.test_response_redaction_recovery import _message, _redaction
 from tests.test_turn_controller_focused import _build_harness, _room_with_members, _text_event
 from tests.test_turn_store import _store
-from tests.test_user_stop_convergence import _SerializingRunner
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -70,99 +68,6 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.asyncio, pytest.mark.ledger_loads_from_disk]
 SOURCE = "$deleted"
 INITIAL = "$initial"
-
-
-async def test_fallback_edit_keeps_cleanup_behind_delivery_lock(
-    journal_store: EventJournalStore,
-    tmp_path: Path,
-) -> None:
-    """Cleanup cannot remove INITIAL between fallback eligibility and its network edit."""
-    principal = journal_store.principal("agent@alice")
-    store = await _store(journal_store)
-    target = MessageTarget.resolve(ROOM_ID, "$thread", SOURCE)
-    await store.record_pending_turn(TurnRecord.create([SOURCE], completed=False, conversation_target=target))
-    dispatcher = _dispatcher(principal, AsyncMock())
-    room = nio.MatrixRoom(ROOM_ID, BOT_USER_ID)
-    await admit_dispatch_event(dispatcher, room, _message(), EventKind.MESSAGE, EventClass.ACTIONABLE)
-    gateway = _gateway(tmp_path, principal)
-    gateway = replace(
-        gateway,
-        deps=replace(
-            gateway.deps,
-            response_recovery=ResponseDeliveryRecovery(principal, lambda: store, gateway.deps.redact_message_event),
-        ),
-    )
-    visible = {}
-
-    async def send(delivery: MatrixDelivery) -> str:
-        visible[INITIAL] = delivery.payload["body"]
-        return INITIAL
-
-    await gateway._response_delivery(send, handoff=None).deliver(
-        delivery_id=SOURCE,
-        stage=DeliveryStage.INITIAL,
-        room_id=ROOM_ID,
-        thread_id="$thread",
-        payload={"msgtype": "m.text", "body": "Thinking..."},
-    )
-    editing, release_edit, cleanup_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-    async def edit(*_args: object, **kwargs: object) -> nio.RoomSendResponse:
-        editing.set()
-        await release_edit.wait()
-        visible[INITIAL] = kwargs["content"]["m.new_content"]["body"]
-        return nio.RoomSendResponse("$failure", ROOM_ID)
-
-    async def redact(*, event_id: str, **_kwargs: object) -> bool:
-        visible.pop(event_id, None)
-        return True
-
-    async def clean() -> bool:
-        cleanup_started.set()
-        return await gateway.cleanup_deleted_response(SOURCE)
-
-    gateway.deps.runtime.client.room_send.side_effect = edit
-    gateway.deps.runtime.client.rooms[ROOM_ID] = gateway.deps.runtime.client.rooms["!room:localhost"]
-    gateway.deps.redact_message_event.side_effect = redact
-    fallback = asyncio.create_task(
-        gateway._finish_placeholder_delivery_failure(
-            _PlaceholderFailureUpdateRequest(
-                target,
-                INITIAL,
-                ResponseIdentity(
-                    "agent",
-                    _envelope(target, source_event_id=SOURCE),
-                    SOURCE,
-                    ResponseSources((SOURCE,), (SOURCE,)),
-                ),
-                "delivery_failed",
-                None,
-                None,
-            ),
-        ),
-    )
-    started = asyncio.create_task(editing.wait())
-    await asyncio.wait((fallback, started), return_when=asyncio.FIRST_COMPLETED)
-    started.cancel()
-    if fallback.done():
-        fallback.result()
-    assert editing.is_set()
-    fallback_owned_lock = gateway._recovery_worker()._delivery_lock(SOURCE).locked()
-    await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
-    cleaning = asyncio.create_task(clean())
-    await cleanup_started.wait()
-    try:
-        assert fallback_owned_lock, "Fallback transport started without the delivery lock"
-        assert gateway._recovery_worker()._delivery_lock(SOURCE).locked()
-        assert not cleaning.done()
-        assert visible == {INITIAL: "Thinking..."}
-    finally:
-        release_edit.set()
-        outcome = await fallback
-        assert await cleaning
-    assert outcome.is_visible_response
-    assert visible == {}
-    assert store.get_turn_record(SOURCE).response_event_id is None
 
 
 def _runner_on(bot: AgentBot, gateway: DeliveryGateway, principal: PrincipalStore) -> ResponseRunner:
@@ -398,7 +303,6 @@ async def test_a_newer_requester_message_supersedes_the_recovered_reply(  # noqa
         (True, "after_retirement"),
         (True, "before_detachment"),
         (True, "stop_before_detachment"),
-        (True, "stop_during_cleanup"),
     ],
 )
 async def test_deleted_acknowledged_initial_remains_cleanup_debt(
@@ -448,10 +352,8 @@ async def test_deleted_acknowledged_initial_remains_cleanup_debt(
         delivered_projections=(),
     )
     visible = {INITIAL: "Thinking..."}
-    stop_task: asyncio.Task[bool] | None = None
 
     async def redact(*, event_id: str, **_kwargs: object) -> bool:
-        nonlocal stop_task
         visible.pop(event_id, None)
         if terminal_write == "before_detachment":
             await store.record_responded_turn(replace(stale_record, response_event_id=INITIAL))
@@ -459,13 +361,6 @@ async def test_deleted_acknowledged_initial_remains_cleanup_debt(
             stopped = await store.record_user_stopped_response(INITIAL, 20)
             assert stopped is not None
             assert stopped.completed
-        elif terminal_write == "stop_during_cleanup":
-            reconciler = UserStopReconciler(
-                UserStopReconcilerDeps(store, cast("ResponseRunner", _SerializingRunner()), gateway),
-            )
-            stop_task = asyncio.create_task(reconciler.finalize(INITIAL, 20, room_id=ROOM_ID))
-            await asyncio.sleep(0)
-            assert not stop_task.done()
         return True
 
     gateway.deps.redact_message_event.side_effect = redact
@@ -474,8 +369,6 @@ async def test_deleted_acknowledged_initial_remains_cleanup_debt(
     assert not await principal.is_pending(SOURCE)
     stale_record = store.get_turn_record(SOURCE)
     await gateway.recover_deliveries()
-    if stop_task is not None:
-        assert await stop_task
     gateway.deps.runtime.client.room_send.assert_not_awaited()
     if terminal_write == "after_retirement":
         await store.record_responded_turn(replace(stale_record, response_event_id=INITIAL))
@@ -493,22 +386,13 @@ async def test_deleted_acknowledged_initial_remains_cleanup_debt(
 
 
 async def _assert_removed_stop_replay(store: TurnStore, gateway: DeliveryGateway) -> None:
-    """A reopened STOP settles twice without editing the removed response."""
+    """A replayed STOP on the removed response changes nothing, since no reply owns it."""
     record = store.get_turn_record(SOURCE)
     assert record.user_stop_receipt_order == 20
     assert record.user_stop_settled_receipt_order == 20
-    recovery = gateway.deps.response_recovery
-    assert recovery is not None
-    gateway = replace(
-        gateway,
-        deps=replace(gateway.deps, response_recovery=replace(recovery, turn_store=lambda: store)),
-    )
-    reconciler = UserStopReconciler(
-        UserStopReconcilerDeps(store, cast("ResponseRunner", _SerializingRunner()), gateway),
-    )
+    reconciler = UserStopReconciler(UserStopReconcilerDeps(store, gateway))
     with patch("mindroom.delivery_gateway.edit_message_outcome", new=AsyncMock()) as edit:
-        assert await reconciler.finalize(INITIAL, 20, room_id=ROOM_ID)
-        assert await reconciler.finalize(INITIAL, 20, room_id=ROOM_ID)
+        assert not await reconciler.finalize(INITIAL, 20, room_id=ROOM_ID)
     edit.assert_not_awaited()
     assert store.get_turn_record(SOURCE) == record
 
@@ -791,22 +675,6 @@ async def test_recovery_respects_existing_source_and_final_owners(  # noqa: C901
         await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
     try:
         if owner in {"owed_final", "completed_final"}:
-            outcome = await gateway._finish_placeholder_delivery_failure(
-                _PlaceholderFailureUpdateRequest(
-                    target,
-                    INITIAL,
-                    ResponseIdentity(
-                        "agent",
-                        _envelope(target, source_event_id=SOURCE),
-                        SOURCE,
-                        ResponseSources((SOURCE,), (SOURCE,)),
-                    ),
-                    "delivery_failed",
-                    None,
-                    None,
-                ),
-            )
-            assert outcome.terminal_status == "suspended"
             assert visible[INITIAL] == ("answer" if owner == "completed_final" else "Thinking...")
         async with gateway.supersession_scope(SOURCE, ROOM_ID) as allowed:
             assert allowed is (owner in {"owed_final", "completed_final", "stop"})

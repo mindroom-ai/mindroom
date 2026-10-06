@@ -121,15 +121,31 @@ from tests.conftest import (
 )
 from tests.legacy_reply_helpers import main_left_reply, read_after_sync
 from tests.participation_helpers import ParticipationModel
+from tests.reply_span_helpers import reply_span, response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
+
+
+async def _in_span(
+    bot: AgentBot,
+    respond: Callable[..., Awaitable[_ResponseGenerationOutcome]],
+    request: ResponseRequest,
+    *,
+    placeholder_event_id: str | None = None,
+    **kwargs: object,
+) -> _ResponseGenerationOutcome:
+    """Run one response call in the request's reply span, as the locked turn runs it."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    async with response_span(runner, request, placeholder_event_id=placeholder_event_id):
+        return await respond(request, **kwargs)
 
 
 @pytest.fixture
@@ -285,7 +301,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner._process_and_respond(
+            generation = await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -344,7 +362,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=record_typing,
             ai_response=mock_ai,
         ):
-            await bot._response_runner._process_and_respond(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Check for updates",
@@ -398,7 +418,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner._process_and_respond(
+            generation = await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -461,7 +483,9 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                generation = await bot._response_runner._process_and_respond_streaming(
+                generation = await _in_span(
+                    bot,
+                    bot._response_runner._process_and_respond_streaming,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -527,7 +551,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._response_runner._process_and_respond(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Continue",
@@ -587,7 +613,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._response_runner._process_and_respond(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Continue",
@@ -642,7 +670,9 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                generation = await bot._response_runner._process_and_respond_streaming(
+                generation = await _in_span(
+                    bot,
+                    bot._response_runner._process_and_respond_streaming,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Hello",
@@ -697,7 +727,9 @@ class TestAgentBot(AgentBotTestBase):
             ),
             pytest.raises(asyncio.CancelledError, match="cancelled"),
         ):
-            await bot._response_runner._process_and_respond_streaming(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Hello",
@@ -739,7 +771,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._response_runner._process_and_respond(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -809,7 +843,9 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_runner._process_and_respond_streaming(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -905,7 +941,9 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_runner._process_and_respond_streaming(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Hello",
@@ -974,7 +1012,9 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_runner._process_and_respond_streaming(
+            await _in_span(
+                bot,
+                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Cancel me",
@@ -1034,7 +1074,9 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=mock_stream_agent_response,
             ),
         ):
-            generation = await bot._response_runner._process_and_respond_streaming(
+            generation = await _in_span(
+                bot,
+                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please continue",
@@ -1095,7 +1137,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner._process_and_respond(
+            generation = await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1139,7 +1183,9 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=noop_typing_indicator,
                 ai_response=mock_ai_response,
             ):
-                await bot._response_runner._process_and_respond(
+                await _in_span(
+                    bot,
+                    bot._response_runner._process_and_respond,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please continue",
@@ -1211,7 +1257,9 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                generation = await bot._response_runner._process_and_respond_streaming(
+                generation = await _in_span(
+                    bot,
+                    bot._response_runner._process_and_respond_streaming,
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -1261,7 +1309,9 @@ class TestAgentBot(AgentBotTestBase):
                     typing_indicator=noop_typing_indicator,
                     stream_agent_response=mock_stream,
                 ):
-                    await bot._response_runner._process_and_respond_streaming(
+                    await _in_span(
+                        bot,
+                        bot._response_runner._process_and_respond_streaming,
                         _response_request(
                             room_id="!test:localhost",
                             prompt="Please continue",
@@ -1316,29 +1366,39 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        delivery = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_text="Handled",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-deliver-suppress",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
+        async with reply_span(
+            gateway.deps.outbox,
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            thread_id="$thread123",
+            placeholder_event_id="$placeholder",
+        ):
+            delivery = await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                    existing_event_id="$placeholder",
+                    existing_event_is_placeholder=True,
+                    response_text="Handled",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=response_envelope,
+                        correlation_id="corr-deliver-suppress",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
                 ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+            )
 
         assert delivery.suppressed is True
         assert delivery.event_id is None
         redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$placeholder",
-            reason="Suppressed placeholder response",
+            reason="Reply removed",
         )
         assert _handled_response_event_id(delivery) is None
 
@@ -1378,92 +1438,37 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        delivery = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                existing_event_id="$existing",
-                existing_event_is_placeholder=False,
-                response_text="Handled",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-deliver-existing-suppress",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
+        async with reply_span(
+            gateway.deps.outbox,
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            thread_id="$thread123",
+            regenerated_event_id="$existing",
+        ):
+            delivery = await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                    existing_event_id="$existing",
+                    existing_event_is_placeholder=False,
+                    response_text="Handled",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=response_envelope,
+                        correlation_id="corr-deliver-existing-suppress",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
                 ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+            )
 
         assert delivery.suppressed is True
         assert delivery.event_id == "$existing"
         redact_message_event.assert_not_awaited()
         assert _handled_response_event_id(delivery) is None
-
-    @pytest.mark.asyncio
-    async def test_deliver_generated_response_raises_when_suppressed_placeholder_redaction_fails(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A failed placeholder redaction should stay inside the typed terminal contract."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        redact_message_event = AsyncMock(return_value=False)
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            redact_message_event=redact_message_event,
-            response_hooks=SimpleNamespace(
-                _apply_before_response=AsyncMock(
-                    return_value=SimpleNamespace(
-                        response_text="Handled",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=True,
-                    ),
-                ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
-            ),
-        )
-
-        outcome = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_text="Handled",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-deliver-suppress-fail",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
-                ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-
-        assert outcome.terminal_status == "error"
-        assert _visible_response_event_id(outcome) == "$placeholder"
-        assert _handled_response_event_id(outcome) is None
-        assert outcome.mark_handled is False
-        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
-
-        redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed placeholder response",
-        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("hook_action"), ["rewrite", "suppress"])
@@ -1543,33 +1548,43 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        outcome = await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                stream_transport_outcome=_stream_outcome(
-                    "$thinking",
-                    "Thinking...",
-                    terminal_status="cancelled",
-                    visible_body_state="placeholder_only",
-                    failure_reason="terminal_update_cancelled",
+        async with reply_span(
+            gateway.deps.outbox,
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            thread_id="$thread123",
+            placeholder_event_id="$thinking",
+        ):
+            outcome = await gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                    stream_transport_outcome=_stream_outcome(
+                        "$thinking",
+                        "Thinking...",
+                        terminal_status="cancelled",
+                        visible_body_state="placeholder_only",
+                        failure_reason="terminal_update_cancelled",
+                    ),
+                    initial_delivery_kind="edited",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=response_envelope,
+                        correlation_id="corr-finalize-stream-cancelled-placeholder",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
                 ),
-                initial_delivery_kind="edited",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-finalize-stream-cancelled-placeholder",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
-                ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+            )
 
         assert outcome.terminal_status == "cancelled"
         gateway.deps.redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$thinking",
-            reason="Completed placeholder-only streamed response",
+            reason="Reply removed",
         )
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
@@ -1673,32 +1688,45 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        outcome = await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                stream_transport_outcome=_stream_outcome(
-                    "$thinking",
-                    "Thinking...",
-                    terminal_status="cancelled",
-                    visible_body_state="placeholder_only",
-                    failure_reason="terminal_update_cancelled",
+        async with reply_span(
+            gateway.deps.outbox,
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            thread_id="$thread123",
+            placeholder_event_id="$thinking",
+        ) as handle:
+            outcome = await gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                    stream_transport_outcome=_stream_outcome(
+                        "$thinking",
+                        "Thinking...",
+                        terminal_status="cancelled",
+                        visible_body_state="placeholder_only",
+                        failure_reason="terminal_update_cancelled",
+                    ),
+                    initial_delivery_kind="edited",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=response_envelope,
+                        correlation_id="corr-finalize-stream-placeholder-cleanup-failed",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
                 ),
-                initial_delivery_kind="edited",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-finalize-stream-placeholder-cleanup-failed",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
-                ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+            )
 
-        assert outcome.terminal_status == "error"
-        assert outcome.event_id == "$thinking"
-        assert outcome.is_visible_response is False
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.event_id is None
         assert outcome.mark_handled is False
+        # The placeholder stays owed for removal.
+        reply = await gateway.deps.outbox.replies.load(handle.reply_id)
+        assert reply is not None
+        assert reply.redaction_pending == ("$thinking",)
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_cancelled_visible_note_survives(
@@ -1795,7 +1823,9 @@ class TestAgentBot(AgentBotTestBase):
                 rendered_body=None,
                 visible_body_state="none",
             )
-            generation = await bot._response_runner._process_and_respond_streaming(
+            generation = await _in_span(
+                bot,
+                bot._response_runner._process_and_respond_streaming,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please reply in thread",
@@ -1891,7 +1921,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner._process_and_respond(
+            generation = await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Summarize README",
@@ -1960,7 +1992,9 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=noop_typing_indicator,
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ):
-            generation = await bot._response_runner._process_and_respond(
+            generation = await _in_span(
+                bot,
+                bot._response_runner._process_and_respond,
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Check status",

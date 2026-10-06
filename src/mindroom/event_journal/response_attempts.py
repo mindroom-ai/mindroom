@@ -211,30 +211,6 @@ def register_response_attempt(
         bind_response_target(transaction, principal_id, driving, response_event_id)
 
 
-def edited_attempt_sources_before_stop(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    response_event_id: str,
-    source_event_id: str,
-    stop_receipt_order: int,
-) -> tuple[str, ...]:
-    """Find captured edited owners by indexed source, including completed FINALs."""
-    rows = transaction.fetchall(
-        """SELECT DISTINCT attempt.driving_event_id, attempt.selected_receipt_order
-        FROM response_attempts AS attempt
-        JOIN response_attempt_sources AS source
-          ON source.principal_id = attempt.principal_id AND source.driving_event_id = attempt.driving_event_id
-        WHERE attempt.principal_id = ? AND attempt.room_id = ? AND attempt.response_event_id = ?
-          AND source.event_id = ? AND attempt.selected_receipt_order <= ?
-          AND attempt.edit_receipt_order <= ?
-        ORDER BY attempt.selected_receipt_order""",
-        (principal_id, room_id, response_event_id, source_event_id, stop_receipt_order, stop_receipt_order),
-    )
-    return tuple(str(row["driving_event_id"]) for row in rows)
-
-
 def approval_failure_disposition(
     transaction: Transaction,
     principal_id: str,

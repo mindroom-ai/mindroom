@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,8 +25,11 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.reply_span_helpers import reply_span
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.bot import AgentBot
 
 
@@ -67,16 +71,37 @@ async def _record_pending_turn(bot: AgentBot, message_id: str, target: MessageTa
     )
 
 
-async def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarget) -> None:
-    """Mirror the durable response intent that owns every real stop button."""
+@asynccontextmanager
+async def _generating(bot: AgentBot, message_id: str, target: MessageTarget) -> AsyncIterator[None]:
+    """Run the block while ``message_id`` shows a reply still being generated."""
     await _record_pending_turn(bot, message_id, target)
-    bot._delivery_gateway.finalize_user_stopped_response = AsyncMock(return_value=True)
-    bot._journal_dispatcher.receipt_order = AsyncMock(return_value=1)
+    async with reply_span(
+        bot.journal_principal(),
+        source_event_id=f"{message_id}-source",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        entity_name=bot.agent_name,
+        placeholder_event_id=message_id,
+    ):
+        # A Stop by a permitted sender would reach this reply.
+        assert await bot._user_stop_reconciler.accepts_reply_stop(message_id, target.room_id)
+        yield
+
+
+async def _assert_not_stopped(bot: AgentBot, message_id: str) -> None:
+    """Neither the turn nor the reply showing ``message_id`` recorded a Stop."""
+    pending = bot._turn_store.get_turn_record(f"{message_id}-source")
+    assert pending is not None
+    assert not pending.completed
+    assert pending.user_stop_receipt_order is None
+    reply = await bot.journal_principal().replies.for_event(message_id)
+    assert reply is not None
+    assert not reply.unapplied_stop
 
 
 @pytest.mark.asyncio
-async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
-    """Test that 🛑 reaction only acts as stop button during message generation."""
+async def test_stop_emoji_without_a_running_reply_is_an_interactive_reaction(tmp_path: Path) -> None:
+    """A 🛑 reaction stops only a running reply; on any other message it is an ordinary reaction."""
     config = _stop_test_config(tmp_path)
     agent_user = _stop_test_agent_user(config)
 
@@ -92,8 +117,6 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    send_response = AsyncMock(return_value="$stopping:example.com")
-    install_send_response_mock(bot, send_response)
 
     # Create a room and reaction event
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
@@ -122,88 +145,9 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         "claim_interactive_reaction",
         new=claim_interactive,
     ):
-        # Case 1: Message is NOT being generated - should handle as interactive
         await dispatch_reaction_durably(bot, room, reaction_event)
 
         claim_interactive.assert_awaited_once()
-
-        # Reset the mock
-        claim_interactive.reset_mock()
-
-        # Case 2: Message IS being generated - should handle as stop button
-        target = MessageTarget.resolve("!test:example.com", None, "$message:example.com")
-        await _record_pending_response(bot, "$message:example.com", target)
-
-        # A second physical reaction reaches the same STOP target.
-        active_reaction_event = nio.ReactionEvent.from_dict(
-            {
-                "content": reaction_event.source["content"],
-                "event_id": "$active-reaction:example.com",
-                "sender": reaction_event.sender,
-                "origin_server_ts": 1000001,
-                "type": "m.reaction",
-                "room_id": room.room_id,
-            },
-        )
-        await dispatch_reaction_durably(bot, room, active_reaction_event)
-
-        claim_interactive.assert_not_awaited()
-        send_response.assert_not_awaited()
-
-    # The response's turn records the Stop.
-    stopped = bot._turn_store.get_turn_record("$message:example.com-source")
-    assert stopped is not None
-    assert stopped.completed
-    assert stopped.user_stop_settled_receipt_order == 1
-
-
-@pytest.mark.asyncio
-async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Path) -> None:
-    """Threaded stop reactions should not send a separate acknowledgement message."""
-    config = _stop_test_config(tmp_path)
-    agent_user = _stop_test_agent_user(config)
-
-    bot = make_test_agent_bot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!test:example.com"],
-    )
-
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = agent_user.user_id
-    bot.logger = MagicMock()
-    send_response = AsyncMock(return_value="$stopping:example.com")
-    install_send_response_mock(bot, send_response)
-
-    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
-    reaction_event = nio.ReactionEvent.from_dict(
-        {
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$message:example.com",
-                    "key": "🛑",
-                },
-            },
-            "event_id": "$reaction:example.com",
-            "sender": "@user:example.com",
-            "origin_server_ts": 1000000,
-            "type": "m.reaction",
-            "room_id": "!test:example.com",
-        },
-    )
-
-    target = MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com")
-    await _record_pending_response(bot, "$message:example.com", target)
-
-    await dispatch_reaction_durably(bot, room, reaction_event)
-
-    send_response.assert_not_awaited()
-    stopped = bot._turn_store.get_turn_record("$message:example.com-source")
-    assert stopped is not None
-    assert stopped.user_stop_settled_receipt_order == 1
 
 
 @pytest.mark.asyncio
@@ -270,24 +214,17 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         "claim_interactive_reaction",
         new=claim_interactive,
     ):
-        # A response is being generated
-        await _record_pending_turn(
+        async with _generating(
             bot,
             "$message:example.com",
             MessageTarget.resolve("!test:localhost", None, "$message:example.com"),
-        )
+        ):
+            await dispatch_reaction_durably(bot, room, reaction_event)
 
-        # Process the reaction from an agent
-        await dispatch_reaction_durably(bot, room, reaction_event)
-
-        # Managed-agent reactions cannot answer this agent's interactive prompt.
-        claim_interactive.assert_not_awaited()
-
-    # The response was NOT stopped (agents can't stop generation)
-    pending = bot._turn_store.get_turn_record("$message:example.com-source")
-    assert pending is not None
-    assert not pending.completed
-    assert pending.user_stop_receipt_order is None
+            # Managed-agent reactions cannot answer this agent's interactive prompt.
+            claim_interactive.assert_not_awaited()
+            # Agents can't stop generation.
+            await _assert_not_stopped(bot, "$message:example.com")
 
 
 @pytest.mark.asyncio
@@ -322,13 +259,6 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
 
-    # A response is being generated
-    await _record_pending_turn(
-        bot,
-        "$message:example.com",
-        MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
-    )
-
     # Disallowed sender reacts with stop emoji
     reaction_event = nio.ReactionEvent.from_dict(
         {
@@ -350,12 +280,14 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     send_response = AsyncMock()
     install_send_response_mock(bot, send_response)
 
-    await dispatch_reaction_durably(bot, room, reaction_event)
+    async with _generating(
+        bot,
+        "$message:example.com",
+        MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
+    ):
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
-    # The response was NOT stopped — sender is disallowed
-    pending = bot._turn_store.get_turn_record("$message:example.com-source")
-    assert pending is not None
-    assert not pending.completed
-    assert pending.user_stop_receipt_order is None
+        # The response was NOT stopped — sender is disallowed
+        await _assert_not_stopped(bot, "$message:example.com")
     # No confirmation message should have been sent
     send_response.assert_not_called()

@@ -243,16 +243,6 @@ async def test_literal_owners_survive_migration_and_reopen(
         )
         assert finished.response_event_id == "$answer"
         assert finished.logical_source_event_ids == ("$source", "$second")
-        assert await store.backend.read(
-            lambda tx: response_attempts.edited_attempt_sources_before_stop(
-                tx,
-                "@bot:example.org",
-                room_id="!room:example.org",
-                response_event_id="$answer",
-                source_event_id="$source",
-                stop_receipt_order=2,
-            ),
-        ) == ("$edit", "$finished")
     finally:
         await store.close()
     assert legacy_database.query("SELECT payload_json, transaction_id FROM matrix_delivery_outbox") == original

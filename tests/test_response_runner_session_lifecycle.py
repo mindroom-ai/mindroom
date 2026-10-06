@@ -83,12 +83,12 @@ from tests.ai_user_id_helpers import (
 )
 from tests.bot_helpers import (
     _stream_outcome,
-    _visible_response_event_id,
 )
 from tests.conftest import (
     message_origin,
     request_envelope,
 )
+from tests.reply_span_helpers import response_span
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -239,31 +239,29 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
             side_effect=asyncio.CancelledError(USER_STOP_CANCEL_MSG),
         )
 
+        request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=("$user_msg",),
+                logical_source_event_ids=("$user_msg",),
+            ),
+            thread_history=(),
+            prompt="Hello",
+            response_envelope=request_envelope(
+                room_id="!test:localhost",
+                reply_to_event_id="$user_msg",
+                thread_id="$thread-root",
+                prompt="Hello",
+                user_id="@alice:localhost",
+            ),
+            user_id="@alice:localhost",
+            existing_event_id="$thinking",
+            existing_event_is_placeholder=True,
+        )
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-            await coordinator._process_and_respond(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=("$user_msg",),
-                        logical_source_event_ids=("$user_msg",),
-                    ),
-                    thread_history=(),
-                    prompt="Hello",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$user_msg",
-                        thread_id="$thread-root",
-                        prompt="Hello",
-                        user_id="@alice:localhost",
-                    ),
-                    user_id="@alice:localhost",
-                    existing_event_id="$thinking",
-                    existing_event_is_placeholder=True,
-                ),
-                run_id="run-1",
-            )
+            async with response_span(coordinator, request, placeholder_event_id="$thinking"):
+                await coordinator._process_and_respond(request, run_id="run-1")
 
     coordinator._persist_interrupted_recorder.assert_called()
-    coordinator.deps.delivery_gateway.deps.redact_message_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1138,15 +1136,15 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
 
         mock_ai.side_effect = fake_ai_response
 
-        generation = await coordinator._process_and_respond(
-            replace(
-                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                existing_event_id="$thinking",
-            ),
+        request = replace(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            existing_event_id="$thinking",
+            existing_event_is_placeholder=True,
         )
+        async with response_span(coordinator, request, placeholder_event_id="$thinking"):
+            generation = await coordinator._process_and_respond(request)
 
     assert generation.delivery.terminal_status == "cancelled"
-    assert _visible_response_event_id(generation.delivery) == "$thinking"
     assert sequence == [
         "ai",
         "started:!test:localhost:$thread-root:$thread-root",
@@ -1501,72 +1499,15 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        resolution = await coordinator._generate_response_locked(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
+        async with coordinator._reply_span_scope():
+            resolution = await coordinator._generate_response_locked(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            )
 
-    assert resolution is None
+    # The interruption note replaces the placeholder, which stays the turn's visible reply.
+    assert resolution == "$thinking"
     assert cancelled_seen == ["sync_restart_cancelled"]
-
-
-@pytest.mark.asyncio
-async def test_early_cancellation_redacts_thinking_placeholder(
-    tmp_path: Path,
-) -> None:
-    """Cancellation after Thinking... but before delivery starts should redact the placeholder."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    cancelled_seen: list[str | None] = []
-
-    @hook(EVENT_MESSAGE_CANCELLED)
-    async def on_cancelled(ctx: CancelledResponseContext) -> None:
-        cancelled_seen.append(ctx.info.failure_reason)
-
-    registry = HookRegistry.from_plugins([_plugin("early-cancel-cleanup", [on_cancelled])])
-
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        on_task_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
-        on_task_cancelled("cancelled_by_user")
-        return "$thinking"
-
-    async def redact_message_event(*, room_id: str, event_id: str, reason: str) -> bool:
-        assert room_id == "!test:localhost"
-        assert event_id == "$thinking"
-        assert reason == "Completed placeholder-only streamed response"
-        assert cancelled_seen == []
-        return True
-
-    with (
-        patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            hook_registry=registry,
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
-        redact_mock = AsyncMock(side_effect=redact_message_event)
-        object.__setattr__(coordinator.deps.delivery_gateway.deps, "redact_message_event", redact_mock)
-
-        resolution = await coordinator._generate_response_locked(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
-
-    assert resolution is None
-    redact_mock.assert_awaited_once()
-    assert cancelled_seen == ["cancelled_by_user"]
 
 
 @pytest.mark.asyncio

@@ -74,6 +74,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
+from tests.reply_span_helpers import final_in_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
@@ -2098,7 +2099,9 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
     async def fail_visible_update(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
-        outcome = await gateway.deliver_final(
+        outcome = await final_in_span(
+            gateway,
+            principal,
             FinalDeliveryRequest(
                 target=request.response_envelope.target,
                 existing_event_id=request.existing_event_id,
@@ -2114,7 +2117,8 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
                 prepared_edit_record=request.prepared_edit_record,
             ),
         )
-        assert outcome.terminal_status == "error"
+        # The failed edit stays owed to recovery instead of ending the reply.
+        assert outcome.terminal_status == "suspended"
         return outcome.event_id
 
     mock_generate_response = AsyncMock(side_effect=fail_visible_update)

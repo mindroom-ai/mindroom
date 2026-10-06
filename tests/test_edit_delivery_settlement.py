@@ -27,6 +27,7 @@ from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import final_in_span
 from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTests
 from tests.test_response_delivery_gateway import _gateway, _identity
@@ -284,7 +285,9 @@ async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publ
         stale = asyncio.create_task(store.record_visible_echo("$source", "$echo"))
         await write_started.wait()
         final = asyncio.create_task(
-            gateway.deliver_final(
+            final_in_span(
+                gateway,
+                principal,
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True),
                     existing_event_id="$answer",
@@ -405,12 +408,12 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
     with patch("mindroom.delivery_gateway.send_message_outcome", send):
         if boundary in {"enqueue", "ack"}:
             with pytest.raises(_ProcessLost):
-                await gateway.deliver_final(request)
+                await final_in_span(gateway, principal, request)
         elif boundary == "failed":
             with pytest.raises(RuntimeError, match="send failed"):
-                await gateway.deliver_final(request)
+                await final_in_span(gateway, principal, request)
         else:
-            await gateway.deliver_final(request)
+            await final_in_span(gateway, principal, request)
     _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store)
     owner = reopened.get_turn_record("$source")
@@ -529,7 +532,9 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
         return DeliveredMatrixEvent("$physical-edit", content)
 
     with patch("mindroom.delivery_gateway.send_message_outcome", send):
-        await gateway.deliver_final(
+        await final_in_span(
+            gateway,
+            principal,
             FinalDeliveryRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True),
                 existing_event_id="$answer",

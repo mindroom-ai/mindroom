@@ -47,7 +47,6 @@ from .approval_card_state import (  # noqa: TC001 - part of this module's runtim
 )
 from .approval_continuations import (
     ApprovalAdvance,
-    ApprovalCall,
     ApprovalContinuation,
     ApprovalContinuationState,
 )
@@ -1142,12 +1141,6 @@ class PrincipalStore:
             ),
         )
 
-    async def initial_response_delivery_id(self, event_id: str) -> str | None:
-        """Resolve this principal's exact INITIAL ACK, including retired cleanup proof."""
-        return await self._backend.read(
-            lambda transaction: outbox.initial_response_delivery_id(transaction, self._principal_id, event_id),
-        )
-
     async def deleted_initial_deliveries(
         self,
         *,
@@ -1618,44 +1611,6 @@ class PrincipalStore:
             ),
         )
 
-    async def edited_approval_sources_for_user_stop(
-        self,
-        *,
-        room_id: str,
-        response_event_id: str,
-        source_event_id: str,
-        stop_receipt_order: int,
-    ) -> tuple[str, ...]:
-        """Resolve edit-owned approvals and finished FINALs within one STOP cutoff."""
-        return await self._backend.read(
-            lambda transaction: response_attempts.edited_attempt_sources_before_stop(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                response_event_id=response_event_id,
-                source_event_id=source_event_id,
-                stop_receipt_order=stop_receipt_order,
-            ),
-        )
-
-    async def claim_approval_continuation(
-        self,
-        approval_id: str,
-        *,
-        runtime_generation: str,
-        legacy_show_tool_calls: bool | None = None,
-    ) -> ApprovalContinuation | None:
-        """Claim one ready paused run for exactly one response lifecycle."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.claim(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                runtime_generation=runtime_generation,
-                legacy_show_tool_calls=legacy_show_tool_calls,
-            ),
-        )
-
     async def claim_approval_resume(
         self,
         approval_id: str,
@@ -1727,33 +1682,6 @@ class PrincipalStore:
             return await self._backend.write(claim)
         except _InPlaceResumeRefusedError as refused:
             return None, refused.applied
-
-    async def advance_approval_continuation(
-        self,
-        approval_id: str,
-        *,
-        claimant_generation: int,
-        run_id: str,
-        session_id: str,
-        calls: tuple[ApprovalCall, ...],
-        runtime_model_name: str | None = None,
-        delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
-        cli_call: dict[str, object] | None = None,
-        continuation_count: int | None = None,
-    ) -> ApprovalContinuation | None:
-        """Replace one claimed generation with the next exact Agno pause."""
-        advance = ApprovalAdvance(
-            approval_id=approval_id,
-            claimant_generation=claimant_generation,
-            run_id=run_id,
-            session_id=session_id,
-            calls=calls,
-            runtime_model_name=runtime_model_name,
-            delegation_storage_bindings=delegation_storage_bindings,
-            cli_call=cli_call,
-            continuation_count=continuation_count,
-        )
-        return await self._backend.write(lambda transaction: advance.apply(transaction, self._principal_id))
 
     async def activate_approval_continuation(
         self,

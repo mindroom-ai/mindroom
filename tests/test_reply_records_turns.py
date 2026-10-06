@@ -874,15 +874,12 @@ async def _blocked_stream(
 async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_path: Path) -> None:
     """The reply's records take the Stop at once; the turn names the reply's event and its Stop, already settled."""
     bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
     response, _streaming = await _blocked_stream(bot)
     reply = await _reply(bot)
     assert reply.event_id is not None
     await _pending_turn(bot)
 
-    with patch.object(type(runner), "finalize_user_stop", new=AsyncMock()) as polling:
-        assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
-    polling.assert_not_awaited()
+    assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
     stopped = bot._turn_store.get_turn_record("$event")
     assert stopped is not None
     assert stopped.response_event_id == reply.event_id

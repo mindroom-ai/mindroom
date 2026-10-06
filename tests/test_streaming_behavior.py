@@ -88,8 +88,10 @@ from tests.conftest import (
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
@@ -2012,7 +2014,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_journal_support(bot)
-        bot.client = MagicMock(rooms={})
+        bot.client = make_matrix_client_mock(user_id=mock_helper_agent.user_id)
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         replace_response_runner_deps(
             bot,
@@ -2041,44 +2043,32 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
-            *,
-            retry_sync_recovery: bool = False,  # noqa: ARG001
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             sent_contents.append(content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            _new_content: dict[str, object],
-            _new_text: str,
-            *,
-            retry_sync_recovery: bool = False,  # noqa: ARG001
-        ) -> DeliveredMatrixEvent:
-            return DeliveredMatrixEvent(event_id="$stream_1", content_sent={})
-
+        request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=(envelope.source_event_id,),
+                logical_source_event_ids=(envelope.source_event_id,),
+            ),
+            thread_history=[],
+            prompt="Continue",
+            user_id="@user:localhost",
+            response_envelope=envelope,
+            correlation_id="$request:localhost",
+        )
+        runner = unwrap_extracted_collaborator(bot._response_runner)
         with (
-            patch("mindroom.streaming.send_message_result", new=record_send),
-            patch("mindroom.streaming.edit_message_result", new=record_edit),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=record_send),
             patch_response_runner_module(
                 stream_agent_response=MagicMock(return_value=response_stream()),
                 typing_indicator=noop_typing,
             ),
         ):
-            generation = await bot._response_runner._process_and_respond_streaming(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=(envelope.source_event_id,),
-                        logical_source_event_ids=(envelope.source_event_id,),
-                    ),
-                    thread_history=[],
-                    prompt="Continue",
-                    user_id="@user:localhost",
-                    response_envelope=envelope,
-                    correlation_id="$request:localhost",
-                ),
-            )
+            async with response_span(runner, request):
+                generation = await runner._process_and_respond_streaming(request)
 
         assert generation.delivery.event_id == "$stream_1"
         assert sent_contents

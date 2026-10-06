@@ -575,11 +575,10 @@ class TurnStore:
         stop_receipt_order: int,
         *,
         delivery_settled: bool = False,
-        deleted_turn_id: str | None = None,
         turn_id: str | None = None,
         also: Callable[[Transaction, TurnRecord], object] | None = None,
     ) -> TurnRecord | None:
-        """Terminate a visible response, or its exact retired INITIAL proven by the delivery owner.
+        """Terminate a visible response.
 
         ``turn_id`` names the turn a reply record says the response answers, for
         a running reply whose turn does not name its event until it finishes.
@@ -588,34 +587,6 @@ class TurnStore:
             msg = "User-stop receipt order must be positive"
             raise ValueError(msg)
         turn_record = self.turn_record_for_response_event_id(response_event_id)
-        if turn_record is None and deleted_turn_id is not None:
-            turn_record = self.get_turn_record(deleted_turn_id)
-            if (
-                turn_record is not None
-                and turn_record.response_event_id is None
-                and set(turn_record.source_event_ids).issubset(turn_record.redacted_source_event_ids)
-            ):
-                if (turn_record.user_stop_settled_receipt_order or 0) >= stop_receipt_order:
-                    return turn_record
-
-                def stopped_deleted_record(records: Mapping[str, TurnRecord]) -> TurnRecord:
-                    current = records[deleted_turn_id]
-                    if (
-                        current.source_event_ids != turn_record.source_event_ids
-                        or current.response_event_id is not None
-                        or not set(current.source_event_ids).issubset(current.redacted_source_event_ids)
-                    ):
-                        return current
-                    return replace(
-                        with_user_stop(current, response_event_id, stop_receipt_order, delivery_settled=True),
-                        response_event_id=None,
-                    )
-
-                return await self._ledger.update_handled_turn(
-                    turn_record.indexed_event_ids,
-                    stopped_deleted_record,
-                    also=also,
-                )
         if turn_record is None and turn_id is not None:
             return await self._stop_running_turn(
                 turn_id,
