@@ -50,7 +50,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - Sentences like these fail the question test:
   - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." states a hardening limit normal use never reaches, with no effect a user sees.
   - "Restart recovery now checks the handled-turn ledger before replaying journal events." narrates a mechanism and its history; the outcome is "restarts do not produce duplicate replies".
-  These pass: "Edits to an agent's `instructions`, `model`, or `tools` apply from its next reply without restarting it." answers "do I need to restart?", and the note in `docs/configuration/history.md` that a voice-call reply or a reply resuming after a tool approval can still use a redacted message is a rare path that answers "can the agent still see what I deleted?".
+  These pass: "Edits to an agent's `instructions` or `model` apply from its next reply without restarting it." answers "do I need to restart?", and the note in `docs/configuration/history.md` that a voice-call reply or a reply resuming after a tool approval can still use a redacted message is a rare path that answers "can the agent still see what I deleted?".
 - Each topic has one owning page that states each of its facts once; other pages link to it instead of splitting its rules across pages.
 
 ### Refactor Policy

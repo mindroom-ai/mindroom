@@ -82,7 +82,7 @@ Reads of worker-controlled files are capped per surface.
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
 
 Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](../thread-exports.md).
-A room's `index.json` larger than 8 MiB is not read; the exporter rebuilds it from the thread files on every pass that reaches its room.
+The exporter's drift check reads at most 8 MiB of a room's `index.json` and rebuilds a larger index from the thread files.
 Workspace todo templates have the size, render, and listing limits documented in [`todo`](../tools/project-management.md#todo), and they render in a short-lived, memory-limited child process instead of the primary, because sandboxed Jinja alone does not bound their cost.
 
 Workspace `SKILL.md` frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, `%TAG` directives, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](../skills.md#skillmd-format-openclaw-compatible) lists the exact limits.
