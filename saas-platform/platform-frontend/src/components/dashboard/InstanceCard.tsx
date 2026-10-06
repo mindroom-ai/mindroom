@@ -334,7 +334,7 @@ export function InstanceCard({
         {/* Tier */}
         <div className="flex items-center justify-between">
           <span className="text-gray-600 dark:text-gray-400">Tier</span>
-          <span className="font-medium capitalize dark:text-gray-200">{instance.tier || 'No plan'}</span>
+          <span className="font-medium capitalize dark:text-gray-200">{!instance.tier || instance.tier === 'free' ? 'No plan' : instance.tier}</span>
         </div>
 
         {/* Chat Interface */}

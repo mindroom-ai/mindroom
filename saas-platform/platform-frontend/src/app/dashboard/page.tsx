@@ -4,10 +4,9 @@ import { useAuth } from '@/hooks/useAuth'
 import { useInstance } from '@/hooks/useInstance'
 import { useSubscription } from '@/hooks/useSubscription'
 import { InstanceCard } from '@/components/dashboard/InstanceCard'
-import { UsageChart } from '@/components/dashboard/UsageChart'
 import { QuickActions } from '@/components/dashboard/QuickActions'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
-import { Card, CardHeader } from '@/components/ui/Card'
+import { Card } from '@/components/ui/Card'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { setSsoCookie, setupAccount } from '@/lib/api'
@@ -82,7 +81,7 @@ export default function DashboardPage() {
 
   // Show setup message only when actively setting up AND no instance exists yet
   if (isSettingUp && !subscription && !instance) {
-    return <DashboardLoader message="Setting up your free MindRoom instance..." />
+    return <DashboardLoader message="Setting up your MindRoom account..." />
   }
 
   return (
@@ -100,12 +99,6 @@ export default function DashboardPage() {
         <InstanceCard instance={instance} subscription={subscription} />
         <QuickActions instance={instance} subscription={subscription} />
       </div>
-
-      {/* Usage Overview */}
-      <Card>
-        <CardHeader className="mb-6">Usage This Month</CardHeader>
-        <UsageChart subscription={subscription} />
-      </Card>
     </div>
   )
 }

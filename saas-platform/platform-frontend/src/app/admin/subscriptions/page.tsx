@@ -105,7 +105,7 @@ export default function SubscriptionsPage() {
                     </td>
                     <td className="py-3 px-4">
                       <div className="font-medium capitalize text-gray-900 dark:text-gray-100">
-                        {subscription.price_tier || subscription.tier || 'Unknown'}
+                        {subscription.tier === 'free' ? 'No plan' : subscription.price_tier || subscription.tier || 'Unknown'}
                       </div>
                     </td>
                     <td className="py-3 px-4">

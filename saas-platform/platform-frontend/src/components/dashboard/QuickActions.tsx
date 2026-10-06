@@ -110,26 +110,6 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
         )}
       </div>
 
-      {/* Usage Summary */}
-      {subscription && (
-        <div className="mt-6 pt-6 border-t dark:border-gray-700">
-          <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-3">Plan Limits</h3>
-          <div className="space-y-2">
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600 dark:text-gray-400">AI Agents</span>
-              <span className="font-medium dark:text-gray-200">{subscription.max_agents}</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600 dark:text-gray-400">Messages/Day</span>
-              <span className="font-medium dark:text-gray-200">{subscription.max_messages_per_day.toLocaleString()}</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600 dark:text-gray-400">Storage</span>
-              <span className="font-medium dark:text-gray-200">{subscription.max_storage_gb}GB</span>
-            </div>
-          </div>
-        </div>
-      )}
     </Card>
   )
 }

@@ -109,7 +109,7 @@ export default function BillingPage() {
                   : subscription?.current_period_end
                   ? new Date(subscription.current_period_end).toLocaleDateString()
                   : 'the end of your billing period'}</strong></p>
-                <p className="mt-1">After this date, your hosted instance stops until you choose a plan again.</p>
+                <p className="mt-1">After this date, your hosted instance stops, and its data is deleted after a grace period unless you choose a plan again.</p>
               </div>
               <div className="mt-3">
                 <button
