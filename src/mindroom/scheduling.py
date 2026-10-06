@@ -627,13 +627,22 @@ def _start_scheduled_task(
     return True
 
 
-def _router_runtime_for_room(room_id: str) -> ScheduledTaskRunnerOwner | None:
-    """Return the router runtime when the router has joined the room and can write its schedule state."""
+def _router_runtime_for_room(workflow: ScheduledWorkflow) -> ScheduledTaskRunnerOwner | None:
+    """Return the router runtime when the router has joined the room and may write its state and triggers."""
     owner = _runner_owner
-    if owner is None:
+    if owner is None or workflow.room_id is None:
         return None
-    room = owner.client.rooms.get(room_id)
-    if room is None or not room.power_levels.can_user_send_state(owner.client.user_id, _SCHEDULED_TASK_EVENT_TYPE):
+    room = owner.client.rooms.get(workflow.room_id)
+    if room is None:
+        return None
+    router_id = owner.client.user_id
+    trigger_type = (
+        "m.room.encrypted" if room.encrypted else scheduling_executor.scheduled_trigger_message_type(workflow)
+    )
+    if not (
+        room.power_levels.can_user_send_state(router_id, _SCHEDULED_TASK_EVENT_TYPE)
+        and room.power_levels.can_user_send_message(router_id, trigger_type)
+    ):
         return None
     return owner
 
@@ -653,8 +662,7 @@ def _start_new_scheduled_task(
     The router restores schedules when it starts and cancels them when it stops, so its runners never
     outlive their client. A room the router cannot serve keeps the creating bot's runtime.
     """
-    assert workflow.room_id is not None
-    owner = _router_runtime_for_room(workflow.room_id)
+    owner = _router_runtime_for_room(workflow)
     if owner is not None:
         client = owner.client
         conversation_reader = owner.conversation_reader

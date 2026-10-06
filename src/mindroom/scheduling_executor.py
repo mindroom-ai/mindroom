@@ -240,6 +240,11 @@ async def _prepare_scheduled_trigger(
     return content
 
 
+def scheduled_trigger_message_type(workflow: ScheduledWorkflow) -> str:
+    """Return the Matrix event type a workflow's trigger is sent as."""
+    return SILENT_SCHEDULE_EVENT_TYPE if workflow.silent else "m.room.message"
+
+
 async def _deliver_scheduled_trigger(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
@@ -263,7 +268,7 @@ async def _deliver_scheduled_trigger(
         client,
         workflow.room_id,
         content,
-        message_type=SILENT_SCHEDULE_EVENT_TYPE if workflow.silent else "m.room.message",
+        message_type=scheduled_trigger_message_type(workflow),
         transaction_id=occurrence.transaction_id if occurrence is not None else None,
         content_is_prepared=occurrence is not None,
     )

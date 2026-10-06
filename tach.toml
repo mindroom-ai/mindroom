@@ -5669,6 +5669,7 @@ from = ["mindroom.matrix.identity"]
 expose = [
     "ScheduledWorkflowOutcome",
     "execute_scheduled_workflow",
+    "scheduled_trigger_message_type",
     "send_scheduled_failure_notice",
     "set_scheduling_hook_registry",
 ]

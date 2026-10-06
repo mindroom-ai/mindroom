@@ -522,7 +522,7 @@ def _pending_once_workflow() -> ScheduledWorkflow:
     )
 
 
-def _router_runtime(*, room_power_level: int | None) -> scheduling.ScheduledTaskRunnerOwner:
+def _router_runtime(*, room_power_level: int | None, events_default: int = 0) -> scheduling.ScheduledTaskRunnerOwner:
     """Return a router runtime joined to the test room at a power level, or not joined when it is None."""
     router_client = AsyncMock()
     router_client.user_id = "@mindroom_router:server"
@@ -530,6 +530,7 @@ def _router_runtime(*, room_power_level: int | None) -> scheduling.ScheduledTask
     if room_power_level is not None:
         room = nio.MatrixRoom("!test:server", router_client.user_id)
         room.power_levels.defaults.state_default = 50
+        room.power_levels.defaults.events_default = events_default
         room.power_levels.users[router_client.user_id] = room_power_level
         router_client.rooms["!test:server"] = room
     return scheduling.ScheduledTaskRunnerOwner(router_client, _conversation_reader())
@@ -568,18 +569,21 @@ async def test_schedule_created_by_an_agent_runs_on_the_router_runtime(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("router_running", "room_power_level"),
-    [(False, None), (True, None), (True, 0)],
-    ids=["no-router", "router-not-joined", "router-cannot-write-state"],
+    ("router_running", "room_power_level", "events_default"),
+    [(False, None, 0), (True, None, 0), (True, 0, 0), (True, 50, 100)],
+    ids=["no-router", "router-not-joined", "router-cannot-write-state", "router-cannot-send-trigger"],
 )
 async def test_schedule_in_a_room_the_router_cannot_serve_runs_on_its_creator(
     tmp_path: Path,
     router_running: bool,
     room_power_level: int | None,
+    events_default: int,
 ) -> None:
-    """Without a router that can write the room's schedule state, the creating bot keeps running the task."""
+    """Without a router that can write the room's schedule state and send its trigger, the creator keeps the task."""
     if router_running:
-        scheduling.set_scheduled_task_runner_owner(_router_runtime(room_power_level=room_power_level))
+        scheduling.set_scheduled_task_runner_owner(
+            _router_runtime(room_power_level=room_power_level, events_default=events_default),
+        )
     agent_client = AsyncMock()
     agent_reader = _conversation_reader()
 
