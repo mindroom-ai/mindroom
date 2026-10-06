@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints
 import httpx
 import pytest
 from agno.run.base import RunContext
-from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ProcessError, ResultMessage, TextBlock
 
 import mindroom.tools  # noqa: F401
 from mindroom.custom_tools import claude_agent as claude_agent_module
@@ -734,7 +734,7 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
     assert client.reader is not None
     assert _TURN_OWNER not in client.reader.get_context()
 
-    # A later turn ends the session; the SDK's task group must still exit where it was entered.
+    # A later turn ends the session; the task that connected the client still disconnects it.
     await asyncio.create_task(tools.claude_end_session(run_context=run_context, agent=agent))
     assert client.disconnect_task is client.connect_task
     assert client.reader.cancelled()
@@ -979,6 +979,31 @@ async def test_claude_send_error_does_not_deadlock(
     assert "Session context:" in result
     assert "- continue_conversation: False" in result
     assert "- resume: (none)" in result
+    assert not fake_manager._sessions
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_exit_while_reading_response_closes_session(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI that exits mid-turn raises a typed SDK error from the response stream, which closes the session."""
+
+    class _ExitingClaudeSDKClient(_FakeClaudeSDKClient):
+        async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
+            yield AssistantMessage(content=[TextBlock(text="partial")], model="claude-sonnet")
+            message = "Command failed"
+            raise ProcessError(message, exit_code=-9)
+
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ExitingClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    result = await asyncio.wait_for(tools.claude_send("hello", run_context=run_context, agent=agent), timeout=1)
+
+    assert "Claude session error: Command failed (exit code: -9)" in result
+    assert "Session context:" in result
     assert not fake_manager._sessions
 
 

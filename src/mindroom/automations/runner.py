@@ -19,10 +19,11 @@ from croniter import croniter
 
 from mindroom.automations.prompt_curation import curation_notice, curation_prompt, plan_curation, verify_curation
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SCHEDULED_MODEL_KEY
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
+from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -174,7 +175,7 @@ class AutomationRunner:
             if bot is None:
                 logger.warning("Automation agent is not running", agent=agent_name, automation=automation.name)
                 return
-            event_id = await self._post_mention(config, bot, room_id, agent_name, curation_prompt(config, plan), None)
+            event_id = await self._post_mention(config, bot, room_id, plan, curation_prompt(config, plan), None)
             if event_id is not None:
                 self._pending[event_id] = _PendingVerify(key, room_id, event_id, plan, now + _VERIFY_FALLBACK)
                 self._wake.set()
@@ -219,28 +220,49 @@ class AutomationRunner:
         notice = curation_notice(config, plan, result)
         if not result.findings:
             await bot._hook_send_message(pending.room_id, notice, pending.thread_id, _SOURCE_HOOK)
+            if result.changed:
+                await self._resolve_thread(bot, pending)
             return
         # A re-check asks the agent once, like the prompt itself; its answer is not verified again.
-        await self._post_mention(config, bot, pending.room_id, plan.agent_name, notice, pending.thread_id)
+        await self._post_mention(config, bot, pending.room_id, plan, notice, pending.thread_id)
+
+    async def _resolve_thread(self, bot: AgentBot | TeamBot, pending: _PendingVerify) -> None:
+        """Mark the thread of a run that stayed within the bounds as resolved; a re-check thread stays open."""
+        if bot.client is None:
+            return
+        try:
+            await set_thread_tag(
+                bot.client,
+                pending.room_id,
+                pending.thread_id,
+                RESOLVED_THREAD_TAG,
+                set_by=bot.client.user_id,
+            )
+        except ThreadTagsError as exc:
+            logger.warning("Automation could not resolve its thread", agent=pending.plan.agent_name, error=str(exc))
 
     async def _post_mention(
         self,
         config: Config,
         bot: AgentBot | TeamBot,
         room_id: str,
-        agent_name: str,
+        plan: CurationPlan,
         text: str,
         thread_id: str | None,
     ) -> str | None:
         """Post ``text`` mentioning the agent so it answers with a normal run, and return the event ID."""
+        extra_content: dict[str, str] = {}
         # Like a todo poke without a human requester, the message runs as MindRoom's internal user.
-        original_sender = mindroom_user_id(config, self.runtime_paths)
+        if (original_sender := mindroom_user_id(config, self.runtime_paths)) is not None:
+            extra_content[ORIGINAL_SENDER_KEY] = original_sender
+        if plan.settings.model is not None:
+            extra_content[SCHEDULED_MODEL_KEY] = plan.settings.model
         return await bot._hook_send_message(
             room_id,
             # Only a mentioned agent answers a message in a room with other responders.
-            f"@{agent_name} {text}",
+            f"@{plan.agent_name} {text}",
             thread_id,
             _SOURCE_HOOK,
-            {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None,
+            extra_content or None,
             trigger_dispatch=True,
         )

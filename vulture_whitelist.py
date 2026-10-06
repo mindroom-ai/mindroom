@@ -28,6 +28,7 @@ can_connect  # JSON response field consumed by personal portal (src/mindroom/api
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 localhostProfile  # Kubernetes wire TypedDict key (src/mindroom/workers/backends/kubernetes_config.py)
 connection_url  # TypedDict field consumed by gateway clients (src/mindroom/mcp_gateway/types.py)
+inputSchema  # TypedDict field consumed by gateway clients (src/mindroom/mcp_gateway/types.py)
 has_credentials  # unused variable (src/mindroom/api/credentials.py)
 key_names  # unused variable (src/mindroom/api/credentials.py)
 location_name  # unused variable (src/mindroom/api/homeassistant_integration.py)

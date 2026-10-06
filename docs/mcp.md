@@ -251,9 +251,9 @@ See [Provider And Credential Service Rules](oauth-framework.md#provider-and-cred
 A minimal local server, saved as `echo_mcp_server.py`:
 
 ```python
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-server = FastMCP("Echo Server")
+server = MCPServer("Echo Server")
 
 
 @server.tool()

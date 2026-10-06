@@ -43,7 +43,7 @@ async def test_inline_screenshot_is_prepared_and_persisted_once(tmp_path: Path) 
     session.call_tool.return_value = CallToolResult(
         content=[
             TextContent(type="text", text="Screenshot captured"),
-            ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png"),
+            ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mime_type="image/png"),
         ],
     )
     provider._session = session
@@ -73,7 +73,7 @@ async def test_inline_screenshot_preparation_does_not_block_browser_loop(
     provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
     session = AsyncMock(spec=PlaywrightMCPSession)
     session.call_tool.return_value = CallToolResult(
-        content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png")],
+        content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mime_type="image/png")],
     )
     provider._session = session
     provider._ready = True
@@ -112,7 +112,7 @@ async def test_inline_screenshot_is_created_private(tmp_path: Path, monkeypatch:
     provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
     session = AsyncMock(spec=PlaywrightMCPSession)
     session.call_tool.return_value = CallToolResult(
-        content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png")],
+        content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mime_type="image/png")],
     )
     provider._session = session
     provider._ready = True
@@ -153,7 +153,7 @@ async def test_inline_screenshot_rejects_output_directory_swap(tmp_path: Path) -
         output.rmdir()
         output.symlink_to(outside, target_is_directory=True)
         return CallToolResult(
-            content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png")],
+            content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mime_type="image/png")],
         )
 
     session.call_tool.side_effect = swap_output

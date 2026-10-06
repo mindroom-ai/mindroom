@@ -4220,7 +4220,7 @@ agents:
     memory_backend: file
     automations:
       - prompt_curation          # the built-in with its defaults
-      # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000}
+      # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
 ```
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
@@ -4251,8 +4251,9 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
     - a protected file changed, or a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
+When the files changed and none of these holds, verify reports the new size and marks the thread resolved.
 When the prompt files are unchanged, verify only checks that no `memory/` detail was deleted, and otherwise reports that nothing changed.
-Verify only reports and never changes the files; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
+Verify never changes the files; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
 
 | Field | Default | Description |
 |---|---|---|
@@ -4263,6 +4264,7 @@ Verify only reports and never changes the files; the agent's answer to a re-chec
 | `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
 | `max_file_shrink` | `0.25` | Largest shrink of any single file before verify asks for a re-check |
 | `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
+| `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
 | `protected_files` | `[]` | Workspace-relative paths the run should leave unchanged |
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
@@ -5327,6 +5329,17 @@ When the panel cannot open, the **Open panel** button is disabled and a message 
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
 Other people in the room, and other Matrix clients, see only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+
+### Find a canvas again
+
+A canvas the user comes back to, such as a landing page an agent keeps current or a checklist used every day, does not have to be found in its thread again.
+Where canvases are on, Chat's sidebar gets a **Canvases** button once the user has a canvas; it lists the canvases agents made for the user: pinned ones first, then the most recently updated, with the thread each was shown in (by its summary, as the sidebar names it), the room, the agent, and when each was updated and created.
+Choosing a title opens the canvas at its latest version, filling the conversation's column; choosing the thread or the room opens that conversation.
+
+Pins are kept in the user's Matrix account data (`io.mindroom.pinned_canvases`, room and event IDs only), so they show on every device.
+The rest of the list holds the canvases this browser has received, so a new device starts with recent canvases and older ones appear once their thread is opened.
+Users who don't want the button turn off **Show Canvases in the sidebar** under Settings → General → Interface; the choice follows them to every device.
+For a page the user returns to, update the same canvas with `canvas_event_id` rather than showing a new one, so its row and pin keep pointing at it.
 
 ## Answering a canvas
 
@@ -6793,9 +6806,9 @@ See [Provider And Credential Service Rules](https://docs.mindroom.chat/oauth-fra
 A minimal local server, saved as `echo_mcp_server.py`:
 
 ```python
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-server = FastMCP("Echo Server")
+server = MCPServer("Echo Server")
 
 
 @server.tool()
@@ -15593,7 +15606,7 @@ Forward these paths to the MindRoom API:
 Browser consent lives at `/connections/mcp/authorize`, inside the authenticated browser prefix, so keep it out of any other frontend's service-worker navigation fallback.
 Machine endpoints must receive MCP and OAuth responses, not an access proxy's HTML login page.
 Strip client-supplied trusted identity headers at the proxy, including on machine paths.
-Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, and `MCP-Protocol-Version` headers.
+Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers.
 Forward the exact `/mcp` path without adding a trailing slash.
 
 Native clients can omit `Origin`.
@@ -15627,7 +15640,8 @@ Client callbacks must be registered HTTPS URLs or loopback HTTP URLs.
 Dashboard API keys, browser cookies, and unsigned identity headers do not authenticate `/mcp`.
 Client names are self-declared, so users should check the displayed client address before approving.
 
-The gateway speaks the Python MCP SDK 1.x Streamable HTTP protocol and is tested with protocol version `2025-11-25`.
+The gateway serves MCP protocol revision `2026-07-28` and the handshake revisions `2024-11-05` through `2025-11-25` over Streamable HTTP.
+Clients on `2026-07-28` connect with `server/discover`, and clients on an earlier revision connect with the `initialize` handshake.
 It uses stateless requests with JSON responses and does not offer resumable SSE sessions, resources, or prompts.
 
 ## External authorization
@@ -15828,6 +15842,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 
 Tools that need the live Matrix room, such as Matrix messaging, scheduling, and conversation attachments, are never exposed.
 Explicit MCP cancellation applies only to a matching request ID from the same client.
+A `2026-07-28` client cancels a call by closing that call's request, which stops only that call.
 Cancellation cannot forcibly stop synchronous tool work, so a stuck provider call can hold capacity and delay shutdown until the process supervisor terminates the API.
 
 ## Inbound request diagnostics
@@ -15842,8 +15857,8 @@ These log events describe inbound `/mcp` traffic, separately from outbound MCP i
 Join these events by the server-generated `request_id`, which differs from the client's JSON-RPC ID.
 In `mcp_gateway_agent_selection`, `agent_eligible=false` with `agent_case_match=true` means a case mismatch, and `agent_eligible=true` with `agent_selected=false` means the user has not selected that agent.
 A zero `selected_agent_count` explains empty discovery.
-A 400 in `mcp_gateway_http_completed` with `unsupported_protocol_version=true` means the client asked for an MCP revision the gateway does not support.
-It is logged at info because compatible clients send this as a probe and then fall back to a supported handshake; if no successful request from the same requester follows, that client cannot connect.
+A 400 in `mcp_gateway_http_completed` with `unsupported_protocol_version=true` means the client asked for an MCP revision the gateway does not serve, such as one newer than `2026-07-28`.
+It is logged at info because compatible clients send this as a probe and then retry with a revision the gateway serves; if no successful request from the same requester follows, that client cannot connect.
 
 # Deployment
 

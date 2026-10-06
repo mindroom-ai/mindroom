@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Literal, cast
+from urllib.parse import urlsplit
 
 from mindroom.desktop.input import DESKTOP_SAFE_KEYS
 from mindroom.matrix.encrypted_file import (
@@ -168,7 +169,7 @@ class DesktopSetupDescriptor:
             msg = "Desktop setup descriptor has unsupported fields, version, or type."
             raise DesktopProtocolError(msg)
         return cls(
-            homeserver=_bounded_str(content, "homeserver", "setup", max_length=2048),
+            homeserver=_setup_homeserver(content),
             user_id=_bounded_str(content, "user_id", "setup", max_length=512),
             code=_bounded_str(content, "code", "setup", max_length=256),
             controller_user_id=_bounded_str(content, "controller_user_id", "setup", max_length=512),
@@ -464,6 +465,16 @@ def _bounded_str(content: dict[str, object], key: str, label: str, *, max_length
     value = _required_str(content, key, label)
     if len(value) > max_length:
         msg = f"{label}.{key} must not exceed {max_length} characters."
+        raise DesktopProtocolError(msg)
+    return value
+
+
+def _setup_homeserver(content: dict[str, object]) -> str:
+    # The app shows this URL as the sign-in server, so nothing may disguise its real host.
+    value = _bounded_str(content, "homeserver", "setup", max_length=2048)
+    parts = urlsplit(value)
+    if not value.isascii() or parts.scheme not in {"http", "https"} or not parts.hostname or "@" in parts.netloc:
+        msg = "Desktop setup homeserver must be a plain http or https URL."
         raise DesktopProtocolError(msg)
     return value
 

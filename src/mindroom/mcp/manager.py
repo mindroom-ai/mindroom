@@ -8,14 +8,13 @@ import json
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import Context
 from dataclasses import dataclass
-from datetime import timedelta
 from time import monotonic
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import mcp.types as mcp_types
-from httpx import HTTPStatusError
+from httpx2 import HTTPStatusError
 from mcp import ClientSession
 
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -74,8 +73,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 
     from agno.tools.function import ToolResult
-    from mcp.client.session import MessageHandlerFnT
-    from mcp.shared.session import ProgressFnT
+    from mcp.client.session import IncomingMessage, MessageHandlerFnT
+    from mcp.shared.dispatcher import ProgressFnT
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -1180,7 +1179,7 @@ class MCPServerManager:
             result = await session.call_tool(
                 remote_tool_name,
                 arguments=arguments,
-                read_timeout_seconds=timedelta(seconds=timeout_seconds),
+                read_timeout_seconds=timeout_seconds,
                 progress_callback=progress_callback,
             )
         except Exception as exc:
@@ -1426,7 +1425,7 @@ class MCPServerManager:
                     ClientSession(
                         read_stream,
                         write_stream,
-                        read_timeout_seconds=timedelta(seconds=state.config.call_timeout_seconds),
+                        read_timeout_seconds=state.config.call_timeout_seconds,
                         message_handler=self._build_message_handler(state),
                     ),
                 )
@@ -1492,9 +1491,11 @@ class MCPServerManager:
         discovered_tools: list[mcp_types.Tool] = []
         cursor: str | None = None
         while True:
-            result = await session.list_tools(cursor=cursor)
+            result = await session.list_tools(
+                params=mcp_types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None,
+            )
             discovered_tools.extend(result.tools)
-            cursor = result.nextCursor
+            cursor = result.next_cursor
             if cursor is None:
                 break
 
@@ -1524,8 +1525,8 @@ class MCPServerManager:
                     remote_name=tool.name,
                     function_name=function_name,
                     description=tool.description,
-                    input_schema=tool.inputSchema,
-                    output_schema=tool.outputSchema,
+                    input_schema=tool.input_schema,
+                    output_schema=tool.output_schema,
                     title=(tool.annotations.title if tool.annotations is not None else tool.title),
                 ),
             )
@@ -1551,7 +1552,7 @@ class MCPServerManager:
         )
 
     def _build_message_handler(self, state: MCPServerState) -> MessageHandlerFnT:
-        async def handle_message(message: object) -> None:
+        async def handle_message(message: IncomingMessage) -> None:
             if isinstance(message, Exception):
                 logger.warning(
                     "MCP server emitted message handler exception",
@@ -1559,15 +1560,13 @@ class MCPServerManager:
                     error=str(message),
                 )
                 return
-            if not isinstance(message, mcp_types.ServerNotification):
-                return
-            if not isinstance(message.root, mcp_types.ToolListChangedNotification):
+            if not isinstance(message, mcp_types.ToolListChangedNotification):
                 return
             state.stale = True
             if state.config.auth is None:
                 self._schedule_refresh_task(state)
 
-        return cast("MessageHandlerFnT", handle_message)
+        return handle_message
 
     def _entities_referencing_server(self, server_id: str) -> set[str]:
         """Return configured entities whose tools reference one MCP server."""

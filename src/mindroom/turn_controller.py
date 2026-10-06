@@ -175,11 +175,13 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
 # Ingress treats only a human's router relay as a handoff, so the router's relay of a
 # task a bot account scheduled arrives as a notice and must keep its per-run settings too.
 _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF, TurnIntent.ROUTER_NOTICE})
+# Hook dispatches come only from managed senders, such as built-in automations choosing a model for their prompt.
+_PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
 
 
 def _scheduled_model_for_dispatch(event: DispatchEvent, origin_intent: TurnIntent) -> str | None:
-    """Accept a per-run model only from trusted scheduled fires or the router's relays of them."""
-    if origin_intent not in _SCHEDULED_RUN_INTENTS:
+    """Accept a per-run model only from trusted scheduled fires, hook dispatches, or the router's relays of them."""
+    if origin_intent not in _PER_RUN_MODEL_INTENTS:
         return None
     content = event.source.get("content") if isinstance(event.source, dict) else None
     if not isinstance(content, dict):
