@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from google.api_core import exceptions as google_exceptions
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
@@ -15,6 +18,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -98,14 +102,57 @@ def test_client_is_built_once_with_the_authenticated_credentials(tmp_path: Path)
     assert tool.built_with[0].token == creds.token
 
 
-def test_client_is_rebuilt_when_credentials_change(tmp_path: Path) -> None:
-    tool = _tool(tmp_path, creds=_valid_credentials())
-    tool.probe_cloud()
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+def test_clients_are_built_per_requester_from_that_requesters_stored_credentials(
+    tmp_path: Path,
+    worker_scope: str,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(paths)
+    provider = google_cloud_oauth_provider()
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    bob_identity = replace(alice_identity, requester_id="@bob:example.org")
+    alice_target = resolve_worker_target(worker_scope, "general", execution_identity=alice_identity)
+    bob_target = resolve_worker_target(worker_scope, "general", execution_identity=bob_identity)
+    assert alice_target.worker_key != bob_target.worker_key
+    for target, token in ((alice_target, "alice-token"), (bob_target, "bob-token")):
+        publish_oauth_credentials(
+            provider,
+            {
+                "token": token,
+                "refresh_token": f"{token}-refresh",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "client-id",
+                "expires_at": 4_102_444_800.0,
+                "scopes": list(provider.scopes),
+                "_source": "oauth",
+                "_oauth_provider": provider.id,
+            },
+            credentials_manager=manager,
+            worker_target=target,
+        )
+    tool = _ProbeCloudTools(runtime_paths=paths, credentials_manager=manager, worker_target=alice_target)
 
-    tool.creds = _valid_credentials(token="other-token")  # noqa: S106
-    tool.probe_cloud()
+    def call_as(identity: ToolExecutionIdentity) -> dict[str, str]:
+        with tool_execution_identity(identity):
+            return json.loads(tool.probe_cloud())
 
-    assert len(tool.built_with) == 2
+    # One worker thread serves both requesters, so only a requester-keyed cache keeps their clients apart.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        alice_result = executor.submit(call_as, alice_identity).result(timeout=5)
+        bob_result = executor.submit(call_as, bob_identity).result(timeout=5)
+
+    assert [credentials.token for credentials in tool.built_with] == ["alice-token", "bob-token"]
+    assert alice_result == {"client": "client-1"}
+    assert bob_result == {"client": "client-2"}
 
 
 def test_non_auth_errors_report_status_without_provider_text(tmp_path: Path) -> None:
