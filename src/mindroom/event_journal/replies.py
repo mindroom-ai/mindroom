@@ -281,6 +281,39 @@ def record_stop(
     )
 
 
+def owner_lost(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    active_generation: str,
+    now_ns: int,
+) -> tuple[AppliedTransition, ...]:
+    """End the work an older bot instance left on this principal's replies (DESIGN.md §6.4 ``owner_lost``).
+
+    Runs once per bot instance at start, after its generation is written and
+    before journal replay: records and rows only, nothing is sent here.
+    """
+    applied: list[AppliedTransition] = []
+    for found in reply_messages.in_states(transaction, principal_id, (rl.ReplyState.ACTIVE,)):
+        if found.legacy_pending is not None:
+            # Its legacy read decides what it showed first.
+            continue
+        reply = reply_messages.lock(transaction, principal_id, found.reply_id)
+        last = reply_spans.load(transaction, principal_id, found.last_span_id)
+        assert reply is not None
+        assert last is not None
+        facts = rl.OwnerLostFacts(
+            active_generation=active_generation,
+            sources_pending=any(
+                journal.is_pending(transaction, principal_id, event_id) for event_id in last.sources.pending
+            ),
+        )
+        transition = rl.owner_lost(reply, last, facts, now_ns=now_ns)
+        if transition.applied:
+            applied.append(apply(transaction, principal_id, transition))
+    return tuple(applied)
+
+
 @dataclass(frozen=True, slots=True)
 class StopTarget:
     """What a Stop on one event reaches among the reply records."""
@@ -577,6 +610,17 @@ class ReplyStore:
             return None if reply is None else apply(transaction, self._principal_id, decide(reply))
 
         return await self._backend.write(write)
+
+    async def owner_lost(self, active_generation: str, *, now_ns: int) -> tuple[AppliedTransition, ...]:
+        """End what an older bot instance left running on these replies; see ``owner_lost``."""
+        return await self._backend.write(
+            lambda transaction: owner_lost(
+                transaction,
+                self._principal_id,
+                active_generation=active_generation,
+                now_ns=now_ns,
+            ),
+        )
 
     async def accepts_stop(self, event_id: str, room_id: str) -> bool:
         """Return whether a Stop on this event reaches a reply: a running one bound to it, or a create in its room."""

@@ -98,7 +98,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_visible_messages import fetch_latest_visible_body
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, fetch_latest_visible_body
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
@@ -159,6 +159,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import EditPreparation, canonicalize_turn_record
+from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
@@ -169,6 +170,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.history_helpers import RecordingModel
+from tests.legacy_reply_helpers import read_after_sync
 from tests.response_runner_helpers import (
     _bot,
     _config,
@@ -2041,7 +2043,6 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
     with (
         patch("mindroom.approval_response.approval_manager.get_approval_store", return_value=manager),
         patch.object(DeliveryGateway, "edit_text", new=edit),
-        patch("mindroom.response_runner.fetch_latest_visible_body", new=AsyncMock(return_value=None)) as fetch_body,
     ):
         handled, _ = await runner._recover_nonready_approval(
             continuation,
@@ -2051,7 +2052,6 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
     assert handled
     expire.assert_awaited_once_with(continuation.approval_id)
     edit.assert_not_awaited()
-    fetch_body.assert_not_awaited()
     assert await store.is_pending("$source") is not cards_expired
     remaining = await store.approval_continuation(continuation.approval_id)
     assert (remaining is None) is cards_expired
@@ -2333,7 +2333,8 @@ async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
 @pytest.mark.asyncio
 async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_path: Path) -> None:
     """A generic cancellation preserves its provenance instead of claiming a restart."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner_bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(runner_bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = ApprovalContinuation(
@@ -2357,58 +2358,37 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     )
     assert claimed is not None
 
-    async def acknowledge_interruption_edit(request: EditTextRequest) -> bool:
-        await store.enqueue_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            payload={"body": request.new_text},
-            edits_event_id="$waiting",
-        )
-        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
+    # This start adopts the reply of the resume a stopped instance left running, and reads what it showed.
+    bot = runner_bot
+    await bot._reply_runtime.start()
+    unique_room_send_responses(bot.client)
+    await read_after_sync(
+        bot,
+        ResolvedVisibleMessage.synthetic(
             event_id="$waiting",
-            delivered_projections=(),
-        )
-        return True
-
-    edit_text = AsyncMock(side_effect=acknowledge_interruption_edit)
+            sender=bot.matrix_id.full_id,
+            body="committed partial",
+            timestamp=1,
+            thread_id="$thread",
+            content={"body": "committed partial", STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
     outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$waiting",
         failure_reason="interrupted",
         is_visible_response=True,
     )
-
-    fetch_body = AsyncMock(side_effect=[None, "committed partial"])
-    with (
-        patch.object(DeliveryGateway, "edit_text", new=edit_text),
-        patch(
-            "mindroom.response_runner.fetch_latest_visible_body",
-            new=fetch_body,
-        ),
-        patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
-            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
-        ),
+    with patch(
+        "mindroom.approval_response.approval_manager.get_approval_store",
+        return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
     ):
         await runner._settle_failed_approval_outcome(claimed, outcome)
-        failing = await store.approval_continuation(continuation.approval_id)
-        assert failing is not None
-        handled, event_id = await runner._recover_nonready_approval(
-            failing,
-            target=_target(thread_id="$thread", reply_to_event_id="$source"),
-        )
 
-    assert handled
-    assert event_id == "$waiting"
-    assert fetch_body.await_count == 2
-    edit_request = edit_text.await_args.args[0]
-    assert edit_request.new_text == f"committed partial\n\n{INTERRUPTED_RESPONSE_NOTE}"
-    assert edit_request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+    assert await store.approval_continuation(continuation.approval_id) is None
+    note = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]
+    assert note["body"] == f"committed partial\n\n{INTERRUPTED_RESPONSE_NOTE}"
+    assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
 def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:

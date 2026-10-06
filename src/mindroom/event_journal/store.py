@@ -28,6 +28,7 @@ from . import (
     background_approvals,
     interactive_questions,
     journal,
+    legacy_reply_messages,
     legacy_turn_records,
     membership_hooks,
     outbox,
@@ -1885,6 +1886,48 @@ class PrincipalStore:
     def replies(self) -> ReplyStore:
         """Return this principal's reply records."""
         return ReplyStore(_backend=self._backend, _principal_id=self._principal_id)
+
+    async def adopt_legacy_replies(
+        self,
+        *,
+        entity_name: str,
+        presentations: legacy_reply_messages.LegacyPresentations,
+        now_ns: int,
+    ) -> tuple[replies.AppliedTransition, ...]:
+        """Give the replies main left in flight records, once per principal (DESIGN.md §14.5)."""
+        return await self._backend.write(
+            lambda transaction: legacy_reply_messages.classify(
+                transaction,
+                self._principal_id,
+                entity_name=entity_name,
+                presentations=presentations,
+                now_ns=now_ns,
+            ),
+        )
+
+    async def legacy_reply_reads(self) -> tuple[tuple[rl.Reply, rl.Span], ...]:
+        """Return main-era replies waiting for what only their Matrix event shows."""
+        return await self._backend.read(
+            lambda transaction: legacy_reply_messages.pending_reads(transaction, self._principal_id),
+        )
+
+    async def finish_legacy_reply_read(
+        self,
+        reply_id: str,
+        read: rl.LegacyRead,
+        *,
+        now_ns: int,
+    ) -> replies.AppliedTransition | None:
+        """Record what a main-era reply's event showed, releasing whatever waited for it."""
+        return await self._backend.write(
+            lambda transaction: legacy_reply_messages.read_done(
+                transaction,
+                self._principal_id,
+                reply_id=reply_id,
+                read=read,
+                now_ns=now_ns,
+            ),
+        )
 
 
 def _turn_membership_is_current(

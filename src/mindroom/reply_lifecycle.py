@@ -589,9 +589,12 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         if context.last_span is not None and context.last_span.span_id == lost.span_id:
             context = replace(context, last_span=lost)
 
-    if reply is not None and (context.durable_write_debt or reply.owed_write is not None):
+    if reply is not None and (
+        context.durable_write_debt or reply.owed_write is not None or reply.legacy_pending is not None
+    ):
         # Waiting under the conversation lock would block the reply's own
-        # sends; the debt's resolution wakes these sources instead.
+        # sends; the debt's resolution wakes these sources instead. A reply
+        # main left waits for its legacy read the same way (DESIGN.md §14.5).
         return Transition(outcome=Outcome.DEFERRED, reply=reply if changed else context.reply, spans=tuple(changed))
 
     def claimed(transition_reply: Reply, span: Span, *extra_spans: Span) -> Transition:
@@ -1332,6 +1335,17 @@ def approval_failure_note(
     return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
 
 
+def span_left_behind(reply: Reply, span: Span, *, active_generation: str | None, now_ns: int) -> Transition:
+    """End a span an older bot instance left current, so the reply's approval settlement can write it."""
+    if span.ended or span.bot_generation == active_generation or reply.current_span_id != span.span_id:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=_touch(_clear_current(reply, span.span_id), now_ns),
+        spans=(_end(span, SpanOutcome.LOST, now_ns),),
+    )
+
+
 def _state_for_span_outcome(outcome: SpanOutcome | None) -> ReplyState | None:
     if outcome is SpanOutcome.COMPLETED:
         return ReplyState.COMPLETED
@@ -1595,6 +1609,52 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
     owed = OwedWrite(last.span_id, NOTE_RESTART)
     updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=tuple(spans))
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyRead:
+    """What reading a main-era reply's event found, once its room synced (DESIGN.md §14.5)."""
+
+    # What the event showed, encoded; ``None`` when the read found nothing or gave up.
+    shown: str | None = None
+    # The event an adoption scan found for a reply its stream created directly.
+    event_id: str | None = None
+    # The event's wire status says the reply already ended, and how.
+    ended_as: ReplyState | None = None
+    # The event was still streaming within main's stale-stream window.
+    recent: bool = False
+
+
+def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pending: bool, now_ns: int) -> Transition:
+    """Record what a main-era reply showed; a stream main stopped after its sources settled ends here.
+
+    That stream gets main's restart note when it was still streaming within
+    main's stale-stream window, as main's startup cleanup gave it; otherwise
+    the reply keeps what its event shows. Replies with pending sources or an
+    approval keep their owners: the replay claim and the approval runtime,
+    which waited for this read.
+    """
+    if reply.legacy_pending is None:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    updated = replace(reply, legacy_pending=None)
+    if read.event_id is not None and updated.event_id is None:
+        updated = replace(updated, event_id=read.event_id, placeholder_only=read.shown is None)
+    if read.shown is not None:
+        updated = replace(updated, presentation=read.shown, possibly_shown=read.shown, placeholder_only=False)
+    updated = _bump(updated, now_ns)
+    stream_main_stopped = (
+        reply.state is ReplyState.ACTIVE
+        and reply.current_span_id is None
+        and reply.approval_id is None
+        and last.outcome is SpanOutcome.LOST
+        and not sources_pending
+    )
+    if not stream_main_stopped:
+        return Transition(outcome=Outcome.APPLIED, reply=updated)
+    if read.ended_as is not None:
+        return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, read.ended_as, now_ns))
+    owed = OwedWrite(last.span_id, NOTE_RESTART) if read.recent else None
+    return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed))
 
 
 def removed_entity(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:

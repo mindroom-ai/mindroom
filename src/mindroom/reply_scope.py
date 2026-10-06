@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation
+from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     Presentation,
@@ -184,7 +185,11 @@ class ReplyRuntime:
         """Retry sources once the reply's earlier writes resolve, instead of retrying at once."""
         self._waiting_for_rows.setdefault(reply_id, []).append((room_id, sources))
         reply = await self.store.replies.load(reply_id)
-        if reply is None or (reply.owed_write is None and not await self.store.replies.has_unresolved_rows(reply_id)):
+        if reply is None or (
+            reply.owed_write is None
+            and reply.legacy_pending is None
+            and not await self.store.replies.has_unresolved_rows(reply_id)
+        ):
             # They resolved before this claim registered its wait. A note still
             # owed and not yet enqueued wakes it when its row resolves.
             self.rows_resolved(reply_id)
@@ -206,8 +211,21 @@ class ReplyRuntime:
         return await self.store.replies.event_ids_of_spans(room_id, self.spans.live_span_ids())
 
     async def start(self) -> None:
-        """Make this bot instance the owner of its principal's replies."""
+        """Make this bot instance the owner of its principal's replies, then end what older instances left running.
+
+        Runs before journal replay (DESIGN.md §9.2): replies main left in flight
+        get records first, replay claims continue the replies whose sources are
+        still pending, and the notes this owes are delivered by the outbox
+        recovery after each room syncs.
+        """
         await self.store.replies.write_generation(self.generation, now_ns=self.clock())
+        adopted = await self.store.adopt_legacy_replies(
+            entity_name=self.entity_name,
+            presentations=LEGACY_PRESENTATIONS,
+            now_ns=self.clock(),
+        )
+        for applied in (*adopted, *await self.store.replies.owner_lost(self.generation, now_ns=self.clock())):
+            await self.run_effects(applied.post_commit)
 
     @asynccontextmanager
     async def span_scope(self) -> AsyncIterator[SpanSlot]:

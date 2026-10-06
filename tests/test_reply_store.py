@@ -510,3 +510,46 @@ async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:
     assert (
         await journal_store.backend.read(lambda tx: reply_messages.in_states(tx, PRINCIPAL, (ReplyState.GONE,))) == ()
     )
+
+
+async def test_owner_lost_ends_what_an_older_instance_left_running(journal_store: EventJournalStore) -> None:
+    """At start, an orphaned span whose sources settled fails with a restart note owed; one with pending sources waits for replay."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$pending")
+    orphan = _first_claim()
+    waiting = _first_claim(span_id="span-2", reply_id="reply-2", source="$pending")
+    for transition in (orphan, waiting):
+        await _apply(journal_store, transition)
+
+    applied = await principal.replies.owner_lost("gen-2", now_ns=50)
+
+    assert len(applied) == 2
+    failed = await principal.replies.load("reply-1")
+    assert failed is not None
+    assert failed.state is rl.ReplyState.FAILED
+    assert failed.owed_write == OwedWrite("span-1", rl.NOTE_RESTART)
+    lost = await principal.replies.span("span-1")
+    assert lost is not None
+    assert lost.outcome is rl.SpanOutcome.LOST
+    replayable = await principal.replies.load("reply-2")
+    assert replayable is not None
+    assert replayable.state is rl.ReplyState.ACTIVE
+    assert replayable.current_span_id is None
+    assert (await principal.replies.span("span-2")).outcome is rl.SpanOutcome.LOST  # type: ignore[union-attr]
+    # Run again by the same instance, it finds nothing left to end.
+    assert await principal.replies.owner_lost("gen-2", now_ns=60) == ()
+
+
+async def test_owner_lost_leaves_a_reply_waiting_for_its_legacy_read(journal_store: EventJournalStore) -> None:
+    """A main-era reply decides what it showed from its legacy read before any restart note."""
+    principal = journal_store.principal(PRINCIPAL)
+    transition = _first_claim()
+    assert transition.reply is not None
+    await _apply(
+        journal_store,
+        replace(transition, reply=replace(transition.reply, legacy_pending=LegacyPending.PRESENTATION_READ)),
+    )
+    assert await principal.replies.owner_lost("gen-2", now_ns=50) == ()
+    span = await principal.replies.span("span-1")
+    assert span is not None
+    assert span.outcome is None

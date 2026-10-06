@@ -235,13 +235,8 @@ async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.RELEASED]
     assert await bot._reply_runtime.store.is_pending("$event")
 
-    # The journal retries the sources; the dispatcher names the placeholder it recovered.
-    retry = replace(
-        _plain_request(_target()),
-        existing_event_id="$sent1",
-        existing_event_is_placeholder=True,
-        existing_event_is_recovered=True,
-    )
+    # The journal retries the sources; the claim finds the reply its first attempt left.
+    retry = _plain_request(_target())
     with patch_response_runner_module(
         ai_response=AsyncMock(return_value="Recovered answer."),
         should_use_streaming=AsyncMock(return_value=False),
@@ -258,25 +253,6 @@ async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp
     ]
     assert _sent_bodies(bot) == ["Thinking...", "Recovered answer."]
     assert not await bot._reply_runtime.store.is_pending("$event")
-
-
-async def test_an_event_no_reply_owns_keeps_mains_path(tmp_path: Path) -> None:
-    """A recovered response written before durable records is answered without claiming a reply."""
-    bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = replace(
-        _plain_request(_target()),
-        existing_event_id="$older",
-        existing_event_is_placeholder=True,
-    )
-    with patch_response_runner_module(
-        ai_response=AsyncMock(return_value="An answer."),
-        should_use_streaming=AsyncMock(return_value=False),
-        typing_indicator=_noop_typing,
-    ):
-        await runner.generate_response(request)
-
-    assert await bot._reply_runtime.store.replies.for_sources(("$event",)) is None
 
 
 async def test_a_claim_the_rules_refuse_settles_with_a_dispatch_error(tmp_path: Path) -> None:
@@ -439,7 +415,6 @@ async def _acknowledge_selection(bot: AgentBot) -> tuple[str | None, str | None]
         target=_target(),
         requester_id="@user:localhost",
         response_text="You selected: 1 Yes\n\nProcessing your response...",
-        recovered_response_event_id=None,
         delivery_turn_id="$event",
     )
 
@@ -810,3 +785,30 @@ async def test_history_counts_a_reply_in_progress_only_while_its_span_runs(tmp_p
     with suppress(asyncio.CancelledError):
         await response
     assert await runner._active_response_event_ids(_target().room_id) == set()
+
+
+async def test_a_regeneration_that_waits_for_earlier_writes_keeps_its_edit(tmp_path: Path) -> None:
+    """An edit whose reply still owes a write waits for it: its sources stay pending, owned by that row's wake."""
+    bot = await _streaming_bot(tmp_path)
+    real_send = _FlakyHomeserver(failures=0).real
+
+    async def refuse_answers(*args: object, **kwargs: object) -> object:
+        content = args[2] if len(args) > 2 else kwargs.get("content")
+        if isinstance(content, dict) and content.get("io.mindroom.stream_status") == "completed":
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup")
+        return await real_send(*args, **kwargs)
+
+    with patch("mindroom.delivery_gateway.send_message_outcome", new=refuse_answers):
+        await _answer(bot, _plain_request(_target()), AsyncMock(return_value="The first answer."))
+    reply = await _reply(bot)
+    assert reply.event_id == "$sent1"
+    assert await bot._reply_runtime.store.replies.has_unresolved_rows(reply.reply_id)
+
+    request = replace(_regeneration(answer_event_id="$sent1"), source_handoff=asyncio.Event())
+    model = AsyncMock(return_value="A fresh answer.")
+    assert await _answer(bot, request, model) is None
+    model.assert_not_awaited()
+    # The edit regenerator reports the edit owned, so the journal keeps it for the retry.
+    assert request.source_handoff is not None
+    assert request.source_handoff.is_set()
+    assert await _span_outcomes(bot, await _reply(bot)) == [rl.SpanOutcome.COMPLETED]

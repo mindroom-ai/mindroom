@@ -1672,9 +1672,6 @@ class TurnController:
         """Execute one authorized selection while replacement admission remains reserved."""
         if await self._interactive_selection_is_durably_terminal(source_event_id):
             return False
-        reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
-            (source_event_id,),
-        )
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
@@ -1703,14 +1700,6 @@ class TurnController:
             await self._require_durable_interactive_selection(source_event_id)
             return False
         selection_handled_turn = pending_turn
-        recovered_ack_event_id = (
-            await self.deps.visible_responses.recovered_response_event_id(
-                selection_handled_turn,
-                room_id=room.room_id,
-            )
-            if reconcile_visible_response
-            else None
-        )
         # This acknowledgement is the placeholder the selection's answer then
         # edits, which is what `existing_event_is_placeholder` below says, so it
         # is the turn's initial delivery and not its answer. Staging it that way
@@ -1725,7 +1714,6 @@ class TurnController:
             response_text=(
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
-            recovered_response_event_id=recovered_ack_event_id,
             delivery_turn_id=source_event_id,
         )
         if not ack_event_id:
@@ -1799,7 +1787,6 @@ class TurnController:
                 member_display_names=room_member_display_names(room),
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
-                existing_event_is_recovered=recovered_ack_event_id is not None,
                 interactive_span_id=interactive_span_id,
                 user_id=requester_user_id,
                 attachment_ids=selection_attachment_ids or None,
@@ -2112,15 +2099,6 @@ class TurnController:
                 handled_turn=handled_turn,
             )
 
-            recovered_response_event_id = (
-                await self.deps.visible_responses.recovered_response_event_id(
-                    handled_turn,
-                    room_id=dispatch.target.room_id,
-                )
-                if reconcile_visible_response
-                else None
-            )
-
             async def record_visible_response(response_event_id: str) -> None:
                 await self.deps.visible_responses.record_pending_visible_response(handled_turn, response_event_id)
 
@@ -2144,9 +2122,7 @@ class TurnController:
                         discovery_event_ids=handled_turn.discovery_event_ids,
                     ),
                     user_id=dispatch.requester_user_id,
-                    existing_event_id=recovered_response_event_id,
-                    existing_event_is_placeholder=recovered_response_event_id is not None,
-                    existing_event_is_recovered=recovered_response_event_id is not None,
+                    # A replay finds the reply its earlier attempt left through the reply's records.
                     response_envelope=dispatch.envelope,
                     correlation_id=dispatch.correlation_id,
                     matrix_run_metadata=matrix_run_metadata,

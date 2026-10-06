@@ -618,6 +618,19 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
     return tuple(owners)
 
 
+def for_principal(transaction: Transaction, principal_id: str) -> tuple[ApprovalContinuation, ...]:
+    """Return one principal's continuations, oldest first."""
+    rows = transaction.fetchall(
+        f"""
+        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
+        WHERE principal_id = ?
+        ORDER BY created_at_ns, approval_id/*bytes*/
+        """,  # noqa: S608 - a fixed column list
+        (principal_id,),
+    )
+    return tuple(continuation for _principal_id, continuation in _load_owners(transaction, rows))
+
+
 def all_owners(
     transaction: Transaction,
     *,

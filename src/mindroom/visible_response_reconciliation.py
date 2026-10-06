@@ -36,7 +36,7 @@ class VisibleResponseReconcilerDeps:
     turn_store: TurnStore
     delivery_gateway: DeliveryGateway
     settle_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]]
-    replies: ReplyRuntime | None = None
+    replies: ReplyRuntime
 
 
 @dataclass
@@ -223,48 +223,36 @@ class VisibleResponseReconciler:
         target: MessageTarget,
         requester_id: str,
         response_text: str,
-        recovered_response_event_id: str | None,
         delivery_turn_id: str,
     ) -> tuple[str | None, str | None]:
-        """Send an interactive selection's acknowledgement, which its answer then edits.
+        """Send an interactive selection's acknowledgement, which creates the reply its answer then edits.
 
-        Returns the acknowledgement's event and, with reply records, the span
-        the acknowledgement created for the answer to adopt (PR-1.md §6.1).
+        Returns the acknowledgement's event and the span it created for the
+        answer to adopt (PR-1.md §6.1). A retry resolves to the row its first
+        attempt recorded, so it neither sends nor creates a second reply.
         """
         replies = self.deps.replies
-        if replies is None:
-            event_id = await self.deliver_recoverable_text(
-                handled_turn,
+        event_id = await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
                 target=target,
                 response_text=response_text,
-                recovered_response_event_id=recovered_response_event_id,
                 delivery_turn_id=delivery_turn_id,
-                as_placeholder=True,
-            )
-            return event_id, None
-        event_id = recovered_response_event_id
-        if event_id is None:
-            event_id = await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    target=target,
-                    response_text=response_text,
-                    delivery_turn_id=delivery_turn_id,
-                    delivery_stage=DeliveryStage.INITIAL,
-                    reply_write=await replies.acknowledgement(
-                        delivery_id=delivery_turn_id,
-                        pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),
-                        logical=handled_turn.source_event_ids,
-                        discovery=handled_turn.discovery_event_ids,
-                        room_id=target.room_id,
-                        thread_id=target.resolved_thread_id,
-                        requester_id=requester_id,
-                        text=response_text,
-                    ),
+                delivery_stage=DeliveryStage.INITIAL,
+                reply_write=await replies.acknowledgement(
+                    delivery_id=delivery_turn_id,
+                    pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),
+                    logical=handled_turn.source_event_ids,
+                    discovery=handled_turn.discovery_event_ids,
+                    room_id=target.room_id,
+                    thread_id=target.resolved_thread_id,
+                    requester_id=requester_id,
+                    text=response_text,
                 ),
-            )
-            if event_id is None:
-                return None, None
-            await self.record_pending_visible_response(handled_turn, event_id)
+            ),
+        )
+        if event_id is None:
+            return None, None
+        await self.record_pending_visible_response(handled_turn, event_id)
         # The answer adopts the acknowledgement's span until some span has run it.
         reply = await replies.store.replies.for_event(event_id)
         if reply is None:

@@ -570,6 +570,14 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS reply_legacy_classifications (
+        -- Principals whose replies from before reply records were adopted
+        -- once, at the first start that had reply records.
+        principal_id TEXT NOT NULL PRIMARY KEY,
+        classified_at_ns BIGINT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS reply_principal_generations (
         -- The bot instance that owns this principal's replies now. Spans of
         -- any other generation can no longer write.

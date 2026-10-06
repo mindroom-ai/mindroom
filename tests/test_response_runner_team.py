@@ -13,6 +13,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 
+from mindroom import reply_lifecycle as rl
 from mindroom.agent_storage import get_team_session
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
@@ -1634,7 +1635,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Suppressed team placeholder responses should not leak the redacted placeholder id."""
+        """A suppressed team answer leaves no reply event behind and reports none."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def before_hook(ctx: BeforeResponseContext) -> None:
@@ -1664,8 +1665,6 @@ class TestAgentBot(AgentBotTestBase):
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
-                    existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_envelope=_hook_envelope(
                         body="Continue",
                         source_event_id="$event",
@@ -1678,8 +1677,9 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert resolution is None
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed placeholder response",
-        )
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.GONE
+        # Nothing was shown, so nothing is left to redact.
+        assert reply.event_id is None
+        bot._redact_message_event.assert_not_awaited()

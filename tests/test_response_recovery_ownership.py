@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -18,10 +18,14 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.history.types import HistoryScope
+from mindroom.legacy_reply_messages import LegacyReplyReads
 from mindroom.matrix import stale_stream_cleanup as cleanup
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
+from mindroom.reply_lifecycle import ReplyState
 from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -202,6 +206,7 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
         completed=False,
         requester_id="@user:localhost",
         conversation_target=target,
+        history_scope=HistoryScope(kind="agent", scope_id="general"),
     )
     await store.record_pending_turn(original)
     dispatcher = _dispatcher(principal, AsyncMock())
@@ -297,6 +302,28 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
         await store.record_pending_turn(replace(original, response_event_id=original_initial_id))
     runner = _runner_on(bot, gateway, principal)
     runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=history)
+    # This start adopts the reply main left, then reads what its event showed.
+    await runner.deps.replies.start()
+    reads = LegacyReplyReads(
+        store=principal,
+        client=lambda: controller.deps.runtime.client,
+        response_sender=lambda: controller.deps.matrix_id.full_id,
+        trusted_sender_ids=tuple,
+        logger=MagicMock(),
+        resolved=lambda _reply_id: None,
+    )
+    placeholder = ResolvedVisibleMessage.synthetic(
+        event_id=INITIAL,
+        sender=controller.deps.matrix_id.full_id,
+        body="Thinking...",
+        timestamp=NOW_MS,
+        thread_id=thread_id,
+        content={"body": "Thinking...", STREAM_STATUS_KEY: "pending"},
+    )
+    with patch("mindroom.legacy_reply_messages.fetch_latest_visible_message", new=AsyncMock(return_value=placeholder)):
+        await reads.run()
+    # The first sync's recovery pass sends what the adopted reply still owes before its replay.
+    assert (await gateway.recover_deliveries()).complete
 
     async def settle_ignored(sources: tuple[str, ...]) -> None:
         for source in sources:
@@ -358,7 +385,10 @@ async def test_recovered_initial_survives_same_requester_supersession(  # noqa: 
     assert response_record.completed
     assert response_record.response_event_id == original_initial_id
     assert final is not None
-    assert final.edits_event_id == original_initial_id
+    # The answer is the reply's last row, aimed at the event its recovered INITIAL created.
+    answered = await principal.replies.for_event(original_initial_id)
+    assert answered is not None
+    assert answered.state is ReplyState.COMPLETED
     assert not await principal.is_pending(source_id)
     assert len(model_requests) == 1
     assert visible == {INITIAL: "Original request finished with a substantive answer."}

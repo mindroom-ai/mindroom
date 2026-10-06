@@ -16,7 +16,6 @@ from agno.db.base import SessionType
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from nio.exceptions import EncryptionError, RemoteProtocolError
 
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_modes import resolve_agent_mode
@@ -46,7 +45,6 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -69,8 +67,6 @@ from mindroom.interactive import InteractiveMetadata
 from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
-    fetch_latest_visible_body,
-    fetch_latest_visible_message,
     replace_visible_message,
 )
 from mindroom.matrix.presence import should_use_streaming
@@ -146,10 +142,8 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
     UnfinishedStreamedReply,
-    build_cancelled_response_update,
     clean_partial_reply_text,
     strip_visible_tool_markers,
-    unfinished_streamed_reply,
 )
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
@@ -563,8 +557,6 @@ class ResponseRequest:
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
     existing_event_is_placeholder: bool = False
-    # Set when replay adopts the reply an earlier attempt at this turn left behind.
-    existing_event_is_recovered: bool = False
     # What the stopped attempt at the adopted reply showed; this attempt streams below it.
     resumed_reply: UnfinishedStreamedReply | None = None
     # The span an interactive selection's acknowledgement created, which this answer adopts.
@@ -680,6 +672,12 @@ def _participation_for_request(
             agent_name=request.response_envelope.agent_name,
         )
     return gate
+
+
+def _approve_continued_reply(participation: ParticipationGate | None, request: ResponseRequest) -> None:
+    """A claim that continued a reply already showing this turn's answer needs no new participation decision."""
+    if participation is not None and request.existing_event_id is not None:
+        participation.approve_existing_response()
 
 
 def _skipped_participation_outcome() -> FinalDeliveryOutcome:
@@ -938,7 +936,7 @@ class ResponseRunnerDeps:
     approval_runtime_generation: str
     redacted_history_events: Callable[[MessageTarget, tuple[str, ...]], Awaitable[Mapping[str, str | None]]]
     # This bot instance's owner of durable reply records.
-    replies: ReplyRuntime | None = None
+    replies: ReplyRuntime
 
 
 @dataclass(frozen=True)
@@ -2212,7 +2210,7 @@ class ResponseRunner:
         reason: str,
         cancel_source: Literal["sync_restart", "interrupted"],
     ) -> bool:
-        """Fence an uncertain stale claim and settle it with the committed visible body."""
+        """Fence an uncertain stale claim and settle it with the interruption its reply shows."""
         failing = continuation
         if failing.state != "failing":
             requested = await self._approval_responses.request_failure(
@@ -2229,54 +2227,11 @@ class ResponseRunner:
         if initial is not None and initial.retired:
             # The legacy approval-recovery boundary proves deletion during settlement.
             return await self._approval_responses.settle_failure(failing, reason)
-        if (
-            self.deps.replies is not None
-            and await self.deps.replies.store.replies.for_event(failing.response_event_id) is not None
-        ):
-            # The reply's records know what it showed; Matrix is not read back.
-            return await self._approval_responses.settle_failure(
-                failing,
-                reason,
-                interruption="restart" if cancel_source == "sync_restart" else "interrupted",
-            )
-        update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
-        if update is None:
-            return False
-        return await self._approval_responses.settle_failure(failing, reason, visible_text=update)
-
-    async def _approval_interruption_update(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        cancel_source: Literal["sync_restart", "interrupted"],
-    ) -> str | None:
-        """Read the latest committed edit and build its interruption terminalization."""
-        try:
-            body = await fetch_latest_visible_body(
-                self._client(),
-                room_id=continuation.room_id,
-                event_id=continuation.response_event_id,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                trusted_sender_ids=current_internal_sender_ids(
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                ),
-            )
-            if body is None:
-                return None
-        except Exception as error:
-            self.deps.logger.warning(
-                "approval_restart_interruption_read_failed",
-                approval_id=continuation.approval_id,
-                error=str(error),
-            )
-            return None
-        note = RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
-        return (
-            body
-            if body.rstrip().endswith(note)
-            else build_cancelled_response_update(body, cancel_source=cancel_source)[0]
+        # The reply's records know what it showed; Matrix is not read back.
+        return await self._approval_responses.settle_failure(
+            failing,
+            reason,
+            interruption="restart" if cancel_source == "sync_restart" else "interrupted",
         )
 
     async def _recover_frozen_approval_final(
@@ -3060,9 +3015,7 @@ class ResponseRunner:
             for event_id, tracked in self.deps.stop_manager.tracked_messages.items()
             if tracked.target.room_id == room_id and not tracked.task.done()
         }
-        if self.deps.replies is not None:
-            active |= await self.deps.replies.live_event_ids(room_id)
-        return active
+        return active | await self.deps.replies.live_event_ids(room_id)
 
     async def _run_locked_response_lifecycle(
         self,
@@ -3129,11 +3082,8 @@ class ResponseRunner:
             self._admission_gate.release()
 
     @asynccontextmanager
-    async def _reply_span_scope(self) -> AsyncIterator[SpanSlot | None]:
-        """Open the slot a claim fills, when this bot keeps durable reply records."""
-        if self.deps.replies is None:
-            yield None
-            return
+    async def _reply_span_scope(self) -> AsyncIterator[SpanSlot]:
+        """Open the slot a claim fills, so the span it claims is shared with child tasks."""
         async with self.deps.replies.span_scope() as slot:
             yield slot
 
@@ -3330,7 +3280,7 @@ class ResponseRunner:
         if isinstance(error, asyncio.CancelledError):
             if not current_task_is_process_shutdown():
                 cancel_source = classify_cancel_source(error)
-                reply = await self.deps.approval_store.replies.load(handle.reply_id)
+                reply = await handle.runtime.store.replies.load(handle.reply_id)
                 if cancel_source == "user_stop" and reply is not None and reply.unapplied_stop:
                     await gateway.end_reply_span_with_note(
                         handle,
@@ -3403,26 +3353,11 @@ class ResponseRunner:
         """
         replies = self.deps.replies
         slot = current_slot()
-        if replies is None or slot is None:
-            return request
-        legacy_initial = await self.deps.approval_store.load_matrix_delivery(
-            delivery_id=request.response_envelope.source_event_id,
-            stage=DeliveryStage.INITIAL,
-        )
-        if legacy_initial is not None and legacy_initial.reply_id is None:
-            # A reply started before durable records exist keeps main's path
-            # until the startup migration adopts it.
+        if slot is None:
             return request
         # An edit regenerates the reply its turn record names; with no record
         # of that reply, it is a historical answer with an unknown presentation.
         regeneration = request.prepared_edit_record is not None
-        if (
-            not regeneration
-            and request.existing_event_id is not None
-            and await replies.store.replies.for_event(request.existing_event_id) is None
-        ):
-            # An answer written before durable records exist keeps main's path too.
-            return request
         try:
             handle = await self._claim_reply(replies, request, history_scope=history_scope)
         except rl.InvalidTransitionError as error:
@@ -3431,6 +3366,10 @@ class ResponseRunner:
             self.deps.logger.exception("reply_claim_invalid", source_event_id=request.response_envelope.source_event_id)
             raise PostLockRequestPreparationError from error
         if handle is None:
+            # The reply's earlier writes resolve first, and their resolution
+            # retries these sources: they stay pending, owned by that wake.
+            if request.source_handoff is not None:
+                request.source_handoff.set()
             return None
         slot.handle = handle
         reply = handle.reply
@@ -3439,8 +3378,6 @@ class ResponseRunner:
             existing_event_id=reply.event_id,
             # A regeneration replaces an answer, not a placeholder, unless the reply shows only one.
             existing_event_is_placeholder=reply.event_id is not None and (not regeneration or reply.placeholder_only),
-            # Records decide what a stopped attempt showed; Matrix is not read back.
-            existing_event_is_recovered=False,
             resumed_reply=handle.resumed,
         )
 
@@ -3567,7 +3504,7 @@ class ResponseRunner:
     ) -> ApprovalContinuation | None:
         """Claim a ready continuation, with its reply's resume span when reply records own the reply."""
         legacy_show_tool_calls = self._show_tool_calls(owned.entity_name)
-        if self.deps.replies is None or slot is None:
+        if slot is None:
             return await self.deps.approval_store.claim_approval_continuation(
                 owned.approval_id,
                 runtime_generation=self.deps.approval_runtime_generation,
@@ -4162,71 +4099,18 @@ class ResponseRunner:
         )
         return request
 
-    async def _with_interrupted_attempt(
-        self,
-        request: ResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-    ) -> ResponseRequest:
+    def _with_interrupted_attempt(self, request: ResponseRequest) -> ResponseRequest:
         """Continue a replayed turn below what its stopped attempt already showed and ran.
 
         A restart, whether a crash, an orderly shutdown, an entity replacement
         or an approved run cut short, leaves the reply streaming and its sources
-        pending, so replay adopts that reply. The reply in Matrix is the only
-        account of the stopped attempt: its visible text and tool trace stay in
-        the message with the new attempt streaming below them, and the same
-        account goes into the new attempt's prompt, where later turns keep it.
+        pending, so replay claims that reply. Its records say what the stopped
+        attempt may have shown: that stays in the message with the new attempt
+        streaming below it, and the same account goes into the new attempt's
+        prompt, where later turns keep it.
         """
         handle = current_span()
-        if handle is not None:
-            return self._with_recorded_interrupted_attempt(request, handle)
-        event_id = request.existing_event_id
-        if event_id is None or not request.existing_event_is_recovered:
-            return request
-        try:
-            message = await fetch_latest_visible_message(
-                self._client(),
-                room_id=resolved_target.room_id,
-                event_id=event_id,
-                trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
-            )
-        except (EncryptionError, RemoteProtocolError):
-            # A reply this device cannot decrypt, or whose edits the server would
-            # not list, is answered with a warning rather than retried, since a
-            # missing key or a refusing server may never change.
-            message = None
-        unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
-        if unfinished is not None:
-            completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
-            attempt = render_stopped_attempt(
-                partial_text=strip_team_display(unfinished.partial_text),
-                completed_tools=completed_tools,
-                interrupted_tools=interrupted_tools,
-            )
-            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
-        elif message is None or message.stream_status in {
-            None,
-            STREAM_STATUS_PENDING,
-            STREAM_STATUS_STREAMING,
-            STREAM_STATUS_APPROVAL_PENDING,
-        }:
-            # Unreadable, or stopped before showing anything (an acknowledgement,
-            # hidden or non-streamed tool calls): unknown work, not absent work.
-            instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
-        else:
-            return request
-        self.deps.logger.info(
-            "interrupted_attempt_resumed",
-            response_event_id=event_id,
-            attempt_shown=unfinished is not None,
-        )
-        account = render_enrichment_block([EnrichmentItem(key="interrupted_attempt", text=instruction)])
-        model_prompt = request.model_prompt if request.model_prompt is not None else request.prompt
-        return replace(
-            request,
-            model_prompt=f"{model_prompt.rstrip()}\n\n{account}",
-            resumed_reply=unfinished,
-        )
+        return request if handle is None else self._with_recorded_interrupted_attempt(request, handle)
 
     def _with_recorded_interrupted_attempt(self, request: ResponseRequest, handle: SpanHandle) -> ResponseRequest:
         """Tell a replay what its stopped attempt may have shown, from the reply's records (DESIGN.md §5.4)."""
@@ -4292,7 +4176,7 @@ class ResponseRunner:
             reply_owned = handle is not None and not handle.exited
             if handle is not None and reply_owned:
                 await self._end_span_for_terminal_source(handle, resolved_target, source_deleted=source_deleted)
-            elif self.deps.replies is not None:
+            else:
                 reply_owned = await self.deps.delivery_gateway.settle_unclaimed_reply(
                     (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
                     source_deleted=source_deleted,
@@ -4336,7 +4220,7 @@ class ResponseRunner:
                 lambda reply, span: rl.sources_deleted(reply, span, now_ns=now_ns),
             )
             return
-        reply = await self.deps.approval_store.replies.load(handle.reply_id)
+        reply = await handle.runtime.store.replies.load(handle.reply_id)
         if reply is not None and reply.unapplied_stop:
             await gateway.end_reply_span_with_note(
                 handle,
@@ -4419,7 +4303,7 @@ class ResponseRunner:
         )
         if prepared_request is None:
             return None
-        return await self._with_interrupted_attempt(prepared_request, resolved_target=resolved_target)
+        return self._with_interrupted_attempt(prepared_request)
 
     async def _begin_locked_turn(
         self,
@@ -4872,7 +4756,7 @@ class ResponseRunner:
             )
             return outcome
         if outcome.terminal_status == "cancelled":
-            reply = await self.deps.approval_store.replies.load(handle.reply_id)
+            reply = await handle.runtime.store.replies.load(handle.reply_id)
             if reply is not None and reply.event_id is None:
                 # Interrupted before anything was visible: nothing to note, and the sources are retried.
                 await gateway.end_reply_span(
@@ -6356,6 +6240,7 @@ class ResponseRunner:
         if admitted_request is None:
             return None
         request = admitted_request
+        _approve_continued_reply(participation, request)
         response_thread_id = _response_thread_id(request, resolved_target)
         active_model_name = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,

@@ -10,13 +10,15 @@ import pytest_asyncio
 
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
-from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
+from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import unwrap_extracted_collaborator
+from tests.legacy_reply_helpers import read_after_sync
 from tests.response_runner_helpers import _bot
 from tests.test_response_runner_focused import _admit_approval_source
 
@@ -69,93 +71,73 @@ async def approval(tmp_path: Path) -> tuple[AgentBot, ApprovalContinuation]:
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
+    # This start adopts the reply main left running its approved resume.
+    await bot._reply_runtime.start()
+    unique_room_send_responses(bot.client)
     return bot, claimed
 
 
-async def _acknowledge(bot: AgentBot, request: EditTextRequest) -> bool:
-    """Persist an actual FINAL ACK at the mocked Matrix transport seam."""
-    store = bot.journal_principal()
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.FINAL,
-        room_id="!room:localhost",
+def _visible(body: str) -> ResolvedVisibleMessage:
+    return ResolvedVisibleMessage.synthetic(
+        event_id="$waiting",
+        sender="@mindroom_general:localhost",
+        body=body,
+        timestamp=1,
         thread_id="$thread",
-        edits_event_id="$waiting",
-        payload={"body": "* " + request.new_text, "m.new_content": {"body": request.new_text, **request.extra_content}},
+        content={"body": body, STREAM_STATUS_KEY: "streaming"},
     )
-    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
-    await store.acknowledge_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.FINAL,
-        event_id="$final-edit",
-        delivered_projections=(),
-    )
-    return True
 
 
-async def _settle(
-    bot: AgentBot,
-    claimed: ApprovalContinuation,
-    edit: AsyncMock,
-    *,
-    body: str | None = "partial answer",
-) -> None:
-    """Settle an active restart cancellation with Matrix transport and body reads replaced."""
+def _sent_bodies(bot: AgentBot) -> list[dict[str, object]]:
+    return [
+        call.kwargs["content"].get("m.new_content", call.kwargs["content"])
+        for call in bot.client.room_send.await_args_list
+    ]
+
+
+async def _settle(bot: AgentBot, claimed: ApprovalContinuation) -> None:
+    """Settle an active restart cancellation of the claimed approval."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    with (
-        patch.object(DeliveryGateway, "edit_text", new=edit),
-        patch("mindroom.response_runner.fetch_latest_visible_body", new=AsyncMock(return_value=body)),
-    ):
-        await runner._settle_failed_approval_outcome(
-            claimed,
-            FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id="$waiting",
-                is_visible_response=True,
-                failure_reason="sync_restart_cancelled",
-            ),
-        )
+    await runner._settle_failed_approval_outcome(
+        claimed,
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$waiting",
+            is_visible_response=True,
+            failure_reason="sync_restart_cancelled",
+        ),
+    )
 
 
-async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: ApprovalContinuation, edit: AsyncMock) -> None:
-    """The reply keeps its partial text, ends with the restart note, and nothing resumes it."""
-    edit.assert_awaited_once()
-    request = edit.await_args.args[0]
-    assert request.event_id == "$waiting"
-    assert request.new_text.startswith("partial answer")
-    assert request.new_text.rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
-    assert request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: ApprovalContinuation, shown: str) -> None:
+    """The reply keeps what it showed, ends with the restart note, and nothing resumes it."""
+    note = _sent_bodies(bot)[-1]
+    assert str(note["body"]).startswith(shown)
+    assert str(note["body"]).rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
+    assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
     store = bot.journal_principal()
     assert await store.approval_continuation(claimed.approval_id) is None
     assert not await store.is_pending("$source")
-    assert not await store.recovery_initial_deliveries()
-    async with bot.response_recovery_scope("!room:localhost", "$waiting") as permitted:
-        assert not permitted
 
 
 @pytest.mark.asyncio
 async def test_approval_interruption_settles_in_place(approval: tuple[AgentBot, ApprovalContinuation]) -> None:
-    """An active restart cancellation edits its reply with the interruption note and settles."""
+    """An active restart cancellation writes the interruption note below what the reply showed, and settles."""
     bot, claimed = approval
-
-    async def edit_notice(request: EditTextRequest) -> bool:
-        return await _acknowledge(bot, request)
-
-    edit = AsyncMock(side_effect=edit_notice)
-    await _settle(bot, claimed, edit)
-    await _assert_settled_with_interruption_note(bot, claimed, edit)
+    await read_after_sync(bot, _visible("partial answer"))
+    await _settle(bot, claimed)
+    await _assert_settled_with_interruption_note(bot, claimed, "partial answer")
 
 
 @pytest.mark.asyncio
-async def test_unreadable_reply_body_leaves_approval_failing(approval: tuple[AgentBot, ApprovalContinuation]) -> None:
-    """Without a committed visible body there is no interruption note to write, so the claim stays fenced."""
+async def test_an_unreadable_reply_still_gets_its_interruption_note(
+    approval: tuple[AgentBot, ApprovalContinuation],
+) -> None:
+    """A read that gives up leaves what the reply showed unknown; the note still ends it."""
     bot, claimed = approval
-    edit = AsyncMock()
-    await _settle(bot, claimed, edit, body=None)
-    edit.assert_not_awaited()
-    current = await bot.journal_principal().approval_continuation(claimed.approval_id)
-    assert current is not None
-    assert current.state == "failing"
+    await read_after_sync(bot, None)
+    await _settle(bot, claimed)
+    await _assert_settled_with_interruption_note(bot, claimed, "")
 
 
 @pytest.mark.asyncio
@@ -164,13 +146,14 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
 ) -> None:
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
+    await read_after_sync(bot, _visible("partial answer"))
     runner = unwrap_extracted_collaborator(bot._response_runner)
     failing = await runner._approval_responses.request_failure(claimed, "sync_restart_cancelled")
     assert failing is not None
     await bot._journal_store.backend.write(lambda tx: tx.execute("DELETE FROM approval_continuations"))
-    edit = AsyncMock()
-    await _settle(bot, failing, edit)
-    edit.assert_not_awaited()
+    sends = bot.client.room_send.await_count
+    await _settle(bot, failing)
+    assert bot.client.room_send.await_count == sends
 
 
 async def _fence_bot(bot: AgentBot, intent: RuntimeShutdownIntent) -> None:
@@ -188,11 +171,7 @@ async def test_approval_settlement_after_removal_still_settles_in_place(
 ) -> None:
     """A removed lifecycle still edits its reply with the interruption note and settles."""
     bot, claimed = approval
+    await read_after_sync(bot, _visible("partial answer"))
     await _fence_bot(bot, ENTITY_REMOVED_SHUTDOWN)
-
-    async def edit_notice(request: EditTextRequest) -> bool:
-        return await _acknowledge(bot, request)
-
-    edit = AsyncMock(side_effect=edit_notice)
-    await _settle(bot, claimed, edit)
-    await _assert_settled_with_interruption_note(bot, claimed, edit)
+    await _settle(bot, claimed)
+    await _assert_settled_with_interruption_note(bot, claimed, "partial answer")

@@ -705,7 +705,8 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert resolution == "$team-terminal"
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -842,7 +843,8 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             team_mode="coordinate",
         )
 
-    assert resolution == "$team-terminal"
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -927,7 +929,8 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
             team_mode="coordinate",
         )
 
-    assert resolution == "$team-terminal"
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1074,7 +1077,8 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             team_mode="coordinate",
         )
 
-    assert resolution is None
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     assert storage.session is None
 
 
@@ -1145,7 +1149,8 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             team_mode="coordinate",
         )
 
-    assert resolution == "$team-msg"
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     assert storage.session is None
 
 
@@ -1217,7 +1222,8 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
             team_mode="coordinate",
         )
 
-    assert resolution == "$team-msg"
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1296,7 +1302,8 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             team_mode="coordinate",
         )
 
-    assert resolution == "$team-msg"
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
 
 
 @pytest.mark.asyncio
@@ -1350,7 +1357,8 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
             team_mode="coordinate",
         )
 
-    assert resolution is None
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     coordinator.deps.delivery_gateway.finalize_streamed_response.assert_not_awaited()
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
@@ -1718,7 +1726,8 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert resolution is None
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -1901,7 +1910,8 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             team_mode="coordinate",
         )
 
-    assert resolution is None
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
 
 
 @pytest.mark.asyncio

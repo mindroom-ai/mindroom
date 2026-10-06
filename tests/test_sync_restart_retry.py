@@ -18,6 +18,7 @@ from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.history.types import HistoryScope
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
+from mindroom.turn_record import TurnRecord
 from tests.conftest import delivered_matrix_event, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
 
@@ -167,9 +168,11 @@ async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path,
         team_id=history_scope.scope_id,
         runs=[_stored_run(history_scope, "run", interrupted=interrupted)],
     )
+    # A sync-restart retry is an edit regeneration of the answer its turn names.
     request = replace(
         _plain_request(target, source_event_id="$source"),
         existing_event_id="$existing",
+        prepared_edit_record=TurnRecord.create(["$source"], response_event_id="$existing"),
         sync_restart_retry_source_event_id="$source",
     )
 

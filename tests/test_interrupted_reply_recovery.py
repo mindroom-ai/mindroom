@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom import reply_lifecycle as rl
 from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -27,13 +27,10 @@ from mindroom.event_journal import DeliveryStage
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.message_target import MessageTarget
-from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import (
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     TEAM_PROGRESS_PLACEHOLDER,
-    USER_STOP_CANCEL_MSG,
-    build_cancelled_response_update,
     format_stream_error_note,
     unfinished_streamed_reply,
 )
@@ -42,23 +39,11 @@ from mindroom.tool_system.events import (
     build_tool_trace_content,
     tool_trace_from_content,
 )
-from mindroom.turn_record import TurnRecord
-from tests.ai_user_id_helpers import (
-    _build_response_runner,
-    _config_with_team_matrix_message,
-    _install_inert_post_response_effects,
-    _make_bot,
-    _response_request,
-    _runtime_paths,
-    _set_gateway_method,
-    _team_orchestrator,
-    bind_runtime_paths,
-)
-from tests.bot_helpers import _stream_outcome
 from tests.conftest import unwrap_extracted_collaborator
-from tests.identity_helpers import fixture_entity_matrix_id
+from tests.legacy_reply_helpers import main_left_reply as _main_left_reply
+from tests.legacy_reply_helpers import read_after_sync as _read_after_sync
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_response_runner_focused import _admit_approval_source, _preparation
+from tests.test_response_runner_focused import _preparation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -66,9 +51,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.delivery_gateway import StreamingDeliveryRequest
-    from mindroom.final_delivery import StreamTransportOutcome
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.response_runner import ResponseRequest, ResponseRunner
     from mindroom.response_turn import ResponseTurnContext
 
@@ -167,46 +149,16 @@ def _streamed(
 
 
 async def _crashed_turn(bot: AgentBot) -> ResponseRequest:
-    """Leave the durable state a stopped process leaves: a pending source and an adopted streamed reply."""
-    store = bot.journal_principal()
+    """Leave the durable state a stopped main process left, then start this one: its reply is adopted."""
+    record = await _main_left_reply(bot)
     target = _target(thread_id="$thread", reply_to_event_id="$source")
-    await _admit_approval_source(store)
-    sources = ResponseSources(("$source",), ("$source",))
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.INITIAL,
-        room_id=ROOM_ID,
-        thread_id="$thread",
-        payload={"body": "Thinking...", STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-        response_attempt=ResponseAttempt("general", sources),
-    )
-    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
-    await store.acknowledge_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.INITIAL,
-        event_id=REPLY_ID,
-        delivered_projections=(),
-    )
-    record = TurnRecord.create(
-        ("$source",),
-        completed=False,
-        response_owner="general",
-        response_event_id=REPLY_ID,
-        requester_id="@user:localhost",
-        conversation_target=target,
-        history_scope=HistoryScope(kind="agent", scope_id="general"),
-    )
-    await bot._turn_store.record_pending_turn(record)
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$answer-edit", room_id=ROOM_ID)
     request = _plain_request(target, source_event_id="$source")
     return replace(
         request,
         prompt="CRASHTEST write the report",
         payload_preparation=_preparation(target, request.response_envelope),
-        sources=sources,
-        existing_event_id=REPLY_ID,
-        existing_event_is_placeholder=True,
-        existing_event_is_recovered=True,
+        sources=ResponseSources(("$source",), ("$source",)),
         matrix_run_metadata=bot._turn_store.build_run_metadata(record),
     )
 
@@ -261,9 +213,8 @@ async def _replay(
         calls.append(_ModelCall(cast("ResponseTurnContext", args[0]), cast("str", kwargs["model_prompt"]), True))
         yield "The complete report."
 
-    fetch = AsyncMock(side_effect=visible) if isinstance(visible, Exception) else AsyncMock(return_value=visible)
+    fetch = await _read_after_sync(bot, visible)
     with (
-        patch("mindroom.response_runner.fetch_latest_visible_message", new=fetch),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         patch("mindroom.response_runner.stream_agent_response", new=fake_stream),
@@ -314,15 +265,8 @@ async def test_replay_continues_below_the_stopped_attempt_and_saves_its_account(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stop", "terminal_note", "stream_status"),
-    [
-        (RuntimeError("model unavailable"), format_stream_error_note("model unavailable"), STREAM_STATUS_ERROR),
-        (
-            asyncio.CancelledError(USER_STOP_CANCEL_MSG),
-            build_cancelled_response_update("", cancel_source="user_stop")[0],
-            STREAM_STATUS_CANCELLED,
-        ),
-    ],
-    ids=["failure", "user_stop"],
+    [(RuntimeError("model unavailable"), format_stream_error_note("model unavailable"), STREAM_STATUS_ERROR)],
+    ids=["failure"],
 )
 async def test_an_end_before_the_continuation_streams_keeps_the_stopped_reply(
     tmp_path: Path,
@@ -333,13 +277,13 @@ async def test_an_end_before_the_continuation_streams_keeps_the_stopped_reply(
     """A run that fails or is stopped before it streams ends the stopped attempt's text with its note instead of redacting it."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
+    await _read_after_sync(bot, _streamed())
     runner = unwrap_extracted_collaborator(bot._response_runner)
 
     def ending_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         raise stop
 
     with (
-        patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.stream_agent_response", new=ending_stream),
         _hooks_prepare(runner),
@@ -357,14 +301,15 @@ async def test_an_end_before_the_continuation_streams_keeps_the_stopped_reply(
 
 
 @pytest.mark.asyncio
-async def test_a_terminal_reply_is_answered_as_before(tmp_path: Path) -> None:
-    """A reply that already reached a terminal state hides no stopped work."""
+async def test_a_reply_that_shows_it_ended_is_answered_afresh(tmp_path: Path) -> None:
+    """A reply whose event already shows an end carries no stopped work below it; its replay is warned conservatively."""
     bot = _bot(tmp_path)
     visible = _streamed(f"Done.\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", status=STREAM_STATUS_ERROR)
 
     (call,), _fetch = await _replay(bot, await _crashed_turn(bot), visible)
 
-    assert call.account is None
+    assert call.account is not None
+    assert "what that attempt did is unknown" in call.account
     assert not call.streamed
     assert (await _final_answer(bot))["body"] == "The complete report."
     assert not await bot.journal_principal().is_pending("$source")
@@ -398,88 +343,28 @@ async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("existing_event_id", [None, REPLY_ID], ids=["fresh_reply", "adopted_unrecovered_reply"])
-async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
-    tmp_path: Path,
-    existing_event_id: str | None,
-) -> None:
-    """Only the recovered flag opens the gate: a reply this attempt sends itself, or one adopted without recovery, is not read."""
+async def test_a_stopped_team_reply_is_accounted_for_without_its_display_chrome(tmp_path: Path) -> None:
+    """A team replay tells the leader what the stopped team showed, without the team's display chrome."""
     bot = _bot(tmp_path)
-    request = replace(
-        await _crashed_turn(bot),
-        existing_event_id=existing_event_id,
-        existing_event_is_placeholder=False,
-        existing_event_is_recovered=False,
-    )
-
-    (call,), fetch = await _replay(bot, request, _streamed())
-
-    fetch.assert_not_awaited()
-    assert call.account is None
-
-
-@pytest.mark.asyncio
-async def test_a_stopped_team_reply_continues_with_its_account_minus_display_chrome(tmp_path: Path) -> None:
-    """The team leader gets the account without the team chrome, and the team stream continues below the stopped reply."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    messages: list[str] = []
-
-    async def fake_team_stream(**kwargs: object) -> AsyncIterator[str]:
-        messages.append(cast("str", kwargs["message"]))
-        # Run metadata the turn recorded but never published to the live collector.
-        cast("TurnRecorder", kwargs["turn_recorder"]).set_run_metadata({AI_RUN_METADATA_KEY: {"version": 1}})
-        yield "Team answer"
-
+    await _main_left_reply(bot, scope=HistoryScope(kind="team", scope_id="general"))
     visible = _streamed(
         f"🤝 **Team Response** (General, Helper):\n\n{PARTIAL}\n\n\n*No team consensus - showing individual responses only*",
     )
-    with (
-        patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)),
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.team_response_stream", new=fake_team_stream),
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+    await _read_after_sync(bot, visible)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    reply = await bot._reply_runtime.store.replies.for_event(REPLY_ID)
+    assert reply is not None
+    async with bot._reply_runtime.span_scope() as slot:
+        claimed = await runner._claim_reply_span(
+            _plain_request(_target(thread_id="$thread", reply_to_event_id="$source"), source_event_id="$source"),
+            history_scope=HistoryScope(kind="team", scope_id="general"),
         )
-        _install_inert_post_response_effects(coordinator)
-        delivered: list[StreamingDeliveryRequest] = []
+        assert claimed is not None
+        assert slot.handle is not None
+        assert slot.handle.span.kind is rl.SpanKind.REPLAY
+        account = runner._with_interrupted_attempt(claimed).model_prompt or ""
 
-        async def deliver(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
-            delivered.append(request)
-            body = "".join([str(chunk) async for chunk in request.response_stream])
-            return _stream_outcome(REPLY_ID, body)
-
-        coordinator.deps.delivery_gateway.deliver_stream.side_effect = deliver
-        finalize = _set_gateway_method(
-            coordinator.deps.delivery_gateway,
-            "finalize_streamed_response",
-            AsyncMock(wraps=coordinator.deps.delivery_gateway.finalize_streamed_response),
-        )
-        await coordinator.generate_team_response_helper(
-            replace(
-                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                existing_event_id=REPLY_ID,
-                existing_event_is_placeholder=True,
-                existing_event_is_recovered=True,
-            ),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
-            team_mode="coordinate",
-        )
-
-    (message,) = messages
-    account = html.unescape(message)
-    assert "\n\nHalf of the report\n\n(turn stopped before completion" in account
+    account = html.unescape(account)
+    assert "Half of the report\n\n(turn stopped before completion" in account
     assert "Team Response" not in account
-    assert "consensus" not in account
-    ((stream,),) = [delivered]
-    assert stream.resumed == unfinished_streamed_reply(visible.body, visible.content)
-    finalized = finalize.await_args.args[0]
-    assert finalized.extra_content[AI_RUN_METADATA_KEY] == {"version": 1}
+    assert "No team consensus" not in account

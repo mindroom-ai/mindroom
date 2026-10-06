@@ -24,7 +24,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -117,6 +117,7 @@ from .journal_dispatch import (
     JournalDispatcher,
 )
 from .knowledge.utils import KnowledgeAccessSupport
+from .legacy_reply_messages import LegacyReplyReads
 from .logging_config import get_logger
 from .managed_avatars import entity_avatar_path
 from .matrix.avatar import set_user_avatar_from_file, user_has_avatar
@@ -825,6 +826,14 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
             ),
+        )
+        self._legacy_reply_reads = LegacyReplyReads(
+            store=self._journal_store.principal(self._journal_principal_id),
+            client=self._delivery_gateway._client,
+            response_sender=lambda: runtime_matrix_id.full_id,
+            trusted_sender_ids=lambda: current_internal_sender_ids(self.config, self.runtime_paths),
+            logger=self.logger,
+            resolved=self._reply_row_resolved,
         )
         self._visible_responses = VisibleResponseReconciler(
             VisibleResponseReconcilerDeps(
@@ -1558,6 +1567,8 @@ class AgentBot:
         onto the same event.
         """
         try:
+            # Replies main left in flight learn what they showed before anything owed for them is sent.
+            await self._legacy_reply_reads.run()
             outcome = await self._delivery_gateway.recover_deliveries()
         except Exception:
             self.logger.exception("Delivery recovery failed")

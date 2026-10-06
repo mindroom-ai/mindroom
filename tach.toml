@@ -482,6 +482,7 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
+    "mindroom.legacy_reply_messages",
     "mindroom.agent_cli.delegation",
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.approval_recovery",
@@ -527,8 +528,22 @@ depends_on = ["mindroom.constants", "mindroom.streaming", "mindroom.tool_system.
 [[modules]]
 path = "mindroom.reply_scope"
 depends_on = [
-    "mindroom.cancellation",
     "mindroom.event_journal",
+    "mindroom.legacy_reply_messages",
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_presentation",
+    "mindroom.stop",
+    "mindroom.streaming",
+    "mindroom.tool_system.events",
+]
+
+[[modules]]
+path = "mindroom.legacy_reply_messages"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.room_history_reads",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.streaming",
@@ -3748,6 +3763,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.matrix.room_history_reads",
+    "mindroom.legacy_reply_messages",
     "mindroom.api.openai_request_parsing",
     "mindroom.commands.handler",
     "mindroom.custom_tools.matrix_conversation_operations",
@@ -3808,6 +3824,7 @@ depends_on = [
     "mindroom.timing",
 ]
 visibility = [
+    "mindroom.legacy_reply_messages",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.thread_summary",
     "mindroom.approval_transport",
@@ -4173,6 +4190,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.legacy_reply_messages",
     "mindroom.model_catalog_receiver",
     "mindroom.reply_lifecycle",
     "mindroom.reply_scope",

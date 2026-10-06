@@ -1836,6 +1836,8 @@ class DeliveryGateway:
             "restart": note_segment(NoteKind.RESTART),
         }[reason]
         while (reply := await self.deps.outbox.replies.for_event(event_id)) is not None:
+            if reply.current_span_id is not None and await self._end_span_left_behind(reply, reply.current_span_id):
+                continue
             span = await self.deps.outbox.replies.span(reply.last_span_id)
             assert span is not None, "a reply's last span exists"
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
@@ -1871,6 +1873,21 @@ class DeliveryGateway:
                 # The reply ended otherwise; the continuation's finish reads its rows.
                 return True
         return None
+
+    async def _end_span_left_behind(self, reply: rl.Reply, span_id: str) -> bool:
+        """End a resume an older bot instance left running on the reply; return whether it ended one."""
+        generation = await self.deps.outbox.replies.active_generation()
+        applied = await self.deps.outbox.replies.decide(
+            reply_id=reply.reply_id,
+            span_id=span_id,
+            decide=lambda current, span: rl.span_left_behind(
+                current,
+                span,
+                active_generation=generation,
+                now_ns=time.time_ns(),
+            ),
+        )
+        return applied.transition.applied
 
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Show a dispatch failure on the reply bound to one event before a span ran it.

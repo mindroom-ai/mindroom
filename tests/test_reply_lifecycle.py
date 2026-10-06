@@ -803,7 +803,10 @@ def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None
     assert resume.reply is not None
     assert resume.claimed is not None
     first = rl.stop(
-        resume.reply, resume.claimed, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW
+        resume.reply,
+        resume.claimed,
+        StopFacts(receipt_order=4, newer_edit=False, span_live=True),
+        now_ns=NOW,
     )
     assert first.reply is not None
     cancelled = rl.stopped(first.reply, resume.claimed, None, now_ns=NOW)

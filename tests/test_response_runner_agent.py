@@ -62,6 +62,7 @@ from mindroom.hooks import (
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage as VisibleMessage
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
@@ -116,6 +117,7 @@ from tests.conftest import (
     runtime_paths_for,
     seed_session,
 )
+from tests.legacy_reply_helpers import main_left_reply, read_after_sync
 from tests.participation_helpers import ParticipationModel
 from tests.response_attempt_helpers import install_direct_response_admission
 
@@ -3706,13 +3708,32 @@ class TestAdaptiveResponse(AgentBotTestBase):
         async def settled() -> None:
             source_settled.append("quiet")
 
+        # A stopped instance left the reply it owned; this start adopts it and reads what it showed.
+        await main_left_reply(
+            bot,
+            room_id="!test:localhost",
+            thread_id="$thread",
+            source="$event",
+            owner=bot.agent_name,
+            event_id="$owned",
+        )
+        shown = "Thinking..." if placeholder else "Half an answer"
+        await read_after_sync(
+            bot,
+            VisibleMessage.synthetic(
+                event_id="$owned",
+                sender=bot.matrix_id.full_id,
+                body=shown,
+                timestamp=1,
+                thread_id="$thread",
+                content={"body": shown, STREAM_STATUS_KEY: STREAM_STATUS_PENDING if placeholder else "streaming"},
+            ),
+        )
         result = await bot._response_runner.generate_response(
             ResponseRequest(
                 prompt="Any thoughts?",
                 sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
                 thread_history=[],
-                existing_event_id="$owned",
-                existing_event_is_placeholder=placeholder,
                 response_envelope=request_envelope(
                     room_id="!test:localhost",
                     reply_to_event_id="$event",

@@ -17,8 +17,9 @@ from mindroom.matrix.client_delivery import (
     MatrixSendOutcome,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import ReplyState
+from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
+from mindroom.turn_record import TurnRecord
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config_with_team,
@@ -250,7 +251,12 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
 
     request = _plain_request(_target())
     regen_request: ResponseRequest = request.__class__(
-        **{**request.__dict__, "existing_event_id": "$prior_answer", "existing_event_is_placeholder": False},
+        **{
+            **request.__dict__,
+            "existing_event_id": "$prior_answer",
+            "existing_event_is_placeholder": False,
+            "prepared_edit_record": TurnRecord.create(["$event"], response_event_id="$prior_answer", completed=True),
+        },
     )
 
     with (
@@ -265,12 +271,19 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
     ):
         await coordinator.generate_response(regen_request)
 
-    # The prior answer event survives as the visible outcome target; a
-    # placeholder-only cleanup would have redacted it instead.
+    # The regeneration ended before its first write, so the reply restores its
+    # old answer: nothing is redacted or edited.
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
-    assert effect_outcomes[0].event_id == "$prior_answer"
-    assert effect_outcomes[0].is_visible_response is True
+    reply = await bot._reply_runtime.store.replies.for_event("$prior_answer")
+    assert reply is not None
+    assert reply.state is ReplyState.COMPLETED
+    bot.client.room_redact.assert_not_awaited()
+    assert not [
+        call
+        for call in bot.client.room_send.await_args_list
+        if call.kwargs["content"].get("m.relates_to", {}).get("event_id") == "$prior_answer"
+    ]
 
 
 @pytest.mark.asyncio
@@ -349,14 +362,8 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
 
 
 @pytest.mark.asyncio
-async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tmp_path: Path) -> None:
-    """A team failure before delivery cleans the thinking placeholder and re-raises.
-
-    The attempt runner already sent the thinking message but the local
-    run_message_id was never assigned (the attempt raised), so the transport
-    outcome must classify the tracked thinking event as placeholder-only —
-    otherwise the gateway leaves "Thinking..." dangling with no cleanup.
-    """
+async def test_team_pre_delivery_failure_keeps_its_placeholder_for_the_retry_and_reraises(tmp_path: Path) -> None:
+    """A team failure before delivery leaves its placeholder to the retry that answers into it, and re-raises."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
@@ -403,7 +410,6 @@ async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tm
             "finalize_streamed_response",
             AsyncMock(side_effect=fake_finalize),
         )
-        _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
         with (
             patch.object(
                 ResponseRunner,
@@ -418,15 +424,15 @@ async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tm
                 team_mode="coordinate",
             )
 
-    # Previously the exception propagated raw with no terminal note or finalize.
-    assert len(finalize_requests) == 1
-    transport_outcome = finalize_requests[0].stream_transport_outcome
-    assert transport_outcome.terminal_status == "error"
-    assert "team prep exploded" in str(transport_outcome.failure_reason)
-    # The dangling thinking placeholder must be classified for cleanup; a
-    # "none"-shaped outcome would leave "Thinking..." dangling forever.
-    assert transport_outcome.last_physical_stream_event_id == "$thinking"
-    assert transport_outcome.visible_body_state == "placeholder_only"
+    # The failure came before any delivery: the span releases, the reply keeps
+    # its placeholder for the retry to stream into, and nothing is finalized.
+    assert finalize_requests == []
+    reply = await coordinator.deps.replies.store.replies.for_sources(("$user_msg",))
+    assert reply is not None
+    assert reply.state is ReplyState.ACTIVE
+    assert reply.event_id == "$thinking"
+    spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
+    assert spans[-1].outcome is SpanOutcome.RELEASED
 
 
 async def _run_response_function_directly(**kwargs: object) -> str:

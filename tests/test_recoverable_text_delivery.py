@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -81,6 +82,7 @@ def _reconciler(gateway: _RecordingGateway) -> VisibleResponseReconciler:
             turn_store=_RecordingTurnStore(),  # type: ignore[arg-type]
             delivery_gateway=gateway,  # type: ignore[arg-type]
             settle_ignored_sources=settle_ignored,
+            replies=MagicMock(),
         ),
     )
 
