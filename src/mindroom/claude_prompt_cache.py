@@ -453,8 +453,10 @@ def _replay_safe_message_content(
 # Reason: Agno 3.0.9 stores captured server-tool blocks with `model_dump()` and replays them verbatim, so a
 # `tool_search_tool_result` keeps response-only fields (`citations`, `parsed_output`, `text`), and a search
 # `server_tool_use` without its result is replayed too; either makes every later request fail with a 400.
-# Upstream issue: Tracking gap; no matching issue identified. Agno PR #6879 added the verbatim replay.
-# Upstream PR: None identified.
+# Upstream issue: https://github.com/agno-agi/agno/issues/8687, open; the same verbatim replay for
+# code-execution citations, not tool-search blocks or unpaired search uses. Agno PR #6879 added the replay.
+# Upstream PR: https://github.com/agno-agi/agno/pull/8686, open and partial; strips citations only from
+# code-execution result blocks.
 # Remove when: The pinned Agno replays tool-search blocks in request shape and drops unpaired search uses.
 # Dropping references to tools absent from the current request stays MindRoom policy.
 # Coverage: tests/test_extra_kwargs.py::test_replay_safe_tool_search_results_strips_response_only_fields;

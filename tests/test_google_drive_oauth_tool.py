@@ -1120,7 +1120,21 @@ def test_google_drive_read_refuses_binary_content_and_names_enabled_download_fun
     assert "content" not in result
 
 
-def test_google_drive_read_returns_text_stored_as_octet_stream(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "mime_type", "content", "text"),
+    [
+        ("config.yaml", "application/octet-stream", "name: été".encode(), "name: été"),
+        ("people.csv", "text/csv", "name\nMüller\n".encode("cp1252"), "name\nM\ufffdller\n"),
+        ("people.xml", "application/xml", "<n>Müller</n>".encode("latin-1"), "<n>M\ufffdller</n>"),
+    ],
+)
+def test_google_drive_read_returns_text_without_nul_bytes(
+    tmp_path: Path,
+    name: str,
+    mime_type: str,
+    content: bytes,
+    text: str,
+) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
@@ -1128,31 +1142,13 @@ def test_google_drive_read_returns_text_stored_as_octet_stream(tmp_path: Path) -
         creds=_valid_credentials(),
     )
     service = _FakeDriveService()
-    service.files_resource.file_metadata = {"name": "config.yaml", "mimeType": "application/octet-stream", "size": "9"}
+    service.files_resource.file_metadata = {"name": name, "mimeType": mime_type, "size": str(len(content))}
     tool.service = service
-    tool._download_bytes = lambda _request: b"name: \xc3\xa9t\xc3\xa9"
+    tool._download_bytes = lambda _request: content
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
-    assert result["content"] == "name: été"
-
-
-@pytest.mark.parametrize(("name", "mime_type"), [("people.csv", "text/csv"), ("people.xml", "application/xml")])
-def test_google_drive_read_replaces_undecodable_bytes_in_text_files(tmp_path: Path, name: str, mime_type: str) -> None:
-    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_valid_credentials(),
-    )
-    service = _FakeDriveService()
-    service.files_resource.file_metadata = {"name": name, "mimeType": mime_type, "size": "12"}
-    tool.service = service
-    tool._download_bytes = lambda _request: "name\nMüller\n".encode("cp1252")
-
-    result = json.loads(tool.read_file("shared-drive-file-id"))
-
-    assert result["content"] == "name\nM\ufffdller\n"
+    assert result["content"] == text
 
 
 def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:

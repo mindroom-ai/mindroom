@@ -486,8 +486,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     # download function, and extracts complete Office text with dependencies MindRoom ships or refuses it;
     # keep MindRoom's function aliases.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_stored_as_octet_stream;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_replaces_undecodable_bytes_in_text_files.
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_without_nul_bytes.
     @authenticate
     def read_file(self, file_id: str) -> str:
         """Read a Drive file and return its text content, including files in Shared Drives."""
