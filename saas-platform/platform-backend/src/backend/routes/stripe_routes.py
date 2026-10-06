@@ -6,10 +6,11 @@ from typing import Annotated, Any
 import anyio
 from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
+from backend.entitlements import ENDED_STRIPE_STATUSES
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
 from backend.services import provisioner_service
-from backend.services.instance_lifecycle import ENDED_STRIPE_STATUSES, PENDING_DELETION_BILLING_DETAIL
+from backend.services.instance_lifecycle import PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 

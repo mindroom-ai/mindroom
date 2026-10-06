@@ -7,7 +7,6 @@ from backend.config import logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.entitlements import decorate_subscription_for_response, is_expired_trial
 from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
-from backend.pricing import get_plan_limits_from_metadata
 from backend.services import provisioner_service
 from backend.services.instance_lifecycle import DELETION_BILLING_MARKER, PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -33,20 +32,17 @@ async def get_user_subscription(request: Request, user: Annotated[dict, Depends(
     if not result.data:
         # Auto-create a real free subscription for new users
         logger.info(f"No subscription found for account {account_id}, creating free tier")
-        limits = get_plan_limits_from_metadata("free")
         subscription_data = {
             "account_id": account_id,
             "tier": "free",
             "status": "active",
-            "max_agents": limits["max_agents"],
-            "max_messages_per_day": limits["max_messages_per_day"],
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
         create_result = sb.table("subscriptions").insert(subscription_data).execute()
         if create_result.data:
             subscription = create_result.data[0]
-            return decorate_subscription_for_response(subscription, plan_limits=limits)
+            return decorate_subscription_for_response(subscription)
 
         logger.error(f"Failed to create subscription for account {account_id}")
         raise HTTPException(status_code=500, detail="Failed to create subscription")

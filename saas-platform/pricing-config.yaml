@@ -13,10 +13,6 @@ plans:
     requires_customer_provider_keys: true
     resource_profile: small
     features: []
-    limits:
-      max_agents: 0
-      max_messages_per_day: 0
-      storage_gb: 0
   byok:
     name: Bring Your Own Keys
     price_monthly: 1000
@@ -34,10 +30,6 @@ plans:
     - Your own model provider keys
     - 10 GB storage
     - Email support
-    limits:
-      max_agents: 100
-      max_messages_per_day: unlimited
-      storage_gb: 10
   hobby:
     name: Hobby
     price_monthly: 2000
@@ -54,10 +46,6 @@ plans:
     - $15 of AI credit every month
     - 10 GB storage
     - Email support
-    limits:
-      max_agents: 100
-      max_messages_per_day: unlimited
-      storage_gb: 10
     stripe_price_id_monthly_live: price_1TZRzu3GVsrZHuzXUXJEQ6Ng
     stripe_price_id_yearly_live: price_1TZRzu3GVsrZHuzX77678390
   pro:
@@ -75,10 +63,6 @@ plans:
     - $150 of AI credit every month
     - 25 GB storage
     - Priority support
-    limits:
-      max_agents: unlimited
-      max_messages_per_day: unlimited
-      storage_gb: 25
     stripe_price_id_monthly_live: price_1TZRzv3GVsrZHuzXFRd9cUgz
     stripe_price_id_yearly_live: price_1TZRzv3GVsrZHuzXrXOhvBy0
   enterprise:
@@ -94,10 +78,6 @@ plans:
     - Dedicated infrastructure
     - On-premises deployment
     - Dedicated support
-    limits:
-      max_agents: unlimited
-      max_messages_per_day: unlimited
-      storage_gb: unlimited
 trial:
   enabled: true
   days: 3

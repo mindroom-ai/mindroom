@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/hooks/useAuth'
 import { useSubscription } from '@/hooks/useSubscription'
-import { planState } from '@/lib/plan-state'
+import { planAction, planState } from '@/lib/plan-state'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
 import { startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { getCachedInstance, loadInstance } from '@/lib/instance-resource'
@@ -25,8 +25,8 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
   const router = useRouter()
   const { subscription, loading: subscriptionLoading } = useSubscription()
   const state = planState(subscription)
-  const canRunInstances = state === 'active'
-  const hasNoPlan = state === 'none'
+  // What the account must do before its plan can run the instance, or null while it can
+  const nextStep = state === 'active' ? null : planAction(state)
   const cachedInstance = getCachedInstance(userId)
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
@@ -155,16 +155,16 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
         return 'Restarting your instance... This will take a moment.'
       case 'stopped':
         if (subscriptionLoading) return 'Instance is stopped.'
-        if (canRunInstances) return 'Instance is stopped. Start it to access your MindRoom.'
-        return hasNoPlan ? 'Instance is stopped. Choose a plan to start it again.' : 'Instance is stopped. Add or restore billing to start it again.'
+        if (!nextStep) return 'Instance is stopped. Start it to access your MindRoom.'
+        return `Instance is stopped. ${nextStep.step} to start it again.`
       case 'failed':
         return 'Instance provisioning failed. Please contact support.'
       case 'error':
         return 'Instance not found in cluster. It may have been removed during maintenance. Please contact support to reprovision your instance.'
       case 'deprovisioned':
         if (subscriptionLoading) return 'Instance has been removed.'
-        if (canRunInstances) return 'Instance has been removed. Click "Reprovision Instance" to set it up again.'
-        return hasNoPlan ? 'Instance has been removed. Choose a plan to set it up again.' : 'Instance has been removed. Add or restore billing to set it up again.'
+        if (!nextStep) return 'Instance has been removed. Click "Reprovision Instance" to set it up again.'
+        return `Instance has been removed. ${nextStep.step} to set it up again.`
       default:
         return 'Unknown status'
     }
@@ -185,17 +185,13 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           <Server className="w-20 h-20 text-gray-400 dark:text-gray-500 mx-auto mb-6" />
           <CardHeader className="mb-3">No Instance Found</CardHeader>
           <p className="text-gray-600 dark:text-gray-400 mb-8 text-lg">
-            {canRunInstances
-              ? "You don't have a MindRoom instance yet. Create it from the dashboard."
-              : hasNoPlan
-                ? "You don't have a MindRoom instance yet. Choose a plan to get your own instance."
-                : "You don't have a MindRoom instance yet. Add or restore billing to run your instance."}
+            You don't have a MindRoom instance yet. {nextStep ? `${nextStep.step} to run a hosted instance.` : 'Create it from the dashboard.'}
           </p>
           <button
-            onClick={() => router.push(canRunInstances ? '/dashboard' : hasNoPlan ? '/dashboard/billing/upgrade' : '/dashboard/billing')}
+            onClick={() => router.push(nextStep?.href ?? '/dashboard')}
             className="px-8 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
           >
-            {canRunInstances ? 'Go to dashboard' : hasNoPlan ? 'Choose a plan' : 'Open billing'}
+            {nextStep?.label ?? 'Go to dashboard'}
           </button>
         </Card>
       </div>
@@ -292,16 +288,16 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
             </div>
           )}
 
-          {!subscriptionLoading && !canRunInstances && (instance.status === 'stopped' || instance.status === 'deprovisioned') && (
+          {!subscriptionLoading && nextStep && (instance.status === 'stopped' || instance.status === 'deprovisioned') && (
             <button
-              onClick={() => router.push(hasNoPlan ? '/dashboard/billing/upgrade' : '/dashboard/billing')}
+              onClick={() => router.push(nextStep.href)}
               className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
             >
-              {hasNoPlan ? 'Choose a plan' : 'Open billing'}
+              {nextStep.label}
             </button>
           )}
 
-          {canRunInstances && instance.status === 'stopped' && (
+          {!nextStep && instance.status === 'stopped' && (
             <button
               onClick={() => handleAction('start')}
               disabled={actionLoading !== null}
@@ -316,7 +312,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
             </button>
           )}
 
-          {canRunInstances && instance.status === 'deprovisioned' && (
+          {!nextStep && instance.status === 'deprovisioned' && (
             <button
               onClick={() => handleAction('reprovision')}
               disabled={actionLoading !== null}

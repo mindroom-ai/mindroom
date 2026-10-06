@@ -1262,54 +1262,6 @@
         "title": "LifecycleInstanceOut",
         "type": "object"
       },
-      "PlanLimits": {
-        "description": "Plan limits and capabilities.",
-        "properties": {
-          "max_agents": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "const": "unlimited",
-                "type": "string"
-              }
-            ],
-            "title": "Max Agents"
-          },
-          "max_messages_per_day": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "const": "unlimited",
-                "type": "string"
-              }
-            ],
-            "title": "Max Messages Per Day"
-          },
-          "storage_gb": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "const": "unlimited",
-                "type": "string"
-              }
-            ],
-            "title": "Storage Gb"
-          }
-        },
-        "required": [
-          "max_agents",
-          "max_messages_per_day",
-          "storage_gb"
-        ],
-        "title": "PlanLimits",
-        "type": "object"
-      },
       "PricingConfigResponse": {
         "description": "Public pricing configuration response model.",
         "properties": {
@@ -1458,9 +1410,6 @@
             "title": "Included Ai Budget Usd",
             "type": "integer"
           },
-          "limits": {
-            "$ref": "#/components/schemas/PlanLimits"
-          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -1518,7 +1467,6 @@
           "price_yearly",
           "description",
           "features",
-          "limits",
           "recommended",
           "included_ai_budget_usd",
           "requires_customer_provider_keys",
@@ -1676,18 +1624,6 @@
             "title": "Id",
             "type": "string"
           },
-          "max_agents": {
-            "title": "Max Agents",
-            "type": "integer"
-          },
-          "max_messages_per_day": {
-            "title": "Max Messages Per Day",
-            "type": "integer"
-          },
-          "max_storage_gb": {
-            "title": "Max Storage Gb",
-            "type": "integer"
-          },
           "status": {
             "enum": [
               "active",
@@ -1712,6 +1648,10 @@
               }
             ],
             "title": "Stripe Customer Id"
+          },
+          "stripe_subscription_ended": {
+            "title": "Stripe Subscription Ended",
+            "type": "boolean"
           },
           "stripe_subscription_id": {
             "anyOf": [
@@ -1774,10 +1714,8 @@
           "account_id",
           "tier",
           "status",
-          "max_agents",
-          "max_messages_per_day",
-          "max_storage_gb",
-          "can_run_instances"
+          "can_run_instances",
+          "stripe_subscription_ended"
         ],
         "title": "SubscriptionOut",
         "type": "object"
@@ -1968,121 +1906,6 @@
           "url"
         ],
         "title": "UrlResponse",
-        "type": "object"
-      },
-      "UsageAggregateOut": {
-        "description": "Aggregated usage statistics model.",
-        "properties": {
-          "totalAgents": {
-            "title": "Totalagents",
-            "type": "integer"
-          },
-          "totalMessages": {
-            "title": "Totalmessages",
-            "type": "integer"
-          },
-          "totalStorage": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "integer"
-              }
-            ],
-            "title": "Totalstorage"
-          }
-        },
-        "required": [
-          "totalMessages",
-          "totalAgents",
-          "totalStorage"
-        ],
-        "title": "UsageAggregateOut",
-        "type": "object"
-      },
-      "UsageMetricOut": {
-        "description": "Usage metric output model.",
-        "properties": {
-          "agents_used": {
-            "title": "Agents Used",
-            "type": "integer"
-          },
-          "created_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created At"
-          },
-          "id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Id"
-          },
-          "messages_sent": {
-            "title": "Messages Sent",
-            "type": "integer"
-          },
-          "metric_date": {
-            "title": "Metric Date",
-            "type": "string"
-          },
-          "storage_used_gb": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "integer"
-              }
-            ],
-            "title": "Storage Used Gb"
-          },
-          "subscription_id": {
-            "title": "Subscription Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "subscription_id",
-          "metric_date",
-          "messages_sent",
-          "agents_used",
-          "storage_used_gb"
-        ],
-        "title": "UsageMetricOut",
-        "type": "object"
-      },
-      "UsageResponse": {
-        "description": "Response model for usage metrics.",
-        "properties": {
-          "aggregated": {
-            "$ref": "#/components/schemas/UsageAggregateOut"
-          },
-          "usage": {
-            "items": {
-              "$ref": "#/components/schemas/UsageMetricOut"
-            },
-            "title": "Usage",
-            "type": "array"
-          }
-        },
-        "required": [
-          "usage",
-          "aggregated"
-        ],
-        "title": "UsageResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -4096,59 +3919,9 @@
         "summary": "Reactivate Subscription"
       }
     },
-    "/my/usage": {
-      "get": {
-        "description": "Get usage metrics for current user.",
-        "operationId": "get_user_usage_my_usage_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "days",
-            "required": false,
-            "schema": {
-              "default": 30,
-              "title": "Days",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UsageResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get User Usage"
-      }
-    },
     "/pricing/config": {
       "get": {
-        "description": "Get the current pricing configuration.\n\nThis returns the pricing plans, features, and limits.\nStripe price IDs are only included if they are configured.",
+        "description": "Get the current pricing configuration.\n\nThis returns the pricing plans and their features.\nStripe price IDs are only included if they are configured.",
         "operationId": "get_pricing_config_pricing_config_get",
         "responses": {
           "200": {

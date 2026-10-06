@@ -97,7 +97,7 @@ export default function DashboardPage() {
       {/* Instance Status and Quick Actions */}
       <div className="grid lg:grid-cols-2 gap-6">
         <InstanceCard instance={instance} subscription={subscription} subscriptionLoading={subscriptionLoading} />
-        <QuickActions subscription={subscription} />
+        <QuickActions subscription={subscription} subscriptionLoading={subscriptionLoading} />
       </div>
     </div>
   )

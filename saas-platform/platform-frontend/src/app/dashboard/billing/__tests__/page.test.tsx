@@ -32,11 +32,6 @@ const enterprisePricing = {
       price_yearly: 'custom',
       description: 'Custom enterprise plan',
       features: ['Dedicated support'],
-      limits: {
-        max_agents: 'unlimited',
-        max_messages_per_day: 'unlimited',
-        storage_gb: 'unlimited',
-      },
       recommended: false,
       included_ai_budget_usd: 0,
       requires_customer_provider_keys: false,
@@ -63,7 +58,6 @@ const noPlanPricing = {
       price_yearly: 0,
       description: 'Choose a plan to run a hosted MindRoom instance',
       features: [],
-      limits: { max_agents: 0, max_messages_per_day: 0, storage_gb: 0 },
       recommended: false,
       included_ai_budget_usd: 0,
       requires_customer_provider_keys: true,
@@ -121,7 +115,7 @@ describe('BillingPage', () => {
 
   it('lets a lapsed plan holder choose their old plan again', async () => {
     ;(useSubscription as jest.Mock).mockReturnValue({
-      subscription: { tier: 'hobby', status: 'cancelled', can_run_instances: false, stripe_subscription_id: null },
+      subscription: { tier: 'hobby', status: 'cancelled', can_run_instances: false, stripe_subscription_ended: true, stripe_subscription_id: null },
       loading: false,
       refresh: jest.fn(),
     })
@@ -142,7 +136,7 @@ describe('BillingPage', () => {
 
   it('keeps an unpaid plan current and points to fixing billing instead of a new checkout', async () => {
     ;(useSubscription as jest.Mock).mockReturnValue({
-      subscription: { tier: 'hobby', status: 'unpaid', can_run_instances: false, stripe_subscription_id: 'sub_123' },
+      subscription: { tier: 'hobby', status: 'unpaid', can_run_instances: false, stripe_subscription_ended: false, stripe_subscription_id: 'sub_123' },
       loading: false,
       refresh: jest.fn(),
     })

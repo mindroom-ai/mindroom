@@ -4,8 +4,8 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft, Sparkles } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { lapsedPlanEnded, planState } from '@/lib/plan-state'
-import { PLAN_ORDER } from '@/lib/pricing-config'
+import { currentPlanTier, planState } from '@/lib/plan-state'
+import { isDowngrade, planRank, trialDays } from '@/lib/pricing-config'
 import { createCheckoutSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 
@@ -27,21 +27,18 @@ export default function UpgradePage() {
   }, [])
 
   useEffect(() => {
-    // Pre-select a plan, keeping any plan already chosen. A running plan accepts only an upgrade
-    // named in `?plan=`; otherwise take that plan, then a lapsed account's own plan, then the recommended one.
+    // Pre-select a plan, keeping any plan already chosen. An account still on a plan accepts only an upgrade
+    // named in `?plan=`; otherwise take that plan, then the plan Stripe ended, then the recommended one.
     if (loading || !pricingConfig) return
-    const state = planState(subscription)
-    const ended = state === 'lapsed' && subscription !== null && lapsedPlanEnded(subscription)
+    const currentTier = currentPlanTier(subscription)
     const requestedPlan = new URLSearchParams(window.location.search).get('plan')
     const isPlan = (plan: string | null | undefined): plan is string =>
       !!plan && plan !== 'free' && Object.hasOwn(pricingConfig.plans, plan)
     let initialPlan: string | undefined
-    if (state === 'active' || (state === 'lapsed' && !ended)) {
-      const isUpgrade = isPlan(requestedPlan)
-        && PLAN_ORDER.indexOf(requestedPlan as typeof PLAN_ORDER[number]) > PLAN_ORDER.indexOf(subscription?.tier as typeof PLAN_ORDER[number])
-      initialPlan = isUpgrade ? requestedPlan : undefined
+    if (currentTier) {
+      initialPlan = isPlan(requestedPlan) && planRank(requestedPlan) > planRank(currentTier) ? requestedPlan : undefined
     } else {
-      const endedPlan = ended ? subscription?.tier : null
+      const endedPlan = planState(subscription) === 'ended' ? subscription?.tier : null
       const recommendedPlan = Object.entries(pricingConfig.plans).find(([_, plan]) => plan.recommended)?.[0]
       initialPlan = [requestedPlan, endedPlan, recommendedPlan].find(isPlan)
     }
@@ -89,18 +86,15 @@ export default function UpgradePage() {
     )
   }
 
-  const currentTier = subscription?.tier || 'free'
-  // A plan Stripe has ended may be chosen again; a running plan, or one with a payment problem fixed in the portal, stays current.
-  const state = planState(subscription)
-  const planEnded = state === 'lapsed' && subscription !== null && lapsedPlanEnded(subscription)
-  const activeTier = state !== 'none' && !planEnded ? currentTier : null
+  const activeTier = currentPlanTier(subscription)
+  const trialDayCount = trialDays(pricingConfig)
   const discountPercentage = pricingConfig.discounts?.annual_percentage || 20
 
   // Filter out free plan and sort plans
   const plans = Object.entries(pricingConfig.plans)
     .filter(([key]) => key !== 'free')
     .map(([key, plan]) => ({ ...plan, id: key }))
-    .sort((a, b) => PLAN_ORDER.indexOf(a.id as typeof PLAN_ORDER[number]) - PLAN_ORDER.indexOf(b.id as typeof PLAN_ORDER[number]))
+    .sort((a, b) => planRank(a.id) - planRank(b.id))
 
   return (
     <div className="max-w-6xl mx-auto p-6">
@@ -165,7 +159,7 @@ export default function UpgradePage() {
       <div className="grid md:grid-cols-3 gap-6 mb-8">
         {plans.map((plan) => {
           const isCurrentPlan = plan.id === activeTier
-          const isDowngrade = activeTier !== null && PLAN_ORDER.indexOf(plan.id as typeof PLAN_ORDER[number]) < PLAN_ORDER.indexOf(activeTier as typeof PLAN_ORDER[number])
+          const downgrade = isDowngrade(activeTier, plan.id)
 
           // Parse prices and calculate display values ('custom' is the backend literal)
           const monthlyPrice = plan.price_monthly === 'custom' ? 'Custom' : plan.price_monthly
@@ -190,12 +184,12 @@ export default function UpgradePage() {
           return (
             <div
               key={plan.id}
-              onClick={() => !isCurrentPlan && !isDowngrade && setSelectedPlan(plan.id)}
+              onClick={() => !isCurrentPlan && !downgrade && setSelectedPlan(plan.id)}
               className={`
                 relative rounded-lg border-2 p-6 cursor-pointer transition-all
                 ${selectedPlan === plan.id ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/10' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}
                 ${isCurrentPlan ? 'opacity-50 cursor-not-allowed' : ''}
-                ${isDowngrade ? 'opacity-50 cursor-not-allowed' : ''}
+                ${downgrade ? 'opacity-50 cursor-not-allowed' : ''}
               `}
             >
               {plan.recommended && !isCurrentPlan && (
@@ -309,8 +303,8 @@ export default function UpgradePage() {
       <div className="mt-8 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
         <h4 className="font-semibold text-blue-900 dark:text-blue-300 mb-2">Good to know</h4>
         <ul className="text-sm text-blue-800 dark:text-blue-400 space-y-1">
-          {planState(subscription) === 'none' && pricingConfig.trial.enabled && pricingConfig.trial.days > 0 && (
-            <li>• Your first plan starts with a {pricingConfig.trial.days}-day free trial</li>
+          {planState(subscription) === 'none' && trialDayCount > 0 && (
+            <li>• Your first plan starts with a {trialDayCount}-day free trial</li>
           )}
           <li>• Cancel or change your plan anytime</li>
           <li>• {billingCycle === 'yearly' ? `Save ${discountPercentage}% with annual billing` : `Switch to yearly billing and save ${discountPercentage}%`}</li>

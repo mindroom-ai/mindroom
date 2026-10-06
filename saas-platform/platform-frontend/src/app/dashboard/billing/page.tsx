@@ -5,8 +5,8 @@ import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 import Link from 'next/link'
-import { PLAN_ORDER, type PlanId } from '@/lib/pricing-config'
-import { lapsedPlanEnded, planState } from '@/lib/plan-state'
+import { isDowngrade, trialDays } from '@/lib/pricing-config'
+import { currentPlanTier, planState } from '@/lib/plan-state'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
 
@@ -67,13 +67,11 @@ export default function BillingPage() {
     )
   }
 
-  const currentTier = (subscription?.tier || 'free') as PlanId
   const state = planState(subscription)
   const hasPlan = state !== 'none'
-  // A plan Stripe has ended may be chosen again; a running plan, or one with a payment problem fixed in the portal, stays current.
-  const planEnded = state === 'lapsed' && subscription !== null && lapsedPlanEnded(subscription)
-  const activePlanTier = hasPlan && !planEnded ? currentTier : null
-  const currentPlan = pricingConfig.plans[currentTier]
+  const activePlanTier = currentPlanTier(subscription)
+  const trialDayCount = trialDays(pricingConfig)
+  const currentPlan = pricingConfig.plans[subscription?.tier || 'free']
   const features = currentPlan?.features || []
   const tierInfo = {
     name: currentPlan?.name || 'No plan',
@@ -168,18 +166,22 @@ export default function BillingPage() {
 
             {!hasPlan && (
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Choose a plan to run a hosted MindRoom instance{pricingConfig.trial.enabled && pricingConfig.trial.days > 0 ? `; your first plan starts with a ${pricingConfig.trial.days}-day free trial` : ''}.{' '}
+                Choose a plan to run a hosted MindRoom instance{trialDayCount > 0 ? `; your first plan starts with a ${trialDayCount}-day free trial` : ''}.{' '}
                 <Link href="/dashboard/billing/upgrade" className="font-semibold text-orange-600 hover:underline dark:text-orange-400">
                   Choose a plan
                 </Link>
               </p>
             )}
 
-            {state === 'lapsed' && (
+            {state === 'ended' && (
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                {planEnded
-                  ? 'Your plan ended. Choose a plan to start your hosted instance again.'
-                  : 'Your hosted instance is stopped until billing is fixed. Update your payment method in the billing portal.'}
+                Your plan ended. Choose a plan to start your hosted instance again.
+              </p>
+            )}
+
+            {state === 'needs_billing' && (
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                Your hosted instance is stopped until billing is fixed. Update your payment method in the billing portal.
               </p>
             )}
 
@@ -311,10 +313,7 @@ export default function BillingPage() {
             .filter(([key]) => key !== 'free' && key !== 'enterprise')
             .map(([key, plan]) => {
               const isCurrentPlan = key === activePlanTier
-              const currentTierRank = activePlanTier ? PLAN_ORDER.indexOf(activePlanTier) : -1
-              const candidateTierRank = PLAN_ORDER.indexOf(key as PlanId)
-              const isDowngrade =
-                currentTierRank !== -1 && candidateTierRank !== -1 && candidateTierRank < currentTierRank
+              const downgrade = isDowngrade(activePlanTier, key)
 
               return (
                 <div
@@ -322,7 +321,7 @@ export default function BillingPage() {
                   className={`border rounded-lg p-4 ${
                     isCurrentPlan
                       ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/20'
-                      : isDowngrade
+                      : downgrade
                       ? 'border-gray-200 dark:border-gray-700 opacity-50'
                       : 'border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-600'
                   }`}
@@ -340,7 +339,7 @@ export default function BillingPage() {
                     </span>
                   </p>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">{plan.description}</p>
-                  {!isCurrentPlan && !isDowngrade && (
+                  {!isCurrentPlan && !downgrade && (
                     <button
                       onClick={() => window.location.href = `/dashboard/billing/upgrade?plan=${key}`}
                       className="w-full px-3 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 transition-colors"
@@ -348,7 +347,7 @@ export default function BillingPage() {
                       {activePlanTier ? 'Upgrade to' : 'Choose'} {plan.name}
                     </button>
                   )}
-                  {isDowngrade && (
+                  {downgrade && (
                     <p className="text-xs text-gray-500 dark:text-gray-400 text-center">
                       Contact support to downgrade
                     </p>

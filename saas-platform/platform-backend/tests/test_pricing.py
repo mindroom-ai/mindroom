@@ -122,42 +122,28 @@ class TestPricingConfig:
         assert model.plans["free"].stripe_price_id_monthly is None
         assert model.plans["enterprise"].stripe_price_id_monthly is None
 
-    def test_plan_features_and_limits(self) -> None:
-        """Test plan features and limits configuration."""
+    def test_plan_features(self) -> None:
+        """Test plan features configuration."""
         model = load_pricing_config_model()
 
-        # BYOK plan
-        byok = model.plans["byok"]
-        assert len(byok.features) == 4
-        assert byok.limits.max_agents == 100
-        assert byok.limits.max_messages_per_day == "unlimited"
-        assert byok.limits.storage_gb == 10
+        assert len(model.plans["byok"].features) == 4
+        assert model.plans["free"].features == []
 
-        # Hobby plan
         hobby = model.plans["hobby"]
         assert hobby.recommended is True
         assert "$15 of AI credit every month" in hobby.features
-        assert hobby.limits.storage_gb == 10
 
-        # Pro plan
-        pro = model.plans["pro"]
-        assert "$150 of AI credit every month" in pro.features
-        assert pro.limits.max_agents == "unlimited"
-        assert pro.limits.storage_gb == 25
-
-        # Enterprise plan
-        enterprise = model.plans["enterprise"]
-        assert enterprise.limits.storage_gb == "unlimited"
+        assert "$150 of AI credit every month" in model.plans["pro"].features
 
     def test_advertised_storage_matches_provisioned_volumes(self) -> None:
-        """Each self-serve plan's storage limit and feature line match the volume its resource profile provisions."""
+        """Each self-serve plan's storage feature line names the volume its resource profile provisions."""
         repository_root = Path(__file__).resolve().parents[3]
         chart_storage = yaml.safe_load((repository_root / "cluster/k8s/instance/values.yaml").read_text())["storage"]
         for plan_id in ("byok", "hobby", "pro"):
             plan = load_pricing_config_model().plans[plan_id]
             provisioned = _RESOURCE_PROFILE_HELM_VALUES.get(plan.resource_profile, {}).get("storage", chart_storage)
-            assert provisioned == f"{plan.limits.storage_gb}Gi", plan_id
-            assert any(f"{plan.limits.storage_gb} GB storage" in feature for feature in plan.features), plan_id
+            advertised = [feature for feature in plan.features if feature.endswith(" GB storage")]
+            assert advertised == [f"{provisioned.removesuffix('Gi')} GB storage"], plan_id
 
     def test_missing_config_file(self) -> None:
         """Test behavior when config file is missing."""
@@ -342,7 +328,6 @@ class TestPricingIntegration:
             assert "price_yearly" in plan_data
             assert "description" in plan_data
             assert "features" in plan_data
-            assert "limits" in plan_data
 
     def test_stripe_price_ids_populated(self) -> None:
         """Test that Stripe price IDs are populated for synced paid plans."""

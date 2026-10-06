@@ -7,7 +7,7 @@ import { provisionInstance } from '@/lib/api'
 import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
-import { planState } from '@/lib/plan-state'
+import { planAction, planState } from '@/lib/plan-state'
 
 function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
@@ -117,6 +117,7 @@ export function InstanceCard({
 
   if (!instance) {
     const state = planState(subscription)
+    const nextStep = state === 'active' ? null : planAction(state)
     const accessMessage = subscriptionAccessMessage(subscription)
 
     return (
@@ -127,7 +128,7 @@ export function InstanceCard({
           {accessMessage && (
             <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">{accessMessage}</p>
           )}
-          {state === 'active' ? (
+          {!nextStep ? (
             <>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
                 No instance provisioned yet. Click below to create your MindRoom instance.
@@ -149,18 +150,14 @@ export function InstanceCard({
             </>
           ) : (
             <>
-              {!(state === 'lapsed' && accessMessage) && (
-                <p className="text-gray-600 dark:text-gray-400 mb-6">
-                  {state === 'lapsed'
-                    ? 'Add or restore billing to run your hosted instance.'
-                    : 'Choose a plan to run a hosted instance.'}
-                </p>
+              {!accessMessage && (
+                <p className="text-gray-600 dark:text-gray-400 mb-6">{nextStep.step} to run a hosted instance.</p>
               )}
               <Link
-                href={state === 'lapsed' ? '/dashboard/billing' : '/dashboard/billing/upgrade'}
+                href={nextStep.href}
                 className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
               >
-                {state === 'lapsed' ? 'Open billing' : 'Choose a plan'}
+                {nextStep.label}
               </Link>
             </>
           )}

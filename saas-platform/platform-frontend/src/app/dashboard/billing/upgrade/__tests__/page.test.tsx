@@ -14,7 +14,6 @@ const plan = (name: string, recommended: boolean) => ({
   price_yearly: '$192',
   description: name,
   features: [],
-  limits: { max_agents: 100, max_messages_per_day: 'unlimited', storage_gb: 10 },
   recommended,
   included_ai_budget_usd: 0,
   requires_customer_provider_keys: false,
@@ -28,7 +27,7 @@ const pricing = {
   discounts: { annual_percentage: 20 },
 }
 
-const lapsedHobby = () => ({ tier: 'hobby', status: 'cancelled', can_run_instances: false })
+const lapsedHobby = () => ({ tier: 'hobby', status: 'cancelled', can_run_instances: false, stripe_subscription_ended: true })
 
 describe('UpgradePage', () => {
   beforeEach(() => {
@@ -52,7 +51,7 @@ describe('UpgradePage', () => {
   })
 
   it("preselects a lapsed customer's own plan rather than the recommended one", async () => {
-    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'byok', status: 'cancelled', can_run_instances: false }, loading: false })
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'byok', status: 'cancelled', can_run_instances: false, stripe_subscription_ended: true }, loading: false })
 
     render(<UpgradePage />)
 
@@ -69,11 +68,21 @@ describe('UpgradePage', () => {
 
   it('preselects an upgrade named in the link for a running plan', async () => {
     window.history.pushState({}, '', '/dashboard/billing/upgrade?plan=pro')
-    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'active', can_run_instances: true }, loading: false })
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'active', can_run_instances: true, stripe_subscription_ended: false }, loading: false })
 
     render(<UpgradePage />)
 
     expect(await screen.findByText(/Selected:/)).toHaveTextContent('Selected: Pro')
+  })
+
+  it('keeps a plan with a billing problem current instead of offering it again', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'unpaid', can_run_instances: false, stripe_subscription_ended: false }, loading: false })
+
+    render(<UpgradePage />)
+
+    expect(await screen.findByRole('heading', { name: 'Upgrade Your Plan' })).toBeInTheDocument()
+    expect(screen.getByText('Currently on hobby plan. Upgrading will prorate your billing.')).toBeInTheDocument()
+    expect(screen.queryByText(/Selected:/)).not.toBeInTheDocument()
   })
 
   it('does not promise a trial to a returning customer', async () => {

@@ -7,14 +7,15 @@ import {
 } from 'lucide-react'
 import type { Subscription } from '@/hooks/useSubscription'
 import { Card, CardHeader } from '@/components/ui/Card'
-import { planState } from '@/lib/plan-state'
+import { planAction, planState } from '@/lib/plan-state'
 
 interface QuickActionsProps {
   subscription: Subscription | null
+  subscriptionLoading: boolean
 }
 
-export function QuickActions({ subscription }: QuickActionsProps) {
-  const state = subscription ? planState(subscription) : null
+export function QuickActions({ subscription, subscriptionLoading }: QuickActionsProps) {
+  const state = planState(subscription)
   const actions = [
     {
       name: 'Documentation',
@@ -25,13 +26,9 @@ export function QuickActions({ subscription }: QuickActionsProps) {
     },
     {
       name: 'Manage Subscription',
-      description: state === null
+      description: subscriptionLoading || state === 'active'
         ? 'Your plan and billing'
-        : state === 'none'
-          ? 'Choose a plan to run a hosted instance'
-          : state === 'lapsed'
-            ? 'Restore billing to run your instance'
-            : 'Your plan and billing',
+        : `${planAction(state).step} to run a hosted instance`,
       href: '/dashboard/billing',
       icon: CreditCard,
       external: false,

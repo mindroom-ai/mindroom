@@ -36,10 +36,8 @@ describe('InstanceCard', () => {
     current_period_end: null,
     trial_ends_at: null,
     cancelled_at: null,
-    max_agents: 1,
-    max_messages_per_day: 100,
-    max_storage_gb: 1,
     can_run_instances: false,
+    stripe_subscription_ended: true,
     trial_days_remaining: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -50,7 +48,9 @@ describe('InstanceCard', () => {
     tier: 'byok' as const,
     status: 'trialing' as const,
     trial_ends_at: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+    stripe_subscription_id: 'sub_stripe_trial',
     can_run_instances: true,
+    stripe_subscription_ended: false,
     trial_days_remaining: 2,
   }
   const activeSubscription = {
