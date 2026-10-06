@@ -200,12 +200,6 @@ async def store_main_continuation(store: PrincipalStore, continuation: ApprovalC
                 len(continuation.approval_id),
             ),
         )
-        for ordinal, event_id in enumerate(continuation.source_event_ids):
-            transaction.execute(
-                "INSERT INTO approval_continuation_sources (principal_id, approval_id, event_id, source_ordinal) "
-                "VALUES (?, ?, ?, ?)",
-                (store._principal_id, continuation.approval_id, event_id, ordinal),
-            )
         approval_continuations._insert_calls(
             transaction,
             store._principal_id,

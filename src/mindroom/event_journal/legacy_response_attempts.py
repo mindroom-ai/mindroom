@@ -16,14 +16,15 @@ if TYPE_CHECKING:
     from .backend import Transaction
 
 # LEGACY_COMPAT: Approval continuations whose reply identity lived outside the continuation.
-# Legacy format: approval_continuations without a span_id column. v2026.10.178 kept each continuation's entity, room,
-# visible event, logical and discovery sources, and edit receipt order in response_attempts and
-# response_attempt_sources, keyed by its first pending source; v2026.9.137 and earlier kept room_id,
-# response_event_id, and any prepared edit record in context_json.
+# Legacy format: approval_continuations without a span_id column. Every release kept a continuation's pending sources in
+# approval_continuation_sources; v2026.10.178 kept its entity, room, visible event, logical and discovery sources, and
+# edit receipt order in response_attempts and response_attempt_sources, keyed by its first pending source;
+# v2026.9.137 and earlier kept room_id, response_event_id, and any prepared edit record in context_json.
 # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages name the paused span in
-# approval_continuations.span_id and read the reply's identity from the reply's records.
-# Handling: the schema upgrade adds span_id, copies each continuation's identity into its context once, and drops the
-# response attempt tables; such a continuation is read from that copy until reply classification names its span.
+# approval_continuations.span_id and read the reply's identity and held sources from the reply's records.
+# Handling: the schema upgrade adds span_id, copies each continuation's identity and pending sources into its context
+# once, and drops approval_continuation_sources and the response attempt tables; such a continuation is read from that
+# copy until reply classification names its span.
 # Coverage: tests/test_legacy_continuation_identity.py.
 
 # LEGACY_COMPAT: Approval continuations that stored their claim.
@@ -47,6 +48,7 @@ class LegacyIdentity(TypedDict):
     room_id: str
     thread_id: str | None
     response_event_id: str
+    pending_event_ids: tuple[str, ...]
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     edit_receipt_order: int | None
@@ -146,7 +148,8 @@ def upgrade_continuation_identity(
     continuation_columns: frozenset[str],
 ) -> None:
     """Name the paused span on continuations and adopt released identities, inside the schema transaction."""
-    if "approval_continuations" not in existing_tables or "span_id" in continuation_columns:
+    # No columns: no approval_continuations table yet, or one a pre-Nio-1 upgrade just retired.
+    if not continuation_columns or "span_id" in continuation_columns:
         return
     transaction.execute("ALTER TABLE approval_continuations ADD COLUMN span_id TEXT")
     transaction.execute("ALTER TABLE approval_continuations ADD COLUMN claim_span_id TEXT")
@@ -189,7 +192,12 @@ def upgrade_continuation_identity(
                 stored,
             )
             claimed = row["state"] == "claimed"
-            stored[_IDENTITY_KEY] = {**identity, "thread_id": stored.get("thread_id"), "claimed": claimed}
+            stored[_IDENTITY_KEY] = {
+                **identity,
+                "thread_id": stored.get("thread_id"),
+                "pending_event_ids": pending,
+                "claimed": claimed,
+            }
             transaction.execute(
                 "UPDATE approval_continuations SET context_json = ? WHERE principal_id = ? AND approval_id = ?",
                 (
@@ -204,6 +212,7 @@ def upgrade_continuation_identity(
     transaction.execute(
         "UPDATE approval_continuations SET state = 'ready', runtime_generation = NULL WHERE state = 'claimed'",
     )
+    transaction.execute("DROP TABLE IF EXISTS approval_continuation_sources")
     if attempts:
         transaction.execute("DROP TABLE IF EXISTS response_attempt_sources")
         transaction.execute("DROP TABLE IF EXISTS response_attempts")
@@ -230,6 +239,7 @@ def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, obj
             "room_id": continuation.room_id,
             "thread_id": continuation.thread_id,
             "response_event_id": continuation.response_event_id,
+            "pending_event_ids": list(continuation.source_event_ids),
             "logical_source_event_ids": list(continuation.sources.logical_source_event_ids),
             "discovery_event_ids": list(continuation.sources.discovery_event_ids),
             "edit_receipt_order": continuation.sources.edit_receipt_order,
@@ -250,6 +260,7 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> Legac
         "room_id": _required_text(identity.get("room_id")),
         "thread_id": cast("str | None", identity.get("thread_id")),
         "response_event_id": _required_text(identity.get("response_event_id")),
+        "pending_event_ids": tuple(_event_ids(identity.get("pending_event_ids"))),
         "logical_source_event_ids": tuple(_event_ids(identity.get("logical_source_event_ids"))),
         "discovery_event_ids": tuple(_event_ids(identity.get("discovery_event_ids", []))),
         "edit_receipt_order": cast("int | None", identity.get("edit_receipt_order")),

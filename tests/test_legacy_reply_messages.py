@@ -479,6 +479,16 @@ async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJ
     assert older is not None
     assert older.state == "failing"
     assert older.failure_reason == "superseded"
+    # Its pause stays on the reply, superseded, and still holds its source for its cleanup.
+    assert await _spans(principal, reply) == [
+        (rl.SpanKind.TURN, rl.SpanOutcome.SUPERSEDED),
+        (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
+    ]
+    assert older.span_id is not None
+    assert await principal.approval_continuation_for_source("$source") == older
+    assert await principal.approval_continuation_for_source("$edit") == await principal.approval_continuation(
+        "approval-2",
+    )
 
 
 async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store: EventJournalStore) -> None:

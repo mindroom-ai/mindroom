@@ -413,13 +413,7 @@ def _resolve_continuation(
         """,
         (continuation_principal_id, continuation_id, generation),
     )
-    source_rows = transaction.fetchall(
-        """
-        SELECT event_id FROM approval_continuation_sources
-        WHERE principal_id = ? AND approval_id = ? ORDER BY source_ordinal
-        """,
-        (continuation_principal_id, continuation_id),
-    )
+    continuation = approval_continuations.get(transaction, continuation_principal_id, approval_id=continuation_id)
     return RecordedApprovalDecision(
         resolution=stored_resolution,
         recorded=True,
@@ -428,7 +422,7 @@ def _resolve_continuation(
         continuation_ready=state is not None and state["state"] == "ready",
         continuation_entity_name=entity_name,
         continuation_room_id=str(card["room_id"]),
-        source_event_ids=tuple(str(row["event_id"]) for row in source_rows),
+        source_event_ids=() if continuation is None else continuation.source_event_ids,
     )
 
 
@@ -455,7 +449,7 @@ def retire_completed_cards_for_departure(
 ) -> None:
     """Finish domain retirement that crashed after a terminal Matrix acknowledgement."""
     rows = transaction.fetchall(
-        """
+        f"""
         SELECT cards.principal_id, cards.delivery_id, initial.acknowledged_event_id
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
@@ -478,19 +472,10 @@ def retire_completed_cards_for_departure(
               OR (
                   background.delivery_id IS NULL
                   AND continuations.principal_id = ?
-                  AND EXISTS (
-                      SELECT 1
-                      FROM approval_continuation_sources AS sources
-                      JOIN journal_events AS events
-                        ON events.principal_id = sources.principal_id
-                       AND events.event_id = sources.event_id
-                      WHERE sources.principal_id = continuations.principal_id
-                        AND sources.approval_id = continuations.approval_id
-                        AND events.room_id = ?
-                  )
+                  AND {approval_continuations.holds_source_in_room("continuations")}
               )
           )
-        """,
+        """,  # noqa: S608 - a fixed SQL fragment, not input
         (principal_id, room_id, principal_id, room_id),
     )
     for row in rows:
@@ -514,24 +499,15 @@ def expire_cards_for_departed_continuations(
     # cleanup. Keep the same order before fencing the deliveries and deleting
     # the continuation, otherwise the two transactions can deadlock.
     transaction.execute(
-        """
+        f"""
         UPDATE approval_continuations SET state = state
         WHERE principal_id = ?
-          AND EXISTS (
-              SELECT 1
-              FROM approval_continuation_sources AS sources
-              JOIN journal_events AS events
-                ON events.principal_id = sources.principal_id
-               AND events.event_id = sources.event_id
-              WHERE sources.principal_id = approval_continuations.principal_id
-                AND sources.approval_id = approval_continuations.approval_id
-                AND events.room_id = ?
-          )
-        """,
+          AND {approval_continuations.holds_source_in_room("approval_continuations")}
+        """,  # noqa: S608 - a fixed SQL fragment, not input
         (continuation_principal_id, room_id),
     )
     rows = transaction.fetchall(
-        """
+        f"""
         SELECT cards.principal_id, cards.delivery_id, initial.event_type,
                initial.room_id, initial.thread_id, initial.payload_json,
                initial.attempted, initial.acknowledged_event_id, initial.membership_epoch,
@@ -552,17 +528,8 @@ def expire_cards_for_departed_continuations(
          AND final.stage = 'final'
         WHERE background.delivery_id IS NULL
           AND continuations.principal_id = ?
-          AND EXISTS (
-              SELECT 1
-              FROM approval_continuation_sources AS sources
-              JOIN journal_events AS events
-                ON events.principal_id = sources.principal_id
-               AND events.event_id = sources.event_id
-              WHERE sources.principal_id = continuations.principal_id
-                AND sources.approval_id = continuations.approval_id
-                AND events.room_id = ?
-          )
-        """,
+          AND {approval_continuations.holds_source_in_room("continuations")}
+        """,  # noqa: S608 - a fixed SQL fragment, not input
         (continuation_principal_id, room_id),
     )
     for row in rows:

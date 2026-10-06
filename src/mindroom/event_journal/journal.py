@@ -690,22 +690,13 @@ def _advance_membership_epoch(
     )
     # A paused run owns exactly the source rows this fence is about to settle.
     # Delete the aggregate first so no durable continuation survives with no
-    # runnable source. Its call and source rows cascade.
+    # runnable source. Its call rows cascade.
     transaction.execute(
-        """
+        f"""
         DELETE FROM approval_continuations
         WHERE principal_id = ?
-          AND EXISTS (
-              SELECT 1
-              FROM approval_continuation_sources AS sources
-              JOIN journal_events AS events
-                ON events.principal_id = sources.principal_id
-               AND events.event_id = sources.event_id
-              WHERE sources.principal_id = approval_continuations.principal_id
-                AND sources.approval_id = approval_continuations.approval_id
-                AND events.room_id = ?
-          )
-        """,
+          AND {approvals.approval_continuations.holds_source_in_room("approval_continuations")}
+        """,  # noqa: S608 - a fixed SQL fragment, not input
         (principal_id, room_id),
     )
     # Turn-backed work still pending from the membership that just ended can
@@ -924,8 +915,8 @@ def _settle_tombstoned_turn_source(
         WHERE principal_id = ? AND room_id = ? AND event_id = ? AND state = ?
           AND kind IN ({kind_placeholders})
           AND NOT EXISTS (
-              SELECT 1 FROM approval_continuation_sources
-              WHERE principal_id = ? AND event_id = ?
+              SELECT 1 FROM {approvals.approval_continuations.HELD_SOURCES}
+              WHERE held_source.principal_id = ? AND held_source.event_id = ?
           )
         """,  # noqa: S608 - placeholders are generated, values are still bound
         (SETTLED_STATE, principal_id, room_id, event_id, PENDING_STATE, *kinds, principal_id, event_id),
@@ -1071,13 +1062,10 @@ def _pending_rows(
     room_params: tuple[object, ...] = () if room_id is None else (room_id,)
     kind_clause = "" if kind is None else " AND kind = ?"
     kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
-    continuation_joins = """
-        LEFT JOIN approval_continuation_sources AS approval_sources
-          ON approval_sources.principal_id = events.principal_id
-         AND approval_sources.event_id = events.event_id
-        LEFT JOIN approval_continuations AS continuations
-         ON continuations.principal_id = approval_sources.principal_id
-         AND continuations.approval_id = approval_sources.approval_id
+    continuation_joins = f"""
+        LEFT JOIN ({approvals.approval_continuations.HELD_SOURCES})
+          ON held_source.principal_id = events.principal_id
+         AND held_source.event_id = events.event_id
         LEFT JOIN reply_spans AS claim_span
           ON claim_span.principal_id = continuations.principal_id
          AND claim_span.span_id = continuations.claim_span_id
@@ -1086,9 +1074,9 @@ def _pending_rows(
     # exists; one an older instance left goes to recovery.
     continuation_clause = """
           AND (
-            approval_sources.approval_id IS NULL
+            continuations.approval_id IS NULL
             OR (
-              approval_sources.source_ordinal = 0
+              held_source.ordinal = 0
               AND (
                 continuations.state = 'failing'
                 OR (

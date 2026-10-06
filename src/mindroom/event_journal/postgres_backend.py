@@ -169,6 +169,12 @@ class PostgresBackend:
                 outbox_table_ddl=OUTBOX_TABLE,
                 sqlite=False,
             )
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'approval_continuations'",
+            )
+            continuation_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
+            upgrade_continuation_identity(_PostgresTransaction(cursor), existing_tables, continuation_columns)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
             cursor.execute(
@@ -178,12 +184,6 @@ class PostgresBackend:
             call_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
             upgrade_approval_toolkit_origins(_PostgresTransaction(cursor), call_columns)
             upgrade_approval_argument_digests(_PostgresTransaction(cursor), call_columns)
-            cursor.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'approval_continuations'",
-            )
-            continuation_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
-            upgrade_continuation_identity(_PostgresTransaction(cursor), existing_tables, continuation_columns)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

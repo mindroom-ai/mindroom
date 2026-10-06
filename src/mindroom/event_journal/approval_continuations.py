@@ -35,6 +35,33 @@ _CONTINUATION_COLUMNS = """
     runtime_generation, failure_reason, context_json
 """
 
+# A continuation holds the pending sources of the span whose pause created it.
+# Join on ``held_source.event_id``; ``held_source.ordinal = 0`` is the source
+# recovery dispatches.
+HELD_SOURCES = """
+    reply_span_sources AS held_source
+    JOIN approval_continuations AS continuations
+      ON continuations.principal_id = held_source.principal_id
+     AND continuations.span_id = held_source.span_id
+     AND held_source.role = 'pending'
+"""
+
+
+def holds_source_in_room(alias: str) -> str:
+    """Return SQL that is true when continuation ``alias`` holds a source admitted in the room its parameter binds."""
+    return f"""
+        EXISTS (
+            SELECT 1 FROM reply_span_sources AS room_source
+            JOIN journal_events AS room_event
+              ON room_event.principal_id = room_source.principal_id
+             AND room_event.event_id = room_source.event_id
+            WHERE room_source.principal_id = {alias}.principal_id
+              AND room_source.span_id = {alias}.span_id
+              AND room_source.role = 'pending'
+              AND room_event.room_id = ?
+        )
+    """  # noqa: S608 - a fixed alias, not input
+
 
 # The failure reason of an approval an edit superseded.
 SUPERSEDED_FAILURE_REASON = "superseded"
@@ -273,14 +300,6 @@ def get(
     )
     if row is None:
         return None
-    source_rows = transaction.fetchall(
-        """
-        SELECT event_id FROM approval_continuation_sources
-        WHERE principal_id = ? AND approval_id = ?
-        ORDER BY source_ordinal
-        """,
-        (principal_id, approval_id),
-    )
     call_rows = transaction.fetchall(
         """
         SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
@@ -291,8 +310,7 @@ def get(
         """,
         (principal_id, approval_id, int(row["generation"])),
     )
-    pending = tuple(str(source["event_id"]) for source in source_rows)
-    return _from_rows(transaction, principal_id, row, call_rows, pending)
+    return _from_rows(transaction, principal_id, row, call_rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +321,7 @@ class _PausedReply:
     room_id: str
     thread_id: str | None
     response_event_id: str
+    pending_event_ids: tuple[str, ...]
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     edit_receipt_order: int | None
@@ -342,6 +361,7 @@ def _paused_reply(
         room_id=reply.room_id,
         thread_id=reply.thread_id,
         response_event_id=reply.event_id,
+        pending_event_ids=span.sources.pending,
         logical_source_event_ids=span.sources.logical,
         discovery_event_ids=span.sources.discovery,
         edit_receipt_order=reply.edit_receipt_order if span.kind is SpanKind.REGENERATION else None,
@@ -361,7 +381,6 @@ def _from_rows(
     principal_id: str,
     row: Row,
     call_rows: tuple[Row, ...],
-    pending: tuple[str, ...],
 ) -> ApprovalContinuation:
     """Decode one normalized continuation aggregate."""
     context = json.loads(str(row["context_json"]))
@@ -374,7 +393,7 @@ def _from_rows(
     claimed = row["state"] == "ready" and (claim_span_id is not None or identity.claimed)
     claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
     sources = ResponseSources(
-        pending,
+        identity.pending_event_ids,
         identity.logical_source_event_ids,
         identity.discovery_event_ids,
         identity.edit_receipt_order,
@@ -506,6 +525,9 @@ def create(
     assert continuation.span_id is not None, "every continuation pauses a reply span"
     if not continuation.source_event_ids:
         return None
+    span = reply_spans.load(transaction, principal_id, continuation.span_id)
+    assert span is not None
+    assert span.sources.pending == continuation.source_event_ids, "a continuation holds its paused span's sources"
     # Admission and approval creation must agree which owner receives a
     # concurrent source redaction, on PostgreSQL as well as SQLite.
     membership_epoch = membership_state.claim_active_membership_epoch(
@@ -531,7 +553,7 @@ def create(
             """,
             (principal_id, event_id, continuation.room_id),
         )
-        if row is None:
+        if row is None or _holder(transaction, principal_id, event_id) not in {None, continuation.approval_id}:
             return None
     inserted = transaction.fetchone(
         """
@@ -558,15 +580,6 @@ def create(
     if inserted is None:
         existing = get(transaction, principal_id, approval_id=continuation.approval_id)
         return existing if existing == continuation else None
-    for ordinal, event_id in enumerate(continuation.source_event_ids):
-        transaction.execute(
-            """
-            INSERT INTO approval_continuation_sources (
-                principal_id, approval_id, event_id, source_ordinal
-            ) VALUES (?, ?, ?, ?)
-            """,
-            (principal_id, continuation.approval_id, event_id, ordinal),
-        )
     _insert_calls(
         transaction,
         principal_id,
@@ -584,14 +597,20 @@ def for_source(
     event_id: str,
 ) -> ApprovalContinuation | None:
     """Return the paused run that owns one exact source event."""
+    approval_id = _holder(transaction, principal_id, event_id)
+    return None if approval_id is None else get(transaction, principal_id, approval_id=approval_id)
+
+
+def _holder(transaction: Transaction, principal_id: str, event_id: str) -> str | None:
+    """Return the continuation that holds one source event, if any."""
     row = transaction.fetchone(
-        """
-        SELECT approval_id FROM approval_continuation_sources
-        WHERE principal_id = ? AND event_id = ?
-        """,
+        f"""
+        SELECT continuations.approval_id FROM {HELD_SOURCES}
+        WHERE held_source.principal_id = ? AND held_source.event_id = ?
+        """,  # noqa: S608 - a fixed join, not input
         (principal_id, event_id),
     )
-    return None if row is None else get(transaction, principal_id, approval_id=str(row["approval_id"]))
+    return None if row is None else str(row["approval_id"])
 
 
 def for_entities(
@@ -626,14 +645,6 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         return ()
     approval_ids = tuple(str(row["approval_id"]) for row in rows)
     placeholders = ", ".join("?" for _approval_id in approval_ids)
-    source_rows = transaction.fetchall(
-        f"""
-        SELECT approval_id, event_id FROM approval_continuation_sources
-        WHERE approval_id IN ({placeholders})
-        ORDER BY approval_id/*bytes*/, source_ordinal
-        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
-        approval_ids,
-    )
     call_rows = transaction.fetchall(
         f"""
         SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
@@ -649,9 +660,6 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
         approval_ids,
     )
-    pending_by_approval: dict[str, list[str]] = {approval_id: [] for approval_id in approval_ids}
-    for source in source_rows:
-        pending_by_approval[str(source["approval_id"])].append(str(source["event_id"]))
     calls_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
     for call in call_rows:
         calls_by_approval[str(call["approval_id"])].append(call)
@@ -659,8 +667,7 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
     for row in rows:
         principal_id = str(row["principal_id"])
         approval_id = str(row["approval_id"])
-        pending = tuple(pending_by_approval[approval_id])
-        continuation = _from_rows(transaction, principal_id, row, tuple(calls_by_approval[approval_id]), pending)
+        continuation = _from_rows(transaction, principal_id, row, tuple(calls_by_approval[approval_id]))
         owners.append((principal_id, continuation))
     return tuple(owners)
 
@@ -837,6 +844,17 @@ def activate(
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
+def answer_frozen(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
+    """Return whether the run's answer is a FINAL the outbox still delivers, which a failure must not replace."""
+    final = outbox.load(
+        transaction,
+        principal_id,
+        delivery_id=continuation.source_event_ids[0],
+        stage=DeliveryStage.FINAL,
+    )
+    return final is not None and final.permanent_failure_reason is None
+
+
 def request_failure(
     transaction: Transaction,
     principal_id: str,
@@ -853,7 +871,11 @@ def request_failure(
     here and the row's stored state in the update.
     """
     current = get(transaction, principal_id, approval_id=approval_id)
-    if current is None or (current.state, current.runtime_generation) != (expected_state, expected_runtime_generation):
+    if (
+        current is None
+        or (current.state, current.runtime_generation) != (expected_state, expected_runtime_generation)
+        or answer_frozen(transaction, principal_id, current)
+    ):
         return None
     claimed = expected_state == "claimed"
     updated = transaction.fetchone(
@@ -862,18 +884,6 @@ def request_failure(
         SET state = 'failing', failure_reason = ?
         WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
           AND runtime_generation IS NOT DISTINCT FROM ? AND claim_span_id IS NOT DISTINCT FROM ?
-          AND NOT EXISTS (
-            SELECT 1 FROM matrix_delivery_outbox AS final
-            WHERE final.principal_id = approval_continuations.principal_id
-              AND final.delivery_id = (
-                SELECT source.event_id FROM approval_continuation_sources AS source
-                WHERE source.principal_id = approval_continuations.principal_id
-                  AND source.approval_id = approval_continuations.approval_id
-                  AND source.source_ordinal = 0
-              )
-              AND final.stage = 'final'
-              AND final.permanent_failure_reason IS NULL
-          )
         RETURNING approval_id
         """,
         (
@@ -903,6 +913,9 @@ def fence(
     also replaces a failure still settling: the regeneration owns the reply, so
     the old approval's cleanup publishes nothing.
     """
+    current = get(transaction, principal_id, approval_id=approval_id)
+    if current is None or answer_frozen(transaction, principal_id, current):
+        return None
     states = (*_FENCEABLE, "failing") if reason == SUPERSEDED_FAILURE_REASON else _FENCEABLE
     placeholders = ", ".join("?" for _ in states)
     updated = transaction.fetchone(
@@ -910,18 +923,6 @@ def fence(
         UPDATE approval_continuations
         SET state = 'failing', failure_reason = ?
         WHERE principal_id = ? AND approval_id = ? AND state IN ({placeholders})
-          AND NOT EXISTS (
-            SELECT 1 FROM matrix_delivery_outbox AS final
-            WHERE final.principal_id = approval_continuations.principal_id
-              AND final.delivery_id = (
-                SELECT source.event_id FROM approval_continuation_sources AS source
-                WHERE source.principal_id = approval_continuations.principal_id
-                  AND source.approval_id = approval_continuations.approval_id
-                  AND source.source_ordinal = 0
-              )
-              AND final.stage = 'final'
-              AND final.permanent_failure_reason IS NULL
-          )
         RETURNING approval_id
         """,  # noqa: S608 - fixed placeholders
         (reason, principal_id, approval_id, *states),

@@ -112,6 +112,8 @@ class _Adoption:
     approval_id: str | None = None
     # The resume an earlier release's claim left running, which claims the continuation.
     claim_span_id: str | None = None
+    # The pauses of older continuations of the same reply, which a newer one superseded.
+    superseded: tuple[rl.Span, ...] = ()
 
 
 def _classified(transaction: Transaction, principal_id: str) -> bool:
@@ -129,7 +131,7 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans and give its outbox rows reply identity.
 # Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
-# reply per newest continuation (older ones are superseded), the state a frozen unacknowledged FINAL implies, a lost
+# reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources), the state a frozen unacknowledged FINAL implies, a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; an
 # unsettled Stop is applied to the reply it names. A coalesced turn is adopted once, under whichever source keyed its
@@ -155,7 +157,7 @@ def classify(
     # One Matrix event is one reply: an edit's newer approval pauses the
     # event its original turn's rows created, and that event is adopted once.
     adopted_events: set[str] = set()
-    for continuation in _newest_continuations(transaction, principal_id, entity_name):
+    for continuation, superseded in _newest_continuations(transaction, principal_id, entity_name):
         # LEGACY_COMPAT: Approval continuations without frozen tool-call visibility.
         # Legacy format: a continuation context without show_tool_calls, which v2026.8.84 and earlier wrote.
         # Last legacy release: v2026.8.84; replacement: v2026.8.85 froze visibility in the context, and the
@@ -168,6 +170,14 @@ def classify(
             else replace(continuation, show_tool_calls=show_tool_calls, show_tool_calls_is_frozen=True)
         )
         adoption = _paused_reply(transaction, principal_id, visible, entity_name, presentations, now_ns)
+        adoption = replace(
+            adoption,
+            superseded=tuple(
+                # Paused before the pause that superseded it.
+                _pause_span(adoption.reply.reply_id, older, rl.SpanOutcome.SUPERSEDED, now_ns - 1)
+                for older in superseded
+            ),
+        )
         adoptions.append(adoption)
         adopted.update(span.delivery_id for span in adoption.spans)
         adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
@@ -205,8 +215,14 @@ def _write(transaction: Transaction, principal_id: str, adoption: _Adoption) -> 
     applied = apply(
         transaction,
         principal_id,
-        rl.Transition(outcome=rl.Outcome.APPLIED, reply=adoption.reply, spans=adoption.spans),
+        rl.Transition(outcome=rl.Outcome.APPLIED, reply=adoption.reply, spans=(*adoption.superseded, *adoption.spans)),
     )
+    for span in adoption.superseded:
+        # A superseded continuation holds its sources through its pause, until its cleanup settles them.
+        transaction.execute(
+            "UPDATE approval_continuations SET span_id = ? WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL",
+            (span.span_id, principal_id, span.approval_id),
+        )
     if adoption.approval_id is not None:
         # The continuation names the span that paused its reply and any resume that claims it, as one paused now does.
         transaction.execute(
@@ -238,9 +254,10 @@ def _newest_continuations(
     transaction: Transaction,
     principal_id: str,
     entity_name: str,
-) -> tuple[ApprovalContinuation, ...]:
-    """Return the newest continuation of each earlier-release reply; older ones are superseded, as an edit supersedes them."""
+) -> tuple[tuple[ApprovalContinuation, tuple[ApprovalContinuation, ...]], ...]:
+    """Return the newest continuation of each earlier-release reply with the older ones it supersedes, as an edit does."""
     newest: dict[str, ApprovalContinuation] = {}
+    superseded: dict[str, list[ApprovalContinuation]] = {}
     for continuation in approval_continuations.for_principal(transaction, principal_id):
         if continuation.entity_name != entity_name:
             continue
@@ -254,8 +271,9 @@ def _newest_continuations(
                 approval_id=older.approval_id,
                 reason=approval_continuations.SUPERSEDED_FAILURE_REASON,
             )
+            superseded.setdefault(continuation.response_event_id, []).append(older)
         newest[continuation.response_event_id] = continuation
-    return tuple(newest.values())
+    return tuple((continuation, tuple(superseded.get(event_id, ()))) for event_id, continuation in newest.items())
 
 
 def _reply(
@@ -338,6 +356,30 @@ def _owed_final(final: MatrixDelivery | None) -> bool:
     )
 
 
+def _pause_span(reply_id: str, continuation: ApprovalContinuation, outcome: rl.SpanOutcome, now_ns: int) -> rl.Span:
+    """Return the span whose pause created ``continuation``, holding its sources as one paused now does."""
+    sources = continuation.sources
+    return _span(
+        reply_id,
+        kind=rl.SpanKind.REGENERATION if continuation.prepared_edit_record is not None else rl.SpanKind.TURN,
+        delivery_id=continuation.source_event_ids[0],
+        sources=rl.SpanSources(
+            pending=sources.pending_event_ids,
+            logical=sources.logical_source_event_ids,
+            discovery=sources.discovery_event_ids,
+        ),
+        now_ns=now_ns,
+        outcome=outcome,
+        approval_id=continuation.approval_id,
+        # A regeneration's paused span carries the edit it selected.
+        prepared_edit=(
+            None
+            if continuation.prepared_edit_record is None
+            else turn_records.encode_prepared_edit(continuation.prepared_edit_record)
+        ),
+    )
+
+
 def _paused_reply(
     transaction: Transaction,
     principal_id: str,
@@ -348,34 +390,14 @@ def _paused_reply(
 ) -> _Adoption:
     """A continuation pauses its reply; a claimed one has its resume left running by the instance that stopped."""
     reply_id = _new_id()
-    sources = continuation.sources
-    span_sources = rl.SpanSources(
-        pending=sources.pending_event_ids,
-        logical=sources.logical_source_event_ids,
-        discovery=sources.discovery_event_ids,
-    )
-    delivery_id = continuation.source_event_ids[0]
     # A claimed resume was running when the earlier release stopped, and so was
     # one its shutdown marked interrupted for the next instance to hand back.
     resumed = continuation.state == "claimed" or (
         continuation.state == "failing"
         and continuation.failure_reason == approval_continuations.INTERRUPTED_FAILURE_REASON
     )
-    paused = _span(
-        reply_id,
-        kind=rl.SpanKind.REGENERATION if continuation.prepared_edit_record is not None else rl.SpanKind.TURN,
-        delivery_id=delivery_id,
-        sources=span_sources,
-        now_ns=now_ns,
-        outcome=rl.SpanOutcome.PAUSED,
-        approval_id=continuation.approval_id,
-        # A regeneration's paused span carries the edit it selected, as one paused now does.
-        prepared_edit=(
-            None
-            if continuation.prepared_edit_record is None
-            else turn_records.encode_prepared_edit(continuation.prepared_edit_record)
-        ),
-    )
+    paused = _pause_span(reply_id, continuation, rl.SpanOutcome.PAUSED, now_ns)
+    delivery_id = paused.delivery_id
     shown = presentations.paused(
         continuation,
         _legacy_paused_answer(transaction, principal_id, continuation.approval_id),
@@ -405,7 +427,7 @@ def _paused_reply(
         reply_id,
         kind=rl.SpanKind.APPROVAL_RESUME,
         delivery_id=delivery_id,
-        sources=span_sources,
+        sources=paused.sources,
         # Claimed after the pause it resumes.
         now_ns=now_ns + 1,
         outcome=None,

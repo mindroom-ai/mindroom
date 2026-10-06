@@ -402,21 +402,6 @@ _TABLES = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS approval_continuation_sources (
-        principal_id TEXT NOT NULL,
-        approval_id TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        source_ordinal BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, approval_id, event_id),
-        UNIQUE (principal_id, event_id),
-        UNIQUE (principal_id, approval_id, source_ordinal),
-        FOREIGN KEY (principal_id, approval_id)
-            REFERENCES approval_continuations (principal_id, approval_id) ON DELETE CASCADE,
-        FOREIGN KEY (principal_id, event_id)
-            REFERENCES journal_events (principal_id, event_id)
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS approval_continuation_calls (
         principal_id TEXT NOT NULL,
         approval_id TEXT NOT NULL,
@@ -651,6 +636,10 @@ _INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
     ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
+    """,
+    """
+    -- A continuation holds its paused span's pending sources; each span pauses at most one.
+    CREATE UNIQUE INDEX IF NOT EXISTS approval_continuations_span ON approval_continuations (principal_id, span_id)
     """,
     """
     CREATE INDEX IF NOT EXISTS reply_spans_reply ON reply_spans (principal_id, reply_id, claimed_at_ns)

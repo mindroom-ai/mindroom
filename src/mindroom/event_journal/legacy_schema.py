@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 
+from . import approval_continuations
+
 if TYPE_CHECKING:
     from .backend import Transaction
 
@@ -80,11 +82,10 @@ def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozense
     """Add historical origins and fence unresumable work in the schema transaction."""
     if "toolkit_name" not in columns:
         transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN toolkit_name TEXT")
-    transaction.execute(
+    unresumable = transaction.fetchall(
         """
-        UPDATE approval_continuations
-        SET state = 'failing', failure_reason = COALESCE(failure_reason, ?)
-        WHERE state IN ('waiting', 'ready', 'claimed')
+        SELECT principal_id, approval_id FROM approval_continuations
+        WHERE state IN ('waiting', 'ready')
           AND EXISTS (
             SELECT 1 FROM approval_continuation_calls AS calls
             WHERE calls.principal_id = approval_continuations.principal_id
@@ -93,23 +94,25 @@ def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozense
               AND calls.toolkit_name IS NULL
               AND (calls.decision IS NULL OR calls.decision = 'approved')
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM matrix_delivery_outbox AS final
-            JOIN approval_continuation_sources AS source
-              ON source.principal_id = final.principal_id
-             AND source.event_id = final.delivery_id
-            WHERE source.principal_id = approval_continuations.principal_id
-              AND source.approval_id = approval_continuations.approval_id
-              AND source.source_ordinal = 0
-              AND final.stage = 'final'
-              AND final.permanent_failure_reason IS NULL
-          )
         """,
-        (
-            "This approval is from an older version of MindRoom and can no longer be used. "
-            "Please check what already completed, then send a new request for anything unfinished.",
-        ),
     )
+    for row in unresumable:
+        principal_id = str(row["principal_id"])
+        continuation = approval_continuations.get(transaction, principal_id, approval_id=str(row["approval_id"]))
+        if continuation is None or approval_continuations.answer_frozen(transaction, principal_id, continuation):
+            continue
+        transaction.execute(
+            """
+            UPDATE approval_continuations SET state = 'failing', failure_reason = COALESCE(failure_reason, ?)
+            WHERE principal_id = ? AND approval_id = ?
+            """,
+            (
+                "This approval is from an older version of MindRoom and can no longer be used. "
+                "Please check what already completed, then send a new request for anything unfinished.",
+                principal_id,
+                continuation.approval_id,
+            ),
+        )
 
 
 # LEGACY_COMPAT: Approval calls without persisted argument digests.
