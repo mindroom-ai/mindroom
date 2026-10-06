@@ -10001,6 +10001,24 @@ def test_redacting_more_basic_secrets_than_the_limit_replaces_the_text_within_a_
     assert redacted == "***"
 
 
+@pytest.mark.parametrize("lead", ["", "-", "1.", "+x9-"])
+def test_redacting_a_url_finds_its_scheme_after_other_scheme_characters(lead: str) -> None:
+    """A URL starts at the first letter of the scheme-character run that ends at ``://``."""
+    text = f"fatal: {lead}https://user:token@example.com/repo.git failed"
+
+    assert redact_credentials_in_text(text) == f"fatal: {lead}https://***@example.com/repo.git failed"
+
+
+def test_redacting_a_long_run_of_scheme_characters_stays_within_a_cpu_budget() -> None:
+    """Hostile Git output with a long run of scheme characters and no ``://`` must not stall the event loop."""
+    text = "remote: " + "A" * 100_000
+
+    with cpu_budget(0.5):
+        redacted = redact_credentials_in_text(text)
+
+    assert redacted == text
+
+
 @pytest.mark.asyncio
 async def test_refresh_subprocess_returns_exact_result(tmp_path: Path) -> None:
     """A real child returns the manual refresh result without rebuilding it from metadata."""

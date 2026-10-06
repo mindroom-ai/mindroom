@@ -28,7 +28,12 @@ from mindroom.git_urls import credential_free_repo_url
 if TYPE_CHECKING:
     from urllib.parse import ParseResult
 
-_URL_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
+#: A URL starts at the first letter of the run of scheme characters that ends at
+#: ``://``. Trying each run once from its start, not again from every letter in
+#: it, keeps a long run without ``://`` from being rescanned once per position.
+_URL_PATTERN: re.Pattern[str] = re.compile(
+    r"(?<![a-zA-Z0-9+.-])(?P<lead>[0-9+.-]*)(?P<url>[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+)",
+)
 _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
     r"\bAuthorization:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
     re.IGNORECASE,
@@ -165,7 +170,7 @@ def redact_credentials_in_text(value: str) -> str:
     unique_decoded_values.sort(key=len, reverse=True)
     for decoded_value in unique_decoded_values:
         redacted = redacted.replace(decoded_value, "***")
-    return _URL_PATTERN.sub(lambda match: redact_url_credentials(match.group(0)), redacted)
+    return _URL_PATTERN.sub(lambda match: match["lead"] + redact_url_credentials(match["url"]), redacted)
 
 
 def credential_free_url_identity(value: str) -> str:
