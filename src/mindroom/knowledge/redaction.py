@@ -41,9 +41,9 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 MAX_REDACTABLE_TOKEN_LENGTH = 2048
 #: Most distinct decoded ``Authorization: Basic`` values one text may carry. Each
 #: is scrubbed with its own pass over the text, and a remote chooses how many its
-#: Git output carries, so a text decoding to more is withheld whole. Real Git
-#: output decodes to one or two credentials, each giving ``user:password`` and
-#: the password.
+#: Git output carries, so a text decoding to more is withheld whole. Ordinary Git
+#: output carries a credential or two, each giving ``user:password`` and the
+#: password.
 _MAX_DECODED_BASIC_VALUES = 16
 __all__ = [
     "MAX_REDACTABLE_TOKEN_LENGTH",

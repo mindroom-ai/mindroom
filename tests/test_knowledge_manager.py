@@ -9977,9 +9977,10 @@ def test_redacting_basic_secrets_scrubs_a_secret_that_contains_another_whole() -
 def test_redacting_basic_secrets_up_to_the_limit_keeps_the_diagnostic() -> None:
     """Sixteen distinct decoded values, from eight credentials, are each scrubbed in place."""
     credentials = [f"user{i}:secret{i}" for i in range(8)]
-    text = "\n".join([*map(_basic_authorization_header, credentials), "fatal: secret0 rejected for user7:secret7"])
+    leaked = [*credentials, *(credential.split(":")[1] for credential in credentials)]
+    text = "\n".join([*map(_basic_authorization_header, credentials), f"fatal: {' '.join(leaked)}"])
 
-    assert redact_credentials_in_text(text).splitlines()[-1] == "fatal: *** rejected for ***"
+    assert redact_credentials_in_text(text).splitlines()[-1] == "fatal: " + " ".join(["***"] * len(leaked))
 
 
 def test_redacting_more_basic_secrets_than_the_limit_replaces_the_text_within_a_cpu_budget() -> None:
