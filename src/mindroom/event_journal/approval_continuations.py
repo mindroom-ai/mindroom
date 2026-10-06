@@ -9,14 +9,12 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
-from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.reply_lifecycle import SpanKind
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import membership_state, outbox, reply_messages, reply_spans
+from . import membership_state, outbox, reply_messages, reply_spans, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .legacy_response_attempts import legacy_identity, legacy_identity_context
 from .models import DeliveryStage
@@ -221,7 +219,6 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "entity_kind": continuation.entity_kind,
         "requester_id": continuation.requester_id,
         "delegation_storage_bindings": continuation.delegation_storage_bindings,
-        "show_tool_calls": continuation.show_tool_calls,
         "execution_identity": continuation.execution_identity,
         "runtime_model_name": continuation.runtime_model_name,
         "team_member_names": list(continuation.team_member_names),
@@ -243,11 +240,6 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
             {"sender": turn.sender, "body": turn.body} for turn in continuation.memory_thread_history
         ],
         "thread_summary_message_count_hint": continuation.thread_summary_message_count_hint,
-        "prepared_edit_record": (
-            TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
-            if continuation.prepared_edit_record is not None
-            else None
-        ),
         **legacy_identity_context(continuation),
     }
 
@@ -307,6 +299,18 @@ class _ReplyIdentity:
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     edit_receipt_order: int | None
+    show_tool_calls: bool
+    show_tool_calls_is_frozen: bool
+    prepared_edit_record: TurnRecord | None
+
+
+def _shows_tool_calls(presentation: str) -> bool:
+    """Return the tool-call visibility a reply froze when it started.
+
+    The reply layer's presentation codec owns this key; the journal reads only it so that it stays free of rendering
+    imports.
+    """
+    return json.loads(presentation)["show_tool_calls"] is True
 
 
 def _identity(
@@ -332,6 +336,13 @@ def _identity(
         logical_source_event_ids=span.sources.logical,
         discovery_event_ids=span.sources.discovery,
         edit_receipt_order=reply.edit_receipt_order if span.kind is SpanKind.REGENERATION else None,
+        show_tool_calls=_shows_tool_calls(reply.presentation),
+        show_tool_calls_is_frozen=True,
+        prepared_edit_record=(
+            None
+            if span.prepared_edit is None
+            else turn_records.decode_prepared_edit(span.prepared_edit, span.sources.logical[0])
+        ),
     )
 
 
@@ -355,7 +366,6 @@ def _from_rows(
         identity.discovery_event_ids,
         identity.edit_receipt_order,
     )
-    prepared_edit = stored.get("prepared_edit_record")
     calls = tuple(
         ApprovalCall(
             tool_call_id=str(call["tool_call_id"]),
@@ -391,8 +401,8 @@ def _from_rows(
             "dict[str, dict[str, object]]",
             stored.get("delegation_storage_bindings", {}),
         ),
-        show_tool_calls=stored.get("show_tool_calls", True) is not False,
-        show_tool_calls_is_frozen="show_tool_calls" in stored,
+        show_tool_calls=identity.show_tool_calls,
+        show_tool_calls_is_frozen=identity.show_tool_calls_is_frozen,
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
@@ -425,12 +435,7 @@ def _from_rows(
         runtime_generation=cast("str | None", row["runtime_generation"]),
         failure_reason=cast("str | None", row["failure_reason"]),
         generation=int(row["generation"]),
-        prepared_edit_record=TurnRecordCodec._from_ledger_record(
-            str(prepared_edit.get("anchor_event_id")),
-            prepared_edit,
-        )
-        if isinstance(prepared_edit, dict)
-        else None,
+        prepared_edit_record=identity.prepared_edit_record,
         span_id=cast("str | None", row["span_id"]),
     )
 
@@ -682,37 +687,16 @@ def claim(
     *,
     approval_id: str,
     runtime_generation: str,
-    legacy_show_tool_calls: bool | None = None,
 ) -> ApprovalContinuation | None:
     """Move one ready paused run into its single execution attempt."""
-    current = get(transaction, principal_id, approval_id=approval_id)
-    if current is None or current.state != "ready":
-        return None
-    show_tool_calls = resolve_legacy_visibility(
-        show_tool_calls=current.show_tool_calls,
-        is_frozen=current.show_tool_calls_is_frozen,
-        current_policy=legacy_show_tool_calls,
-    )
-    claimed_continuation = replace(
-        current,
-        state="claimed",
-        runtime_generation=runtime_generation,
-        show_tool_calls=show_tool_calls,
-        show_tool_calls_is_frozen=True,
-    )
     claimed = transaction.fetchone(
         """
         UPDATE approval_continuations
-        SET state = 'claimed', runtime_generation = ?, context_json = ?
+        SET state = 'claimed', runtime_generation = ?
         WHERE principal_id = ? AND approval_id = ? AND state = 'ready'
         RETURNING approval_id
         """,
-        (
-            runtime_generation,
-            _json(_context(claimed_continuation)),
-            principal_id,
-            approval_id,
-        ),
+        (runtime_generation, principal_id, approval_id),
     )
     return None if claimed is None else get(transaction, principal_id, approval_id=approval_id)
 

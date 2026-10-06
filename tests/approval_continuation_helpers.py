@@ -17,7 +17,6 @@ async def claim_continuation(
     approval_id: str,
     *,
     runtime_generation: str,
-    legacy_show_tool_calls: bool | None = None,
 ) -> ApprovalContinuation | None:
     """Claim one ready paused run for exactly one execution attempt, as an approval resume's claim does."""
     return await principal._backend.write(
@@ -26,7 +25,6 @@ async def claim_continuation(
             principal.principal_id,
             approval_id=approval_id,
             runtime_generation=runtime_generation,
-            legacy_show_tool_calls=legacy_show_tool_calls,
         ),
     )
 

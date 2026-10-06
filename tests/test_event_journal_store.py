@@ -6891,43 +6891,6 @@ class TestApprovalContinuations:
         stored = json.loads(str(row["context_json"]))
         assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
-    @pytest.mark.parametrize("current_policy", [False, True])
-    async def test_claim_freezes_current_visibility_for_a_legacy_continuation(
-        self,
-        alice: PrincipalStore,
-        current_policy: bool,
-    ) -> None:
-        """A pre-visibility row adopts policy once instead of defaulting visible forever."""
-        await self.admit_sources(alice)
-        await paused_for_approval(alice, self.continuation())
-
-        def remove_visibility(transaction: object) -> None:
-            row = transaction.fetchone(  # type: ignore[attr-defined]
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            )
-            context = json.loads(str(row["context_json"]))
-            context.pop("show_tool_calls")
-            transaction.execute(  # type: ignore[attr-defined]
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(context), "approval-1"),
-            )
-
-        await alice._backend.write(remove_visibility)
-
-        claimed = await claim_continuation(
-            alice,
-            "approval-1",
-            runtime_generation="runtime-a",
-            legacy_show_tool_calls=current_policy,
-        )
-        restored = await alice.approval_continuation("approval-1")
-
-        assert claimed is not None
-        assert claimed.show_tool_calls is current_policy
-        assert restored is not None
-        assert restored.show_tool_calls is current_policy
-
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
         """Only one response lifecycle may continue the exact persisted Agno run."""
         await self.admit_sources(alice)

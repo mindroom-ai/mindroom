@@ -140,6 +140,7 @@ def classify(
     *,
     entity_name: str,
     presentations: LegacyPresentations,
+    show_tool_calls: bool,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
     """Give each reply an earlier release left in flight a record, once per principal; return what to run after commit."""
@@ -153,7 +154,18 @@ def classify(
     # event its original turn's rows created, and that event is adopted once.
     adopted_events: set[str] = set()
     for continuation in _newest_continuations(transaction, principal_id, entity_name):
-        adoption = _paused_reply(transaction, principal_id, continuation, entity_name, presentations, now_ns)
+        # LEGACY_COMPAT: Approval continuations without frozen tool-call visibility.
+        # Legacy format: a continuation context without show_tool_calls, which v2026.8.84 and earlier wrote.
+        # Last legacy release: v2026.8.84; replacement: v2026.8.85 froze visibility in the context, and the
+        # unreleased durable reply messages keep it in the paused reply's presentation.
+        # Handling: the adopted reply shows tool calls as the entity's current policy says.
+        # Coverage: tests/test_legacy_reply_messages.py::test_an_unfrozen_approval_adopts_the_current_tool_call_visibility.
+        visible = (
+            continuation
+            if continuation.show_tool_calls_is_frozen
+            else replace(continuation, show_tool_calls=show_tool_calls, show_tool_calls_is_frozen=True)
+        )
+        adoption = _paused_reply(transaction, principal_id, visible, entity_name, presentations, now_ns)
         adoptions.append(adoption)
         adopted.update(span.delivery_id for span in adoption.spans)
         adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
@@ -287,7 +299,6 @@ def _span(
     now_ns: int,
     outcome: rl.SpanOutcome | None,
     approval_id: str | None = None,
-    approval_generation: int | None = None,
 ) -> rl.Span:
     return rl.Span(
         span_id=_new_id(),
@@ -299,7 +310,6 @@ def _span(
         claimed_at_ns=now_ns,
         base_sequence=0,
         approval_id=approval_id,
-        approval_generation=approval_generation,
         outcome=outcome,
         ended_at_ns=None if outcome is None else now_ns,
     )
@@ -389,7 +399,6 @@ def _paused_reply(
         now_ns=now_ns + 1,
         outcome=None,
         approval_id=continuation.approval_id,
-        approval_generation=continuation.generation,
     )
     if final is not None and (final.acknowledged_event_id is not None or _owed_final(final)):
         # The resume froze its answer: the reply ends as that row says, and

@@ -12,23 +12,6 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal.approval_continuations import ApprovalContinuation
 
-# LEGACY_COMPAT: Approval continuation context without frozen presentation visibility.
-# Legacy format: Continuation context without a frozen presentation-visibility snapshot.
-# Last legacy release: v2026.8.84; replacement: v2026.8.85 persisted presentation and show_tool_calls.
-# Handling: Adopt current visibility once at the first claim and freeze it for later claims and restarts.
-# Coverage: tests/test_event_journal_store.py::test_claim_freezes_current_visibility_for_a_legacy_continuation.
-
-
-def resolve_legacy_visibility(*, show_tool_calls: bool, is_frozen: bool, current_policy: bool | None) -> bool:
-    """Freeze an older continuation against the policy available at its first claim."""
-    if is_frozen:
-        return show_tool_calls
-    if current_policy is None:
-        msg = "Legacy approval continuation visibility must be resolved before claim"
-        raise RuntimeError(msg)
-    return current_policy
-
-
 # LEGACY_COMPAT: Sparse external approval continuation origins.
 # Legacy format: Nullable or externally sparse approval continuation origin.
 # Last legacy release: Unversioned sparse input; replacement: no distinct released native predecessor.

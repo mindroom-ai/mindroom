@@ -276,10 +276,9 @@ def test_approval_resume_claims_the_paused_reply() -> None:
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.PAUSED)
     reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1")
-    transition = rl.claim(_request("span-2", approval_id="approval-1", approval_generation=3), _context(reply, span))
+    transition = rl.claim(_request("span-2", approval_id="approval-1"), _context(reply, span))
     assert transition.claimed is not None
     assert transition.claimed.kind is SpanKind.APPROVAL_RESUME
-    assert transition.claimed.approval_generation == 3
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.ACTIVE
 
@@ -791,7 +790,7 @@ def test_a_resume_that_waited_in_place_stays_stoppable_through_its_approval() ->
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.PAUSED)
     reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1", event_id="$reply")
-    resume = rl.claim(_request("span-2", approval_id="approval-1", approval_generation=1), _context(reply, span))
+    resume = rl.claim(_request("span-2", approval_id="approval-1"), _context(reply, span))
     assert resume.reply is not None
     assert resume.claimed is not None
     waiting = rl.pause(
@@ -1050,7 +1049,7 @@ def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.PAUSED)
     reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1", event_id="$reply")
-    resume = rl.claim(_request("span-2", approval_id="approval-1", approval_generation=1), _context(reply, span))
+    resume = rl.claim(_request("span-2", approval_id="approval-1"), _context(reply, span))
     assert resume.reply is not None
     assert resume.claimed is not None
     first = rl.stop(

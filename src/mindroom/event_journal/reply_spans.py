@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 _SPAN_COLUMNS = """
-    span_id, reply_id, kind, delivery_id, approval_id, approval_generation, bot_generation,
+    span_id, reply_id, kind, delivery_id, approval_id, bot_generation,
     base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns, prepared_edit_json
 """
 _ROLES = ("pending", "logical", "discovery")
@@ -73,7 +73,6 @@ def _sources(transaction: Transaction, principal_id: str, span_id: str) -> SpanS
 
 
 def _span(transaction: Transaction, principal_id: str, row: Row) -> Span:
-    approval_generation = row["approval_generation"]
     ended_at_ns = row["ended_at_ns"]
     outcome = row["outcome"]
     return Span(
@@ -86,7 +85,6 @@ def _span(transaction: Transaction, principal_id: str, row: Row) -> Span:
         claimed_at_ns=int(row["claimed_at_ns"]),
         base_sequence=int(row["base_sequence"]),
         approval_id=cast("str | None", row["approval_id"]),
-        approval_generation=None if approval_generation is None else int(approval_generation),
         rollback=_rollback(cast("str | None", row["rollback_json"])),
         outcome=None if outcome is None else SpanOutcome(str(outcome)),
         ended_at_ns=None if ended_at_ns is None else int(ended_at_ns),
@@ -168,10 +166,10 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
         transaction.execute(
             """
             INSERT INTO reply_spans (
-                principal_id, span_id, reply_id, kind, delivery_id, approval_id, approval_generation,
+                principal_id, span_id, reply_id, kind, delivery_id, approval_id,
                 bot_generation, base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns,
                 prepared_edit_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 principal_id,
@@ -180,7 +178,6 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
                 span.kind.value,
                 span.delivery_id,
                 span.approval_id,
-                span.approval_generation,
                 span.bot_generation,
                 span.base_sequence,
                 _rollback_json(span.rollback),

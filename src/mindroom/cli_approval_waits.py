@@ -48,7 +48,7 @@ class CliApprovalWaits:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Claims a ready continuation for the waiting response, with its reply's
     # resume in place when reply records own the reply.
-    claim: Callable[[ApprovalContinuation, bool], Awaitable[ApprovalContinuation | None]]
+    claim: Callable[[ApprovalContinuation], Awaitable[ApprovalContinuation | None]]
     # Records a claimed continuation's next pause while the response waits in place.
     advance: Callable[[ApprovalContinuation, PausedAttempt, MessageTarget], Awaitable[object]]
     waiters: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
@@ -71,7 +71,6 @@ class CliApprovalWaits:
         waiter: asyncio.Event,
         source: str,
         target: MessageTarget,
-        show_tool_calls: bool,
         publish: Callable[[PausedAttempt], Awaitable[object]],
         authorize: Callable[[], Awaitable[bool]],
     ) -> tuple[RunRequirement, ...]:
@@ -108,7 +107,7 @@ class CliApprovalWaits:
                     raise PermissionError(msg)
                 if deadline is not None and time.time_ns() >= deadline:
                     raise ResponsePausedForApproval(paused)
-                claimed = await self.claim(current, show_tool_calls)
+                claimed = await self.claim(current)
                 if claimed is None:
                     msg = "CLI approval lost its single execution claim"
                     raise RuntimeError(msg)
@@ -134,7 +133,6 @@ class CliApprovalWaits:
         source_event_ids: tuple[str, ...],
         progress: _ApprovalProgress,
         target: MessageTarget,
-        show_tool_calls: bool,
         publish: Callable[[PausedAttempt], Awaitable[object]],
         authorize: Callable[[], Awaitable[bool]],
         settle_terminal: bool,
@@ -163,7 +161,6 @@ class CliApprovalWaits:
                         target=target,
                         publish=publish,
                         authorize=authorize,
-                        show_tool_calls=show_tool_calls,
                     )
                 except ResponsePausedForApproval as error:
                     suspended = True

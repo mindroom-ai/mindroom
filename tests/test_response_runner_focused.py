@@ -401,10 +401,16 @@ async def _in_reply_span(
     request: ResponseRequest,
     *,
     placeholder_event_id: str | None = "$thinking",
+    show_tool_calls: bool = True,
 ) -> AsyncIterator[tuple[AsyncMock, AsyncMock]]:
     """Run the block in the request's reply span, recording the reply writes it sends through the real gateway."""
     with _through_the_gateway(runner) as sent:
-        async with response_span(runner, request, placeholder_event_id=placeholder_event_id):
+        async with response_span(
+            runner,
+            request,
+            placeholder_event_id=placeholder_event_id,
+            show_tool_calls=show_tool_calls,
+        ):
             yield sent
 
 
@@ -3956,7 +3962,13 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
         ),
         patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
     ):
-        async with _in_reply_span(runner, request, placeholder_event_id="$stream") as (edit_text, _send_text):
+        # The turn's span froze the visibility it claimed with.
+        async with _in_reply_span(
+            runner,
+            request,
+            placeholder_event_id="$stream",
+            show_tool_calls=turn_visibility,
+        ) as (edit_text, _send_text):
             outcome = await runner._suspend_for_approval(
                 paused,
                 request=request,
@@ -8595,7 +8607,6 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
                     show_tool_calls=True,
                 ),
                 authorize=lambda: runner._request_remains_authorized(request),
-                show_tool_calls=True,
             )
             if authorized:
                 resolved = await operation
@@ -8665,7 +8676,6 @@ async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
                     show_tool_calls=True,
                 ),
                 authorize=AsyncMock(return_value=True),
-                show_tool_calls=True,
             )
 
 
@@ -9052,7 +9062,6 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
                 show_tool_calls=False,
             ),
             authorize=lambda: runner._request_remains_authorized(request),
-            show_tool_calls=False,
         )
         pytest.fail("expired live approval must suspend")
 

@@ -640,6 +640,7 @@ class AgentBot:
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
             clean_up_superseded=self._clean_up_superseded_approval,
+            show_tool_calls=lambda: show_tool_calls_for_agent(self.config, self.agent_name),
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(

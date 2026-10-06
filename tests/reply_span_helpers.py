@@ -171,6 +171,7 @@ def response_span(
     request: ResponseRequest,
     *,
     placeholder_event_id: str | None = None,
+    show_tool_calls: bool = True,
 ) -> AbstractAsyncContextManager[SpanHandle]:
     """Run the block in the reply span the runner's bot claims for the request's source.
 
@@ -189,6 +190,7 @@ def response_span(
         regenerated_event_id=regenerated,
         edit_receipt_order=request.sources.edit_receipt_order,
         prepared_edit=request.prepared_edit_record,
+        show_tool_calls=show_tool_calls,
     )
 
 
@@ -219,7 +221,7 @@ async def reply_shown_for_approval(principal: PrincipalStore, continuation: Appr
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,
             membership_epoch=await principal.membership_epoch(continuation.room_id),
-            empty_presentation=encode_presentation(Presentation()),
+            empty_presentation=encode_presentation(Presentation(show_tool_calls=continuation.show_tool_calls)),
         ),
         ClaimLookup(existing_event_id=continuation.response_event_id),
     )

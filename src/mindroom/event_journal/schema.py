@@ -509,7 +509,6 @@ _TABLES = (
         -- attempt, and spans of one reply can share it.
         delivery_id TEXT NOT NULL,
         approval_id TEXT,
-        approval_generation BIGINT,
         bot_generation TEXT NOT NULL,
         base_sequence BIGINT NOT NULL,
         rollback_json TEXT,

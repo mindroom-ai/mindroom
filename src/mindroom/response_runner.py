@@ -1723,7 +1723,6 @@ class ResponseRunner:
     async def _claim_in_place_approval(
         self,
         current: ApprovalContinuation,
-        legacy_show_tool_calls: bool,
     ) -> ApprovalContinuation | None:
         """Claim a ready continuation for the response waiting on it, resuming its reply in place."""
         handle = current_span()
@@ -1731,7 +1730,6 @@ class ResponseRunner:
         claimed, applied = await self.deps.approval_store.claim_approval_in_place(
             current.approval_id,
             runtime_generation=self.deps.approval_runtime_generation,
-            legacy_show_tool_calls=legacy_show_tool_calls,
             reply_id=handle.reply_id,
             span_id=handle.span_id,
         )
@@ -1868,7 +1866,6 @@ class ResponseRunner:
             source_event_ids=request.sources.pending_event_ids,
             progress=progress,
             target=target,
-            show_tool_calls=show_tool_calls,
             publish=partial(
                 self._suspend_for_approval,
                 request=request,
@@ -3444,11 +3441,9 @@ class ResponseRunner:
         slot: SpanSlot,
     ) -> ApprovalContinuation | None:
         """Claim a ready continuation together with its reply's resume span."""
-        legacy_show_tool_calls = self._show_tool_calls(owned.entity_name)
         claimed, handle = await self.deps.replies.claim_approval_resume(
             owned,
             runtime_generation=self.deps.approval_runtime_generation,
-            legacy_show_tool_calls=legacy_show_tool_calls,
             placeholder=TEAM_PLACEHOLDER if owned.entity_kind == "team" else AGENT_PLACEHOLDER,
         )
         slot.handle = handle

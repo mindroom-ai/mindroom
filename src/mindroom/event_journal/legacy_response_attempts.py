@@ -10,6 +10,8 @@ from mindroom.handled_turns import TurnRecordCodec
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.turn_record import TurnRecord
+
     from .approval_continuations import ApprovalContinuation
     from .backend import Transaction
 
@@ -37,6 +39,9 @@ class LegacyIdentity(TypedDict):
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     edit_receipt_order: int | None
+    show_tool_calls: bool
+    show_tool_calls_is_frozen: bool
+    prepared_edit_record: TurnRecord | None
 
 
 _PAGE_SIZE = 128
@@ -187,10 +192,21 @@ def upgrade_continuation_identity(
 
 
 def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, object]:
-    """Return the context entries that keep a continuation's adopted identity until its span is named."""
+    """Return the context entries that keep a continuation's adopted identity until its span is named.
+
+    That includes the visibility and selected edit an earlier release kept in
+    the context; a named span's reply holds both instead.
+    """
     if continuation.span_id is not None:
         return {}
+    visibility = {"show_tool_calls": continuation.show_tool_calls} if continuation.show_tool_calls_is_frozen else {}
     return {
+        **visibility,
+        "prepared_edit_record": (
+            None
+            if continuation.prepared_edit_record is None
+            else TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
+        ),
         _IDENTITY_KEY: {
             "entity_name": continuation.entity_name,
             "room_id": continuation.room_id,
@@ -218,4 +234,14 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> Legac
         "logical_source_event_ids": tuple(_event_ids(identity.get("logical_source_event_ids"))),
         "discovery_event_ids": tuple(_event_ids(identity.get("discovery_event_ids", []))),
         "edit_receipt_order": cast("int | None", identity.get("edit_receipt_order")),
+        "show_tool_calls": context.get("show_tool_calls", True) is not False,
+        "show_tool_calls_is_frozen": "show_tool_calls" in context,
+        "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
     }
+
+
+def _prepared_edit(raw: object) -> TurnRecord | None:
+    if not isinstance(raw, dict):
+        return None
+    stored = cast("dict[str, object]", raw)
+    return TurnRecordCodec._from_ledger_record(str(stored.get("anchor_event_id")), stored)

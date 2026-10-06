@@ -33,6 +33,7 @@ from mindroom.reply_lifecycle import (
     SpanOutcome,
     SpanSources,
 )
+from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.turn_record import TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
@@ -59,7 +60,7 @@ def _request(span_id: str = "span-1", *, reply_id: str = "reply-1", source: str 
         room_id=ROOM,
         thread_id="$thread",
         membership_epoch=3,
-        empty_presentation='{"version":1}',
+        empty_presentation=encode_presentation(Presentation()),
     )
 
 
@@ -965,7 +966,6 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
     claimed, applied = await alice.claim_approval_in_place(
         "approval-1",
         runtime_generation="gen-1",
-        legacy_show_tool_calls=None,
         reply_id=paused.reply_id,
         span_id=waiting.span_id,
     )

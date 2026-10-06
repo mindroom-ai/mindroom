@@ -1543,7 +1543,6 @@ class PrincipalStore:
         *,
         runtime_generation: str,
         claim: rl.ClaimRequest,
-        legacy_show_tool_calls: bool | None = None,
     ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
         """Claim one ready paused run and its reply's resume span together.
 
@@ -1558,7 +1557,6 @@ class PrincipalStore:
                 approval_id=approval_id,
                 runtime_generation=runtime_generation,
                 claim=claim,
-                legacy_show_tool_calls=legacy_show_tool_calls,
             ),
         )
 
@@ -1567,7 +1565,6 @@ class PrincipalStore:
         approval_id: str,
         *,
         runtime_generation: str,
-        legacy_show_tool_calls: bool | None,
         reply_id: str,
         span_id: str,
     ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
@@ -1583,7 +1580,6 @@ class PrincipalStore:
                 self._principal_id,
                 approval_id=approval_id,
                 runtime_generation=runtime_generation,
-                legacy_show_tool_calls=legacy_show_tool_calls,
             )
             if claimed is None:
                 return None, None
@@ -1738,6 +1734,7 @@ class PrincipalStore:
         *,
         entity_name: str,
         presentations: legacy_reply_messages.LegacyPresentations,
+        show_tool_calls: bool,
         now_ns: int,
     ) -> tuple[AppliedTransition, ...]:
         """Give the replies an earlier release left in flight records, once per principal."""
@@ -1747,6 +1744,7 @@ class PrincipalStore:
                 self._principal_id,
                 entity_name=entity_name,
                 presentations=presentations,
+                show_tool_calls=show_tool_calls,
                 now_ns=now_ns,
             ),
         )
@@ -1923,7 +1921,6 @@ def _claim_approval_resume(
     approval_id: str,
     runtime_generation: str,
     claim: rl.ClaimRequest,
-    legacy_show_tool_calls: bool | None,
 ) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
     """Claim the continuation and the resume span of its paused reply in one transaction."""
     current = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
@@ -1933,7 +1930,7 @@ def _claim_approval_resume(
     applied = replies.claim(
         transaction,
         principal_id,
-        replace(claim, approval_id=current.approval_id, approval_generation=current.generation),
+        replace(claim, approval_id=current.approval_id),
         replies.ClaimLookup(existing_event_id=current.response_event_id),
     )
     if applied.transition.claimed is None:
@@ -1944,7 +1941,6 @@ def _claim_approval_resume(
         principal_id,
         approval_id=approval_id,
         runtime_generation=runtime_generation,
-        legacy_show_tool_calls=legacy_show_tool_calls,
     )
     assert claimed is not None, "a ready continuation is claimed in the transaction that read it"
     return claimed, applied

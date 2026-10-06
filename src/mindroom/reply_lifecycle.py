@@ -156,7 +156,6 @@ class Span:
     # The reply's write sequence at claim; any acknowledged write above it is this span's or later.
     base_sequence: int
     approval_id: str | None = None
-    approval_generation: int | None = None
     rollback: Rollback | None = None
     outcome: SpanOutcome | None = None
     ended_at_ns: int | None = None
@@ -509,7 +508,6 @@ class ClaimRequest:
     driving_edit_id: str | None = None
     # Set for approval resumes, claimed with the continuation.
     approval_id: str | None = None
-    approval_generation: int | None = None
     # Set when an interactive selection created this span at its acknowledgement.
     interactive_span_id: str | None = None
     # Set when no reply record exists but the turn records a historical response event.
@@ -568,7 +566,6 @@ def _new_span(
         claimed_at_ns=request.now_ns,
         base_sequence=reply.reply_sequence,
         approval_id=request.approval_id,
-        approval_generation=request.approval_generation,
         rollback=rollback,
         prepared_edit=request.prepared_edit,
     )

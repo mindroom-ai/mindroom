@@ -137,7 +137,12 @@ async def _main_continuation(
 
 async def _adopt(principal: PrincipalStore) -> tuple[rl.Reply, ...]:
     await principal.replies.write_generation("gen-new", now_ns=NOW)
-    await principal.adopt_legacy_replies(entity_name=ENTITY, presentations=LEGACY_PRESENTATIONS, now_ns=NOW)
+    await principal.adopt_legacy_replies(
+        entity_name=ENTITY,
+        presentations=LEGACY_PRESENTATIONS,
+        show_tool_calls=True,
+        now_ns=NOW,
+    )
     replies = []
     for reply, _last in await principal.legacy_reply_reads():
         replies.append(reply)
@@ -201,6 +206,32 @@ async def test_a_waiting_approval_pauses_its_reply_with_what_it_showed(
     assert (adopted.response_event_id, adopted.room_id, adopted.source_event_ids) == ("$reply", ROOM, ("$source",))
     # owner_lost leaves a paused reply to its approval.
     assert await principal.replies.owner_lost("gen-new", now_ns=NOW) == ()
+
+
+@pytest.mark.parametrize("current_policy", [False, True])
+async def test_an_unfrozen_approval_adopts_the_current_tool_call_visibility(
+    journal_store: EventJournalStore,
+    current_policy: bool,
+) -> None:
+    """A continuation from before frozen visibility shows tool calls as the entity's policy says when adopted."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    await _main_continuation(principal, replace(_continuation("waiting"), show_tool_calls_is_frozen=False))
+
+    await principal.replies.write_generation("gen-new", now_ns=NOW)
+    await principal.adopt_legacy_replies(
+        entity_name=ENTITY,
+        presentations=LEGACY_PRESENTATIONS,
+        show_tool_calls=current_policy,
+        now_ns=NOW,
+    )
+
+    reply = await _only_reply(principal)
+    assert decode_presentation(reply.presentation).show_tool_calls is current_policy
+    adopted = await principal.approval_continuation("approval-1")
+    assert adopted is not None
+    assert adopted.show_tool_calls is current_policy
 
 
 async def test_an_interrupted_stream_with_pending_sources_waits_for_its_read_then_replays(
@@ -280,7 +311,12 @@ async def test_a_settled_stream_from_days_ago_is_history(journal_store: EventJou
     two_days_later = initial.created_at_ns + 2 * 24 * 60 * 60 * 1_000_000_000
 
     await principal.replies.write_generation("gen-new", now_ns=two_days_later)
-    await principal.adopt_legacy_replies(entity_name=ENTITY, presentations=LEGACY_PRESENTATIONS, now_ns=two_days_later)
+    await principal.adopt_legacy_replies(
+        entity_name=ENTITY,
+        presentations=LEGACY_PRESENTATIONS,
+        show_tool_calls=True,
+        now_ns=two_days_later,
+    )
 
     assert await principal.legacy_reply_reads() == ()
     assert await principal.replies.for_sources(("$source",)) is None
@@ -409,6 +445,7 @@ async def test_command_turns_and_finished_answers_get_no_reply(journal_store: Ev
         await principal.adopt_legacy_replies(
             entity_name=ENTITY,
             presentations=LEGACY_PRESENTATIONS,
+            show_tool_calls=True,
             now_ns=NOW,
         )
         == ()
