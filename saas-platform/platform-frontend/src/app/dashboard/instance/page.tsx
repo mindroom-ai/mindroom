@@ -24,6 +24,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
   const router = useRouter()
   const { subscription, loading: subscriptionLoading } = useSubscription()
   const canRunInstances = subscription?.can_run_instances === true
+  const hasNoPlan = !subscription || subscription.tier === 'free'
   const cachedInstance = getCachedInstance(userId)
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
@@ -179,14 +180,16 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           <CardHeader className="mb-3">No Instance Found</CardHeader>
           <p className="text-gray-600 dark:text-gray-400 mb-8 text-lg">
             {canRunInstances
-              ? "You don't have a MindRoom instance yet. Start it from the dashboard."
-              : "You don't have a MindRoom instance yet. Choose a plan to get your own instance; your first plan starts with a free trial."}
+              ? "You don't have a MindRoom instance yet. Create it from the dashboard."
+              : hasNoPlan
+                ? "You don't have a MindRoom instance yet. Choose a plan to get your own instance; your first plan starts with a free trial."
+                : "You don't have a MindRoom instance yet. Restore billing to run your instance."}
           </p>
           <button
-            onClick={() => router.push(canRunInstances ? '/dashboard' : '/dashboard/billing/upgrade')}
+            onClick={() => router.push(canRunInstances ? '/dashboard' : hasNoPlan ? '/dashboard/billing/upgrade' : '/dashboard/billing')}
             className="px-8 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
           >
-            {canRunInstances ? 'Go to dashboard' : 'Choose a plan'}
+            {canRunInstances ? 'Go to dashboard' : hasNoPlan ? 'Choose a plan' : 'Open billing'}
           </button>
         </Card>
       </div>

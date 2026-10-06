@@ -29,7 +29,7 @@ describe('QuickActions', () => {
   it('asks an account without a plan to choose one and lists no plan limits', () => {
     render(<QuickActions instance={null} subscription={subscription('free')} />)
 
-    expect(screen.getByText('Choose a plan to run MindRoom')).toBeInTheDocument()
+    expect(screen.getByText('Choose a plan to run a hosted instance')).toBeInTheDocument()
     expect(screen.queryByText('Plan Limits')).not.toBeInTheDocument()
     expect(screen.queryByText(/free plan/i)).not.toBeInTheDocument()
   })

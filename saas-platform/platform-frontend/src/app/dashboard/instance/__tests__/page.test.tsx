@@ -79,6 +79,17 @@ describe('InstancePage', () => {
     expect(screen.queryByRole('button', { name: 'Choose a plan' })).not.toBeInTheDocument()
   })
 
+  it('sends an account whose plan is not entitled to billing instead of offering a trial', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'paused', can_run_instances: false }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: 'Open billing' })).toBeInTheDocument()
+    expect(screen.getByText(/Restore billing to run your instance/)).toBeInTheDocument()
+    expect(screen.queryByText(/free trial/)).not.toBeInTheDocument()
+  })
+
   it('asks an account without a plan to choose one', async () => {
     ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'free', can_run_instances: false }, loading: false })
     ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })

@@ -144,7 +144,7 @@ Agents keep what matters from every conversation, get better as more people use 
 <td valign="top">
 
 **🛡️ [Safe to give real access](https://docs.mindroom.chat/#safe-to-give-real-access)**<br />
-One-tap approval for the actions you choose, sandboxed code execution (on by default when hosted), and opt-in end-to-end encryption on Matrix, the open standard governments use for secure messaging.
+One-tap approval for the actions you choose, sandboxed code execution (on by default in hosted MindRoom), and opt-in end-to-end encryption on Matrix, the open standard governments use for secure messaging.
 
 </td>
 </tr>

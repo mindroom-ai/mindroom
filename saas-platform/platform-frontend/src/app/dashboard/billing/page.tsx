@@ -333,7 +333,7 @@ export default function BillingPage() {
                       onClick={() => window.location.href = '/dashboard/billing/upgrade'}
                       className="w-full px-3 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 transition-colors"
                     >
-                      Upgrade to {plan.name}
+                      {hasPlan ? 'Upgrade to' : 'Choose'} {plan.name}
                     </button>
                   )}
                   {isDowngrade && (

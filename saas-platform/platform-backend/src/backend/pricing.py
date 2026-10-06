@@ -33,6 +33,8 @@ class PlanLimits(BaseModel):
     storage_gb: int | Literal["unlimited"]
 
 
+# `pricing-config.yaml` keeps a `free` entry for accounts that never subscribed to a plan.
+# It is not offered as a plan, and entitlements never let it run a hosted instance.
 class Plan(BaseModel):
     """Pricing plan configuration."""
 

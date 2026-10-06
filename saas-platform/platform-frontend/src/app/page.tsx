@@ -89,8 +89,8 @@ const installOptions: InstallOption[] = [
     command: 'brew install --cask mindroom-ai/tap/mindroom',
     note: 'Needs an Apple silicon Mac with macOS 14 or later.',
     steps: [
-      ['Open the MindRoom app', 'It installs MindRoom, with one-click local models.'],
-      ['Connect your chat account', 'Approve the pairing link without leaving the app, and your agents start in the background.'],
+      ['Open the MindRoom app', 'It installs MindRoom and offers one-click local models.'],
+      ['Connect your chat account', 'Approve the pairing link without leaving the app, then click Install and Start Agents to run them in the background.'],
     ],
     guide: { href: macAppUrl, label: 'Read the macOS app guide' },
   },
@@ -159,7 +159,7 @@ const reasons: IconItem[] = [
   },
   {
     title: 'Safe to give real access',
-    body: 'One-tap approval for the actions you choose, sandboxed code execution (on by default when hosted), and opt-in end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
+    body: 'One-tap approval for the actions you choose, sandboxed code execution (on by default in hosted MindRoom), and opt-in end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
     icon: Shield,
     href: `${docsUrl}#safe-to-give-real-access`,
   },

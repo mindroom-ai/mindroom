@@ -4,7 +4,6 @@ product:
   metadata:
     platform: mindroom
 plans:
-  # Accounts that never subscribed to a plan; not offered as a plan and cannot run a hosted instance.
   free:
     name: No plan
     price_monthly: 0
