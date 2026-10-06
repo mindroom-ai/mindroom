@@ -140,8 +140,8 @@ Other people in the room, and other Matrix clients, see only the notice text, `I
 ### Find a canvas again
 
 A canvas the user comes back to, such as a landing page an agent keeps current or a checklist used every day, does not have to be found in its thread again.
-Where canvases are on, the **Canvases** button in Chat's sidebar lists the canvases agents made for the user: pinned ones first, then the most recently updated, with the agent, the room, and when each was updated and created.
-Choosing a title opens the canvas at its latest version, filling the conversation's column; choosing the room opens the conversation.
+Where canvases are on, the **Canvases** button in Chat's sidebar lists the canvases agents made for the user: pinned ones first, then the most recently updated, with the thread each was shown in (by its summary, as the sidebar names it), the room, the agent, and when each was updated and created.
+Choosing a title opens the canvas at its latest version, filling the conversation's column; choosing the thread or the room opens that conversation.
 
 Pins are kept in the user's Matrix account data (`io.mindroom.pinned_canvases`, room and event IDs only), so they show on every device.
 The rest of the list holds the canvases this browser has received, so a new device starts with recent canvases and older ones appear once their thread is opened.
