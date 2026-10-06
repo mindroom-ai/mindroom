@@ -16,6 +16,8 @@ image:
   digest: ""
   pullPolicy: Always
 
+# Applied to every chart pod and to dedicated Kubernetes worker pods.
+# With a separate workers.kubernetes.namespace, create these Secrets there too; the chart does not copy them.
 imagePullSecrets: []
 
 deploymentAnnotations: {}

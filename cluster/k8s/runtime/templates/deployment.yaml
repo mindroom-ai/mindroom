@@ -288,6 +288,10 @@ spec:
               value: {{ include "mindroom-runtime.workerImage" . | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY
               value: {{ default .Values.image.pullPolicy .Values.workers.kubernetes.image.pullPolicy | quote }}
+            {{- with .Values.imagePullSecrets }}
+            - name: MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_SECRETS_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_PORT
               value: {{ .Values.workers.kubernetes.port | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME
