@@ -2121,6 +2121,7 @@ class DeliveryGateway:
             handle,
             handle.presentation(display_text, tuple(draft.tool_trace or ())),
             state=ReplyState.COMPLETED,
+            consumes_edit=request.prepared_edit_record is not None,
         )
         # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
         shown_text, _shown_trace = _reply_body(display_text, draft.tool_trace, reply_write.shown)
@@ -2623,8 +2624,9 @@ class DeliveryGateway:
         def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite:
             status = state_content.get(constants.STREAM_STATUS_KEY)
             state = _reply_state_for_stream_status(status)
+            consumes_edit = completed_edit_record is not None and completed_edit_record() is not None
             if progress.untransformed_text is None:
-                return terminal_write(handle, shown(progress), state=state)
+                return terminal_write(handle, shown(progress), state=state, consumes_edit=consumes_edit)
             # The final transform reshaped the whole reply: that is what it
             # shows from now on, and the span's own answer stays canonical.
             whole = Presentation(
@@ -2635,7 +2637,7 @@ class DeliveryGateway:
                 show_tool_calls=handle.base.show_tool_calls,
             )
             canonical = shown(replace(progress, text=progress.untransformed_text))
-            return terminal_write(handle, canonical, state=state, frozen_display=whole)
+            return terminal_write(handle, canonical, state=state, frozen_display=whole, consumes_edit=consumes_edit)
 
         async def terminal_send(
             client: nio.AsyncClient,

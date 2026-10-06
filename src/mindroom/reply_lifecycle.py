@@ -160,6 +160,8 @@ class Span:
     rollback: Rollback | None = None
     outcome: SpanOutcome | None = None
     ended_at_ns: int | None = None
+    # A regeneration's selected edit (an encoded turn record), committed to the turn when the span answers.
+    prepared_edit: str | None = None
 
     @property
     def ended(self) -> bool:
@@ -243,8 +245,8 @@ class SettleSources:
     """In the transaction: settle every pending source of the span, which records its turn answered."""
 
     span_id: str
-    # Whether the span ended with its answer, which consumes a regeneration's selected edit.
-    answered: bool = False
+    # Whether the span's answer consumes the selected edit its regeneration carries.
+    consumes_edit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +522,8 @@ class ClaimRequest:
     interactive_span_id: str | None = None
     # Set when no reply record exists but the turn records a historical response event.
     historical_event_id: str | None = None
+    # Set for edit regenerations: the encoded turn record of the edit the run answers.
+    prepared_edit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,6 +578,7 @@ def _new_span(
         approval_id=request.approval_id,
         approval_generation=request.approval_generation,
         rollback=rollback,
+        prepared_edit=request.prepared_edit,
     )
 
 
@@ -961,6 +966,8 @@ class TerminalWrite:
     frozen_display: str | None = None
     # The span's last direct progress edit, which this durable write confirms.
     confirms: ProgressConfirmation | None = None
+    # Whether this answer consumes the regeneration's selected edit: its run completed.
+    consumes_edit: bool = False
 
 
 def _terminal_row(
@@ -992,9 +999,8 @@ def _terminal_row(
     )
     shown = write.shown if write.frozen_display is None else write.frozen_display
     updated, row = _row(updated, span, stage, shown=shown)
-    effects: tuple[Effect, ...] = (
-        (SettleSources(span.span_id, answered=write.state is ReplyState.COMPLETED),) if settles else ()
-    )
+    consumes_edit = write.consumes_edit and write.state is ReplyState.COMPLETED
+    effects: tuple[Effect, ...] = (SettleSources(span.span_id, consumes_edit=consumes_edit),) if settles else ()
     return Transition(
         outcome=Outcome.APPLIED,
         reply=updated,

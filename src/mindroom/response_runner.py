@@ -3356,6 +3356,7 @@ class ResponseRunner:
             historical_event_id=request.existing_event_id if regeneration else None,
             existing_event_id=request.existing_event_id,
             interactive_span_id=request.interactive_span_id,
+            prepared_edit=request.prepared_edit_record,
         )
 
     async def _settle_unauthorized_approval_continuation(

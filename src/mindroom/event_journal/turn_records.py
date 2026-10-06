@@ -220,6 +220,18 @@ def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> Te
     return write
 
 
+def encode_prepared_edit(record: TurnRecord) -> str:
+    """Encode a regeneration's selected edit for its span."""
+    return json.dumps(TurnRecordCodec._to_ledger_record(record))
+
+
+def decode_prepared_edit(stored: str, index_event_id: str) -> TurnRecord:
+    """Decode the selected edit a regeneration span carries."""
+    record = TurnRecordCodec._from_ledger_record(index_event_id, json.loads(stored))
+    assert record is not None, "Corrupt prepared edit on a regeneration span"
+    return record
+
+
 def complete_turn(
     transaction: Transaction,
     agent_name: str,

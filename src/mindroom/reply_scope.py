@@ -21,6 +21,7 @@ from uuid import uuid4
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation, TurnCompleted
+from mindroom.event_journal.turn_records import encode_prepared_edit
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -332,6 +333,7 @@ class ReplyRuntime:
         approval_id: str | None = None,
         approval_generation: int | None = None,
         interactive_span_id: str | None = None,
+        prepared_edit: TurnRecord | None = None,
     ) -> SpanHandle | ClaimRefused:
         """Claim the reply one span answers, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
@@ -348,6 +350,7 @@ class ReplyRuntime:
             approval_generation=approval_generation,
             interactive_span_id=interactive_span_id,
             historical_event_id=historical_event_id,
+            prepared_edit=None if prepared_edit is None else encode_prepared_edit(prepared_edit),
         )
         try:
             applied = await self.committed(
@@ -662,6 +665,7 @@ def terminal_write(
     *,
     state: rl.ReplyState,
     frozen_display: Presentation | None = None,
+    consumes_edit: bool = False,
 ) -> ReplyWrite:
     """Return the span's terminal row for one reply state, as finish, stopped, or a delivery failure decides it."""
     write = rl.TerminalWrite(
@@ -670,6 +674,7 @@ def terminal_write(
         state=state,
         frozen_display=None if frozen_display is None else encode_presentation(frozen_display),
         confirms=handle.unconfirmed_progress,
+        consumes_edit=consumes_edit,
     )
 
     def decide(reply: rl.Reply, span: rl.Span) -> rl.Transition:
