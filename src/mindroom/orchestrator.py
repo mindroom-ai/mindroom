@@ -1546,6 +1546,14 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.schedule_reply_authorized_call_reconciliation()
 
+    async def _end_unconfigured_entity_replies(self, config: Config) -> None:
+        """End the replies of entities removed while MindRoom was stopped; no bot finishes them (DESIGN.md §9.3)."""
+        configured = {ROUTER_AGENT_NAME, *config.agents, *config.teams}
+        await self._shared_journal_store().end_entity_replies(
+            lambda entity_name: entity_name not in configured,
+            now_ns=time.time_ns(),
+        )
+
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
@@ -1579,6 +1587,7 @@ class _MultiAgentOrchestrator:
         )
 
         config = self._require_config()
+        await self._end_unconfigured_entity_replies(config)
         self._log_mcp_degraded_entities(config)
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
@@ -1772,6 +1781,8 @@ class _MultiAgentOrchestrator:
             if bot is not None:
                 await bot.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
                 self.agent_bots.pop(entity_name, None)
+        # No bot remains to finish their replies (DESIGN.md §9.3).
+        await self._shared_journal_store().end_entity_replies(removed_entities.__contains__, now_ns=time.time_ns())
 
     async def _stop_entities_before_mcp_sync(
         self,

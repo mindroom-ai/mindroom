@@ -314,13 +314,22 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """The bot that mutates a recovery-only client must own its full lifetime."""
+        """The bot that mutates a recovery-only client must own its full lifetime, and its principal's replies."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
+        async def recover_as_owner(_approval_id: str) -> bool:
+            # It is its own bot instance for the replies it finishes, before it writes any of them.
+            assert await bot._reply_runtime.store.replies.active_generation() == bot._reply_runtime.generation
+            return True
+
         with (
             patch.object(bot, "_open_approval_recovery_client", new=AsyncMock()) as open_client,
-            patch.object(bot._response_runner, "recover_approval_final", new=AsyncMock(return_value=True)) as recover,
+            patch.object(
+                bot._response_runner,
+                "recover_approval_final",
+                new=AsyncMock(side_effect=recover_as_owner),
+            ) as recover,
             patch.object(bot, "_close_approval_recovery_client", new=AsyncMock()) as close_client,
         ):
             assert await bot.recover_approval_final("approval-1")

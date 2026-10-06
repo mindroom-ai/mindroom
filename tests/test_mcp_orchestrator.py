@@ -1037,6 +1037,7 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
             "reconcile_unavailable_entities",
             side_effect=reconcile_before_cleanup,
         ),
+        patch.object(orchestrator, "_shared_journal_store", return_value=MagicMock(end_entity_replies=AsyncMock())),
     ):
         await orchestrator._remove_deleted_entities({ROUTER_AGENT_NAME})
 

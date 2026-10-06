@@ -585,6 +585,41 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
     assert await principal.replies.supersede_replay(("$elsewhere",), now_ns=110) is None
 
 
+async def test_a_removed_entitys_open_replies_end_without_writing(journal_store: EventJournalStore) -> None:
+    """The removed entity's running reply fails with its span lost, owing nothing; other entities are untouched."""
+    principal = journal_store.principal(PRINCIPAL)
+    await _claimed(principal)
+    other = journal_store.principal("other@alice")
+    others = rl.claim(
+        replace(_request("span-other", reply_id="reply-other"), entity_name="other"),
+        ClaimContext(
+            reply=None,
+            last_span=None,
+            current_span=None,
+            interactive_span=None,
+            durable_write_debt=False,
+            active_generation="gen-1",
+        ),
+    )
+    await journal_store.backend.write(lambda tx: replies.apply(tx, "other@alice", others))
+
+    assert await journal_store.end_entity_replies(lambda name: name == "agent", now_ns=50) == 1
+
+    ended = await principal.replies.load("reply-1")
+    assert ended is not None
+    assert ended.state is ReplyState.FAILED
+    assert ended.current_span_id is None
+    assert ended.owed_write is None
+    assert ended.redaction_pending == ()
+    lost = await principal.replies.span("span-1")
+    assert lost is not None
+    assert lost.outcome is SpanOutcome.LOST
+    untouched = await other.replies.load("reply-other")
+    assert untouched is not None
+    assert untouched.state is ReplyState.ACTIVE
+    assert await journal_store.end_entity_replies(lambda name: name == "agent", now_ns=60) == 0
+
+
 async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:
     """Locking returns the stored reply; state queries return only the asked states."""
     transition = _first_claim()

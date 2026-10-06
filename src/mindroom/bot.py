@@ -1987,6 +1987,8 @@ class AgentBot:
         try:
             if opened_recovery_client:
                 await self._open_approval_recovery_client()
+                # A recovery-only bot is its own instance for the replies it finishes (DESIGN.md §9.3).
+                await self._reply_runtime.take_ownership()
             return await self._response_runner.recover_approval_final(approval_id)
         finally:
             if opened_recovery_client:

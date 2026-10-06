@@ -2523,6 +2523,12 @@ class EventJournalStore:
             ),
         )
 
+    async def end_entity_replies(self, ends: Callable[[str], bool], *, now_ns: int) -> int:
+        """End the open replies of the entities ``ends`` names; return how many ended."""
+        return await self.backend.write(
+            lambda transaction: replies.end_entity_replies(transaction, ends, now_ns=now_ns),
+        )
+
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.
 

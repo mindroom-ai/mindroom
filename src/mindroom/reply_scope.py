@@ -225,6 +225,10 @@ class ReplyRuntime:
         for span_id in await self.store.replies.spans_in_room(room_id, self.spans.live_span_ids()):
             self.spans.cancel(span_id, cancel_source=None)
 
+    async def take_ownership(self) -> None:
+        """Make this bot instance the owner of its principal's replies, before it writes any of them."""
+        await self.store.replies.write_generation(self.generation, now_ns=self.clock())
+
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
@@ -233,7 +237,7 @@ class ReplyRuntime:
         still pending, and the notes this owes are delivered by the outbox
         recovery after each room syncs.
         """
-        await self.store.replies.write_generation(self.generation, now_ns=self.clock())
+        await self.take_ownership()
         adopted = await self.store.adopt_legacy_replies(
             entity_name=self.entity_name,
             presentations=LEGACY_PRESENTATIONS,

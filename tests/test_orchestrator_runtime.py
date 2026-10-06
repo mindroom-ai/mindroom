@@ -382,15 +382,41 @@ async def test_entity_removal_recovers_original_final_before_bot_cleanup(tmp_pat
     orchestrator._approval_recovery.reconcile_unavailable_entities = AsyncMock(
         side_effect=lambda _names: order.append("recover"),
     )
+    journal = MagicMock()
+    journal.end_entity_replies = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("end_replies"))
 
     try:
-        await orchestrator._remove_deleted_entities({"removed"})
+        with patch.object(orchestrator, "_shared_journal_store", return_value=journal):
+            await orchestrator._remove_deleted_entities({"removed"})
     finally:
         sync.cancel()
         await asyncio.gather(sync, return_exceptions=True)
 
-    assert order == ["quiesce", "recover", "cleanup", "cancel_sync", "stop"]
+    # With no bot left to finish them, the removed entity's replies end last.
+    assert order == ["quiesce", "recover", "cleanup", "cancel_sync", "stop", "end_replies"]
+    ((ends,), _kwargs) = journal.end_entity_replies.call_args
+    assert ends("removed")
+    assert not ends("kept")
     assert "removed" not in orchestrator.agent_bots
+
+
+@pytest.mark.asyncio
+async def test_startup_ends_the_replies_of_entities_no_longer_configured(tmp_path: Path) -> None:
+    """An entity removed while MindRoom was stopped has no bot, so its open replies end at startup."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    journal = MagicMock()
+    journal.end_entity_replies = AsyncMock(return_value=1)
+    config = MagicMock(agents={"general": object()}, teams={"crew": object()})
+
+    with patch.object(orchestrator, "_shared_journal_store", return_value=journal):
+        await orchestrator._end_unconfigured_entity_replies(config)
+
+    ((ends,), _kwargs) = journal.end_entity_replies.call_args
+    assert ends("removed")
+    assert not any(ends(name) for name in ("general", "crew", ROUTER_AGENT_NAME))
 
 
 @pytest.mark.asyncio

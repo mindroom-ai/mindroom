@@ -315,6 +315,24 @@ def supersede_replay(
     )
 
 
+def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
+    """End the open replies of entities with no bot any more, without writing to Matrix (DESIGN.md §9.3)."""
+    ended = 0
+    for principal_id, found in reply_messages.open_replies(transaction):
+        if not ends(found.entity_name):
+            continue
+        reply = reply_messages.lock(transaction, principal_id, found.reply_id)
+        assert reply is not None
+        current = (
+            None
+            if reply.current_span_id is None
+            else reply_spans.load(transaction, principal_id, reply.current_span_id)
+        )
+        if apply(transaction, principal_id, rl.removed_entity(reply, current, now_ns=now_ns)).transition.applied:
+            ended += 1
+    return ended
+
+
 def owner_lost(
     transaction: Transaction,
     principal_id: str,

@@ -240,6 +240,18 @@ def spans_in_room(
     return frozenset(str(row["span_id"]) for row in rows)
 
 
+def open_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
+    """Return every principal's replies not yet terminal, with their principal."""
+    rows = transaction.fetchall(
+        f"""
+        SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages
+        WHERE state IN ('active', 'paused')
+        ORDER BY principal_id, created_at_ns, reply_id
+        """,  # noqa: S608 - a fixed column list
+    )
+    return tuple((str(row["principal_id"]), _reply(row)) for row in rows)
+
+
 def with_pending_work(transaction: Transaction, principal_id: str) -> tuple[Reply, ...]:
     """Return replies owing a redaction or a write that has not been enqueued yet."""
     rows = transaction.fetchall(
