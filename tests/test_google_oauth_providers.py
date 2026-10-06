@@ -26,7 +26,7 @@ from mindroom.oauth.google import (
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
 from mindroom.oauth.google_cloud import (
     _GOOGLE_CLOUD_OAUTH_SCOPES,
-    GOOGLE_CLOUD_READ_ONLY_SCOPE,
+    _GOOGLE_CLOUD_READ_ONLY_SCOPE,
     google_cloud_oauth_provider,
 )
 from mindroom.oauth.google_docs import _GOOGLE_DOCS_OAUTH_SCOPES, google_docs_oauth_provider
@@ -216,9 +216,9 @@ def test_google_cloud_provider_requests_only_read_only_cloud_and_identity_scopes
 
     assert provider.id == "google_cloud"
     assert provider.display_name == "Google Cloud"
-    assert provider.scopes == (*GOOGLE_IDENTITY_SCOPES, GOOGLE_CLOUD_READ_ONLY_SCOPE)
+    assert provider.scopes == (*GOOGLE_IDENTITY_SCOPES, _GOOGLE_CLOUD_READ_ONLY_SCOPE)
     assert provider.scopes == _GOOGLE_CLOUD_OAUTH_SCOPES
-    assert GOOGLE_CLOUD_READ_ONLY_SCOPE == "https://www.googleapis.com/auth/cloud-platform.read-only"
+    assert _GOOGLE_CLOUD_READ_ONLY_SCOPE == "https://www.googleapis.com/auth/cloud-platform.read-only"
     assert provider.credential_service == "google_cloud_oauth"
     assert provider.tool_config_service is None
     assert provider.client_config_services == ("google_cloud_oauth_client",)

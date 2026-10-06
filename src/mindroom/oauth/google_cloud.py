@@ -9,10 +9,10 @@ import mindroom.oauth.google as google_oauth
 if TYPE_CHECKING:
     from mindroom.oauth.providers import OAuthProvider
 
-GOOGLE_CLOUD_READ_ONLY_SCOPE = "https://www.googleapis.com/auth/cloud-platform.read-only"
+_GOOGLE_CLOUD_READ_ONLY_SCOPE = "https://www.googleapis.com/auth/cloud-platform.read-only"
 _GOOGLE_CLOUD_OAUTH_SCOPES = (
     *google_oauth.GOOGLE_IDENTITY_SCOPES,
-    GOOGLE_CLOUD_READ_ONLY_SCOPE,
+    _GOOGLE_CLOUD_READ_ONLY_SCOPE,
 )
 
 
