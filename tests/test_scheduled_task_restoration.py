@@ -433,6 +433,44 @@ class TestScheduledTaskRestoration:
         router_bot.client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_non_router_stop_keeps_scheduled_tasks_and_router_owner(self, tmp_path: Path) -> None:
+        """Replacing a non-router agent leaves the router's runner owner and running tasks alone."""
+        config = self._bind_runtime(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default", "rooms": ["lobby"]}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
+        )
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@general:mindroom.com",
+            password="test",  # noqa: S106
+            display_name="GeneralAgent",
+        )
+        agent_bot = make_test_agent_bot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["lobby"],
+        )
+        agent_bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+        agent_bot.client.rooms = {}
+        self._install_runtime_support(agent_bot)
+        router_owner = scheduling.ScheduledTaskRunnerOwner(
+            make_matrix_client_mock(user_id="@router:mindroom.com"),
+            agent_bot._conversation_reader,
+        )
+        scheduling.set_scheduled_task_runner_owner(router_owner)
+
+        with patch("mindroom.bot.cancel_all_running_scheduled_tasks", new_callable=AsyncMock) as mock_cancel:
+            await agent_bot.stop()
+
+        assert scheduling._runner_owner is router_owner
+        mock_cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_multiple_agents_only_router_restores(self, tmp_path: Path) -> None:
         """Test that when multiple agents join a room, only router restores tasks."""
         config = self._bind_runtime(

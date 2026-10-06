@@ -479,7 +479,7 @@ class TestBotTaskRestoration:
 
     @pytest.mark.asyncio
     async def test_restore_tasks_on_room_join(self) -> None:
-        """Test that scheduled tasks are restored when joining rooms."""
+        """The started router registers as the scheduled-task runner owner and restores tasks when joining rooms."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -582,6 +582,8 @@ class TestBotTaskRestoration:
                 mock_restore.return_value = 0  # No tasks restored
 
                 await bot.start()
+                # Only the router offers its runtime to new scheduled-task runners.
+                assert scheduling._runner_owner is None
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 
