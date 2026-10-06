@@ -181,6 +181,31 @@ async def test_authentication_rejection_has_safe_http_diagnostics() -> None:
     assert "private-token-marker" not in json.dumps(logs)
 
 
+async def test_newer_protocol_probe_is_logged_as_negotiation() -> None:
+    """A newer client's version probe is rejected without a warning; other rejections still warn."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        pytest.fail("Rejected request reached dispatch")
+
+    probe = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}},
+    }
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        async with _client(dispatch) as client:
+            probed = await client.post("/mcp", json=probe, headers={"MCP-Protocol-Version": "2026-07-28"})
+            malformed = await client.post("/mcp", content=b"{", headers={"Content-Type": "application/json"})
+    assert probed.status_code == 400
+    assert malformed.status_code == 400
+    probe_log, malformed_log = [entry for entry in logs if entry["event"] == "mcp_gateway_http_completed"]
+    assert probe_log["log_level"] == "info"
+    assert probe_log["unsupported_protocol_version"] is True
+    assert malformed_log["log_level"] == "warning"
+    assert "unsupported_protocol_version" not in malformed_log
+
+
 async def test_concurrent_call_diagnostics_keep_request_ownership() -> None:
     """Duplicate IDs, capacity failures, and cancellation retain distinct correlated outcomes."""
     started = asyncio.Event()
