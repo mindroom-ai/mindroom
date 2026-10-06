@@ -519,8 +519,7 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
         # What recovery restores for after-response hooks is what the room shows.
         frozen = await bot.journal_principal().load_matrix_delivery(delivery_id="$event", stage=DeliveryStage.FINAL)
         assert frozen is not None
-        assert frozen.result is not None
-        assert frozen.result["body"] == final
+        assert (await runner._approval_outcome_from_delivery(frozen)).final_visible_body == final
 
 
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:

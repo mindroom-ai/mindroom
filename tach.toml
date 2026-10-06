@@ -1283,6 +1283,7 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
     "mindroom.message_target",
+    "mindroom.reply_lifecycle",
     "mindroom.tool_approval",
     "mindroom.tool_system.events",
     "mindroom.delegation.recovery",

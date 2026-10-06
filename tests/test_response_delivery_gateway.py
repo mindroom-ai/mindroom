@@ -72,7 +72,7 @@ from tests.conftest import (
 )
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import final_in_span, reply_span
+from tests.reply_span_helpers import final_in_resume_span, final_in_span, reply_span
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
@@ -1200,12 +1200,12 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         # would be permanent for those clients, not a one-attempt glitch.
         assert stored["body"] == "* the answer"
 
-    async def test_deferred_final_edit_freezes_semantic_interactive_outcome(
+    async def test_an_approved_runs_final_edit_freezes_its_interactive_question(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """Approval recovery must restore plain text and interactive registration facts."""
+        """Approval recovery must restore the interactive registration facts of an approved run's answer."""
         gateway = _gateway(tmp_path, alice)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "Choose"})
@@ -1215,13 +1215,12 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)):
-            outcome = await final_in_span(
+            await final_in_resume_span(
                 gateway,
                 alice,
                 replace(
                     self._final_request(interactive_text),
                     existing_event_id="$placeholder",
-                    defer_source_handoff=True,
                 ),
             )
 
@@ -1232,13 +1231,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
         assert new_content[DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
-        semantic = delivery.result
-        assert semantic is not None
-        assert semantic["body"] == outcome.final_visible_body
-        assert semantic["interactive"]["question_text"] == "Pick"
-        assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
+        # The reply's records hold the body; the result keeps only the question's registration facts.
+        assert delivery.result is not None
+        assert set(delivery.result) == {"interactive"}
+        assert delivery.result["interactive"]["question_text"] == "Pick"
+        assert delivery.result["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
 
-    async def test_large_deferred_final_edit_freezes_a_sendable_semantic_payload(
+    async def test_large_final_edit_freezes_a_sendable_payload(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
@@ -1268,7 +1267,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             replace(
                 self._final_request(answer),
                 existing_event_id="$placeholder",
-                defer_source_handoff=True,
             ),
         )
 
@@ -1276,10 +1274,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         delivery = await _turn_row(alice, DeliveryStage.FINAL)
         frozen = delivery.payload
         assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
-        assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
         assert delivery.result is not None
-        assert delivery.result["body"] == answer
-        assert delivery.result["interactive"] is None
         continuations = delivery.result[_SEGMENT_PAYLOADS_RESULT_KEY]
         assert isinstance(continuations, list)
         assert continuations
@@ -1317,7 +1312,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outcome = await final_in_span(
             gateway,
             alice,
-            replace(self._final_request("x" * 100_000), defer_source_handoff=True),
+            self._final_request("x" * 100_000),
         )
 
         assert outcome.terminal_status == "completed"
@@ -1327,8 +1322,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert client.upload.await_count == 1
         assert client.room_send.await_count == 1
-        assert delivery.result is not None
-        assert _SEGMENT_PAYLOADS_RESULT_KEY not in delivery.result
+        assert delivery.result is None
 
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,
@@ -1348,7 +1342,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         answer = "\n\n".join(f"## Part {index}\n\n" + "x" * 500 for index in range(200))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
-            await final_in_span(gateway, alice, replace(self._final_request(answer), defer_source_handoff=True))
+            await final_in_span(gateway, alice, self._final_request(answer))
         row = await _turn_row(alice, DeliveryStage.FINAL)
         assert row.acknowledged_event_id is None
         assert row.result is not None
@@ -1418,7 +1412,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         request = replace(
             self._final_request("x" * 20_500),
             existing_event_id="$placeholder",
-            defer_source_handoff=True,
             extra_content={"io.mindroom.test_metadata": "m" * 10_500},
         )
 
@@ -1501,7 +1494,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             alice,
             replace(
                 self._final_request("x" * 100_000),
-                defer_source_handoff=True,
             ),
         )
 
@@ -1575,7 +1567,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         request = replace(
             self._final_request("x" * 70_000),
             existing_event_id=existing_event_id,
-            defer_source_handoff=True,
             extra_content={"io.mindroom.required_metadata": "m" * 70_000},
         )
 

@@ -517,7 +517,6 @@ class SendTextRequest:  # noqa: D101
     # command confirmation -- and takes the direct path, because a synthetic
     # turn ID would put a row in the outbox that recovery cannot reason about.
     delivery_turn_id: str | None = None
-    defer_source_handoff: bool = False
     delivery_result: dict[str, object] | None = None
     # Set when this send is a durable write of an agent or team reply.
     reply_write: ReplyWrite | None = None
@@ -531,11 +530,6 @@ class EditTextRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
     retry_sync_recovery: bool = False
-    # Set when this edit is a turn's final answer. Once a placeholder exists
-    # the answer reaches the room as an edit of it, so this is the delivery
-    # whose loss leaves a user looking at "Thinking..." for good.
-    delivery_turn_id: str | None = None
-    defer_source_handoff: bool = False
     delivery_result: dict[str, object] | None = None
     # Set when this edit is a durable write of an agent or team reply.
     reply_write: ReplyWrite | None = None
@@ -551,7 +545,6 @@ class FinalDeliveryRequest:  # noqa: D101
     extra_content: dict[str, Any] | None
     existing_event_is_placeholder: bool = False
     skip_mentions: bool = False
-    defer_source_handoff: bool = False
     # Set when this answer completes a regeneration, which consumes the edit its span selected.
     consumes_edit: bool = False
 
@@ -1221,8 +1214,7 @@ class DeliveryGateway:
         delivery_result = _result_with_segment_payloads(request.delivery_result, prepared)
 
         try:
-            handoff = None if request.defer_source_handoff else self.deps.turn_handoff
-            event_id = await self._response_delivery(send, handoff=handoff).deliver(
+            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
                 delivery_id=request.delivery_turn_id,
                 stage=DeliveryStage.FINAL,
                 room_id=room_id,
@@ -1534,13 +1526,12 @@ class DeliveryGateway:
         reason: _ApprovalFailureNote,
         text: str,
         target: MessageTarget,
-    ) -> bool | None:
+    ) -> bool:
         """Show a failed approval's note on the reply it paused.
 
         A Stop or failure note replaces the reply's body; an interruption note
-        goes below what the reply showed. Returns ``None`` when no reply records
-        own the event, else whether the note was delivered; the continuation's
-        finish then ends the reply.
+        goes below what the reply showed. Returns whether the note was
+        delivered; the continuation's finish then ends the reply.
         """
         note = {
             "cancelled": note_segment(NoteKind.CANCELLED),
@@ -1592,7 +1583,8 @@ class DeliveryGateway:
                     continue
                 # The reply ended otherwise; the continuation's finish reads its rows.
                 return True
-        return None
+        # Only a continuation reply classification has not reached yet has no reply to show the note on.
+        return True
 
     async def _end_span_left_behind(self, reply: rl.Reply, span_id: str) -> bool:
         """End a resume an older bot instance left running on the reply; return whether it ended one."""
@@ -1814,23 +1806,16 @@ class DeliveryGateway:
         )
         return None
 
-    async def _edit_content(  # noqa: PLR0911
+    async def _edit_content(
         self,
         request: EditTextRequest,
         room_id: str,
         content: dict[str, Any],
     ) -> MatrixSendOutcome | None:
-        """Apply one edit, through the outbox when it carries a turn's answer.
+        """Apply one edit, through the outbox when it is a durable write of a reply.
 
-        Once a turn has a placeholder, its answer reaches the room as an edit
-        of that message rather than a new one, so this is where the answer
-        becomes visible and where losing it leaves the user reading
-        "Thinking..." with nothing durable to recover.
-
-        Edits that are not a turn's answer -- streaming progress, cancellation
-        notices, failure updates -- take the direct path. They are transport,
-        and a durable row per streamed revision would put a claim-before-send
-        round trip inside the streaming loop.
+        Other edits -- a voice echo, a reconciliation update -- take the direct
+        path: they are transport with no identity a restart can resolve.
         """
         client = self.ready_client()
         if request.reply_write is not None:
@@ -1842,93 +1827,14 @@ class DeliveryGateway:
                 result=request.delivery_result,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
-        if request.delivery_turn_id is None:
-            return await edit_message_outcome(
-                client,
-                room_id,
-                request.event_id,
-                content,
-                request.new_text,
-                retry_sync_recovery=request.retry_sync_recovery,
-            )
-        delivered: DeliveredMatrixEvent | None = None
-
-        async def send(claimed: MatrixDelivery) -> str:
-            # The frozen row, not the request that produced it. `edit_message_result`
-            # would rebuild the envelope from the current closure, which is the same
-            # bytes on a first attempt and the wrong ones on a second: a row is frozen
-            # once attempted, so a regenerated answer would go out under a transaction
-            # ID the homeserver has already seen -- dropped as a duplicate if the first
-            # attempt landed, visible while the durable row says otherwise if it did
-            # not. The stored envelope already is what that helper would build.
-            nonlocal delivered
-            delivered = await self._send_claimed(
-                claimed,
-                retry_sync_recovery=request.retry_sync_recovery,
-                operation="edit_message",
-            )
-            return delivered.event_id
-
-        # What is stored is the finished wire event, not the text it was built
-        # from. Recovery sends the row exactly as frozen and has no request to
-        # rebuild from, so anything reconstructed at send time -- the replace
-        # envelope, the fallback body -- would be missing on the one path that
-        # matters, and the answer would come back as a second message with the
-        # placeholder still above it.
-        envelope = build_edit_event_content(
-            event_id=request.event_id,
-            new_content=content,
-            new_text=request.new_text,
-        )
-        # Prepared before the row is written, for the same reason the envelope
-        # is built here: the row has to hold the finished wire event. A sidecar
-        # uploaded after the claim would leave the row holding the oversized
-        # original while Matrix received an MXC reference, and a resend would
-        # upload again under a transaction ID already accepted. An attempted
-        # row is already frozen, so preparation is skipped and
-        # `enqueue` leaves that stored envelope untouched for the claimed send.
-        prepared = await self._prepared_for_the_wire(
+        return await edit_message_outcome(
+            client,
             room_id,
-            envelope,
-            turn_id=request.delivery_turn_id,
-            stage=DeliveryStage.FINAL,
-            continuation_thread_id=request.target.resolved_thread_id,
-            continuation_reply_to_event_id=request.event_id,
+            request.event_id,
+            content,
+            request.new_text,
+            retry_sync_recovery=request.retry_sync_recovery,
         )
-        if isinstance(prepared, MatrixDeliveryFailure):
-            if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
-                return prepared
-            preparation_failure = prepared
-        else:
-            preparation_failure = None
-            envelope = prepared.content
-        delivery_result = _result_with_segment_payloads(request.delivery_result, prepared)
-
-        try:
-            handoff = None if request.defer_source_handoff else self.deps.turn_handoff
-            event_id = await self._response_delivery(send, handoff=handoff).deliver(
-                delivery_id=request.delivery_turn_id,
-                stage=DeliveryStage.FINAL,
-                room_id=room_id,
-                thread_id=request.target.resolved_thread_id,
-                payload=envelope,
-                result=delivery_result,
-                edits_event_id=request.event_id,
-                permanent_failure_reason=(
-                    _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
-                ),
-            )
-        except _DeliveryRefusedError:
-            return None
-        if event_id is None:
-            # The delivery was withdrawn by membership or ended in an explicit
-            # permanent failure, so there is nothing left for recovery to send.
-            return preparation_failure
-        if delivered is not None:
-            return delivered
-        # Already acknowledged: this turn's answer reached the room on an
-        # earlier run, so nothing was sent and the callback never ran.
-        return await self._acknowledged_delivery(request.delivery_turn_id, DeliveryStage.FINAL, event_id, envelope)
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
@@ -2042,13 +1948,11 @@ class DeliveryGateway:
         # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
         shown_text, _shown_trace = _reply_body(display_text, draft.tool_trace, reply_write.shown)
         delivery_result: dict[str, object] | None = None
-        if request.defer_source_handoff:
-            metadata = interactive_response.interactive_metadata
+        metadata = interactive_response.interactive_metadata
+        if handle.span.kind is rl.SpanKind.APPROVAL_RESUME:
             add_legacy_final_outcome_marker(delivery_extra_content)
-            delivery_result = {
-                "body": shown_text,
-                "interactive": metadata.to_metadata() if metadata is not None else None,
-            }
+            # Recovery after a restart registers an approved run's question from its frozen answer.
+            delivery_result = None if metadata is None else {"interactive": metadata.to_metadata()}
 
         if request.existing_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.

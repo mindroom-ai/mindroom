@@ -14,17 +14,15 @@ from mindroom.approval_failure import prepare_approval_failure
 from mindroom.cancellation import cancel_source_from_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_CANCELLED,
-    STREAM_STATUS_ERROR,
-    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
-from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
+from mindroom.delivery_gateway import DeliveryStage
 from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
+from mindroom.reply_lifecycle import SpanOutcome
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
@@ -39,8 +37,6 @@ def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
     if not succeeded:
         raise RuntimeError(failure_reason)
 
-
-_USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -446,13 +442,11 @@ class ApprovalResponseCoordinator:
         continuation: ApprovalContinuation,
         reason: str,
         *,
-        visible_text: str | None = None,
         interruption: Literal["interrupted", "restart"] | None = None,
     ) -> bool:
         """Settle cards and the failure outcome from the owning source worker.
 
-        ``interruption`` names the note a reply with records shows below its
-        content; ``visible_text`` is that content as read back from Matrix.
+        ``interruption`` names the note the reply shows below its content.
         """
         current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:
@@ -477,29 +471,15 @@ class ApprovalResponseCoordinator:
         if await self.finish_approval(current.approval_id):
             return True
         user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
-        visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if user_stop else redact_sensitive_text(reason))
-        target = continuation_target(current)
         written = await self.delivery_gateway.write_approval_failure_note(
             current.response_event_id,
             approval_id=current.approval_id,
             reason=interruption or ("cancelled" if user_stop else "error"),
             text=redact_sensitive_text(reason),
-            target=target,
+            target=continuation_target(current),
         )
-        if written is not None:
-            # The reply's records show the note; the finish ends the reply.
-            return written and await self.finish_approval(current.approval_id)
-        delivered = await self.delivery_gateway.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=current.response_event_id,
-                new_text=visible_reason,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED if user_stop else STREAM_STATUS_ERROR},
-                delivery_turn_id=current.source_event_ids[0],
-                defer_source_handoff=True,
-            ),
-        )
-        return delivered and await self.finish_approval(current.approval_id)
+        # The reply's records show the note; the finish ends the reply.
+        return written and await self.finish_approval(current.approval_id)
 
     async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
         """End an interrupted continuation's cards and hand its pending sources back to ordinary replay."""
@@ -531,9 +511,19 @@ class ApprovalResponseCoordinator:
     ) -> MatrixDelivery | None:
         """Return FINAL debt produced by a completed Agno continuation, not failure settlement."""
         delivery = await self.final_delivery(continuation, recover=recover)
-        if delivery is None:
+        if delivery is None or delivery.permanently_failed:
             return None
-        return delivery if delivery.result is not None and not delivery.permanently_failed else None
+        if delivery.span_id is None:
+            # LEGACY_COMPAT: Approval answers frozen before reply records, marked successful by their result.
+            # Legacy format: an acknowledged FINAL row without reply_id whose result_json an approval resume's
+            # completed answer filled, while a failure note's row has none.
+            # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages read success
+            # from the outcome of the reply span that wrote the row.
+            # Handling: such a row is successful when it has a result, as it was.
+            # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
+            return delivery if delivery.result is not None else None
+        span = await self.store.replies.span(delivery.span_id)
+        return delivery if span is not None and span.outcome is SpanOutcome.COMPLETED else None
 
     async def final_delivery(
         self,

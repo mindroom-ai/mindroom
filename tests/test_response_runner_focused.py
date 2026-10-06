@@ -1983,6 +1983,60 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
+@pytest.mark.parametrize("completed", [True, False])
+@pytest.mark.asyncio
+async def test_frozen_approval_final_without_reply_records_restores_its_body(
+    tmp_path: Path,
+    *,
+    completed: bool,
+) -> None:
+    """An approval answer an earlier release froze is successful when its result says so, and restores that body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-frozen",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="claimed",
+    )
+    await store_main_continuation(store, continuation)
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "* Approved answer", "m.new_content": {"body": "Approved answer"}},
+        edits_event_id="$waiting",
+        result={"body": "Approved answer", "interactive": None} if completed else None,
+    )
+    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$final",
+        delivered_projections=(),
+    )
+    stored = await store.approval_continuation("approval-frozen")
+    assert stored is not None
+
+    frozen = await runner._approval_responses.successful_final_delivery(stored)
+    if not completed:
+        assert frozen is None
+        return
+    assert frozen is not None
+    restored = await runner._approval_outcome_from_delivery(frozen)
+    assert (restored.final_visible_body, restored.event_id) == ("Approved answer", "$waiting")
+
+
 def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:
     """Return one complete visible Matrix event response."""
     response = nio.RoomGetEventResponse.from_dict(

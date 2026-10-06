@@ -100,6 +100,7 @@ from mindroom.reply_presentation import (
     decode_presentation,
     format_error_note,
     note_segment,
+    render_body,
 )
 from mindroom.reply_scope import (
     ClaimRefused,
@@ -1968,7 +1969,6 @@ class ResponseRunner:
                         identity=identity,
                         tool_trace=visible_tool_trace if show_tool_calls else None,
                         extra_content=_merge_response_extra_content(result.metadata_content, claimed.attachment_ids),
-                        defer_source_handoff=True,
                         consumes_edit=claimed.prepared_edit_record is not None,
                     ),
                 ),
@@ -2058,7 +2058,7 @@ class ResponseRunner:
                         ),
                     )
                     return
-                progress.settle(self._approval_outcome_from_delivery(delivery))
+                progress.settle(await self._approval_outcome_from_delivery(delivery))
                 return
             if (
                 outcome.terminal_status not in {"completed", "suspended"}
@@ -2120,9 +2120,8 @@ class ResponseRunner:
         else:
             await self._approval_responses.settle_failure(continuation, reason)
 
-    @staticmethod
-    def _approval_outcome_from_delivery(delivery: MatrixDelivery) -> FinalDeliveryOutcome:
-        """Restore semantic lifecycle facts from one frozen approval FINAL."""
+    async def _approval_outcome_from_delivery(self, delivery: MatrixDelivery) -> FinalDeliveryOutcome:
+        """Restore semantic lifecycle facts from one frozen approval FINAL and the reply it answered."""
         acknowledged_event_id = delivery.acknowledged_event_id
         if acknowledged_event_id is None:
             msg = "Approval final delivery is not acknowledged"
@@ -2131,14 +2130,23 @@ class ResponseRunner:
         payload = dict(delivery.payload)
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
-        semantic = delivery.result
-        semantic_body: object = None
-        interactive_metadata = None
-        if isinstance(semantic, dict):
-            stored_semantic = cast("dict[str, object]", semantic)
-            semantic_body = stored_semantic.get("body")
-            interactive_metadata = InteractiveMetadata.from_metadata(stored_semantic.get("interactive"))
-        body = semantic_body if isinstance(semantic_body, str) else visible.get("body")
+        semantic = cast("dict[str, object]", delivery.result) if isinstance(delivery.result, dict) else {}
+        interactive_metadata = InteractiveMetadata.from_metadata(semantic.get("interactive"))
+        reply = None if delivery.reply_id is None else await self.deps.replies.store.replies.load(delivery.reply_id)
+        body: object
+        if reply is not None:
+            body, _trace = render_body(decode_presentation(reply.presentation))
+        else:
+            # LEGACY_COMPAT: Approval answers frozen before reply records, with their body in the result.
+            # Legacy format: an acknowledged FINAL row without reply_id whose result_json holds the body the
+            # completed approval resume showed.
+            # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages read the body
+            # from the presentation of the reply the row answered.
+            # Handling: the result's body, else the payload's, restores the answer's visible body.
+            # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
+            body = semantic.get("body")
+            if not isinstance(body, str):
+                body = visible.get("body")
         if not isinstance(body, str):
             body = "Tool approval continuation completed"
         return FinalDeliveryOutcome(
@@ -2241,7 +2249,7 @@ class ResponseRunner:
             return False, None
         if delivery.acknowledged_event_id is None:
             return True, None
-        recovered_outcome = self._approval_outcome_from_delivery(delivery)
+        recovered_outcome = await self._approval_outcome_from_delivery(delivery)
         request = self._approval_response_request(claimed, target=target)
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(

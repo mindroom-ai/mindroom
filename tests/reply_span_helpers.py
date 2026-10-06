@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ClaimLookup, ReplyRowRequest
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
+from mindroom.response_sources import ResponseSources
 from tests.approval_continuation_helpers import claim_continuation
 
 if TYPE_CHECKING:
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
-    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
+    from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_runner import ResponseRequest, ResponseRunner
     from mindroom.turn_record import TurnRecord
@@ -165,6 +166,56 @@ async def final_in_span(
         runtime=runtime,
     ):
         return await gateway.deliver_final(replace(request, consumes_edit=prepared_edit is not None))
+
+
+async def final_in_resume_span(
+    gateway: DeliveryGateway,
+    principal: PrincipalStore,
+    request: FinalDeliveryRequest,
+) -> FinalDeliveryOutcome:
+    """Deliver one final answer as an approved run's resume, below the pause its request's event shows."""
+    runtime = _runtime(principal)
+    gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
+    source = request.identity.response_envelope.source_event_id
+    if not await principal.is_pending(source):
+        await principal.admit(
+            InboundEvent(
+                event_id=source,
+                room_id=request.target.room_id,
+                thread_id=request.target.resolved_thread_id,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=1,
+                source={},
+            ),
+        )
+    assert request.existing_event_id is not None
+    paused = await paused_for_approval(
+        principal,
+        ApprovalContinuation(
+            approval_id=f"approval-{source}",
+            run_id="run",
+            session_id="session",
+            entity_kind="agent",
+            entity_name="agent",
+            room_id=request.target.room_id,
+            thread_id=request.target.resolved_thread_id,
+            requester_id="@user:localhost",
+            response_event_id=request.existing_event_id,
+            sources=ResponseSources((source,), request.identity.sources.logical_source_event_ids or (source,)),
+            calls=(),
+            state="ready",
+        ),
+    )
+    assert paused is not None
+    await runtime.take_ownership()
+    async with runtime.span_scope() as slot:
+        claimed, handle = await runtime.claim_approval_resume(paused, placeholder=AGENT_PLACEHOLDER)
+        assert claimed is not None
+        assert handle is not None
+        slot.handle = handle
+        return await gateway.deliver_final(request)
 
 
 def response_span(
