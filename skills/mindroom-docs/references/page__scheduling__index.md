@@ -262,3 +262,67 @@ Recurring progress is kept in `tracking/recurring_schedules/` under the storage 
 Without it, or after a schedule edit, MindRoom resumes from the next future occurrence without replaying past ones.
 Restarts do not post the same trigger twice.
 For `schedule:fired` hooks that run more than once for the same occurrence, see [Hooks](https://docs.mindroom.chat/hooks/#event-notes).
+
+## Built-in Automations
+
+Built-in automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
+Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
+
+```yaml
+defaults:
+  automations: []                # inherited by agents that omit the field
+
+agents:
+  mind:
+    memory_backend: file
+    automations:
+      - prompt_curation          # the built-in with its defaults
+      # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000}
+```
+
+- An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
+- `cron` is a five-field expression in the configured [timezone](#timezone).
+- `room` is a room alias or ID; it defaults to the agent's first configured room, and each prompt starts a new thread.
+- `agents.<name>.automations: []` turns inherited defaults off for one agent.
+- Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
+- Edits apply on config reload without restarting the agent.
+- The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
+- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a one-line notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
+- An automation does not post again while its previous prompt awaits verify.
+- Nothing is persisted: the schedule is the cooldown, and a restart skips the occurrence it missed.
+
+For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](https://docs.mindroom.chat/hooks/#event-notes), which can suppress a fire or rewrite its message.
+
+### `prompt_curation`
+
+Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
+`prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
+
+1. The check measures `MEMORY.md` plus the agent's `context_files`, except `protected_files`, with the estimate behind `static_prompt_tokens` (characters / 4).
+2. Above `trigger_tokens`, it snapshots those files and posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", which asks for a 10 to 15% cut, or only the gap to 90% of the trigger when that is smaller.
+3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
+4. Verify writes the snapshot back over every changed file, and posts why, when any of these holds:
+    - a file can no longer be read safely, for example because it became a link or grew past 1 MiB;
+    - a file shrank by more than `max_file_shrink`;
+    - the files total less than the floor, or did not shrink;
+    - a protected file changed, or a file is no longer valid UTF-8;
+    - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
+
+A restore also rewrites any `memory/` topic file the run changed other than by appending, back to its archived text followed by everything the run left in it, and new files are kept, so moved detail is never lost.
+A topic file that grew past 1 MiB or is no longer valid UTF-8 cannot be compared safely, so it is left as it is.
+When the prompt files are unchanged, only lost memory content triggers that restore.
+A reply that rewrites a curated file or a changed topic file during the run can be overwritten when verify restores the snapshot.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `0 4 * * *` | When to check |
+| `room` | first configured room | Where to post the prompt |
+| `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
+| `min_reduction` | `0.10` | Cut the prompt asks for, or only the gap to 90% of the trigger when that is smaller |
+| `max_reduction` | `0.15` | Largest cut one run may make |
+| `max_file_shrink` | `0.25` | Largest shrink of any single file in one run |
+| `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size |
+| `protected_files` | `[]` | Workspace-relative paths the run must leave unchanged |
+
+`prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt template is overridable as `PROMPT_CURATION_PROMPT_TEMPLATE`.

@@ -4268,7 +4268,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Allow updating existing spreadsheets",
+          "description": "Allow updating and formatting existing spreadsheets",
           "label": "Enable Update Operations",
           "name": "update",
           "options": null,
@@ -4285,7 +4285,7 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Read, create, and update Google Sheets spreadsheets",
+      "description": "Read, create, update, and format Google Sheets spreadsheets",
       "display_name": "Google Sheets",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
       "executes_code": false,
@@ -4293,7 +4293,8 @@
       "function_names": [
         "create_sheet",
         "read_sheet",
-        "update_sheet"
+        "update_sheet",
+        "batch_update_sheet"
       ],
       "helper_text": null,
       "icon": "SiGooglesheets",

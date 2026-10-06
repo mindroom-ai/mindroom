@@ -242,7 +242,7 @@ async def test_register_media_attachment_rejects_payload_over_limit(
     tmp_path: Path,
 ) -> None:
     """Direct media registration should not persist bytes over the Matrix media cap."""
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 5)
 
     record = await _register_media_attachment(
         storage_path=tmp_path,
@@ -273,7 +273,7 @@ async def test_register_matrix_media_attachment_stops_reading_an_oversized_downl
     homeserver accepts and have every agent that reads it buffer all of it.
     """
     limit = 256 * 1024
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", limit)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", limit)
     response = FakeMediaResponse(b"x" * (5 * limit))
     client = make_matrix_client_mock()
     client.send = AsyncMock(return_value=response)
@@ -313,7 +313,7 @@ async def test_thread_history_media_that_failed_is_not_downloaded_again_every_tu
     Anyone who can post can name media that always fails, such as a file over
     the size cap, and every turn in that conversation fetched each one in full.
     """
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 1024)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 1024)
     client = make_matrix_client_mock()
     client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"x" * 4096))
     history = [
@@ -348,7 +348,7 @@ async def test_one_turn_downloads_a_bounded_number_of_thread_history_media(
     turn itself must stop. Media left over waits for a later turn.
     """
     limit = attachments_module._MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 1024)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 1024)
     client = make_matrix_client_mock()
     client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"x" * 4096))
     history = [
@@ -383,7 +383,7 @@ async def test_failing_older_thread_history_media_cannot_hold_back_newer_media(
     the budget left out still arrives on a later turn.
     """
     limit = attachments_module._MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 1024)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 1024)
     client = make_matrix_client_mock()
     client.send = AsyncMock(
         side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
@@ -598,7 +598,7 @@ def test_register_bytes_attachment_rejects_unsafe_ids_and_oversized_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unsafe IDs and payloads above the retained media limit never reach storage."""
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 5)
     common = {
         "kind": "file",
         "mime_type": "text/plain",
@@ -663,7 +663,7 @@ def test_register_local_attachment_rejects_sources_over_the_media_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Retaining a copy must not let an oversized or sparse source consume primary storage."""
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 5)
     source = tmp_path / "large.bin"
     source.write_bytes(b"123456")
 

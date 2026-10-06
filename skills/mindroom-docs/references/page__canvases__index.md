@@ -198,7 +198,11 @@ chat_ui.show_canvas(
 - **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
-- **Saved state:** call `window.mindroom.saveState(value)` on every change to keep what the user did in the page; Chat batches the writes, and a value over 256K characters of JSON throws.
+- **Kept inputs:** inputs, selects, and textareas with an `id` or `name` keep their values on their own, across a reload, an update, and a switch to another version, matched by that `id` or `name` (a radio group by its name).
+  When the page loads, Chat sets the kept values and fires `input` and `change` on each, so a page that redraws on those events shows them.
+  Give a field a new `id` when its meaning changes between versions.
+  Never kept: password, file, and hidden inputs, fields with `autocomplete="off"`, and texts over 32K characters, which a page can keep with `saveState`.
+- **Saved state:** to keep anything else the user did in the page, call `window.mindroom.saveState(value)` on every change; Chat batches the writes, and a value over 256K characters of JSON throws.
   Later loads of the canvas, after a reload, an update, or a switch to another version, start with it in `window.mindroom.state`, which is `undefined` when nothing is saved.
   Read it defensively, since an earlier version of the page may have saved it in another shape.
   It stays in that browser and never reaches the agent, so anything the agent needs belongs in the answer.

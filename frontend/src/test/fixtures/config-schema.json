@@ -441,6 +441,22 @@
           "description": "Allow this agent to modify its own configuration via a tool",
           "title": "Allow Self Config"
         },
+        "automations": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PromptCurationAutomation"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Built-in automations for this agent, such as prompt_curation; omitted inherits defaults.automations",
+          "title": "Automations"
+        },
         "skill_learning": {
           "$ref": "#/$defs/SkillLearningConfig",
           "default": {
@@ -1380,6 +1396,15 @@
           "minimum": 1,
           "title": "Max Preload Chars",
           "type": "integer"
+        },
+        "automations": {
+          "default": [],
+          "description": "Built-in automations, such as prompt_curation, for agents that do not list their own",
+          "items": {
+            "$ref": "#/$defs/PromptCurationAutomation"
+          },
+          "title": "Automations",
+          "type": "array"
         },
         "tool_output_auto_save_threshold_bytes": {
           "default": 51200,
@@ -2582,7 +2607,8 @@
           "$ref": "#/$defs/_MemoryFileConfig",
           "default": {
             "path": null,
-            "max_entrypoint_lines": 200
+            "max_entrypoint_lines": 200,
+            "max_entrypoint_tokens": 50000
           },
           "description": "File-backed memory configuration"
         },
@@ -3076,6 +3102,88 @@
         "path"
       ],
       "title": "PluginEntryConfig",
+      "type": "object"
+    },
+    "PromptCurationAutomation": {
+      "additionalProperties": false,
+      "description": "Daily check that asks the agent to condense its always-loaded prompt files once they grow too large.",
+      "properties": {
+        "name": {
+          "const": "prompt_curation",
+          "default": "prompt_curation",
+          "description": "Built-in automation name",
+          "title": "Name",
+          "type": "string"
+        },
+        "cron": {
+          "default": "0 4 * * *",
+          "description": "When to check, in the configured timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "trigger_tokens": {
+          "default": 50000,
+          "description": "Post the prompt once MEMORY.md and the context files total more than this many estimated tokens",
+          "minimum": 1,
+          "title": "Trigger Tokens",
+          "type": "integer"
+        },
+        "min_reduction": {
+          "default": 0.1,
+          "description": "Fraction of the files' size each pass is asked to remove, unless less is needed",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Min Reduction",
+          "type": "number"
+        },
+        "max_reduction": {
+          "default": 0.15,
+          "description": "Largest fraction of the files' size one pass may remove",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Max Reduction",
+          "type": "number"
+        },
+        "max_file_shrink": {
+          "default": 0.25,
+          "description": "Largest fraction any single file may shrink in one pass",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Max File Shrink",
+          "type": "number"
+        },
+        "max_content_loss": {
+          "default": 0.05,
+          "description": "Largest net drop in total memory content (the files plus memory/**), as a fraction of the files' size; detail must move to memory/ instead of being deleted",
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "title": "Max Content Loss",
+          "type": "number"
+        },
+        "protected_files": {
+          "default": [],
+          "description": "Workspace-relative files the pass must leave unchanged",
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Files",
+          "type": "array"
+        }
+      },
+      "title": "PromptCurationAutomation",
       "type": "object"
     },
     "RealtimeCallProfile": {
@@ -4059,6 +4167,13 @@
           "minimum": 1,
           "title": "Max Entrypoint Lines",
           "type": "integer"
+        },
+        "max_entrypoint_tokens": {
+          "default": 50000,
+          "description": "Maximum estimated tokens (characters / 4) of whole lines to preload from MEMORY.md",
+          "minimum": 1,
+          "title": "Max Entrypoint Tokens",
+          "type": "integer"
         }
       },
       "title": "_MemoryFileConfig",
@@ -4247,6 +4362,7 @@
         "worker_grantable_credentials": null,
         "allow_self_config": false,
         "max_preload_chars": 50000,
+        "automations": [],
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
           "interval_ramp_seconds": 15.0,
@@ -4279,6 +4395,7 @@
         "llm": null,
         "file": {
           "max_entrypoint_lines": 200,
+          "max_entrypoint_tokens": 50000,
           "path": null
         },
         "search": {

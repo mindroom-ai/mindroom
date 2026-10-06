@@ -188,7 +188,7 @@ from tests.test_response_turn import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+    from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
     from pathlib import Path
     from typing import Literal
 
@@ -10070,6 +10070,98 @@ async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path
     """Skill learning is background bookkeeping, so a failed count must not cost the user their answer."""
     _reviews, _model, send = await _respond_with_skill_learning(tmp_path, fail=True)
     send.assert_awaited()
+
+
+@dataclass
+class _RecordedAutomations:
+    """The orchestrator's automation runner as a response sees it, recording each finished response."""
+
+    finished: list[tuple[str, ...]] = field(default_factory=list)
+
+    def response_finished(self, source_event_ids: Sequence[str]) -> None:
+        self.finished.append(tuple(source_event_ids))
+
+
+@pytest.mark.asyncio
+async def test_a_finished_response_tells_automations_its_source_events(tmp_path: Path) -> None:
+    """An automation prompt's verify step waits for the response whose source is that prompt."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    automations = _RecordedAutomations()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    request = _plain_request(_target())
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(request)
+        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+
+    assert automations.finished == [tuple(request.sources.logical_source_event_ids)]
+
+
+def test_a_finished_approval_continuation_tells_automations_its_source_events(tmp_path: Path) -> None:
+    """A run that paused for approval is verified when its continuation ends, not after the hourly fallback."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    automations = _RecordedAutomations()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$prompt",
+        resolved_thread_id="$prompt",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-1",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$prompt",
+        requester_id="@user:localhost",
+        response_event_id="$response",
+        sources=ResponseSources(("$prompt",), ("$prompt",)),
+        calls=(),
+        state="running",
+        execution_identity=serialize_tool_execution_identity(identity),
+    )
+
+    deps = coordinator._approval_post_response_deps(continuation)
+    assert deps.notify_response_finished is not None
+    deps.notify_response_finished()
+
+    assert automations.finished == [("$prompt",)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("succeeded", [True, False])
+async def test_automations_hear_of_every_final_response(succeeded: bool) -> None:
+    """A failed run must still reach verify, which restores files a broken run left behind."""
+    calls: list[str] = []
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(terminal_status="completed" if succeeded else "error", event_id=None),
+        ResponseOutcome(response_run_id="run-1", run_succeeded=succeeded),
+        PostResponseEffectsDeps(logger=MagicMock(), notify_response_finished=lambda: calls.append("finished")),
+    )
+    assert calls == ["finished"]
 
 
 @pytest.mark.asyncio

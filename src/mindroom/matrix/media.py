@@ -14,6 +14,7 @@ from nio import crypto
 from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
 
+from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
 
@@ -36,7 +37,6 @@ _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
 _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
-_matrix_media_max_bytes = 64 * 1024 * 1024
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
@@ -190,7 +190,7 @@ async def fetch_matrix_thumbnail(
 
 def media_size_exceeds_limit(size_bytes: int) -> bool:
     """Return whether a media size exceeds the runtime ingestion cap."""
-    return size_bytes > _matrix_media_max_bytes
+    return size_bytes > RETAINED_MEDIA_MAX_BYTES
 
 
 def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
@@ -435,7 +435,7 @@ async def download_media_bytes(
         downloaded_bytes = await download_mxc_bytes(
             client,
             event.url,
-            max_bytes=_matrix_media_max_bytes,
+            max_bytes=RETAINED_MEDIA_MAX_BYTES,
             request_timeout=0,
         )
     except Exception:

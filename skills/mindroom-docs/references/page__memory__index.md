@@ -165,6 +165,7 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+    max_entrypoint_tokens: 50000
   search:
     mode: keyword
     include:
@@ -177,7 +178,9 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines; when it truncates, a marker reports the included and total line counts and the path to read for the rest.
+`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
+Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
+When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
 `memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
 ### File layout
@@ -274,6 +277,18 @@ memory:
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 
+## Prompt Curation
+
+Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
+Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, with the bounds enforced afterwards in code.
+
+```yaml
+agents:
+  mind:
+    memory_backend: file
+    automations: [prompt_curation]
+```
+
 ## [`memory`]
 
 The `memory` tool lets an agent deliberately remember, look up, correct, or forget something, alongside automatic memory.
@@ -302,7 +317,7 @@ Failures are returned as readable error messages rather than raised into the con
 
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.
 

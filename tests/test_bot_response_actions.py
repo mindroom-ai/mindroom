@@ -491,7 +491,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Explicit mentions must not let unconfigured bots answer in configured rooms."""
+        """Explicit mentions of unconfigured bots in configured rooms get a rejection, not an answer."""
         config = _runtime_bound_config(
             with_current_room_member_access(
                 Config(
@@ -529,7 +529,7 @@ class TestAgentBot(AgentBotTestBase):
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
-        assert action.kind == "skip"
+        assert action.kind == "reject"
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_allows_explicit_private_agent_mention(
@@ -589,7 +589,7 @@ class TestAgentBot(AgentBotTestBase):
         self,
         tmp_path: Path,
     ) -> None:
-        """Explicit team mentions must not let unconfigured teams answer in configured rooms."""
+        """Explicit mentions of unconfigured teams in configured rooms get a rejection, not an answer."""
         config = _runtime_bound_config(
             with_current_room_member_access(
                 Config(
@@ -645,7 +645,7 @@ class TestAgentBot(AgentBotTestBase):
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
-        assert action.kind == "skip"
+        assert action.kind == "reject"
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_ignores_non_materializable_owner_candidates(

@@ -2881,10 +2881,10 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert bridge.closed is True
     post.assert_awaited_once()
     assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
-    body = post.await_args.kwargs["body"]
+    body = post.await_args.kwargs["writeback"].body
     assert body.startswith("📞 Voice call · 2 min")
-    assert "**Alice**: Book the train" in body
-    assert "**Helper**: Booked" in body
+    assert "@alice:example.org (Alice): Book the train" in body
+    assert "Helper: Booked" in body
     await manager.shutdown()
 
 

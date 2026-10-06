@@ -1,0 +1,408 @@
+"""The prompt_curation built-in: when it asks, what it asks for, and how verify keeps or restores the files."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+
+from mindroom.automations.prompt_curation import (
+    CurationPlan,
+    curation_notice,
+    curation_prompt,
+    plan_curation,
+    verify_curation,
+)
+from mindroom.config.agent import AgentConfig
+from mindroom.config.automations import PromptCurationAutomation
+from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
+from mindroom.constants import resolve_runtime_paths
+from mindroom.runtime_resolution import resolve_agent_runtime
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+# Eight 642-character sections: MEMORY.md is 1,286 tokens, over a 1,000-token trigger.
+SECTIONS = [f"## Topic {index}\n" + f"Detail {index} " * 70 + "\n" for index in range(8)]
+MEMORY = "# Memory\n" + "".join(SECTIONS)
+POINTER = "## Topic 3\nSee memory/topics.md\n"
+SOUL = "Be kind and brief.\n"
+USER = "Name: Sam\n"
+
+
+def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAutomation, Path]:
+    automation = PromptCurationAutomation(trigger_tokens=1_000, **settings)
+    agent = AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        context_files=["SOUL.md", "AGENTS.md", "USER.md"],
+        automations=[automation],
+    )
+    config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    assert root is not None
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "MEMORY.md").write_text(MEMORY, encoding="utf-8")
+    (root / "SOUL.md").write_text(SOUL, encoding="utf-8")
+    (root / "USER.md").write_text(USER, encoding="utf-8")
+    (root / "memory").mkdir()
+    (root / "memory" / "2026-10-01.md").write_text("Daily note.\n", encoding="utf-8")
+    return config, automation, root
+
+
+def _plan(tmp_path: Path, **settings: object) -> tuple[CurationPlan, Config, Path]:
+    config, automation, root = _setup(tmp_path, **settings)
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    return plan, config, root
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:
+    """Small prompt files post no prompt."""
+    config, automation, root = _setup(tmp_path)
+    (root / "MEMORY.md").write_text("# Memory\n- Prefers terse replies.\n", encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    assert plan_curation(config, paths, "mind", automation) is None
+
+
+def test_the_plan_covers_memory_and_every_context_file_with_a_gradual_band(tmp_path: Path) -> None:
+    """MEMORY.md plus the context files count; the band asks for 10-15% and never more."""
+    plan, _config, _root = _plan(tmp_path)
+
+    assert plan.curated == {"MEMORY.md": 1286, "SOUL.md": 4, "USER.md": 2}
+    assert plan.measured_tokens == 1292
+    assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
+    assert plan.memory_snapshot == {"memory/2026-10-01.md": "Daily note.\n"}
+
+
+def test_protected_files_are_excluded_from_the_band(tmp_path: Path) -> None:
+    """A protected file is snapshotted for verify but not counted or offered for curation."""
+    plan, config, _root = _plan(tmp_path, protected_files=["SOUL.md"])
+
+    assert "SOUL.md" not in plan.curated
+    assert "SOUL.md" in plan.snapshot
+    assert "6. Leave SOUL.md unchanged." in curation_prompt(config, plan)
+
+
+def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
+    """The visible prompt names every file, the band, the per-file cap, and committing first."""
+    plan, config, _root = _plan(tmp_path)
+
+    prompt = curation_prompt(config, plan)
+
+    assert "total 1292 tokens, over the 1000-token limit" in prompt
+    assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
+    assert "at most 1163 tokens in total, but not below 1098" in prompt
+    assert "shrink by more than 25%" in prompt
+    assert "git init" in prompt
+    assert "6. Leave" not in prompt
+
+
+def test_an_untouched_workspace_is_reported_unchanged(tmp_path: Path) -> None:
+    """A run that edits nothing restores nothing and says so."""
+    plan, _config, root = _plan(tmp_path)
+    before = _snapshot(root)
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (False, False)
+    assert _snapshot(root) == before
+    assert curation_notice(plan, result) == "Prompt maintenance changed nothing; the files stay at 1292 tokens."
+
+
+def test_moving_a_section_into_memory_within_bounds_is_kept(tmp_path: Path) -> None:
+    """Detail moved verbatim into memory/ with a pointer lands in the band and stays."""
+    plan, _config, root = _plan(tmp_path)
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (True, False)
+    assert (root / "MEMORY.md").read_text() == MEMORY.replace(SECTIONS[3], POINTER)
+    assert curation_notice(plan, result) == "✅ Prompt files condensed from 1292 to 1139 tokens."
+
+
+def _over_cut(root: Path) -> None:
+    (root / "MEMORY.md").write_text("# Memory\n" + SECTIONS[0], encoding="utf-8")
+
+
+def _delete_without_moving(root: Path) -> None:
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+
+
+def _grow(root: Path) -> None:
+    (root / "MEMORY.md").write_text(MEMORY + "- One more fact.\n", encoding="utf-8")
+
+
+def _delete_a_file(root: Path) -> None:
+    (root / "USER.md").unlink()
+
+
+def _corrupt(root: Path) -> None:
+    (root / "MEMORY.md").write_bytes(MEMORY.encode() + b"caf\xe9\n")
+
+
+def _grow_past_the_read_cap(root: Path) -> None:
+    (root / "MEMORY.md").write_bytes(b"x" * ((1 << 20) + 1))
+
+
+def _replace_with_a_link(root: Path) -> None:
+    outside = root.parent / "outside.md"
+    outside.write_text("planted\n", encoding="utf-8")
+    (root / "MEMORY.md").unlink()
+    (root / "MEMORY.md").symlink_to(outside)
+
+
+@pytest.mark.parametrize(
+    ("change", "violation"),
+    [
+        (_over_cut, "MEMORY.md shrank 87% (more than 25%)"),
+        (_delete_without_moving, "161 tokens of memory were deleted instead of moved to memory/ (at most 65)"),
+        (_grow, "the files did not shrink (1296 tokens)"),
+        (_delete_a_file, "USER.md shrank 100% (more than 25%)"),
+        (_corrupt, "MEMORY.md is no longer valid UTF-8"),
+        (_grow_past_the_read_cap, "MEMORY.md cannot be read (File exceeds its size limit: MEMORY.md)"),
+        (_replace_with_a_link, "MEMORY.md cannot be read ([Errno 40] Too many levels of symbolic links: 'MEMORY.md')"),
+    ],
+)
+def test_a_run_that_misses_the_bounds_is_restored_byte_identical(
+    tmp_path: Path,
+    change: Callable[[Path], None],
+    violation: str,
+) -> None:
+    """Every guard writes the snapshot back over the changed files and names the reason."""
+    plan, _config, root = _plan(tmp_path)
+    before = _snapshot(root)
+    change(root)
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert violation in result.violations
+    assert _snapshot(root) == before
+    assert curation_notice(plan, result).startswith("↩️ Restored the snapshot: ")
+
+
+def test_changing_a_protected_file_restores_it_and_the_rest(tmp_path: Path) -> None:
+    """A protected file edit fails verify even when the cut itself is fine."""
+    plan, _config, root = _plan(tmp_path, protected_files=["SOUL.md"])
+    before = _snapshot(root)
+    (root / "SOUL.md").write_text("Rewritten.\n", encoding="utf-8")
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.violations == ("SOUL.md changed but is protected",)
+    assert {path: data for path, data in _snapshot(root).items() if path != "memory/topics.md"} == before
+
+
+def test_a_planted_link_stops_the_check(tmp_path: Path) -> None:
+    """A symlinked context file is refused instead of followed."""
+    config, automation, root = _setup(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret\n", encoding="utf-8")
+    (root / "USER.md").unlink()
+    (root / "USER.md").symlink_to(outside)
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    with pytest.raises((OSError, ValueError)):
+        plan_curation(config, paths, "mind", automation)
+
+
+ARCHIVE = "# Projects\n" + "Archived project detail. " * 80 + "\n"
+
+
+def _plan_with_archive(tmp_path: Path) -> tuple[CurationPlan, Path]:
+    config, automation, root = _setup(tmp_path)
+    (root / "memory" / "projects.md").write_text(ARCHIVE, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    return plan, root
+
+
+def test_deleting_archived_memory_is_restored_even_when_the_prompt_files_are_untouched(tmp_path: Path) -> None:
+    """A run that empties a memory/ topic file loses detail verify must catch on its own."""
+    plan, root = _plan_with_archive(tmp_path)
+    before = _snapshot(root)
+    (root / "memory" / "projects.md").unlink()
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert any("deleted instead of moved" in violation for violation in result.violations)
+    assert _snapshot(root) == before
+
+
+def test_overwriting_archived_memory_while_moving_is_restored(tmp_path: Path) -> None:
+    """Overwriting a topic file drops its archive; verify restores it, keeps the lines the run added, and MEMORY.md."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "MEMORY.md").read_text() == MEMORY
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + SECTIONS[3]
+
+
+def test_a_restored_archive_keeps_facts_added_during_the_run(tmp_path: Path) -> None:
+    """A fact appended to a damaged topic file, for example by auto-flush, survives the restore."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").write_text("# Projects\n- Dentist on Friday.\n", encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "# Projects\n- Dentist on Friday.\n"
+
+
+def test_a_restored_archive_keeps_a_fact_repeated_under_another_heading(tmp_path: Path) -> None:
+    """The run's text is kept whole, so the same line under a different heading is not dropped as a duplicate."""
+    config, automation, root = _setup(tmp_path)
+    archive = "# Project A\nDeadline: Friday\n" + "Archived project detail. " * 80 + "\n"
+    (root / "memory" / "projects.md").write_text(archive, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    (root / "memory" / "projects.md").write_text("# Project B\nDeadline: Friday\n", encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == archive + "# Project B\nDeadline: Friday\n"
+
+
+def test_an_archive_appended_past_the_read_cap_is_left_alone(tmp_path: Path) -> None:
+    """A topic file that grows past 1 MiB cannot be compared safely, so verify neither counts it lost nor restores it."""
+    config, automation, root = _setup(tmp_path)
+    big = "x" * ((1 << 20) - 100) + "\n"
+    (root / "memory" / "projects.md").write_text(big, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    with (root / "memory" / "projects.md").open("a", encoding="utf-8") as archive:
+        archive.write("- Dentist on Friday at 10, bring the insurance card.\n" * 4)
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (False, False)
+    assert (root / "memory" / "projects.md").read_text().endswith("bring the insurance card.\n")
+
+
+def test_an_archive_that_stops_being_utf8_is_left_alone(tmp_path: Path) -> None:
+    """A topic file that is no longer valid UTF-8 cannot be compared safely, so a restore leaves its bytes alone."""
+    plan, root = _plan_with_archive(tmp_path)
+    with (root / "memory" / "projects.md").open("ab") as archive:
+        archive.write(b"caf\xe9\n")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "MEMORY.md").read_text() == MEMORY
+    assert (root / "memory" / "projects.md").read_bytes() == ARCHIVE.encode() + b"caf\xe9\n"
+
+
+def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_path: Path) -> None:
+    """The loss baseline counts a topic file that was past 1 MiB at fire time, so it cannot pass as moved detail."""
+    config, automation, root = _setup(tmp_path)
+    (root / "memory" / "big.md").write_text("Old detail.\n" * 100_000, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    before = _snapshot(root)
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert "161 tokens of memory were deleted instead of moved to memory/ (at most 65)" in result.violations
+    assert _snapshot(root) == before
+
+
+def test_a_topic_file_the_scan_skipped_is_not_treated_as_deleted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshotted topic file past the scan's byte budget is read directly, so its appended facts survive."""
+    plan, root = _plan_with_archive(tmp_path)
+    monkeypatch.setattr("mindroom.memory._file_backend._MAX_MEMORY_SCAN_BYTES", 1)
+    with (root / "memory" / "projects.md").open("a", encoding="utf-8") as archive:
+        archive.write("- Dentist on Friday.\n")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], ""), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "- Dentist on Friday.\n"
+
+
+def test_a_topic_file_the_scan_cut_short_is_still_restored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The file where the scan's byte budget runs out is read directly, so an overwritten archive is still restored."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").write_text("# Projects\n" + SECTIONS[3], encoding="utf-8")
+    memory = MEMORY.replace(SECTIONS[3], POINTER)
+    (root / "MEMORY.md").write_text(memory, encoding="utf-8")
+    monkeypatch.setattr("mindroom.memory._file_backend._MAX_MEMORY_SCAN_BYTES", len(memory) + len("Daily note.\n") + 20)
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "# Projects\n" + SECTIONS[3]
+
+
+def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
+    """Moving detail out of a context file that lives under memory/ is a move, not a deletion."""
+    config, automation, root = _setup(tmp_path)
+    context = "# Context\n" + "".join(SECTIONS)
+    (root / "memory" / "context.md").write_text(context, encoding="utf-8")
+    (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    config.agents["mind"].context_files = ["memory/context.md"]
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    assert "memory/context.md" not in plan.memory_snapshot
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "memory" / "context.md").write_text(context.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (True, False)
+
+
+def test_reorganizing_an_archive_without_losing_content_is_kept(tmp_path: Path) -> None:
+    """Rewriting a topic file is fine as long as the detail stays and the cut is in bounds."""
+    plan, root = _plan_with_archive(tmp_path)
+    reorganized = SECTIONS[3] + ARCHIVE
+    (root / "memory" / "projects.md").write_text(reorganized, encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (True, False)
+    assert (root / "memory" / "projects.md").read_text() == reorganized
+
+
+def test_a_lossless_memory_edit_while_the_prompt_files_are_untouched_is_kept(tmp_path: Path) -> None:
+    """Without a curation edit, only lost content triggers a restore; reorganizing memory/ is left alone."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").unlink()
+    (root / "memory" / "work.md").write_text(ARCHIVE, encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (False, False)
+    assert not (root / "memory" / "projects.md").exists()
+    assert curation_notice(plan, result).startswith("Prompt maintenance changed nothing")
