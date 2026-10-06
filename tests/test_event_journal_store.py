@@ -6753,27 +6753,10 @@ class TestApprovalContinuations:
         for index in (1, 2):
             await admit(alice, f"$redact-{index}", redacts=f"$source-{index}", kind=EventKind.REDACTION)
 
-        assert await alice.deleted_initial_deliveries(agent_name="agent") == ()
-        with pytest.raises(RuntimeError, match="approval"):
-            await alice.retire_deleted_initial(delivery_id="$source-1")
         assert await alice.is_pending("$source-1")
         initial = await alice.load_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.INITIAL)
         assert initial is not None
         assert not initial.retired
-
-    async def test_approval_cannot_acquire_retired_initial(self, alice: PrincipalStore) -> None:
-        """A response already retired by deletion cannot acquire a new paused run."""
-        await self.admit_sources(alice)
-        await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
-            stage=DeliveryStage.INITIAL,
-            room_id=ROOM,
-            thread_id="$thread",
-            payload=text("Waiting"),
-        )
-        await alice.retire_deleted_initial(delivery_id="$source-1")
-
-        assert await alice.create_approval_continuation(self.continuation()) is None
 
     @pytest.mark.parametrize("approval_first", [True, False])
     async def test_approval_creation_serializes_with_source_redaction(

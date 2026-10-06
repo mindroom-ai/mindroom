@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -136,7 +135,7 @@ from tests.conftest import (
 from tests.journal_helpers import admit_dispatch_event
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
@@ -294,11 +293,6 @@ class _RecordingDeliveryGateway:
     async def supersede_replay(self, _source_event_ids: tuple[str, ...]) -> bool | None:
         """No reply has the sources in this recording-only delivery fixture."""
         return None
-
-    @asynccontextmanager
-    async def supersession_scope(self, _turn_id: str, _room_id: str) -> AsyncIterator[bool]:
-        """No durable INITIAL exists in this recording-only delivery fixture."""
-        yield True
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         self.sent.append(request)

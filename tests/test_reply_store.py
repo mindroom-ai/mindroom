@@ -719,53 +719,6 @@ async def test_a_regeneration_that_does_not_consume_its_edit_leaves_the_turns_pr
     assert record.source_event_revisions is None
 
 
-async def test_deleted_initial_cleanup_waits_until_the_reply_ends(journal_store: EventJournalStore) -> None:
-    """A running reply's rows stay its span's; once deletion ends the reply, the cleanup also detaches its turn."""
-    principal = journal_store.principal(PRINCIPAL)
-    await admit(principal, "$other")
-    await admit(principal, "$source")
-    await principal.replies.write_generation("gen-1", now_ns=1)
-    request = replace(_request(), sources=SpanSources(pending=("$source", "$other"), logical=("$source", "$other")))
-    claim = (await principal.replies.claim(request, ClaimLookup())).transition
-    reply, span = claim.reply, claim.claimed
-    assert reply is not None
-    assert span is not None
-    await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
-            reply_id=reply.reply_id,
-            span_id=span.span_id,
-            decide=lambda reply, span: rl.enqueue_initial(
-                reply,
-                span,
-                shown="ph",
-                placeholder_only=True,
-                prepared_revision=reply.revision,
-                now_ns=60,
-            ),
-            placeholder_only=True,
-        ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "Thinking..."},
-    )
-    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
-    await _acknowledge_the_create(principal)
-
-    await _delete(principal, "$source")
-    running = await principal.replies.load(reply.reply_id)
-    assert running is not None
-    assert running.state is ReplyState.ACTIVE
-    assert await principal.deleted_initial_deliveries(agent_name="agent") == ()
-
-    await _delete(principal, "$other")
-    gone = await principal.replies.load(reply.reply_id)
-    assert gone is not None
-    assert gone.state is ReplyState.GONE
-    assert gone.redaction_pending == ("$reply",)
-    (initial,) = await principal.deleted_initial_deliveries(agent_name="agent")
-    assert initial.delivery_id == "$source"
-
-
 async def test_progress_waits_for_the_replys_earlier_durable_writes(journal_store: EventJournalStore) -> None:
     """An unresolved row, such as a pause whose send failed once, holds progress back: sent later, it would win."""
     principal = journal_store.principal(PRINCIPAL)

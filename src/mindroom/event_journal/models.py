@@ -465,8 +465,6 @@ class ResponseRecoveryState:
     sources_settled_by_departure: bool
     redacted_sources: tuple[bool, ...]
     turn_records: tuple[TurnRecord | None, ...]
-    source_tombstones: tuple[bool, ...] = ()
-    approval_owned: bool = False
     # The newest reply answering the sources, which owns an AI turn's outcome.
     reply: Reply | None = None
 

@@ -20,6 +20,7 @@ from mindroom.handled_turns import TurnRecordCodec
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
 from .models import DeliveryStage
+from .projection import is_tombstoned
 from .replies import AppliedTransition, apply, row_facts
 
 if TYPE_CHECKING:
@@ -487,11 +488,28 @@ def _reply_of_rows(
             **base,  # type: ignore[arg-type]
         )
         return _Adoption(reply=reply, spans=(span,), row=final)
-    if initial is None:
-        return None
-    if final is not None or initial.retired:
+    if initial is None or final is not None or initial.retired:
         # Answered, or retired by a departure or a deleted source: their existing owners finish it.
         return None
+    if all(
+        source in record.redacted_source_event_ids or is_tombstoned(transaction, principal_id, target.room_id, source)
+        for source in record.source_event_ids
+    ):
+        return _deleted_source_reply(
+            transaction,
+            principal_id,
+            _span(
+                reply_id,
+                kind=rl.SpanKind.TURN,
+                delivery_id=delivery_id,
+                sources=sources,
+                now_ns=now_ns,
+                outcome=rl.SpanOutcome.CANCELLED,
+            ),
+            initial,
+            presentations.empty(team),
+            **base,  # type: ignore[arg-type]
+        )
     stopped = record.user_stop_receipt_order is not None
     # That release finished a settled Stop and shows it; its turn record turns
     # the replay of any source it left pending away.
@@ -529,6 +547,47 @@ def _reply_of_rows(
         **base,  # type: ignore[arg-type]
     )
     return _Adoption(reply=reply, spans=(span,), row=initial if owns_create else None, row_placeholder_only=True)
+
+
+def _deleted_source_reply(
+    transaction: Transaction,
+    principal_id: str,
+    span: rl.Span,
+    initial: MatrixDelivery,
+    presentation: str,
+    *,
+    entity_name: str,
+    room_id: str,
+    thread_id: str | None,
+    now_ns: int,
+) -> _Adoption:
+    # LEGACY_COMPAT: Placeholders of deleted requests that an earlier release still had to remove.
+    # Legacy format: a reply-less INITIAL row, neither retired nor answered by a FINAL, whose turn's sources all
+    # carry redaction tombstones; that release's deleted-INITIAL cleanup redacted its event and retired the row.
+    # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages end such a reply gone,
+    # with its event pending redaction.
+    # Handling: the reply is adopted gone with its span cancelled, owing the redaction of the acknowledged event; a
+    # create still owed is redacted when it lands, as any create of a gone reply is.
+    # Coverage: tests/test_legacy_reply_messages.py::test_a_placeholder_whose_source_was_deleted_becomes_a_gone_reply_that_removes_it.
+    acknowledged = initial.acknowledged_event_id
+    reply = _reply(
+        transaction,
+        principal_id,
+        state=rl.ReplyState.GONE,
+        span=span,
+        presentation=presentation,
+        membership_epoch=initial.membership_epoch,
+        event_id=acknowledged,
+        placeholder_only=acknowledged is not None,
+        reply_sequence=1,
+        confirmed_seq=1 if acknowledged is not None else None,
+        redaction_pending=() if acknowledged is None else (acknowledged,),
+        entity_name=entity_name,
+        room_id=room_id,
+        thread_id=thread_id,
+        now_ns=now_ns,
+    )
+    return _Adoption(reply=reply, spans=(span,), row=initial, row_placeholder_only=True)
 
 
 def _pending_turns(transaction: Transaction, principal_id: str, entity_name: str) -> tuple[TurnRecord, ...]:

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import INTERRUPTED_FAILURE_REASON, ApprovalContinuation, DeliveryStage
+from mindroom.event_journal import INTERRUPTED_FAILURE_REASON, ApprovalContinuation, DeliveryStage, EventKind
 from mindroom.event_journal.replies import ReplyCreation, ReplyRowRequest
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
@@ -279,6 +279,28 @@ async def test_a_settled_stream_from_days_ago_is_history(journal_store: EventJou
 
     assert await principal.legacy_reply_reads() == ()
     assert await principal.replies.for_sources(("$source",)) is None
+
+
+async def test_a_placeholder_whose_source_was_deleted_becomes_a_gone_reply_that_removes_it(
+    journal_store: EventJournalStore,
+) -> None:
+    """Main still owed the cleanup of a deleted request's placeholder; the gone reply owes its redaction."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    await admit(principal, "$redaction", redacts="$source", kind=EventKind.REDACTION, content={})
+
+    await _adopt(principal)
+
+    gone = await _only_reply(principal)
+    assert gone.state is rl.ReplyState.GONE
+    assert gone.event_id == "$reply"
+    assert gone.redaction_pending == ("$reply",)
+    assert await _spans(principal, gone) == [(rl.SpanKind.TURN, rl.SpanOutcome.CANCELLED)]
+    initial = await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    assert initial is not None
+    assert initial.reply_id == gone.reply_id
 
 
 async def test_a_stream_that_shows_it_completed_keeps_its_answer(journal_store: EventJournalStore) -> None:

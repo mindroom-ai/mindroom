@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -878,25 +878,6 @@ class TurnStore:
             msg = "Conversation revision changed before locked response preparation"
             raise RevisionSnapshotChangedError(msg)
         return False
-
-    async def detach_deleted_response(self, turn_id: str, response_event_id: str | None) -> None:
-        """Detach the removed response after Matrix cleanup, retaining any concurrent STOP authority."""
-        record = self.get_turn_record(turn_id)
-        if record is None or response_event_id is None:
-            return
-
-        def detached(records: Mapping[str, TurnRecord]) -> TurnRecord:
-            current = records[turn_id]
-            if current.response_event_id != response_event_id:
-                return current
-            return replace(
-                current,
-                response_event_id=None,
-                user_stop_settled_receipt_order=current.user_stop_receipt_order,
-                timestamp=0.0,
-            )
-
-        await self._ledger.update_handled_turn(record.indexed_event_ids, detached)
 
     def response_history_scope(
         self,

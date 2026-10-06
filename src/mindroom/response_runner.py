@@ -4060,9 +4060,7 @@ class ResponseRunner:
                 "response_suppressed_for_terminal_source",
                 source_event_id=request.response_envelope.source_event_id,
             )
-            source_deleted = await self.deps.delivery_gateway.cleanup_deleted_response(
-                request.response_envelope.source_event_id,
-            )
+            source_deleted = await self._sources_deleted(request, resolved_target)
             if handle is not None and not handle.exited:
                 await self._end_span_for_terminal_source(handle, resolved_target, source_deleted=source_deleted)
             elif (
@@ -4077,6 +4075,13 @@ class ResponseRunner:
                 await request.on_source_turn_suppressed()
             return None
         return request
+
+    async def _sources_deleted(self, request: ResponseRequest, target: MessageTarget) -> bool:
+        """Return whether deletion made the request's sources terminal: all of them, or the edit driving it."""
+        driving = request.response_envelope.source_event_id
+        logical = request.sources.logical_source_event_ids
+        redacted = await self.deps.replies.store.redacted_event_ids(target.room_id, (driving, *logical))
+        return redacted.issuperset(logical) or (driving not in logical and driving in redacted)
 
     async def _end_span_for_terminal_source(
         self,

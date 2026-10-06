@@ -30,7 +30,7 @@ from mindroom.event_journal import (
     replacement_target,
     thread_root,
 )
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY, UnreadableMatrixDelivery
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.replies import (
     ReplyRowEnqueue,
     ReplyRowRequest,
@@ -156,7 +156,6 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
     from mindroom.hooks import MessageEnvelope
-    from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
     from mindroom.streaming import ProgressPublisher, StreamInputChunk, UnfinishedStreamedReply
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
@@ -674,7 +673,6 @@ class DeliveryGatewayDeps:
     # that leaves the row open to a mutation that derived before the commit and
     # lands after it, which erases the event the answer is stored under.
     terminal_turn_committed: Callable[[str, str, TurnRecord | None], Awaitable[None]] | None = None
-    response_recovery: ResponseDeliveryRecovery | None = None
     # Runs what committed reply transitions left for after their commit:
     # cancelling a span a Stop reached, waking an approval source.
     reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
@@ -1010,9 +1008,6 @@ class DeliveryGateway:
             terminal_turn_committed=self._publish_terminal_turn,
             process_shutdown_requested=current_task_is_process_shutdown,
             delivery_locks=self._delivery_turn_locks,
-            cleanup_deleted_initial=(
-                self.deps.response_recovery.cleanup if self.deps.response_recovery is not None else None
-            ),
             reply_row_resolved=self.deps.reply_row_resolved,
             run_reply_effects=self._run_reply_effects,
         )
@@ -1025,45 +1020,6 @@ class DeliveryGateway:
             return delivered.event_id
 
         return self._response_delivery(send, handoff=None)
-
-    @asynccontextmanager
-    async def supersession_scope(self, turn_id: str, room_id: str) -> AsyncIterator[bool]:
-        """Keep existing INITIAL debt with canonical replay until it reaches FINAL."""
-        recovery = self.deps.response_recovery
-        if recovery is None:
-            yield True
-            return
-        async with self._recovery_worker()._delivery_lock(turn_id):
-            initial = await recovery.principal.load_matrix_delivery(
-                delivery_id=turn_id,
-                stage=DeliveryStage.INITIAL,
-            )
-            yield (
-                initial is None
-                or initial.room_id != room_id
-                or initial.retired
-                or initial.permanently_failed
-                or initial.membership_epoch != await recovery.principal.membership_epoch(room_id)
-                or await recovery.permits_supersession(initial)
-            )
-
-    async def cleanup_deleted_response(self, turn_id: str) -> bool:
-        """Suppress deleted-source notices while retaining retryable INITIAL cleanup debt."""
-        recovery = self.deps.response_recovery
-        if recovery is None:
-            return False
-        worker = self._recovery_worker()
-        async with worker._delivery_lock(turn_id):
-            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
-            if initial is None:
-                return recovery.turn_store().is_revision_redacted(turn_id)
-            if not recovery.deleted(await recovery.state(initial)):
-                return False
-            try:
-                await recovery.cleanup(worker, turn_id)
-            except Exception:
-                self.deps.logger.exception("Deleted response cleanup remains owed", delivery_id=turn_id)
-            return True
 
     async def _publish_terminal_turn(self, turn_id: str, event_id: str, committed: TerminalTurnWrite | None) -> None:
         """Publish the transaction's exact proof through the ledger's conflict owner."""
@@ -1200,28 +1156,8 @@ class DeliveryGateway:
         Nothing escapes here.
         """
         worker = self._recovery_worker()
-        failed: set[tuple[str, DeliveryStage]] = set()
-        recovery = self.deps.response_recovery
-        if recovery is not None:
-            cursor: tuple[int, str] | None = None
-            while batch := await recovery.principal.deleted_initial_deliveries(
-                agent_name=self.deps.agent_name,
-                after=cursor,
-            ):
-                cursor = (batch[-1].created_at_ns, batch[-1].delivery_id)
-                for initial in batch:
-                    if isinstance(initial, UnreadableMatrixDelivery):
-                        failed.add((initial.delivery_id, DeliveryStage.INITIAL))
-                        self.deps.logger.error("Deleted INITIAL is unreadable", delivery_id=initial.delivery_id)
-                        continue
-                    try:
-                        async with worker._delivery_lock(initial.delivery_id):
-                            await recovery.cleanup(worker, initial.delivery_id)
-                    except Exception:
-                        failed.add((initial.delivery_id, DeliveryStage.INITIAL))
-                        self.deps.logger.exception("Deleted INITIAL cleanup failed", delivery_id=initial.delivery_id)
         outcome = await worker.recover()
-        failed.update(outcome.failed_deliveries)
+        failed = set(outcome.failed_deliveries)
         # Debt a crash or an earlier failure left: notes owed, events to redact.
         for reply in await self.deps.outbox.replies.with_pending_work():
             await self.settle_reply_debt(reply.reply_id)

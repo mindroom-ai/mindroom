@@ -135,7 +135,6 @@ from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
 from .response_admission import admitted_response_decision
-from .response_delivery_recovery import ResponseDeliveryRecovery
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import (
     ResponseRequest,
@@ -654,11 +653,6 @@ class AgentBot:
                     hook_context=self._hook_context_support,
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
-                response_recovery=ResponseDeliveryRecovery(
-                    self._journal_store.principal(self._journal_principal_id),
-                    lambda: self._turn_store,
-                    self._redact_message_event,
-                ),
                 turn_handoff=TurnHandoff(
                     sources_for_turn=self._delivered_turn_source_ids,
                     # Resolved late: the dispatcher is built after the gateway.

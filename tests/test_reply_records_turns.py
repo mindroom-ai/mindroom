@@ -1236,6 +1236,53 @@ async def test_leaving_the_room_mid_stream_ends_the_reply_without_writing_to_it(
     assert bot._reply_runtime.spans.live_span_ids() == frozenset()
 
 
+async def test_a_prompt_deleted_before_the_model_runs_removes_its_placeholder(tmp_path: Path) -> None:
+    """A deletion the locked preparation finds ends the reply gone and removes its placeholder, running nothing."""
+    bot = await _streaming_bot(tmp_path)
+    await _pending_turn(bot)
+    room_id = _target().room_id
+    redaction = nio.Event.parse_event(
+        {
+            "event_id": "$redaction",
+            "type": "m.room.redaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2,
+            "redacts": "$event",
+            "content": {},
+        },
+    )
+    assert isinstance(redaction, nio.RedactionEvent)
+
+    checks = 0
+
+    async def deleted_while_locking(_history: object) -> bool:
+        # The first check passes; the deletion lands before the refreshed history's check.
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            return False
+        await bot.journal_principal().admit(
+            _inbound_event(room_id, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(room_id, redaction, EventKind.REDACTION, self_sender=bot.matrix_id.full_id),
+        )
+        return True
+
+    model = AsyncMock(return_value="Unreachable.")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with patch_response_runner_module(
+        ai_response=model,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        await runner.generate_response(replace(_plain_request(_target()), prepare_source_turn=deleted_while_locking))
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.GONE
+    assert not reply.redaction_pending
+    assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [reply.event_id]
+    model.assert_not_awaited()
+
+
 async def test_deleting_the_prompt_mid_stream_removes_its_reply(tmp_path: Path) -> None:
     """The tombstone ends the reply gone: its running span is cancelled and the event it showed is redacted."""
     bot = await _streaming_bot(tmp_path)

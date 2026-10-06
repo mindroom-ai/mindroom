@@ -161,7 +161,6 @@ class MatrixDeliveryWorker:
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
     process_shutdown_requested: Callable[[], bool] = lambda: False
-    cleanup_deleted_initial: Callable[[MatrixDeliveryWorker, str], Awaitable[bool]] | None = None
     # Told the reply whose row just stopped being unknown, so claims that
     # waited for that reply's earlier writes run again.
     reply_row_resolved: Callable[[str], None] | None = None
@@ -476,12 +475,6 @@ class MatrixDeliveryWorker:
         on_cancelled: Callable[[], None] | None = None,
     ) -> _FlushOutcome:
         """Send one delivery while holding its visible-delivery lock."""
-        if (
-            stage is DeliveryStage.INITIAL
-            and self.cleanup_deleted_initial is not None
-            and await self.cleanup_deleted_initial(self, delivery_id)
-        ):
-            return _FlushOutcome(event_id=None)
         claimed = await self.store.claim_matrix_delivery(
             delivery_id=delivery_id,
             stage=stage,
