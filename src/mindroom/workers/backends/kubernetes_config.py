@@ -335,7 +335,7 @@ def _read_image_pull_secrets_env(env: Mapping[str, str]) -> tuple[str, ...]:
     names: list[str] = []
     for index, item in enumerate(read_json_object_list_env(env, _IMAGE_PULL_SECRETS_JSON_ENV)):
         if set(item) != {"name"}:
-            msg = f"{_IMAGE_PULL_SECRETS_JSON_ENV}[{index}] must contain only a name."
+            msg = f"{_IMAGE_PULL_SECRETS_JSON_ENV}[{index}] must contain exactly one key, `name`."
             raise WorkerBackendError(msg)
         _validate_required_string(item, _IMAGE_PULL_SECRETS_JSON_ENV, index, "name")
         names.append(cast("str", item["name"]).strip())

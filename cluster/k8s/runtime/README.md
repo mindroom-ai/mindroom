@@ -920,6 +920,7 @@ workers:
   Running workers are recreated on their next provisioning after they scale down.
 - `workers.kubernetes.runtimeClassName` optionally applies one RuntimeClass to the entire generated worker pool, including background-script workers. Verify the RuntimeClass handler on every eligible node and validate that it supports the worker storage driver and access mode before enabling it. Changing the value can recreate existing workers when they are next ensured, so finish active work first.
 - Dedicated worker pods also get the chart's `imagePullSecrets`, so they can pull a worker image from a private registry.
+  Pod-level pull secrets replace the worker ServiceAccount's `imagePullSecrets`, so list every Secret workers need in `imagePullSecrets`.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
   Create the `imagePullSecrets` Secrets in that namespace too, because the chart does not copy them and worker pods cannot pull without them.
   Kubernetes owner references are only set by default for same-namespace workers.
