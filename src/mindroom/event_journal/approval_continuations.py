@@ -36,6 +36,9 @@ _CONTINUATION_COLUMNS = """
 
 # The failure reason of an approval an edit superseded.
 SUPERSEDED_FAILURE_REASON = "superseded"
+# The failure reason of a resume a shutdown cut short, which the next instance
+# hands back to replay.
+INTERRUPTED_FAILURE_REASON = "Tool approval continuation was interrupted before final delivery and denied safely."
 
 
 def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:

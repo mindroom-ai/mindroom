@@ -50,6 +50,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.event_journal import (
+    INTERRUPTED_FAILURE_REASON,
     SUPERSEDED_FAILURE_REASON,
     ApprovalAdvance,
     ApprovalContinuation,
@@ -196,10 +197,6 @@ from .response_lifecycle import (
     ResponseLifecycleCoordinator,
     ResponseLifecycleDeps,
     ResponseLifecycleReservation,
-)
-
-_INTERRUPTED_APPROVAL_RECOVERY_REASON = (
-    "Tool approval continuation was interrupted before final delivery and denied safely."
 )
 
 
@@ -2216,10 +2213,10 @@ class ResponseRunner:
         if final_delivery is not None and final_delivery.permanently_failed:
             settled = await self._approval_responses.settle_failure(
                 claimed,
-                _INTERRUPTED_APPROVAL_RECOVERY_REASON,
+                INTERRUPTED_FAILURE_REASON,
             )
             return claimed.response_event_id if settled else None
-        return await self._release_interrupted_approval(claimed, reason=_INTERRUPTED_APPROVAL_RECOVERY_REASON)
+        return await self._release_interrupted_approval(claimed, reason=INTERRUPTED_FAILURE_REASON)
 
     async def _release_interrupted_approval(
         self,
@@ -3503,9 +3500,7 @@ class ResponseRunner:
             # ends the span is no shutdown task.
             process_shutdown = current_task_is_process_shutdown()
             reason = (
-                _INTERRUPTED_APPROVAL_RECOVERY_REASON
-                if process_shutdown
-                else cancel_failure_reason(classify_cancel_source(error))
+                INTERRUPTED_FAILURE_REASON if process_shutdown else cancel_failure_reason(classify_cancel_source(error))
             )
             if not process_shutdown:
                 await run_coroutine_until_complete(self._end_live_resume_span())
@@ -3712,7 +3707,7 @@ class ResponseRunner:
             owns_final, event_id = await self._recover_frozen_approval_final(failing, target=target)
             return event_id if owns_final else None
         reason = failing.failure_reason or "Tool approval continuation failed safely."
-        if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
+        if reason == INTERRUPTED_FAILURE_REASON:
             return await self._release_interrupted_approval(failing, reason=reason)
         cancel_source = _approval_interruption_cancel_source(reason)
         settled = (

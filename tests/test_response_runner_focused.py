@@ -79,6 +79,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
+    INTERRUPTED_FAILURE_REASON,
     ApprovalCall,
     ApprovalCardReservation,
     ApprovalContinuation,
@@ -1869,7 +1870,7 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
         ("ready", None),
         ("claimed", None),
         ("failing", None),
-        ("failing", response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON),
+        ("failing", INTERRUPTED_FAILURE_REASON),
     ],
 )
 @pytest.mark.parametrize("cards_expired", [True, False])
@@ -2038,7 +2039,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_reason",
-    [None, response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON],
+    [None, INTERRUPTED_FAILURE_REASON],
     ids=["stale_claim", "handoff_fence"],
 )
 async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
@@ -2150,7 +2151,7 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("handed_off", "failure_reason"),
-    [(True, response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON), (False, "sync_restart_cancelled")],
+    [(True, INTERRUPTED_FAILURE_REASON), (False, "sync_restart_cancelled")],
     ids=["handed_to_successor", "cancelled_in_place"],
 )
 async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(

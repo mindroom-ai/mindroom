@@ -328,6 +328,12 @@ def _paused_reply(
         discovery=sources.discovery_event_ids,
     )
     delivery_id = continuation.source_event_ids[0]
+    # A claimed resume was running when the earlier release stopped, and so was
+    # one its shutdown marked interrupted for the next instance to hand back.
+    resumed = continuation.state == "claimed" or (
+        continuation.state == "failing"
+        and continuation.failure_reason == approval_continuations.INTERRUPTED_FAILURE_REASON
+    )
     paused = _span(
         reply_id,
         kind=rl.SpanKind.REGENERATION if continuation.prepared_edit_record is not None else rl.SpanKind.TURN,
@@ -355,16 +361,12 @@ def _paused_reply(
         now_ns=now_ns,
         event_id=continuation.response_event_id,
         approval_id=continuation.approval_id,
-        # A claimed approval may have resumed past its pause, which only Matrix
+        # A resumed approval may have streamed past its pause, which only Matrix
         # shows. A team's resume restores its stored document instead, which a
         # read of rendered text would lose.
-        legacy_pending=(
-            rl.LegacyPending.PRESENTATION_READ
-            if continuation.state == "claimed" and continuation.entity_kind != "team"
-            else None
-        ),
+        legacy_pending=(rl.LegacyPending.PRESENTATION_READ if resumed and continuation.entity_kind != "team" else None),
     )
-    if continuation.state != "claimed":
+    if not resumed:
         return _Adoption(reply=reply, spans=(paused,))
     final = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL)
     resume = _span(

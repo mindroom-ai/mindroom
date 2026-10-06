@@ -1722,13 +1722,15 @@ class LegacyRead:
 
 
 def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pending: bool, now_ns: int) -> Transition:
-    """Record what an earlier-release reply showed; a stream an earlier release stopped after its sources settled ends here.
+    """Record what an earlier-release reply showed; a stream that release stopped ends here.
 
-    That stream gets the restart note when it was still streaming within
-    the stale-stream window, as that release's startup cleanup gave it; otherwise
-    the reply keeps what its event shows. Replies with pending sources or an
-    approval keep their owners: the replay claim and the approval runtime,
-    which waited for this read.
+    An event whose status says the reply ended is history: the reply ends in
+    that state with its sources, which nothing continues. Otherwise a stream
+    whose sources settled gets the restart note when it was still streaming
+    within the stale-stream window, as that release's startup cleanup gave it,
+    or keeps what its event shows. A stream with pending sources, and a reply
+    an approval holds, keep their owners: the replay claim and the approval
+    runtime, which waited for this read.
     """
     if reply.legacy_pending is None:
         return _unchanged(Outcome.DUPLICATE, reply)
@@ -1738,17 +1740,20 @@ def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pend
     if read.shown is not None:
         updated = replace(updated, presentation=read.shown, possibly_shown=read.shown, placeholder_only=False)
     updated = _bump(updated, now_ns)
-    stream_main_stopped = (
+    stopped_stream = (
         reply.state is ReplyState.ACTIVE
         and reply.current_span_id is None
         and reply.approval_id is None
         and last.outcome is SpanOutcome.LOST
-        and not sources_pending
     )
-    if not stream_main_stopped:
+    if not stopped_stream:
         return Transition(outcome=Outcome.APPLIED, reply=updated)
     if read.ended_as is not None:
-        return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, read.ended_as, now_ns))
+        ended = _set_state(replace(updated, placeholder_only=False), read.ended_as, now_ns)
+        effects: tuple[Effect, ...] = (SettleSources(last.span_id),) if sources_pending else ()
+        return Transition(outcome=Outcome.APPLIED, reply=ended, effects=effects)
+    if sources_pending:
+        return Transition(outcome=Outcome.APPLIED, reply=updated)
     owed = OwedWrite(last.span_id, _NOTE_RESTART) if read.recent else None
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed))
 

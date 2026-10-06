@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import ApprovalContinuation, DeliveryStage
+from mindroom.event_journal import INTERRUPTED_FAILURE_REASON, ApprovalContinuation, DeliveryStage
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS, LegacyReplyReads
@@ -219,6 +219,28 @@ async def test_an_interrupted_stream_with_pending_sources_waits_for_its_read_the
     assert _text(read.possibly_shown or "") == "Partial"
 
 
+async def test_a_stream_whose_event_shows_it_ended_keeps_it_though_its_source_is_pending(
+    journal_store: EventJournalStore,
+) -> None:
+    """A Stop the earlier release showed just before a crash stands; nothing replays the source it left pending."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+
+    (reply,) = await _adopt(principal)
+    await principal.finish_legacy_reply_read(
+        reply.reply_id,
+        rl.LegacyRead(event_id="$reply", ended_as=rl.ReplyState.CANCELLED),
+        now_ns=NOW,
+    )
+    ended = await _only_reply(principal)
+    assert ended.state is rl.ReplyState.CANCELLED
+    assert ended.redaction_pending == ()
+    assert ended.owed_write is None
+    assert not await principal.is_pending("$source")
+
+
 async def test_a_stream_main_stopped_after_its_sources_settled_gets_the_restart_note(
     journal_store: EventJournalStore,
 ) -> None:
@@ -412,12 +434,25 @@ async def test_a_claimed_team_resume_keeps_its_document_instead_of_a_read(journa
     assert answer.team_state == team_state
 
 
-async def test_a_claimed_resume_is_left_running_for_approval_recovery(journal_store: EventJournalStore) -> None:
-    """A resume the old instance was running stays current; main's approval recovery decides it, as after a crash."""
+@pytest.mark.parametrize("state", ["claimed", "interrupted"])
+async def test_a_claimed_resume_is_left_running_for_approval_recovery(
+    journal_store: EventJournalStore,
+    state: str,
+) -> None:
+    """A resume the old instance was running stays current; approval recovery decides it, as after a crash.
+
+    A shutdown marked the resume it cut short interrupted, for the next
+    instance to hand back to replay: it was running too.
+    """
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
-    await _main_continuation(principal, _continuation("claimed"))
+    continuation = (
+        _continuation("claimed")
+        if state == "claimed"
+        else replace(_continuation("failing"), failure_reason=INTERRUPTED_FAILURE_REASON)
+    )
+    await _main_continuation(principal, continuation)
 
     (reply,) = await _adopt(principal)
     assert reply.state is rl.ReplyState.ACTIVE
