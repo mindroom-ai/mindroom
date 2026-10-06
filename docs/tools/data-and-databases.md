@@ -18,7 +18,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
 | [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
 | [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
-| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud credentials |
+| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud connection or service account |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
 | [`google_docs`](#google_docs) | Creating, reading, and editing Google Docs | Google Docs OAuth |
 | [`google_sheets`](#google_sheets) | Reading, creating, and updating spreadsheets | Google Sheets OAuth |
@@ -218,16 +218,25 @@ run_dataframe_operation("sales", "describe", {})
 
 ## [`google_bigquery`]
 
-`google_bigquery` provides `list_tables()`, `describe_table()`, and `run_sql_query()` for the configured dataset.
-The dataset is only the default for unqualified table names, so queries can still reference other datasets that the Google Cloud credentials can read.
-It authenticates with the MindRoom process's default Google Cloud credentials, not with MindRoom's Google OAuth connections.
+`google_bigquery` provides `list_tables()`, `describe_table(table_id)`, and `run_sql_query(query)` for the configured dataset.
+The dataset is only the default for unqualified table names, so queries can still reference other datasets that the connected account can read.
+It queries as the requester's **Google Cloud** connection, which has the read-only `cloud-platform.read-only` scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured.
+It does not use the MindRoom process's Application Default Credentials, and it takes no `credentials` option.
+The connected account or service account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
+If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
+The Google Cloud connection is shared by Google Cloud tools, so one connection serves all of them; see [Google Services OAuth](../deployment/google-services-oauth.md) for the setup and [Google Cloud tools](../plugins.md#google-cloud-tools) for plugin tools that use it.
+The tool always runs in the primary runtime, even when `worker_tools` lists it.
+
+`run_sql_query` accepts exactly one `SELECT` or `WITH` statement, with an optional trailing `;`.
+It refuses DML, DDL, scripts, and multiple statements with `Only a single read-only SELECT query is allowed`.
+It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `true` when more than `max_rows` rows were available.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `project` | `text` | yes | `null` | Google Cloud project ID. |
 | `dataset` | `text` | yes | `null` | Dataset name. |
 | `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
-| `credentials` | `text` | no | `null` | Programmatic only: a Google credentials object; rejected as an inline override. |
+| `max_rows` | `number` | no | `100` | Most rows `run_sql_query` returns, from `1` to `1000`. |
 | `list_tables` | `boolean` | no | `true` | Enable `list_tables()`. |
 | `describe_table` | `boolean` | no | `true` | Enable `describe_table()`. |
 | `run_sql_query` | `boolean` | no | `true` | Enable `run_sql_query()`. |

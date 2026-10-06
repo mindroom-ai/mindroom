@@ -139,6 +139,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](tools/project-management.md#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](tools/atlassian.md) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail | [Google Services OAuth](deployment/google-services-oauth.md) |
+| Google Cloud (read-only, shared by Google Cloud tools such as BigQuery) | [Google Services OAuth](deployment/google-services-oauth.md) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](mcp.md#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.

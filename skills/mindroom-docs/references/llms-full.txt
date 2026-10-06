@@ -8493,7 +8493,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
 | [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
 | [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
-| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud credentials |
+| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud connection or service account |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
 | [`google_docs`](#google_docs) | Creating, reading, and editing Google Docs | Google Docs OAuth |
 | [`google_sheets`](#google_sheets) | Reading, creating, and updating spreadsheets | Google Sheets OAuth |
@@ -8693,16 +8693,25 @@ run_dataframe_operation("sales", "describe", {})
 
 ## [`google_bigquery`]
 
-`google_bigquery` provides `list_tables()`, `describe_table()`, and `run_sql_query()` for the configured dataset.
-The dataset is only the default for unqualified table names, so queries can still reference other datasets that the Google Cloud credentials can read.
-It authenticates with the MindRoom process's default Google Cloud credentials, not with MindRoom's Google OAuth connections.
+`google_bigquery` provides `list_tables()`, `describe_table(table_id)`, and `run_sql_query(query)` for the configured dataset.
+The dataset is only the default for unqualified table names, so queries can still reference other datasets that the connected account can read.
+It queries as the requester's **Google Cloud** connection, which has the read-only `cloud-platform.read-only` scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured.
+It does not use the MindRoom process's Application Default Credentials, and it takes no `credentials` option.
+The connected account or service account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
+If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
+The Google Cloud connection is shared by Google Cloud tools, so one connection serves all of them; see [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for the setup and [Google Cloud tools](https://docs.mindroom.chat/plugins/#google-cloud-tools) for plugin tools that use it.
+The tool always runs in the primary runtime, even when `worker_tools` lists it.
+
+`run_sql_query` accepts exactly one `SELECT` or `WITH` statement, with an optional trailing `;`.
+It refuses DML, DDL, scripts, and multiple statements with `Only a single read-only SELECT query is allowed`.
+It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `true` when more than `max_rows` rows were available.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `project` | `text` | yes | `null` | Google Cloud project ID. |
 | `dataset` | `text` | yes | `null` | Dataset name. |
 | `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
-| `credentials` | `text` | no | `null` | Programmatic only: a Google credentials object; rejected as an inline override. |
+| `max_rows` | `number` | no | `100` | Most rows `run_sql_query` returns, from `1` to `1000`. |
 | `list_tables` | `boolean` | no | `true` | Enable `list_tables()`. |
 | `describe_table` | `boolean` | no | `true` | Enable `describe_table()`. |
 | `run_sql_query` | `boolean` | no | `true` | Enable `run_sql_query()`. |
@@ -13237,6 +13246,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](https://docs.mindroom.chat/tools/project-management/#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
+| Google Cloud (read-only, shared by Google Cloud tools such as BigQuery) | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.
@@ -13328,7 +13338,7 @@ Installation-level connections that are not assigned to an agent scope must be r
 
 # Google Services OAuth For Local Installs
 
-This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation.
+This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud on a paired local installation.
 Paired installations use MindRoom's Google OAuth client, so you do not need a Google Cloud project, callback URLs, or a client secret.
 Pair first with `mindroom connect`, or let `mindroom run` pair automatically on first run (see [Hosted Matrix](https://docs.mindroom.chat/deployment/hosted-matrix/)).
 The provisioned client works only when MindRoom is opened on a loopback address (`localhost`, `127.0.0.1`, or `::1`).
@@ -13338,7 +13348,8 @@ That page also lists the scopes each Google tool requests and how to restrict wh
 ## Choose Providers
 
 Add only the Google tools your agents need.
-Each tool connects and asks for Google approval separately.
+Each Google Workspace tool connects and asks for Google approval separately.
+Google Cloud tools such as `google_bigquery` share one read-only **Google Cloud** connection, so you approve it once for all of them.
 
 ```yaml
 agents:
@@ -13359,6 +13370,7 @@ agents:
 With `user_agent`, each Matrix user connects their own account for this agent.
 With `shared`, everyone allowed to use the agent acts through one connected account and may receive its Google data in replies.
 See [Where Connections Are Stored](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored) for every scope.
+The Google Cloud connection requests the sensitive `cloud-platform.read-only` scope, and what the agent can read is limited by the connected account's own IAM roles.
 
 ## Connect
 
@@ -13388,11 +13400,13 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 
 - **`OAuth client configuration could not be resolved`**: MindRoom could not get a Google OAuth client, usually because the install is not paired or its pairing was revoked.
   Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
+- **Google shows an unverified-app warning or blocks the Google Cloud connection**: `cloud-platform.read-only` is a sensitive scope, so an OAuth client that Google has not verified for it can be limited to test users.
+  Add your account as a test user, or use a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup) whose consent screen is Internal to your organization; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
 - **`The provisioned OAuth client is available only when MindRoom is opened on localhost...`**: open MindRoom on `localhost`, or configure a custom client for remote access.
 
 # Google Services OAuth
 
-This page covers the Google OAuth providers behind the Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail tools: which scopes each requests and why, how to set up your own Google Cloud OAuth client, and how to restrict which Google accounts may connect.
+This page covers the Google OAuth providers behind the Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud tools: which scopes each requests and why, how to set up your own Google Cloud OAuth client, and how to restrict which Google accounts may connect.
 Paired local installations need no Google Cloud setup and use MindRoom's provisioned client; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 Use a custom client when MindRoom is opened on any address other than a local loopback address such as `localhost` or `127.0.0.1`, when the installation is not paired, or when you need organization-specific Google policies or your own consent-screen branding.
 The provisioned client works only on a loopback address; other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
@@ -13400,7 +13414,8 @@ How connections are made, stored per credential scope, disconnected, and reset i
 
 ## Providers
 
-Each Google tool has its own provider, so users connect and approve each service separately.
+Each Google Workspace tool has its own provider, so users connect and approve each service separately.
+Google Cloud is the exception: one read-only provider serves every Google Cloud tool, such as `google_bigquery`, so users connect once for all of them.
 
 | Tool | Provider ID | Token service | Client config service | Settings service | Google scopes |
 | --- | --- | --- | --- | --- | --- |
@@ -13410,6 +13425,7 @@ Each Google tool has its own provider, so users connect and approve each service
 | Google Sheets | `google_sheets` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | `spreadsheets` |
 | Google Tasks | `google_tasks` | `google_tasks_oauth` | `google_tasks_oauth_client` | `google_tasks` | `tasks` |
 | Gmail | `google_gmail` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | `gmail.modify` |
+| Google Cloud | `google_cloud` | `google_cloud_oauth` | `google_cloud_oauth_client` | Each tool's own name, such as `google_bigquery` | `cloud-platform.read-only` |
 
 Scope names are relative to `https://www.googleapis.com/auth/`.
 Every provider also requests the OpenID `openid`, email, and profile scopes.
@@ -13432,6 +13448,8 @@ MindRoom requests only the scopes needed for the operations it exposes to agents
 - `spreadsheets` lets an agent read and, when enabled, create or update spreadsheets the user names.
 - `tasks` lets an agent list task lists and tasks and, when `manage_tasks` is enabled, create, update, complete, and delete tasks.
   It also authorizes creating and deleting task lists, but the `google_tasks` tool does not manage task lists.
+- `cloud-platform.read-only` lets Google Cloud tools such as `google_bigquery` read data and run read-only queries as the connected account.
+  It cannot change Google Cloud resources, and the account's own IAM roles still decide what it can read.
 - `gmail.modify` is the narrowest single Gmail scope that keeps mailbox search and reading, drafts and sending, replies, labels, archiving, and other organization.
   It does not allow permanent deletion that bypasses the trash, and MindRoom does not request the full `mail.google.com` scope.
 - The OpenID email and profile scopes identify the connected account and enforce [account restrictions](#account-restrictions).
@@ -13443,7 +13461,7 @@ MindRoom does not use Google user data to train or improve generalized, foundati
 ## Custom Google Cloud Setup
 
 1. In Google Cloud Console, create an OAuth client of type **Web application**.
-2. Enable only the Google APIs for the tools you plan to use, such as the Google Docs API for `google_docs` and the Google Tasks API for `google_tasks`.
+2. Enable only the Google APIs for the tools you plan to use, such as the Google Docs API for `google_docs`, the Google Tasks API for `google_tasks`, and the BigQuery API for `google_bigquery`.
 3. Add one authorized redirect URI per provider you enable.
    With the default local origin these are:
 
@@ -13454,6 +13472,7 @@ MindRoom does not use Google user data to train or improve generalized, foundati
    http://localhost:8765/api/oauth/google_sheets/callback
    http://localhost:8765/api/oauth/google_tasks/callback
    http://localhost:8765/api/oauth/google_gmail/callback
+   http://localhost:8765/api/oauth/google_cloud/callback
    ```
 
    For a public deployment, replace the origin with your `MINDROOM_PUBLIC_URL` (see [callback URL rules](https://docs.mindroom.chat/oauth-framework/#connect-an-account)).
@@ -13498,12 +13517,14 @@ For non-interactive deployments, seed the shared client at startup with a [crede
 To use a Google Workspace service account instead of per-user OAuth, set `GOOGLE_SERVICE_ACCOUNT_FILE` to the service-account key file path in the environment or the config-adjacent `.env`.
 Set `GOOGLE_DELEGATED_USER` to the account to impersonate through domain-wide delegation, and authorize the service account's client ID for the scopes in the [Providers](#providers) table in the Google Workspace Admin console.
 The service account then serves every Google tool on this page instead of stored user connections, and the dashboard shows these services as connected.
+For Google Cloud tools, grant the service account the IAM roles the tool needs, such as BigQuery Data Viewer and BigQuery Job User for `google_bigquery`.
 
 ## Production Verification Follow-up
 
-Google classifies the `documents` and `tasks` scopes as sensitive and the `drive` scope as restricted.
+Google classifies the `documents`, `tasks`, and `cloud-platform.read-only` scopes as sensitive and the `drive` scope as restricted.
 Until Google approves a sensitive scope on your production project, users can see an unverified-app warning and test-user limits still apply, so do not enable that provider for general users before approval.
-To add the Docs or Tasks provider to a project whose consent screen is already in verification:
+A project whose consent screen is **Internal** to your Google Workspace organization does not need verification.
+To add the Docs, Tasks, or Google Cloud provider to a project whose consent screen is already in verification:
 
 1. Do not add the new scope to the production consent configuration while another verification submission is under review, unless you intend to change that submission.
 2. Validate the integration in a separate Google Cloud testing project with test users: enable the API, add the scope, and register the callback.
@@ -13519,12 +13540,13 @@ Restrict which Google accounts may connect with comma-separated domain lists, se
 | `<PROVIDER>_ALLOWED_EMAIL_DOMAINS` | Its verified email address is in one of the listed domains |
 | `<PROVIDER>_ALLOWED_HOSTED_DOMAINS` | It belongs to one of the listed Google Workspace domains |
 
-`<PROVIDER>` is the uppercased provider ID: `GOOGLE_DRIVE`, `GOOGLE_DOCS`, `GOOGLE_CALENDAR`, `GOOGLE_SHEETS`, `GOOGLE_TASKS`, or `GOOGLE_GMAIL`.
+`<PROVIDER>` is the uppercased provider ID: `GOOGLE_DRIVE`, `GOOGLE_DOCS`, `GOOGLE_CALENDAR`, `GOOGLE_SHEETS`, `GOOGLE_TASKS`, `GOOGLE_GMAIL`, or `GOOGLE_CLOUD`.
 Each variable also accepts a `MINDROOM_OAUTH_` prefix, such as `MINDROOM_OAUTH_GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS`.
 
 ```bash
 GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
 GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com,example.org
+GOOGLE_CLOUD_ALLOWED_HOSTED_DOMAINS=example.com
 ```
 
 A rejected account saves nothing, and the callback returns HTTP 400 with `OAuth account email domain is not allowed`, `OAuth account email ownership is not verified`, or `OAuth hosted domain claim is not allowed`.
@@ -14307,6 +14329,100 @@ To set up a workspace:
 When a workspace tool needs a login, it returns its own chat authorization link.
 Workspace tools never fall back to the default Google client or a global service account, and like the built-in Google tools they always run in the primary runtime.
 Functions are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `send_email` does not match `secondary_send_email`.
+
+### Google Cloud tools
+
+A plugin tool that calls Google Cloud client libraries, such as `google-cloud-storage`, can reuse the built-in read-only **Google Cloud** connection instead of defining its own OAuth provider.
+Users connect once for every Google Cloud tool, the connection requests the `cloud-platform.read-only` scope, and a configured `GOOGLE_SERVICE_ACCOUNT_FILE` is used instead and counts as connected.
+See [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for the client setup, scope, and account restrictions.
+
+Subclass `GoogleCloudToolkit`, set `_oauth_provider` and `_oauth_tool_name`, and pass the managed constructor values through:
+
+```python
+import json
+
+from mindroom.custom_tools.google_service import GoogleCloudToolkit
+from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+
+
+class CloudStorageBrowserTools(GoogleCloudToolkit):
+    _oauth_provider = google_cloud_oauth_provider()
+    _oauth_tool_name = "cloud_storage_browser"
+
+    def __init__(self, *, project, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs):
+        self.project = project
+        super().__init__(
+            name="cloud_storage_browser",
+            tools=[self.list_buckets],
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            **kwargs,
+        )
+
+    def list_buckets(self) -> str:
+        """List the Cloud Storage buckets in the configured project."""
+        from google.api_core.exceptions import GoogleAPICallError
+        from google.cloud import storage
+
+        try:
+            client = self._google_cloud_client(
+                "storage",
+                lambda creds: storage.Client(project=self.project, credentials=creds),
+            )
+            return json.dumps({"buckets": [bucket.name for bucket in client.list_buckets()]})
+        except GoogleAPICallError as exc:
+            return self._google_cloud_error_result("Cloud Storage", "list_buckets", exc)
+```
+
+Register the tool in the same module with an OAuth setup, the Google Cloud provider, the primary runtime, and the four managed init args that the constructor receives:
+
+```python
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
+from mindroom.tool_system.registration import register_tool_with_metadata
+
+
+@register_tool_with_metadata(
+    name="cloud_storage_browser",
+    display_name="Cloud Storage Browser",
+    description="List Google Cloud Storage buckets",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.REQUIRES_CONFIG,
+    file_access=ToolFileAccess.NONE,
+    setup_type=SetupType.OAUTH,
+    auth_provider="google_cloud",
+    requires_primary_runtime=True,
+    config_fields=[ConfigField(name="project", label="Project", type="text", required=True)],
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
+    ),
+    dependencies=["google-cloud-storage"],
+)
+def cloud_storage_browser_tools() -> type[CloudStorageBrowserTools]:
+    return CloudStorageBrowserTools
+```
+
+The base class provides three helpers:
+
+| Method | What it does |
+| --- | --- |
+| `self._google_cloud_credentials()` | Returns the requester's credentials, or the service account's; when the account is not connected, the tool call returns the standard connect prompt instead |
+| `self._google_cloud_client(name, factory)` | Returns one client per worker thread, built by `factory(credentials)` and rebuilt whenever the credentials change |
+| `self._google_cloud_error_result(service_name, operation, exc)` | Returns a JSON error that exposes only the HTTP status, and turns an HTTP 401 into a reconnect prompt |
+
+The plugin must list and install its own client-library dependencies, because MindRoom does not ship them; see [Dependencies](#dependencies).
+Build clients only from the credentials the helpers return, and do not copy them with `with_quota_project`, because the copy no longer refreshes through the stored connection.
 
 ### Additional Atlassian connections
 
@@ -19568,9 +19684,9 @@ When a paired local installation uses MindRoom's desktop OAuth client, the provi
 The local MindRoom process performs the token exchange with Google and stores the resulting tokens; the provisioning service does not receive the Google authorization code, tokens, or Google API data.
 Control of the OAuth app registration lets the project maintainers manage or disable the client, but it does not by itself reveal a user's OAuth tokens or Google data to them.
 
-Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Docs document contents, Calendar data, Sheets spreadsheet values, and Tasks task lists and tasks.
+Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Docs document contents, Calendar data, Sheets spreadsheet values, Tasks task lists and tasks, and Google Cloud data such as BigQuery table schemas and query results.
 
-The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, editing a document, managing a calendar event, reading and updating a spreadsheet, or creating and completing a task.
+The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, editing a document, managing a calendar event, reading and updating a spreadsheet, creating and completing a task, or running a read-only BigQuery query.
 
 Google connections follow the selected agent's saved effective execution scope.
 MindRoom uses `private.per` first, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope:

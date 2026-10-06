@@ -36,6 +36,37 @@ describe("Generic OAuth integration provider", () => {
     });
   });
 
+  it("registers Google BigQuery on the shared Google Cloud connection", async () => {
+    const provider = integrationProviders.google_bigquery;
+    const config = provider.getConfig();
+
+    expect(config.integration).toMatchObject({
+      id: "google_bigquery",
+      name: "Google BigQuery",
+      setup_type: "oauth",
+      oauth_provider_id: "google_cloud",
+    });
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        connected: true,
+        has_client_config: true,
+        has_custom_client_config: false,
+        has_service_account_config: false,
+        client_config_service: "google_cloud_oauth_client",
+      }),
+    });
+
+    const status = await provider.loadStatus!();
+
+    expect(global.fetch).toHaveBeenCalledWith("/api/oauth/google_cloud/status");
+    expect(status).toMatchObject({
+      status: "connected",
+      oauth_client_config_service: "google_cloud_oauth_client",
+    });
+  });
+
   it("resolves connect once and releases observers after popup completion", async () => {
     vi.useFakeTimers();
     const removeListener = vi.spyOn(window, "removeEventListener");

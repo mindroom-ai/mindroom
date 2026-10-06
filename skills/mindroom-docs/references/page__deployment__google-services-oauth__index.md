@@ -1,6 +1,6 @@
 # Google Services OAuth
 
-This page covers the Google OAuth providers behind the Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail tools: which scopes each requests and why, how to set up your own Google Cloud OAuth client, and how to restrict which Google accounts may connect.
+This page covers the Google OAuth providers behind the Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud tools: which scopes each requests and why, how to set up your own Google Cloud OAuth client, and how to restrict which Google accounts may connect.
 Paired local installations need no Google Cloud setup and use MindRoom's provisioned client; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 Use a custom client when MindRoom is opened on any address other than a local loopback address such as `localhost` or `127.0.0.1`, when the installation is not paired, or when you need organization-specific Google policies or your own consent-screen branding.
 The provisioned client works only on a loopback address; other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
@@ -8,7 +8,8 @@ How connections are made, stored per credential scope, disconnected, and reset i
 
 ## Providers
 
-Each Google tool has its own provider, so users connect and approve each service separately.
+Each Google Workspace tool has its own provider, so users connect and approve each service separately.
+Google Cloud is the exception: one read-only provider serves every Google Cloud tool, such as `google_bigquery`, so users connect once for all of them.
 
 | Tool | Provider ID | Token service | Client config service | Settings service | Google scopes |
 | --- | --- | --- | --- | --- | --- |
@@ -18,6 +19,7 @@ Each Google tool has its own provider, so users connect and approve each service
 | Google Sheets | `google_sheets` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | `spreadsheets` |
 | Google Tasks | `google_tasks` | `google_tasks_oauth` | `google_tasks_oauth_client` | `google_tasks` | `tasks` |
 | Gmail | `google_gmail` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | `gmail.modify` |
+| Google Cloud | `google_cloud` | `google_cloud_oauth` | `google_cloud_oauth_client` | Each tool's own name, such as `google_bigquery` | `cloud-platform.read-only` |
 
 Scope names are relative to `https://www.googleapis.com/auth/`.
 Every provider also requests the OpenID `openid`, email, and profile scopes.
@@ -40,6 +42,8 @@ MindRoom requests only the scopes needed for the operations it exposes to agents
 - `spreadsheets` lets an agent read and, when enabled, create or update spreadsheets the user names.
 - `tasks` lets an agent list task lists and tasks and, when `manage_tasks` is enabled, create, update, complete, and delete tasks.
   It also authorizes creating and deleting task lists, but the `google_tasks` tool does not manage task lists.
+- `cloud-platform.read-only` lets Google Cloud tools such as `google_bigquery` read data and run read-only queries as the connected account.
+  It cannot change Google Cloud resources, and the account's own IAM roles still decide what it can read.
 - `gmail.modify` is the narrowest single Gmail scope that keeps mailbox search and reading, drafts and sending, replies, labels, archiving, and other organization.
   It does not allow permanent deletion that bypasses the trash, and MindRoom does not request the full `mail.google.com` scope.
 - The OpenID email and profile scopes identify the connected account and enforce [account restrictions](#account-restrictions).
@@ -51,7 +55,7 @@ MindRoom does not use Google user data to train or improve generalized, foundati
 ## Custom Google Cloud Setup
 
 1. In Google Cloud Console, create an OAuth client of type **Web application**.
-2. Enable only the Google APIs for the tools you plan to use, such as the Google Docs API for `google_docs` and the Google Tasks API for `google_tasks`.
+2. Enable only the Google APIs for the tools you plan to use, such as the Google Docs API for `google_docs`, the Google Tasks API for `google_tasks`, and the BigQuery API for `google_bigquery`.
 3. Add one authorized redirect URI per provider you enable.
    With the default local origin these are:
 
@@ -62,6 +66,7 @@ MindRoom does not use Google user data to train or improve generalized, foundati
    http://localhost:8765/api/oauth/google_sheets/callback
    http://localhost:8765/api/oauth/google_tasks/callback
    http://localhost:8765/api/oauth/google_gmail/callback
+   http://localhost:8765/api/oauth/google_cloud/callback
    ```
 
    For a public deployment, replace the origin with your `MINDROOM_PUBLIC_URL` (see [callback URL rules](https://docs.mindroom.chat/oauth-framework/#connect-an-account)).
@@ -106,12 +111,14 @@ For non-interactive deployments, seed the shared client at startup with a [crede
 To use a Google Workspace service account instead of per-user OAuth, set `GOOGLE_SERVICE_ACCOUNT_FILE` to the service-account key file path in the environment or the config-adjacent `.env`.
 Set `GOOGLE_DELEGATED_USER` to the account to impersonate through domain-wide delegation, and authorize the service account's client ID for the scopes in the [Providers](#providers) table in the Google Workspace Admin console.
 The service account then serves every Google tool on this page instead of stored user connections, and the dashboard shows these services as connected.
+For Google Cloud tools, grant the service account the IAM roles the tool needs, such as BigQuery Data Viewer and BigQuery Job User for `google_bigquery`.
 
 ## Production Verification Follow-up
 
-Google classifies the `documents` and `tasks` scopes as sensitive and the `drive` scope as restricted.
+Google classifies the `documents`, `tasks`, and `cloud-platform.read-only` scopes as sensitive and the `drive` scope as restricted.
 Until Google approves a sensitive scope on your production project, users can see an unverified-app warning and test-user limits still apply, so do not enable that provider for general users before approval.
-To add the Docs or Tasks provider to a project whose consent screen is already in verification:
+A project whose consent screen is **Internal** to your Google Workspace organization does not need verification.
+To add the Docs, Tasks, or Google Cloud provider to a project whose consent screen is already in verification:
 
 1. Do not add the new scope to the production consent configuration while another verification submission is under review, unless you intend to change that submission.
 2. Validate the integration in a separate Google Cloud testing project with test users: enable the API, add the scope, and register the callback.
@@ -127,12 +134,13 @@ Restrict which Google accounts may connect with comma-separated domain lists, se
 | `<PROVIDER>_ALLOWED_EMAIL_DOMAINS` | Its verified email address is in one of the listed domains |
 | `<PROVIDER>_ALLOWED_HOSTED_DOMAINS` | It belongs to one of the listed Google Workspace domains |
 
-`<PROVIDER>` is the uppercased provider ID: `GOOGLE_DRIVE`, `GOOGLE_DOCS`, `GOOGLE_CALENDAR`, `GOOGLE_SHEETS`, `GOOGLE_TASKS`, or `GOOGLE_GMAIL`.
+`<PROVIDER>` is the uppercased provider ID: `GOOGLE_DRIVE`, `GOOGLE_DOCS`, `GOOGLE_CALENDAR`, `GOOGLE_SHEETS`, `GOOGLE_TASKS`, `GOOGLE_GMAIL`, or `GOOGLE_CLOUD`.
 Each variable also accepts a `MINDROOM_OAUTH_` prefix, such as `MINDROOM_OAUTH_GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS`.
 
 ```bash
 GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
 GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com,example.org
+GOOGLE_CLOUD_ALLOWED_HOSTED_DOMAINS=example.com
 ```
 
 A rejected account saves nothing, and the callback returns HTTP 400 with `OAuth account email domain is not allowed`, `OAuth account email ownership is not verified`, or `OAuth hosted domain claim is not allowed`.
