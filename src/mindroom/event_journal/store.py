@@ -338,18 +338,21 @@ class PrincipalStore:
             lambda transaction: membership_hooks.mark_completed(transaction, self._principal_id, room_id, user_id),
         )
 
-    async def settle(self, event_id: str) -> None:
-        """Mark one event's semantic work terminal."""
-        await self._backend.write(
-            lambda transaction: journal.settle(transaction, self._principal_id, event_id),
-        )
+    async def settle(self, event_id: str) -> tuple[str, ...]:
+        """Mark one event's semantic work terminal; return the replies that ends, as ``settle_many`` does."""
+        return await self.settle_many((event_id,))
 
-    async def settle_many(self, event_ids: tuple[str, ...]) -> None:
-        """Settle every event that one terminal turn accounted for."""
+    async def settle_many(self, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Settle every event that one terminal turn accounted for; return the replies that ends.
+
+        A reply an earlier span left waiting to replay these sources ends in
+        the same commit, since nothing replays them any more; what it owes
+        Matrix is its caller's to deliver.
+        """
         if not event_ids:
-            return
-        await self._backend.write(
-            lambda transaction: journal.settle_many(transaction, self._principal_id, event_ids),
+            return ()
+        return await self._backend.write(
+            lambda transaction: _settle_turn_sources(transaction, self._principal_id, event_ids),
         )
 
     async def unsettled_event_ids(self) -> frozenset[str]:
@@ -2377,6 +2380,11 @@ def _settle_history_recovery(
     )
 
 
+def _settle_turn_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+    journal.settle_many(transaction, principal_id, event_ids)
+    return replies.drop_replays(transaction, principal_id, event_ids, now_ns=time.time_ns())
+
+
 def _install_room_history_recovery_chunk(
     transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
     principal_id: str,
@@ -2396,13 +2404,15 @@ def _install_room_history_recovery_chunk(
     if not journal.claim_room_history_recovery(transaction, principal_id, recovery):
         return False
     for event in events:
-        project(
+        tombstoned = project(
             transaction,
             principal_id,
             event,
             receipt_order=0,
             membership_epoch=expected_membership_epoch,
         )
+        if tombstoned is not None:
+            journal.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
     return True
 
 
@@ -2447,13 +2457,15 @@ def _install_hydration_chunk(
     ):
         return False
     for event in events:
-        project(
+        tombstoned = project(
             transaction,
             principal_id,
             event,
             receipt_order=0,
             membership_epoch=expected_membership_epoch,
         )
+        if tombstoned is not None:
+            journal.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
     return True
 
 

@@ -36,6 +36,22 @@ if TYPE_CHECKING:
 
 
 _POOL_SIZE = 4
+# The journal lock's session. A runtime that vanishes without closing it (a
+# lost node, a partition) holds the lock until the server notices: within about
+# a minute with these, instead of the default two hours. A holder cut off from
+# the server fails its probe within a minute too, and shuts down.
+_HOLD_SERVER_KEEPALIVES: tuple[LiteralString, ...] = (
+    "SET tcp_keepalives_idle = 30",
+    "SET tcp_keepalives_interval = 10",
+    "SET tcp_keepalives_count = 3",
+)
+_HOLD_CLIENT_KEEPALIVES: dict[str, Any] = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+    "tcp_user_timeout": 60_000,
+}
 
 
 def _statement(sql: str) -> LiteralString:
@@ -282,8 +298,10 @@ class PostgresBackend:
         key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
 
         def take() -> psycopg.Connection[tuple[Any, ...]] | None:
-            session = psycopg.connect(self.database_url, autocommit=True)
+            session = psycopg.connect(self.database_url, autocommit=True, **_HOLD_CLIENT_KEEPALIVES)
             try:
+                for statement in _HOLD_SERVER_KEEPALIVES:
+                    session.execute(statement)
                 row = session.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()
             except BaseException:
                 session.close()

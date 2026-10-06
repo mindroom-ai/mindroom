@@ -223,6 +223,16 @@ class ReplyRuntime:
         for span_id in await self.store.replies.spans_in_room(room_id, self.spans.live_span_ids()):
             self.spans.cancel(span_id, cancel_source=None)
 
+    async def source_deleted(self, event_id: str) -> tuple[str, ...]:
+        """Cancel the spans this instance runs for replies deleting this source ended; return those replies.
+
+        The tombstone's projection ended them; what they showed is their debt.
+        """
+        replies = await self.store.replies.ended_by_deletion(event_id)
+        for reply in replies:
+            self.spans.cancel(reply.last_span_id, cancel_source=None)
+        return tuple(reply.reply_id for reply in replies)
+
     async def take_ownership(self) -> None:
         """Make this bot instance the owner of its principal's replies, before it writes any of them."""
         await self.store.replies.write_generation(self.generation, now_ns=self.clock())

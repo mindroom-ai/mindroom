@@ -10049,3 +10049,24 @@ async def test_one_runtime_holds_a_journal_at_a_time(journal_database: Callable[
 
     assert await second.hold_exclusively("journal-identity")
     assert await second.still_held()
+
+
+async def test_a_postgres_journal_hold_lets_the_server_drop_a_vanished_holder(postgres_journal_url: str) -> None:
+    """The lock's session keeps short TCP keepalives, so a runtime lost without closing it frees the journal soon."""
+    from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
+
+    store = EventJournalStore.open_postgres(postgres_journal_schema_url(postgres_journal_url))
+    try:
+        assert await store.hold_exclusively("keepalive-identity")
+        backend = store.backend
+        assert isinstance(backend, PostgresBackend)
+        session = backend._hold
+        assert session is not None
+        shown = {}
+        for setting in ("tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"):
+            row = session.execute(f"SHOW {setting}").fetchone()
+            assert row is not None
+            shown[setting] = row[0]
+        assert shown == {"tcp_keepalives_idle": "30", "tcp_keepalives_interval": "10", "tcp_keepalives_count": "3"}
+    finally:
+        await store.close()

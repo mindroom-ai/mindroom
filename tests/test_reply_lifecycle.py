@@ -906,6 +906,27 @@ def test_a_wait_in_place_keeps_its_stop_button_until_its_span_ends() -> None:
     assert ended.reply.redaction_pending == ("$button",)
 
 
+def test_a_button_acknowledged_during_a_wait_in_place_stays_until_the_span_ends() -> None:
+    """A Stop button whose send lands after the span paused in place is the waiting reply's button."""
+    reply, span = _turn()
+    waiting = rl.pause(
+        replace(reply, event_id="$reply"),
+        span,
+        rl.PauseWrite(shown="paused", prepared_revision=reply.revision, stage=WriteStage.EDIT),
+        approval_id="approval-1",
+        in_place=True,
+        now_ns=NOW,
+    )
+    assert waiting.reply is not None
+    late = rl.record_stop_button(waiting.reply, event_id="$button", now_ns=NOW)
+    assert late.reply is not None
+    assert late.reply.stop_button_event_id == "$button"
+    assert late.reply.redaction_pending == ()
+    paused = rl.record_stop_button(replace(waiting.reply, current_span_id=None), event_id="$late", now_ns=NOW)
+    assert paused.reply is not None
+    assert paused.reply.redaction_pending == ("$late",)
+
+
 def test_a_wait_in_place_an_older_instance_ran_ends_as_a_pause_at_start() -> None:
     """After a restart the reply waits for its decision as any pause does, and its Stop button goes."""
     reply, span = _turn()
@@ -1105,6 +1126,26 @@ def test_stop_without_a_live_span_cancels_directly_and_owes_a_note() -> None:
     assert flushed.reply.owed_write is None
 
 
+def test_a_note_owed_by_a_reply_still_being_read_waits_for_the_read() -> None:
+    """A note rendered before an earlier release's reply is read back would replace what it showed."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.RELEASED)
+    stop = rl.stop(reply, None, StopFacts(receipt_order=6, newer_edit=False, span_live=False), now_ns=NOW)
+    assert stop.reply is not None
+    reading = replace(stop.reply, legacy_pending=rl.LegacyPending.PRESENTATION_READ)
+    deferred = rl.flush_owed_write(
+        reading,
+        span,
+        shown="cancelled",
+        prepared_revision=reading.revision,
+        span_has_final=False,
+        now_ns=NOW,
+    )
+    assert deferred.outcome is Outcome.DEFERRED
+    assert deferred.row is None
+    assert deferred.reply == reading
+
+
 def test_stop_guards() -> None:
     """Older Stops and Stops a newer edit superseded are duplicates; a terminal reply keeps its answer."""
     reply, span = _turn()
@@ -1230,6 +1271,40 @@ def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
         durable_write_debt=False,
         now_ns=NOW,
     )
+    assert answered.outcome is Outcome.DUPLICATE
+
+
+def test_a_dropped_replay_ends_the_reply_its_earlier_span_left() -> None:
+    """Ingress settled the replay's sources without a turn, so the reply ends interrupted; it owes no row first."""
+    reply, span = _interrupted()
+    owing = replace(reply, owed_write=rl.OwedWrite(span.span_id, rl._NOTE_RESTART))
+    dropped = rl.replay_dropped(owing, span, sources_pending=False, now_ns=NOW)
+    assert dropped.outcome is Outcome.APPLIED
+    assert dropped.reply is not None
+    assert dropped.reply.state is ReplyState.FAILED
+    assert dropped.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
+    assert dropped.effects == ()
+    # A placeholder is removed, unless an edit Matrix has not confirmed may show more.
+    unconfirmed = replace(reply, placeholder_only=True, possibly_shown_seq=3, confirmed_seq=2)
+    shown = rl.replay_dropped(unconfirmed, span, sources_pending=False, now_ns=NOW)
+    assert shown.reply is not None
+    assert shown.reply.state is ReplyState.FAILED
+    placeholder = rl.replay_dropped(replace(unconfirmed, confirmed_seq=3), span, sources_pending=False, now_ns=NOW)
+    assert placeholder.reply is not None
+    assert placeholder.reply.state is ReplyState.GONE
+    kept = (
+        rl.replay_dropped(reply, span, sources_pending=True, now_ns=NOW),
+        rl.replay_dropped(replace(reply, approval_id="approval-1"), span, sources_pending=False, now_ns=NOW),
+        rl.replay_dropped(
+            replace(reply, legacy_pending=rl.LegacyPending.PRESENTATION_READ),
+            span,
+            sources_pending=False,
+            now_ns=NOW,
+        ),
+        rl.replay_dropped(replace(reply, current_span_id="span-2"), span, sources_pending=False, now_ns=NOW),
+    )
+    assert [transition.outcome for transition in kept] == [Outcome.DEFERRED] * 4
+    answered = rl.replay_dropped(replace(reply, state=ReplyState.COMPLETED), span, sources_pending=False, now_ns=NOW)
     assert answered.outcome is Outcome.DUPLICATE
 
 

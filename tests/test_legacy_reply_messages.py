@@ -155,12 +155,18 @@ def _text(presentation: str) -> str:
     return "".join(segment.text for segment in decode_presentation(presentation).segments)
 
 
+@pytest.mark.parametrize("state", ["waiting", "ready"])
 @pytest.mark.parametrize("entity_kind", ["agent", "team"])
 async def test_a_waiting_approval_pauses_its_reply_with_what_it_showed(
     journal_store: EventJournalStore,
     entity_kind: Literal["agent", "team"],
+    state: Literal["waiting", "ready"],
 ) -> None:
-    """The continuation's kept presentation becomes the paused reply's; the approval runtime stays its owner."""
+    """The continuation's kept presentation becomes the paused reply's; the approval runtime stays its owner.
+
+    Nothing has resumed past the pause yet, so no read replaces it: a team's
+    resume restores the document kept here.
+    """
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
@@ -171,11 +177,12 @@ async def test_a_waiting_approval_pauses_its_reply_with_what_it_showed(
         if entity_kind == "team"
         else None
     )
-    continuation = replace(_continuation("waiting"), entity_kind=entity_kind)
+    continuation = replace(_continuation(state), entity_kind=entity_kind)
     await _main_continuation(principal, continuation, tool_trace=(trace,), team_state=team_state)
 
     assert await _adopt(principal) == ()
     reply = await _only_reply(principal)
+    assert reply.legacy_pending is None
     assert reply.state is rl.ReplyState.PAUSED
     assert reply.event_id == "$reply"
     assert reply.approval_id == "approval-1"
@@ -344,10 +351,14 @@ async def test_command_turns_and_finished_answers_get_no_reply(journal_store: Ev
 
 
 async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJournalStore) -> None:
-    """Only the newest continuation pauses the reply; the older one is fenced, as an edit supersedes it."""
+    """Only the newest continuation pauses the reply; the older one is fenced, as an edit supersedes it.
+
+    The original turn's rows created the same event, which stays one reply.
+    """
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await admit(principal, "$edit")
+    await _turn(journal_store, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
     await _main_continuation(principal, _continuation("waiting"))
     newer = replace(
@@ -365,6 +376,22 @@ async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJ
     assert older is not None
     assert older.state == "failing"
     assert older.failure_reason == "superseded"
+
+
+async def test_a_claimed_team_resume_keeps_its_document_instead_of_a_read(journal_store: EventJournalStore) -> None:
+    """A team's resume restores the document its continuation kept, which a read of rendered text would lose."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    team_state = {"kind": "team_stream", "version": 2, "members": [], "consensus": "Reading document"}
+    continuation = replace(_continuation("claimed"), entity_kind="team")
+    await _main_continuation(principal, continuation, team_state=team_state)
+
+    assert await _adopt(principal) == ()
+    reply = await _only_reply(principal)
+    assert reply.legacy_pending is None
+    (answer,) = decode_presentation(reply.presentation).segments
+    assert answer.team_state == team_state
 
 
 async def test_a_claimed_resume_is_left_running_for_approval_recovery(journal_store: EventJournalStore) -> None:

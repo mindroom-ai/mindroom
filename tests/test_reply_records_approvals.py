@@ -13,6 +13,7 @@ from agno.models.response import ToolExecution
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
+from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
@@ -288,6 +289,42 @@ async def test_stop_during_an_approval_resume_cancels_it_through_its_approval(tm
         assert await bot.journal_principal().approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
         assert _sent_bodies(bot)[-1] == "**[Response cancelled by user]**"
+
+
+async def test_a_shutdown_during_an_approval_resume_leaves_it_for_replay(tmp_path: Path) -> None:
+    """A process stop leaves the resume span as a crash would; recovery hands it back to replay, which may claim it."""
+    async with _approval_bot(tmp_path, requires_human=False) as bot:
+        resuming = asyncio.Event()
+
+        async def resume_until_cancelled(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+            resuming.set()
+            await asyncio.Event().wait()
+            return CompletedApprovalRun("Never answered.", {})
+
+        response = asyncio.create_task(_respond(bot, resume=AsyncMock(side_effect=resume_until_cancelled)))
+        await asyncio.wait_for(resuming.wait(), timeout=5)
+        request_task_cancel(response, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(response, timeout=5)
+
+        assert await _span_kinds(bot) == [
+            (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
+            (rl.SpanKind.APPROVAL_RESUME, None),
+        ]
+        failing = await bot.journal_principal().approval_continuation_for_source("$event")
+        assert failing is not None
+        assert failing.state == "failing"
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        await runner._recover_failing_approval(failing, target=_target())
+
+        reply = await _reply(bot)
+        assert reply.state is rl.ReplyState.ACTIVE
+        assert reply.current_span_id is None
+        assert await _span_kinds(bot) == [
+            (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
+            (rl.SpanKind.APPROVAL_RESUME, rl.SpanOutcome.RELEASED),
+        ]
+        assert await bot._reply_runtime.store.is_pending("$event")
 
 
 async def test_a_failed_resume_shows_its_failure_and_ends_the_reply(tmp_path: Path) -> None:

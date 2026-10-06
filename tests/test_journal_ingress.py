@@ -1655,8 +1655,8 @@ class TestPendingEventWorker:
             async def is_pending(self, event_id: str) -> bool:
                 return await self.inner.is_pending(event_id)
 
-            async def settle(self, event_id: str) -> None:
-                await self.inner.settle(event_id)
+            async def settle(self, event_id: str) -> tuple[str, ...]:
+                return await self.inner.settle(event_id)
 
         async def handle(event: JournalEvent) -> bool:
             del event
@@ -3163,6 +3163,7 @@ class TestOutOfBandDispatch:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3244,6 +3245,7 @@ class TestDeferralOwnership:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda _event_id: turn_claimed,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3698,12 +3700,12 @@ class _FlakyReplayView:
             raise RuntimeError(msg)
         return await self.inner.is_pending(event_id)
 
-    async def settle(self, event_id: str) -> None:
+    async def settle(self, event_id: str) -> tuple[str, ...]:
         if event_id in self.fail_settle:
             self.fail_settle.discard(event_id)
             msg = "the journal is unwritable"
             raise RuntimeError(msg)
-        await self.inner.settle(event_id)
+        return await self.inner.settle(event_id)
 
 
 @dataclass
@@ -3872,6 +3874,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -4107,6 +4110,7 @@ class TestAdmittedWorkReachesItsCallback:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
             schedule_trigger_sender_is_managed=lambda sender: sender == BOT,

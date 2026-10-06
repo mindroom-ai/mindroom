@@ -3270,28 +3270,27 @@ class ResponseRunner:
         confirms = handle.unconfirmed_progress
         now_ns = time.time_ns()
         if isinstance(error, asyncio.CancelledError):
-            if not current_task_is_process_shutdown():
-                cancel_source = classify_cancel_source(error)
-                reply = await handle.runtime.store.replies.load(handle.reply_id)
-                if cancel_source == "user_stop" and reply is not None and reply.unapplied_stop:
-                    await gateway.end_reply_span_with_note(
-                        handle,
-                        target,
-                        state=rl.ReplyState.CANCELLED,
-                        note=note_segment(NoteKind.CANCELLED),
-                    )
-                    return
-                if reply is not None and reply.event_id is not None:
-                    # An early placeholder shows why it stopped; the sources stay for the retry.
-                    await gateway.end_reply_span_with_note(
-                        handle,
-                        target,
-                        state=rl.ReplyState.ACTIVE,
-                        note=note_segment(
-                            NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED,
-                        ),
-                    )
-                    return
+            cancel_source = classify_cancel_source(error)
+            reply = await handle.runtime.store.replies.load(handle.reply_id)
+            if cancel_source == "user_stop" and reply is not None and reply.unapplied_stop:
+                await gateway.end_reply_span_with_note(
+                    handle,
+                    target,
+                    state=rl.ReplyState.CANCELLED,
+                    note=note_segment(NoteKind.CANCELLED),
+                )
+                return
+            if reply is not None and reply.event_id is not None:
+                # An early placeholder shows why it stopped; the sources stay for the retry.
+                await gateway.end_reply_span_with_note(
+                    handle,
+                    target,
+                    state=rl.ReplyState.ACTIVE,
+                    note=note_segment(
+                        NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED,
+                    ),
+                )
+                return
             # Other cancellations leave the sources for a retry, without touching Matrix.
             await gateway.end_reply_span(
                 handle,
@@ -3433,13 +3432,17 @@ class ResponseRunner:
             outcome = await self._run_claimed_approval_lifecycle(claimed, target=target)
         except asyncio.CancelledError as error:
             # A shutdown that hands this run to a successor runtime records it as
-            # restart-interrupted, which that runtime hands back to replay.
+            # restart-interrupted and leaves the span as a crash would, for that
+            # runtime to hand back to replay. Read here: the detached task that
+            # ends the span is no shutdown task.
+            process_shutdown = current_task_is_process_shutdown()
             reason = (
                 _INTERRUPTED_APPROVAL_RECOVERY_REASON
-                if current_task_is_process_shutdown()
+                if process_shutdown
                 else cancel_failure_reason(classify_cancel_source(error))
             )
-            await run_coroutine_until_complete(self._end_live_resume_span())
+            if not process_shutdown:
+                await run_coroutine_until_complete(self._end_live_resume_span())
             owns_final, event_id, _failing = await run_coroutine_until_complete(
                 self._recover_or_request_claimed_failure(
                     claimed,
@@ -3452,7 +3455,8 @@ class ResponseRunner:
             raise
         except Exception as error:
             reason = str(error) or "Tool approval continuation failed safely."
-            await self._end_live_resume_span()
+            if not current_task_is_process_shutdown():
+                await self._end_live_resume_span()
             owns_final, event_id, failing = await self._recover_or_request_claimed_failure(
                 claimed,
                 target=target,
@@ -3477,13 +3481,7 @@ class ResponseRunner:
     async def _end_live_resume_span(self) -> None:
         """End a resume span its lifecycle left running, before the continuation's failure settles the reply."""
         handle = current_span()
-        if (
-            handle is None
-            or handle.exited
-            or handle.span.kind is not rl.SpanKind.APPROVAL_RESUME
-            or current_task_is_process_shutdown()
-        ):
-            # A process stop leaves the span as a crash would, for the next instance to end.
+        if handle is None or handle.exited or handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
             return
         now_ns = time.time_ns()
         await self.deps.delivery_gateway.end_reply_span(

@@ -1489,6 +1489,10 @@ def flush_owed_write(
     owed = reply.owed_write
     if owed is None:
         return _unchanged(Outcome.DUPLICATE, reply)
+    if reply.legacy_pending is not None:
+        # What a reply an earlier release left showed is still being read; a
+        # note rendered now would replace it. The read's resolution flushes it.
+        return _unchanged(Outcome.DEFERRED, reply)
     recompute = _check_revision(reply, prepared_revision)
     if recompute is not None:
         return recompute
@@ -1548,11 +1552,12 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
         spans = (_end(span, SpanOutcome.SUPPRESSED, now_ns),)
     if span.kind is SpanKind.REGENERATION and span.rollback is not None and not _had_acknowledged_write(reply, span):
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, span, now_ns), spans=spans)
-    if reply.event_id is None or reply.placeholder_only:
+    if reply.event_id is None or (reply.placeholder_only and reply.confirmed):
         gone = _with_redactions(_set_state(updated, ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans)
     # What the reply showed stays, ended by the interrupted note; nothing else
-    # would replace the in-progress status it shows.
+    # would replace the in-progress status it shows. An edit Matrix has not
+    # confirmed may show more than the placeholder, so it stays too.
     owed = OwedWrite(span.span_id, _NOTE_INTERRUPTED)
     return Transition(
         outcome=Outcome.APPLIED,
@@ -1565,23 +1570,35 @@ def replay_superseded(reply: Reply, last: Span, *, durable_write_debt: bool, now
     """A newer message superseded the replay of the reply's sources; they settle in this transaction.
 
     A reply that still owes Matrix a write is never superseded, because its
-    replay is what resolves that write; neither is one a span runs, a pending
-    legacy read, or an approval owns.
+    replay is what resolves that write; nor is one ``replay_dropped`` keeps.
+    """
+    if reply.terminal:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    if durable_write_debt or reply.owed_write is not None:
+        return _unchanged(Outcome.DEFERRED, reply)
+    settled = replay_dropped(reply, last, sources_pending=False, now_ns=now_ns)
+    if not settled.applied:
+        return settled
+    return replace(settled, effects=(*settled.effects, SettleSources(last.span_id)))
+
+
+def replay_dropped(reply: Reply, last: Span, *, sources_pending: bool, now_ns: int) -> Transition:
+    """The sources a reply waits to replay settled without a turn, as ingress settles one it will not answer.
+
+    Nothing replays them any more, so the reply ends as its earlier span left
+    it. A reply a span runs, or with sources still pending, keeps waiting; a
+    pending legacy read or an approval ends its reply instead.
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     if (
-        durable_write_debt
-        or reply.owed_write is not None
+        sources_pending
         or reply.legacy_pending is not None
         or reply.current_span_id is not None
         or reply.approval_id is not None
     ):
         return _unchanged(Outcome.DEFERRED, reply)
-    settled = sources_settled_without_reply(reply, last, now_ns=now_ns)
-    if not settled.applied:
-        return settled
-    return replace(settled, effects=(*settled.effects, SettleSources(last.span_id)))
+    return sources_settled_without_reply(reply, last, now_ns=now_ns)
 
 
 def sources_deleted(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
@@ -1770,11 +1787,16 @@ def redactions_done(reply: Reply, event_ids: tuple[str, ...], *, now_ns: int) ->
 
 
 def record_stop_button(reply: Reply, *, event_id: str, now_ns: int) -> Transition:
-    """Record the Stop button reaction sent for an active reply, or queue it for removal (I8).
+    """Record the Stop button reaction sent for a running reply, or queue it for removal (I8).
 
-    A reply shows one button: one it already recorded is queued for removal.
+    A reply runs while active, and while paused with the span that waits in
+    place still current. A reply shows one button: one it already recorded is
+    queued for removal.
     """
-    if reply.state is not ReplyState.ACTIVE:
+    running = reply.state is ReplyState.ACTIVE or (
+        reply.state is ReplyState.PAUSED and reply.current_span_id is not None
+    )
+    if not running:
         return Transition(outcome=Outcome.APPLIED, reply=_touch(_with_redactions(reply, event_id), now_ns))
     updated = (
         reply if reply.stop_button_event_id in {None, event_id} else _with_redactions(reply, reply.stop_button_event_id)

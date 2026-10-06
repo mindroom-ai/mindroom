@@ -71,6 +71,7 @@ def _dispatcher(
             on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=lambda _event_id: False,
+            replies_ended=lambda _reply_ids: None,
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@bot:localhost"),
     )

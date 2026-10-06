@@ -137,17 +137,24 @@ def classify(
         return ()
     adoptions: list[_Adoption] = []
     adopted: set[str] = set()
+    # One Matrix event is one reply: an edit's newer approval pauses the
+    # event its original turn's rows created, and that event is adopted once.
+    adopted_events: set[str] = set()
     for continuation in _newest_continuations(transaction, principal_id, entity_name):
         adoption = _paused_reply(transaction, principal_id, continuation, entity_name, presentations, now_ns)
         adoptions.append(adoption)
         adopted.update(span.delivery_id for span in adoption.spans)
+        adopted_events.add(continuation.response_event_id)
     for delivery_id in _unowned_row_delivery_ids(transaction, principal_id):
         if delivery_id in adopted:
             continue
         adoption = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
-        if adoption is not None:
-            adoptions.append(adoption)
-            adopted.add(delivery_id)
+        if adoption is None or adoption.reply.event_id in adopted_events:
+            continue
+        adoptions.append(adoption)
+        adopted.add(delivery_id)
+        if adoption.reply.event_id is not None:
+            adopted_events.add(adoption.reply.event_id)
     adoptions.extend(
         _stream_created_reply(transaction, principal_id, record, entity_name, presentations, now_ns)
         for record in _pending_turns(transaction, principal_id, entity_name)
@@ -343,8 +350,14 @@ def _paused_reply(
         now_ns=now_ns,
         event_id=continuation.response_event_id,
         approval_id=continuation.approval_id,
-        # A ready or claimed approval may have resumed past its pause, which only Matrix shows.
-        legacy_pending=rl.LegacyPending.PRESENTATION_READ if continuation.state in {"ready", "claimed"} else None,
+        # A claimed approval may have resumed past its pause, which only Matrix
+        # shows. A team's resume restores its stored document instead, which a
+        # read of rendered text would lose.
+        legacy_pending=(
+            rl.LegacyPending.PRESENTATION_READ
+            if continuation.state == "claimed" and continuation.entity_kind != "team"
+            else None
+        ),
     )
     if continuation.state != "claimed":
         return _Adoption(reply=reply, spans=(paused,))

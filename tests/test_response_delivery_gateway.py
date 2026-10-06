@@ -55,6 +55,7 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome, TurnHandoff
 from mindroom.message_target import MessageTarget
+from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -242,6 +243,14 @@ def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnSto
     bot._turn_store = turn_store
     bot._response_recovery_diagnostic_classes = set()
     bot.logger = MagicMock()
+    # No reply runs here, so a deletion ends none and nothing owes debt.
+    bot._reply_runtime = ReplyRuntime(
+        store=journal_store.principal("agent@alice"),
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        run_effects=AsyncMock(),
+    )
     return bot
 
 

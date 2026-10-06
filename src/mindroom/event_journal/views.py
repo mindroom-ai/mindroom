@@ -106,8 +106,8 @@ class ReplayView(Protocol):
         """Return whether one event still owes semantic work."""
         ...
 
-    async def settle(self, event_id: str) -> None:
-        """Mark one event's semantic work terminal."""
+    async def settle(self, event_id: str) -> tuple[str, ...]:
+        """Mark one event's semantic work terminal; return the replies left waiting to replay it that ends."""
         ...
 
 
@@ -122,8 +122,8 @@ class DispatchView(ReplayView, Protocol):
         """Record successful room-member hook delivery."""
         ...
 
-    async def settle_many(self, event_ids: tuple[str, ...]) -> None:
-        """Settle every event that one terminal turn accounted for."""
+    async def settle_many(self, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Settle every event that one terminal turn accounted for; return the replies that ends."""
         ...
 
     async def unsettled_event_ids(self) -> frozenset[str]:

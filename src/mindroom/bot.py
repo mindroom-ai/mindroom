@@ -721,6 +721,7 @@ class AgentBot:
                     or self._response_runner.has_live_inbox_response(event_id)
                 ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
+                replies_ended=self._replies_ended,
             ),
             room_for_id=self._room_for_journal_event,
             schedule_trigger_sender_is_managed=lambda sender: (
@@ -954,6 +955,15 @@ class AgentBot:
     def _reply_row_resolved(self, reply_id: str) -> None:
         """Wake claims that waited for this reply's rows, and settle any debt its rows left."""
         self._reply_runtime.rows_resolved(reply_id)
+        self._settle_reply_debt_later(reply_id)
+
+    def _replies_ended(self, reply_ids: tuple[str, ...]) -> None:
+        """Deliver what replies a settlement ended owe Matrix."""
+        for reply_id in reply_ids:
+            self._settle_reply_debt_later(reply_id)
+
+    def _settle_reply_debt_later(self, reply_id: str) -> None:
+        """Redact and write what a reply owes Matrix, outside the caller's task."""
         create_background_task(
             self._delivery_gateway.settle_reply_debt(reply_id),
             name=f"reply_debt_{reply_id}",
@@ -2713,12 +2723,15 @@ class AgentBot:
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Tombstone the redacted source so no replay reruns the turn it started.
 
-        The projection learns about the redaction through journal admission, so
-        this owes only the durable tombstone. Raising leaves the callback
+        The projection learns about the redaction through journal admission and
+        ends the replies that lost every source with it, so this owes only the
+        durable tombstone and those replies' effects: their running spans stop
+        and what they showed is redacted. Raising leaves the callback
         unaccepted and the source available for sync to redeliver.
         """
         assert isinstance(event, nio.RedactionEvent)
         await self._turn_store.mark_source_redacted(event.redacts, room_id=room.room_id)
+        self._replies_ended(await self._reply_runtime.source_deleted(event.redacts))
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import DeliveryStage, DepartureSource, replies, reply_messages, reply_spans
+from mindroom.event_journal import DeliveryStage, DepartureSource, EventKind, replies, reply_messages, reply_spans
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyRowRequest
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.reply_lifecycle import (
@@ -442,6 +442,43 @@ async def test_a_departure_ends_the_rooms_replies_and_refuses_their_rows(journal
     assert await principal.replies.load("reply-1") == departed
 
 
+async def _delete(principal: PrincipalStore, event_id: str) -> None:
+    await admit(principal, f"$redaction-{event_id}", redacts=event_id, kind=EventKind.REDACTION, content={})
+
+
+async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: EventJournalStore) -> None:
+    """The tombstone of a reply's last remaining source ends it gone in the same commit, its span cancelled."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$first")
+    await admit(principal, "$second")
+    await principal.replies.write_generation("gen-1", now_ns=1)
+    request = replace(
+        _request(source="$first"),
+        sources=SpanSources(pending=("$first", "$second"), logical=("$first", "$second")),
+    )
+    span = (await principal.replies.claim(request, ClaimLookup())).transition.claimed
+    assert span is not None
+
+    await _delete(principal, "$first")
+    running = await principal.replies.load("reply-1")
+    assert running is not None
+    assert running.state is ReplyState.ACTIVE
+    assert running.current_span_id == span.span_id
+    assert await principal.replies.ended_by_deletion("$first") == ()
+
+    await _delete(principal, "$second")
+    gone = await principal.replies.load("reply-1")
+    assert gone is not None
+    assert gone.state is ReplyState.GONE
+    assert gone.current_span_id is None
+    cancelled = await principal.replies.span(span.span_id)
+    assert cancelled is not None
+    assert cancelled.outcome is SpanOutcome.CANCELLED
+    assert not await principal.is_pending("$first")
+    assert not await principal.is_pending("$second")
+    assert await principal.replies.ended_by_deletion("$second") == (gone,)
+
+
 async def _stop_waiting_for_the_create(journal_store: EventJournalStore) -> PrincipalStore:
     """Record a Stop on ``$reply`` while the reply's create, which Matrix gives that event, is still unacknowledged."""
     principal = journal_store.principal(PRINCIPAL)
@@ -532,6 +569,26 @@ async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: Eve
     assert ended is not None
     assert ended.outcome is SpanOutcome.CANCELLED
     await _assert_the_turn_learned_the_stop(journal_store)
+
+
+async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue(
+    journal_store: EventJournalStore,
+) -> None:
+    """Ingress settling the source a restart left for replay ends the reply in that commit; nothing replays it."""
+    principal = journal_store.principal(PRINCIPAL)
+    await _claimed(principal)
+    await principal.replies.write_generation("gen-2", now_ns=70)
+    assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
+    waiting = await principal.replies.load("reply-1")
+    assert waiting is not None
+    assert waiting.state is ReplyState.ACTIVE
+
+    assert await principal.settle("$source") == ("reply-1",)
+    ended = await principal.replies.load("reply-1")
+    assert ended is not None
+    # It never showed an event, so it leaves nothing behind.
+    assert ended.state is ReplyState.GONE
+    assert await principal.settle("$source") == ()
 
 
 async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_store: EventJournalStore) -> None:

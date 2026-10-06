@@ -32,7 +32,7 @@ At most one span is current per reply.
 Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`, and `reply_sequence`; the stage is `initial` (the create), `final` (the span's terminal write), or `edit`.
 `pending_reply_stops` holds a Stop on an event no reply is bound to yet.
 `reply_principal_generations` holds the bot instance that owns each principal's replies.
-`reply_legacy_classifications` marks principals whose main-era replies were adopted.
+`reply_legacy_classifications` marks principals whose earlier-release replies were adopted.
 
 ## Rules and outcomes
 
@@ -44,7 +44,7 @@ Callers render a payload from the reply's revision before the transaction; a rul
 
 ## Claims
 
-A claim runs under the conversation lock after main's first source gate and finds the reply through the span's sources, its bound event, or an interactive selection's acknowledgement:
+A claim runs under the conversation lock after the turn's first source gate and finds the reply through the span's sources, its bound event, or an interactive selection's acknowledgement:
 
 - No reply: create one in `active` with a `turn` span, or a historical reply with a `regeneration` span when an edit names an answer the records never saw.
 - An edit whose driving edit differs from the last span's: a `regeneration` span with a rollback snapshot; a paused reply's approval is fenced `superseded` and cleaned up outside the conversation lock.
@@ -76,9 +76,11 @@ A response-local CLI approval waits in place: its span stays current through the
 
 ## Lifetime
 
-Each bot instance writes a fresh generation for its principal at start, then adopts main-era replies once, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note, and replies whose sources are pending wait for their replay.
+Each bot instance writes a fresh generation for its principal at start, then adopts replies an earlier release left once, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note, and replies whose sources are pending wait for their replay.
 A membership departure ends the room's replies `gone` inside the departure fence and cancels their spans afterwards.
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
+A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
+Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit; the bot then cancels its running span and redacts what it showed, while a paused reply, an approval resume, and a written answer are kept.
 An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes.
 
 ## Invariants
@@ -92,4 +94,4 @@ An entity removed from the configuration has no bot: its open replies end `faile
 - I7. Every reply write is recorded before it is sent.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place.
 
-`tests/test_reply_lifecycle_fuzz.py` checks these over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approvals, deletions, departures, and supersessions.
+`tests/test_reply_lifecycle_fuzz.py` checks these over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approvals, deletions, departures, supersessions, and dropped replays.

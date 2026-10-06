@@ -315,6 +315,33 @@ def _supersede_replay(
     )
 
 
+def drop_replays(
+    transaction: Transaction,
+    principal_id: str,
+    event_ids: tuple[str, ...],
+    *,
+    now_ns: int,
+) -> tuple[str, ...]:
+    """End the replies waiting to replay these sources, which just settled without a turn; return their ids."""
+    if not event_ids:
+        return ()
+    ended: list[str] = []
+    for reply_id in reply_messages.waiting_to_replay(transaction, principal_id, event_ids):
+        reply = reply_messages.lock(transaction, principal_id, reply_id)
+        assert reply is not None
+        last = reply_spans.load(transaction, principal_id, reply.last_span_id)
+        assert last is not None
+        sources_pending = any(journal.is_pending(transaction, principal_id, source) for source in last.sources.pending)
+        applied = apply(
+            transaction,
+            principal_id,
+            rl.replay_dropped(reply, last, sources_pending=sources_pending, now_ns=now_ns),
+        )
+        if applied.transition.applied:
+            ended.append(reply_id)
+    return tuple(ended)
+
+
 def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
     """End the open replies of entities with no bot any more, without writing to Matrix."""
     ended = 0
@@ -725,6 +752,12 @@ class ReplyStore:
                 room_id,
                 tuple(sorted(span_ids)),
             ),
+        )
+
+    async def ended_by_deletion(self, event_id: str) -> tuple[Reply, ...]:
+        """Return the replies deleting this source ended, their last span cancelled with them."""
+        return await self._backend.read(
+            lambda transaction: reply_messages.ended_by_deletion(transaction, self._principal_id, event_id),
         )
 
     async def spans_in_room(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:

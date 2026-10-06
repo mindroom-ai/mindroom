@@ -8,12 +8,14 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.hooks import FinalResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
+from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
@@ -860,6 +862,45 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
             await response
 
 
+async def test_a_replay_ingress_will_not_answer_ends_the_reply_a_restart_left(tmp_path: Path) -> None:
+    """Ingress settling the replayed source without a turn ends that reply interrupted, its Stop button redacted."""
+    old = await _streaming_bot(tmp_path)
+
+    async def shown_with_button() -> rl.Reply:
+        while (reply := await _reply(old)).stop_button_event_id is None or "Partial" not in _sent_bodies(old):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        return reply
+
+    with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
+        response, _streaming = await _blocked_stream(old)
+        left = await asyncio.wait_for(shown_with_button(), timeout=5)
+
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._reply_runtime.start()
+    try:
+        assert (await _reply(restarted)).state is rl.ReplyState.ACTIVE
+        # As ingress settles a replay it rejects, such as one whose requester lost access.
+        await restarted._journal_dispatcher.settle_intentionally_ignored_turn_sources(("$event",))
+
+        async def noted() -> None:
+            while _sent_bodies(restarted)[-1:] != ["Partial\n\n**[Response interrupted]**"]:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            while (await _reply(restarted)).redaction_pending:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(noted(), timeout=5)
+        reply = await _reply(restarted)
+        assert reply.state is rl.ReplyState.FAILED
+        assert reply.stop_button_event_id is None
+        assert reply.owed_write is None
+        assert [call.args[1] for call in restarted.client.room_redact.await_args_list] == [left.stop_button_event_id]
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
 async def test_leaving_the_room_mid_stream_ends_the_reply_without_writing_to_it(tmp_path: Path) -> None:
     """The departure ends the reply gone and releases its span; the cancelled stream writes nothing more."""
     bot = await _streaming_bot(tmp_path)
@@ -884,6 +925,55 @@ async def test_leaving_the_room_mid_stream_ends_the_reply_without_writing_to_it(
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.RELEASED]
     assert len(bot.client.room_send.await_args_list) == sends
     assert bot._reply_runtime.spans.live_span_ids() == frozenset()
+
+
+async def test_deleting_the_prompt_mid_stream_removes_its_reply(tmp_path: Path) -> None:
+    """The tombstone ends the reply gone: its running span is cancelled and the event it showed is redacted."""
+    bot = await _streaming_bot(tmp_path)
+    response, _streaming = await _blocked_stream(bot)
+
+    async def partial_shown() -> None:
+        while "Partial" not in _sent_bodies(bot):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(partial_shown(), timeout=5)
+    shown = await _reply(bot)
+    assert shown.event_id is not None
+    sends = len(bot.client.room_send.await_args_list)
+
+    room = nio.MatrixRoom(_target().room_id, bot.matrix_id.full_id)
+    redaction = nio.Event.parse_event(
+        {
+            "event_id": "$redaction",
+            "type": "m.room.redaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2,
+            "redacts": "$event",
+            "content": {},
+        },
+    )
+    assert isinstance(redaction, nio.RedactionEvent)
+    await bot.journal_principal().admit(
+        _inbound_event(room.room_id, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+        _projected_event(room.room_id, redaction, EventKind.REDACTION, self_sender=room.own_user_id),
+    )
+    await bot._on_redaction(room, redaction)
+    # The callback stopped the span itself; nothing else would end the blocked stream.
+    done, _pending = await asyncio.wait({response}, timeout=5)
+    assert response in done
+
+    async def redacted() -> None:
+        while (await _reply(bot)).redaction_pending:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(redacted(), timeout=5)
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.GONE
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.CANCELLED]
+    assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [shown.event_id]
+    assert len(bot.client.room_send.await_args_list) == sends
+    assert bot._reply_runtime.spans.live_span_ids() == frozenset()
+    assert not await bot._reply_runtime.store.is_pending("$event")
 
 
 async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tmp_path: Path) -> None:

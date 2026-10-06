@@ -1990,6 +1990,9 @@ class DeliveryGateway:
     async def _flush_owed_write(self, reply_id: str) -> None:
         """Render and send the note a reply-authored transition owed."""
         while (reply := await self.deps.outbox.replies.load(reply_id)) is not None and reply.owed_write is not None:
+            if reply.legacy_pending is not None:
+                # The legacy read's resolution flushes it, once what the reply showed is known.
+                return
             owed = reply.owed_write
             span = await self.deps.outbox.replies.span(owed.span_id)
             assert span is not None, "an owed write names a span of its reply"

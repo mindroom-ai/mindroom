@@ -696,6 +696,21 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS reply_messages_room ON reply_messages (principal_id, room_id, state)
     """,
     """
+    CREATE INDEX IF NOT EXISTS reply_messages_state ON reply_messages (principal_id, state, created_at_ns)
+    """,
+    """
+    -- Every delivery recovery pass looks for debt; it must not read every
+    -- reply the principal ever wrote to find the few that owe some.
+    CREATE INDEX IF NOT EXISTS reply_messages_pending_work
+    ON reply_messages (principal_id, created_at_ns, reply_id)
+    WHERE redaction_pending_json IS NOT NULL OR owed_write_json IS NOT NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS reply_messages_legacy_pending
+    ON reply_messages (principal_id, reply_id)
+    WHERE legacy_pending IS NOT NULL
+    """,
+    """
     CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_reply
     ON matrix_delivery_outbox (principal_id, reply_id, reply_sequence)
     WHERE reply_id IS NOT NULL

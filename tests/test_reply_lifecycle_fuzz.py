@@ -704,6 +704,24 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             # A terminal reply keeps its answer; the replay's sources settle as ignored.
             self.model.settled.add(last.span_id)
 
+    @precondition(
+        lambda self: (
+            self.model.reply is not None
+            and self.model.approval is None
+            and self.model.reply.current_span_id is None
+            and self.model.reply.last_span_id not in self.model.settled
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
+        ),
+    )
+    @rule()
+    def drop_replay(self) -> None:
+        """Ingress settles the sources a reply waits to replay without a turn."""
+        reply = self.model.reply
+        assert reply is not None
+        last = self.model.spans[reply.last_span_id]
+        self.model.settled.add(last.span_id)
+        self._apply(rl.replay_dropped(reply, last, sources_pending=False, now_ns=self._now()))
+
     @precondition(lambda self: self.model.reply is not None and self.model.reply.state is ReplyState.ACTIVE)
     @rule()
     def dispatch_failure(self) -> None:
