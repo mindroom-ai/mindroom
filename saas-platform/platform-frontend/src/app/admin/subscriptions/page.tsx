@@ -115,16 +115,22 @@ export default function SubscriptionsPage() {
                         subscription.status === 'past_due' ? 'bg-yellow-100 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-400' :
                         'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400'
                       }`}>
-                        {subscription.status}
+                        {subscription.tier === 'free' ? '—' : subscription.status}
                       </span>
                     </td>
                     <td className="py-3 px-4">
-                      <span className="text-gray-900 dark:text-gray-100">
-                        {formatPrice(subscription.price || 0)}
-                      </span>
-                      <span className="text-gray-500 dark:text-gray-400 text-sm">
-                        /{subscription.billing_period || 'month'}
-                      </span>
+                      {subscription.tier === 'free' ? (
+                        <span className="text-gray-500 dark:text-gray-400">—</span>
+                      ) : (
+                        <>
+                          <span className="text-gray-900 dark:text-gray-100">
+                            {formatPrice(subscription.price || 0)}
+                          </span>
+                          <span className="text-gray-500 dark:text-gray-400 text-sm">
+                            /{subscription.billing_period || 'month'}
+                          </span>
+                        </>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
                       {new Date(subscription.created_at).toLocaleDateString()}

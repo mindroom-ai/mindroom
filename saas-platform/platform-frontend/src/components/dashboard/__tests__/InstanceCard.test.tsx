@@ -143,14 +143,26 @@ describe('InstanceCard', () => {
       expect(mockAlert).not.toHaveBeenCalled()
     })
 
-    it('should send free users to billing instead of provisioning infrastructure', async () => {
+    it('should send free users to choosing a plan instead of provisioning infrastructure', async () => {
       render(<InstanceCard instance={null} subscription={freeSubscription} />)
 
       expect(screen.queryByRole('button', { name: /Provision Instance/i })).not.toBeInTheDocument()
-      expect(screen.getByRole('link', { name: /Start Trial/i })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: 'Choose a plan' })).toHaveAttribute(
         'href',
         '/dashboard/billing/upgrade'
       )
+    })
+
+    it('should send a lapsed plan holder to billing instead of offering a trial', () => {
+      render(
+        <InstanceCard
+          instance={null}
+          subscription={{ ...trialSubscription, tier: 'hobby', status: 'cancelled', can_run_instances: false, trial_days_remaining: null }}
+        />
+      )
+
+      expect(screen.getByRole('link', { name: 'Open billing' })).toHaveAttribute('href', '/dashboard/billing')
+      expect(screen.queryByText(/free trial/i)).not.toBeInTheDocument()
     })
 
     it('should show trial time remaining for trial users who can provision', () => {

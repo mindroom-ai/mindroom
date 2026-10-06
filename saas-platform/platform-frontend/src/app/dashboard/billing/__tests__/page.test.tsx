@@ -116,4 +116,25 @@ describe('BillingPage', () => {
     expect(screen.queryByText('Plan Includes:')).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Choose a plan' })).toHaveAttribute('href', '/dashboard/billing/upgrade')
   })
+
+  it('lets a lapsed plan holder choose their old plan again', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: { tier: 'hobby', status: 'cancelled', can_run_instances: false, stripe_subscription_id: null },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue({
+      ...enterprisePricing,
+      plans: {
+        byok: { ...enterprisePricing.plans.enterprise, name: 'Your own keys', price_monthly: '$10', price_yearly: '$96', features: [] },
+        hobby: { ...enterprisePricing.plans.enterprise, name: 'Hobby', price_monthly: '$20', price_yearly: '$192', features: [] },
+      },
+    })
+
+    render(<BillingPage />)
+
+    expect(await screen.findByRole('button', { name: 'Choose Hobby' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Choose Your own keys' })).toBeInTheDocument()
+    expect(screen.queryByText('Contact support to downgrade')).not.toBeInTheDocument()
+  })
 })

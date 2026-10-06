@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft, Sparkles } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
+import { planState } from '@/lib/plan-state'
 import { createCheckoutSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 
@@ -75,6 +76,8 @@ export default function UpgradePage() {
   }
 
   const currentTier = subscription?.tier || 'free'
+  // Only a plan that runs is current; an account without one, or with a lapsed one, may choose any plan.
+  const activeTier = planState(subscription) === 'active' ? currentTier : null
   const discountPercentage = pricingConfig.discounts?.annual_percentage || 20
 
   // Filter out free plan and sort plans
@@ -97,7 +100,7 @@ export default function UpgradePage() {
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back to Billing
         </button>
-        <h1 className="text-3xl font-bold dark:text-white">{currentTier === 'free' ? 'Choose a plan' : 'Upgrade Your Plan'}</h1>
+        <h1 className="text-3xl font-bold dark:text-white">{activeTier ? 'Upgrade Your Plan' : 'Choose a plan'}</h1>
         {process.env.NODE_ENV === 'development' || process.env.NEXT_PUBLIC_STRIPE_MODE === 'test' ? (
           <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-600 rounded-lg p-3 mt-4">
             <p className="text-sm text-yellow-800 dark:text-yellow-200 font-semibold">Test Mode Active</p>
@@ -109,9 +112,9 @@ export default function UpgradePage() {
         <p className="text-gray-600 dark:text-gray-400 mt-2">
           Choose a plan that fits your needs. You can change or cancel anytime.
         </p>
-        {currentTier !== 'free' && (
+        {activeTier && (
           <p className="text-sm text-orange-600 dark:text-orange-400 mt-2">
-            Currently on {currentTier} plan. Upgrading will prorate your billing.
+            Currently on {activeTier} plan. Upgrading will prorate your billing.
           </p>
         )}
       </div>
@@ -148,8 +151,8 @@ export default function UpgradePage() {
       {/* Plans Grid */}
       <div className="grid md:grid-cols-3 gap-6 mb-8">
         {plans.map((plan) => {
-          const isCurrentPlan = plan.id === currentTier
-          const isDowngrade = plans.findIndex(p => p.id === plan.id) < plans.findIndex(p => p.id === currentTier)
+          const isCurrentPlan = plan.id === activeTier
+          const isDowngrade = activeTier !== null && plans.findIndex(p => p.id === plan.id) < plans.findIndex(p => p.id === activeTier)
 
           // Parse prices and calculate display values ('custom' is the backend literal)
           const monthlyPrice = plan.price_monthly === 'custom' ? 'Custom' : plan.price_monthly

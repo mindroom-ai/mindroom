@@ -1,7 +1,6 @@
 import Link from 'next/link'
 import {
   BookOpen,
-  MessageSquare,
   Settings,
   CreditCard,
   RefreshCw,

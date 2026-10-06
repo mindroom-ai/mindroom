@@ -7,6 +7,7 @@ import { provisionInstance } from '@/lib/api'
 import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
+import { planState } from '@/lib/plan-state'
 
 const INFRASTRUCTURE_TIERS = new Set(['byok', 'hobby', 'pro', 'enterprise'])
 
@@ -147,13 +148,15 @@ export function InstanceCard({
           ) : (
             <>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Hosted instances require an active trial or paid plan.
+                {planState(subscription) === 'lapsed'
+                  ? 'Restore billing to run your hosted instance.'
+                  : 'Choose a plan to run a hosted instance; your first plan starts with a free trial.'}
               </p>
               <Link
-                href="/dashboard/billing/upgrade"
+                href={planState(subscription) === 'lapsed' ? '/dashboard/billing' : '/dashboard/billing/upgrade'}
                 className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
               >
-                Start Trial
+                {planState(subscription) === 'lapsed' ? 'Open billing' : 'Choose a plan'}
               </Link>
             </>
           )}

@@ -6,6 +6,7 @@ import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib
 import { logger } from '@/lib/logger'
 import Link from 'next/link'
 import { type PlanId } from '@/lib/pricing-config'
+import { planState } from '@/lib/plan-state'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
 
@@ -68,6 +69,8 @@ export default function BillingPage() {
 
   const currentTier = (subscription?.tier || 'free') as PlanId
   const hasPlan = currentTier !== 'free'
+  // Only a plan that runs is current in the plan list; a lapsed plan may be chosen again.
+  const activePlanTier = planState(subscription) === 'active' ? currentTier : null
   const currentPlan = pricingConfig.plans[currentTier]
   const features = currentPlan?.features || []
   const tierInfo = {
@@ -297,9 +300,9 @@ export default function BillingPage() {
           {Object.entries(pricingConfig.plans)
             .filter(([key]) => key !== 'free' && key !== 'enterprise')
             .map(([key, plan]) => {
-              const isCurrentPlan = key === currentTier
+              const isCurrentPlan = key === activePlanTier
               const tierOrder: PlanId[] = ['free', 'byok', 'hobby', 'pro', 'enterprise']
-              const currentTierRank = tierOrder.indexOf(currentTier)
+              const currentTierRank = activePlanTier ? tierOrder.indexOf(activePlanTier) : -1
               const candidateTierRank = tierOrder.indexOf(key as PlanId)
               const isDowngrade =
                 currentTierRank !== -1 && candidateTierRank !== -1 && candidateTierRank < currentTierRank
@@ -333,7 +336,7 @@ export default function BillingPage() {
                       onClick={() => window.location.href = '/dashboard/billing/upgrade'}
                       className="w-full px-3 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 transition-colors"
                     >
-                      {hasPlan ? 'Upgrade to' : 'Choose'} {plan.name}
+                      {activePlanTier ? 'Upgrade to' : 'Choose'} {plan.name}
                     </button>
                   )}
                   {isDowngrade && (

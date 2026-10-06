@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/hooks/useAuth'
 import { useSubscription } from '@/hooks/useSubscription'
+import { planState } from '@/lib/plan-state'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
 import { startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { getCachedInstance, loadInstance } from '@/lib/instance-resource'
@@ -23,8 +24,9 @@ export default function InstancePage() {
 function InstanceDetails({ userId, authLoading }: { userId: string | null; authLoading: boolean }) {
   const router = useRouter()
   const { subscription, loading: subscriptionLoading } = useSubscription()
-  const canRunInstances = subscription?.can_run_instances === true
-  const hasNoPlan = !subscription || subscription.tier === 'free'
+  const state = planState(subscription)
+  const canRunInstances = state === 'active'
+  const hasNoPlan = state === 'none'
   const cachedInstance = getCachedInstance(userId)
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
