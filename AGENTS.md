@@ -34,7 +34,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 
 - The primary reader of `docs/` is an AI agent running inside MindRoom, which loads whole pages through the bundled `mindroom-docs` skill to explain, configure, operate, and troubleshoot MindRoom for its user.
   Every sentence on a page costs context on every question that page answers, so a sentence belongs only when that agent needs it.
-- **Default to no change in user docs**, meaning the `zensical.toml` nav pages outside `docs/architecture/`, which the `mindroom-docs` skill bundles.
+- **Default to no change in user docs**, meaning the `zensical.toml` nav pages outside `docs/architecture/`.
   Bug fixes that restore documented behavior, refactors, and hardening or internal limits that normal use never reaches need none; contributor pages such as the code map, `security-posture.md`, `migrations.md`, and `agno-compatibility.md` follow their own update rules.
   Change docs only when configuration, user-visible behavior, or an operator procedure changes, and then add only the sentences that change an answer to a user question.
 - **Name the question before writing a sentence**: keep it only when the agent would answer a realistic user question worse without it, such as how to set something up, what a setting does, or why something did or did not happen.
@@ -44,7 +44,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
   Show a few examples of realistic tasks instead of one example per field.
 - State guarantees as outcomes, such as "restarts do not produce duplicate replies", not as the mechanism that provides them.
 - Leave out implementation mechanics: locks, transactions, journals, caches, retries, internal IDs, module and class names, ordering internals, encoding details, and change history such as "previously" or "now".
-  Also leave out hardening limits that normal use never reaches, and behavior on rare failure, cancellation, recovery, and replay paths unless a user would plausibly ask about it.
+  Also leave out hardening limits that normal use never reaches and behavior on rare failure, cancellation, recovery, and replay paths, unless a user would plausibly ask about them.
   Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
   Every `docs/architecture/` page and every page outside the nav, such as `docs/dev/`, is for contributors and operators and may explain mechanisms; user docs name implementation details only when a documented procedure needs them.
 - Sentences like these fail the question test:
@@ -125,7 +125,7 @@ Design migrations around that assumption rather than adding machinery to coordin
 A worker container (worker routing through the sandbox proxy) is the only security boundary between an agent and the MindRoom runtime.
 Check every reported vulnerability and every proposed hardening change against this model before implementing it, and decline changes that contradict it.
 The full model, the `file_access` setting, and the list of intentional behaviors reviewers must not "fix" live in `docs/architecture/security-posture.md`; read it before reporting or fixing any security issue.
-Update that page in the same PR when a change alters the trust model, an intentional behavior, a known gap, or a cap on worker-controlled reads.
+Update that page in the same PR when a change alters the trust model, an intentional behavior, a known gap, or a cap on worker-controlled reads; the `mindroom-docs` skill bundles it, so add only those facts there.
 
 - **Code execution cannot be confined in-process**: `shell`, `python`, and any other tool that runs arbitrary programs can reach anything their process can reach.
   Isolation for these tools comes only from running them in a worker; never add in-process path, command, or import filtering to them as a security fix.

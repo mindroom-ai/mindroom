@@ -115,7 +115,7 @@ Each instance gets three hosts:
 
 ## Platform Deployment
 
-Run these commands against the platform cluster; the repository's `.envrc` exports `KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml`, which the Terraform setup writes.
+Run these commands from the repository root against the platform cluster; the repository's `.envrc` exports `KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml`, which the Terraform setup writes.
 
 ```bash
 # Create values file from example

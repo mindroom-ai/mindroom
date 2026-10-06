@@ -167,7 +167,7 @@ Matrix sync callback
 | `matrix/durable_ingestion.py` | Owned Nio batch validation, journal admission, and acknowledgement |
 | `matrix/sync_continuity.py` | Durable pending join-fence persistence |
 | `matrix/journal_ingress.py` | Typed event classification and replay parsing using Nio provenance |
-| `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
+| `matrix/message_content.py` | Canonical extraction and sidecar resolution for received Matrix messages and edits |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
 | `matrix/provisioning_heartbeat.py` | Best-effort startup and periodic "last seen" heartbeat from paired installs to the hosted provisioning service |
