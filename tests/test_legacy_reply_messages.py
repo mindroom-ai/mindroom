@@ -16,6 +16,7 @@ from mindroom.event_journal import (
     ApprovalContinuation,
     DeliveryStage,
     EventKind,
+    outbox,
     turn_records,
 )
 from mindroom.event_journal.replies import ReplyCreation, ReplyRowRequest
@@ -404,6 +405,52 @@ async def test_an_unacknowledged_answer_becomes_the_reply_its_row_finishes(journ
     bound = await _only_reply(principal)
     assert bound.event_id == "$answer"
     assert bound.confirmed_seq == 1
+
+
+async def test_an_answer_waiting_for_its_placeholder_adopts_that_placeholder_first(
+    journal_store: EventJournalStore,
+) -> None:
+    """A frozen FINAL that edits an unacknowledged INITIAL is sent once that INITIAL, the reply's create, binds it."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending")
+    # Main sent the placeholder but saw no acknowledgement, then froze the answer to edit it.
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    content = {"msgtype": "m.text", "body": "The answer.", "io.mindroom.stream_status": "completed"}
+    await journal_store.backend.write(
+        lambda transaction: outbox.enqueue(
+            transaction,
+            PRINCIPAL,
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_type="m.room.message",
+            room_id=ROOM,
+            membership_epoch=0,
+            thread_id=None,
+            payload={"m.new_content": content, "m.relates_to": {"rel_type": "m.replace", "event_id": None}},
+            edits_event_id=None,
+            edit_target_pending=True,
+        ),
+    )
+
+    assert await _adopt(principal) == ()
+    reply = await _only_reply(principal)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.reply_sequence == 2
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None
+
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.INITIAL,
+        event_id="$placeholder",
+        delivered_projections=(),
+    )
+    assert (await _only_reply(principal)).event_id == "$placeholder"
+    final = await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert final is not None
+    assert final.edits_event_id == "$placeholder"
 
 
 async def test_a_pending_turn_whose_stream_created_its_reply_scans_for_it(journal_store: EventJournalStore) -> None:

@@ -105,9 +105,9 @@ class _Adoption:
 
     reply: rl.Reply
     spans: tuple[rl.Span, ...]
-    # The earlier release's row the reply now owns, given reply identity so its acknowledgement binds the reply.
-    row: MatrixDelivery | None = None
-    row_placeholder_only: bool = False
+    # The earlier release's rows the reply now owns in write order, given reply identity so the first one's
+    # acknowledgement binds the reply; each says whether it shows only the placeholder.
+    rows: tuple[tuple[MatrixDelivery, bool], ...] = ()
     # The continuation whose pause the reply's first span is.
     approval_id: str | None = None
     # The resume an earlier release's claim left running, which claims the continuation.
@@ -138,8 +138,8 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; an
 # unsettled Stop is applied to the reply it names. A coalesced turn is adopted once, under whichever source keyed its
-# rows, and an adopted INITIAL, owed or acknowledged, becomes the reply's first row. What only Matrix knows is marked
-# legacy_pending and read after the room syncs.
+# rows, and an adopted INITIAL, owed or acknowledged, becomes the reply's first row, also before a frozen FINAL that waits
+# to edit it. What only Matrix knows is marked legacy_pending and read after the room syncs.
 # Coverage: tests/test_legacy_reply_messages.py.
 def classify(
     transaction: Transaction,
@@ -238,18 +238,18 @@ def _write(transaction: Transaction, principal_id: str, adoption: _Adoption) -> 
             WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL""",
             (adoption.spans[0].span_id, adoption.claim_span_id, principal_id, adoption.approval_id),
         )
-    row = adoption.row
-    if row is not None:
+    for sequence, (row, placeholder_only) in enumerate(adoption.rows, start=1):
         # The reply's first write: its acknowledgement binds the reply, a permanent refusal fails it.
         transaction.execute(
             """
-            UPDATE matrix_delivery_outbox SET reply_id = ?, span_id = ?, reply_sequence = 1, reply_row_json = ?
+            UPDATE matrix_delivery_outbox SET reply_id = ?, span_id = ?, reply_sequence = ?, reply_row_json = ?
             WHERE principal_id = ? AND delivery_id = ? AND stage = ? AND reply_id IS NULL
             """,
             (
                 adoption.reply.reply_id,
                 adoption.reply.last_span_id,
-                json.dumps(row_facts(placeholder_only=adoption.row_placeholder_only, new_text=None)),
+                sequence,
+                json.dumps(row_facts(placeholder_only=placeholder_only, new_text=None)),
                 principal_id,
                 row.delivery_id,
                 row.stage.value,
@@ -352,6 +352,15 @@ def _final_state(final: MatrixDelivery) -> rl.ReplyState:
         cast("Mapping[str, object]", content).get("io.mindroom.stream_status") if isinstance(content, dict) else None
     )
     return _STATE_BY_STATUS.get(str(status), rl.ReplyState.COMPLETED)
+
+
+def _edits_its_initial(transaction: Transaction, principal_id: str, delivery_id: str) -> bool:
+    """Return whether a FINAL waits to edit the event its INITIAL has not acknowledged yet."""
+    row = transaction.fetchone(
+        "SELECT edit_target_pending FROM matrix_delivery_outbox WHERE principal_id = ? AND delivery_id = ? AND stage = ?",
+        (principal_id, delivery_id, DeliveryStage.FINAL.value),
+    )
+    return row is not None and bool(row["edit_target_pending"])
 
 
 def _owed_final(final: MatrixDelivery | None) -> bool:
@@ -464,7 +473,7 @@ def _paused_reply(
             approval_id=continuation.approval_id,
             reply=answered,
             spans=(paused, ended),
-            row=final if owed else None,
+            rows=((final, False),) if owed else (),
             claim_span_id=claim_span_id,
         )
     # Approval recovery owns a resume a stopped instance left running.
@@ -535,6 +544,17 @@ def _reply_of_rows(
     }
     if final is not None and _owed_final(final):
         state = _final_state(final)
+        # The answer edits the placeholder its INITIAL has yet to create, so the reply owns that create first.
+        create = (
+            initial
+            if initial is not None
+            and _edits_its_initial(transaction, principal_id, delivery_id)
+            and initial.acknowledged_event_id is None
+            and not initial.retired
+            and initial.permanent_failure_reason is None
+            else None
+        )
+        rows = ((final, False),) if create is None else ((create, True), (final, False))
         span = _span(
             reply_id,
             kind=rl.SpanKind.TURN,
@@ -553,12 +573,12 @@ def _reply_of_rows(
             membership_epoch=final.membership_epoch,
             event_id=final.edits_event_id,
             possibly_shown=shown,
-            possibly_shown_seq=1,
-            reply_sequence=1,
+            possibly_shown_seq=len(rows),
+            reply_sequence=len(rows),
             **base,  # type: ignore[arg-type]
         )
         # The answer is enqueued, so its turn is answered, as a terminal row records now.
-        return _Adoption(reply=reply, spans=(span,), row=final, effects=(rl.SettleSources(span.span_id),))
+        return _Adoption(reply=reply, spans=(span,), rows=rows, effects=(rl.SettleSources(span.span_id),))
     if initial is None or final is not None or initial.retired:
         # Answered, or retired by a departure or a deleted source: their existing owners finish it.
         return None
@@ -618,7 +638,7 @@ def _reply_of_rows(
         legacy_pending=rl.LegacyPending.PRESENTATION_READ if acknowledged is not None else None,
         **base,  # type: ignore[arg-type]
     )
-    return _Adoption(reply=reply, spans=(span,), row=initial if owns_create else None, row_placeholder_only=True)
+    return _Adoption(reply=reply, spans=(span,), rows=((initial, True),) if owns_create else ())
 
 
 def _deleted_source_reply(
@@ -659,7 +679,7 @@ def _deleted_source_reply(
         thread_id=thread_id,
         now_ns=now_ns,
     )
-    return _Adoption(reply=reply, spans=(span,), row=initial, row_placeholder_only=True)
+    return _Adoption(reply=reply, spans=(span,), rows=((initial, True),))
 
 
 def _pending_turns(transaction: Transaction, principal_id: str, entity_name: str) -> tuple[TurnRecord, ...]:
