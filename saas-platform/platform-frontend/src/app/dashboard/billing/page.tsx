@@ -282,7 +282,7 @@ export default function BillingPage() {
       {/* Payment Method */}
       <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
         <h2 className="text-xl font-bold mb-4 dark:text-white">Payment Method</h2>
-        {subscription?.stripe_subscription_id ? (
+        {activePlanTier && subscription?.stripe_subscription_id ? (
           <>
             <p className="text-gray-600 dark:text-gray-400 mb-4">
               Manage your payment methods and billing information through the Stripe customer portal.
@@ -297,7 +297,7 @@ export default function BillingPage() {
         ) : (
           <>
             <p className="text-gray-600 mb-4">
-              No payment method on file. {activePlanTier ? 'Upgrade your plan' : 'Choose a plan'} to add a payment method.
+              {activePlanTier ? 'No payment method on file. Upgrade your plan to add a payment method.' : 'Choose a plan to add a payment method.'}
             </p>
             <button
               onClick={() => window.location.href = '/dashboard/billing/upgrade'}

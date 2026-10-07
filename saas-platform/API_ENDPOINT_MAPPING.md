@@ -8,9 +8,9 @@ Backend filenames below are relative to `platform-backend/src/backend/routes/`; 
 
 ## Summary
 
-- **OpenAPI operations**: 53, counting each HTTP method and path template once.
+- **OpenAPI operations**: 52, counting each HTTP method and path template once.
 - **OpenAPI operations called by platform frontend code**: 32, including browser requests and server authentication checks.
-- **OpenAPI operations without a direct platform frontend caller**: 21, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and eight other routes.
+- **OpenAPI operations without a direct platform frontend caller**: 20, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and seven other routes.
 
 Ordinary browser requests go directly to the configured platform API through `src/lib/api.ts`.
 The frontend also makes server-side authentication checks in `src/lib/auth/admin.ts` and `src/app/auth/callback/route.ts`.
@@ -26,7 +26,6 @@ An operation without a platform frontend caller can still serve an external inte
 | POST | `/my/account/setup` | `accounts.py` | `src/lib/api.ts` → `src/app/dashboard/page.tsx`: account setup |
 | GET | `/my/subscription` | `subscriptions.py` | `src/hooks/useSubscription.ts`: subscription details |
 | POST | `/my/subscription/cancel` | `subscriptions.py` | No current frontend caller; cancel a subscription |
-| POST | `/my/subscription/reactivate` | `subscriptions.py` | No current frontend caller; reactivate a subscription |
 
 ## Customer Instances
 
@@ -54,13 +53,13 @@ An operation without a platform frontend caller can still serve an external inte
 | GET | `/admin/accounts/{account_id}` | `admin.py` | `src/app/admin/accounts/[id]/page.tsx`: account details |
 | PUT | `/admin/accounts/{account_id}/status` | `admin.py` | `src/app/admin/accounts/page.tsx`: status control |
 | DELETE | `/admin/accounts/{account_id}/complete` | `admin.py` | `src/app/admin/accounts/page.tsx`: complete account deletion |
-| GET | `/admin/{resource}` | `admin.py` | `src/app/admin/{accounts,subscriptions,instances,audit-logs,usage}/page.tsx`: list resources |
+| GET | `/admin/{resource}` | `admin.py` | `src/app/admin/{accounts,subscriptions,instances,audit-logs}/page.tsx`: list resources |
 | GET | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record lookup |
 | POST | `/admin/{resource}` | `admin.py` | No current frontend caller; generic record creation |
 | PUT | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record update |
 | DELETE | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record deletion |
 
-The generic list callers use `accounts`, `subscriptions`, `instances`, `audit_logs`, and `usage_metrics` as resource values.
+The generic list callers use `accounts`, `subscriptions`, `instances`, and `audit_logs` as resource values.
 Account detail requests use the specific `/admin/accounts/{account_id}` route, registered before generic record lookup.
 The generic CRUD API retains its React Admin-compatible response shapes; the current UI uses custom React components.
 

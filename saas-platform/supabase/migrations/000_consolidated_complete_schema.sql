@@ -158,26 +158,6 @@ CREATE INDEX idx_instances_instance_id ON instances(instance_id);
 CREATE INDEX idx_instances_kubernetes_synced_at ON instances(kubernetes_synced_at);
 
 -- ============================================================================
--- USAGE METRICS TABLE
--- ============================================================================
-CREATE TABLE usage_metrics (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
-    metric_date DATE NOT NULL,
-
-    -- Basic metrics
-    messages_sent INTEGER DEFAULT 0,
-    agents_used INTEGER DEFAULT 0,
-    storage_used_gb DECIMAL(10,2) DEFAULT 0,
-
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-
-    UNIQUE(subscription_id, metric_date)
-);
-
-CREATE INDEX idx_usage_metrics_subscription_date ON usage_metrics(subscription_id, metric_date DESC);
-
--- ============================================================================
 -- PAYMENTS TABLE (with tenant isolation)
 -- ============================================================================
 CREATE TABLE payments (
@@ -488,7 +468,6 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE instances ENABLE ROW LEVEL SECURITY;
-ALTER TABLE usage_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
@@ -518,13 +497,6 @@ CREATE POLICY "Users can view own subscriptions" ON subscriptions
 CREATE POLICY "Users can view own instances" ON instances
     FOR SELECT USING (
         account_id = auth.uid() OR
-        subscription_id IN (SELECT id FROM subscriptions WHERE account_id = auth.uid()) OR
-        is_admin()
-    );
-
--- Usage metrics - users can view their own
-CREATE POLICY "Users can view own usage" ON usage_metrics
-    FOR SELECT USING (
         subscription_id IN (SELECT id FROM subscriptions WHERE account_id = auth.uid()) OR
         is_admin()
     );
@@ -605,7 +577,6 @@ GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
 GRANT ALL ON TABLE accounts TO service_role;
 GRANT ALL ON TABLE subscriptions TO service_role;
 GRANT ALL ON TABLE instances TO service_role;
-GRANT ALL ON TABLE usage_metrics TO service_role;
 GRANT ALL ON TABLE payments TO service_role;
 GRANT ALL ON TABLE webhook_events TO service_role;
 GRANT ALL ON TABLE audit_logs TO service_role;
@@ -628,7 +599,6 @@ GRANT SELECT, INSERT, UPDATE ON TABLE instances TO authenticated;
 GRANT SELECT ON TABLE accounts TO anon;
 GRANT SELECT ON TABLE subscriptions TO anon;
 GRANT SELECT ON TABLE instances TO anon;
-GRANT SELECT ON TABLE usage_metrics TO anon;
 GRANT SELECT ON TABLE payments TO anon;
 GRANT SELECT ON TABLE webhook_events TO anon;
 

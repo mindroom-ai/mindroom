@@ -543,13 +543,6 @@ class TestAdminEndpoints:
         subs_data_mock.neq.return_value = subs_data_mock
         subs_data_mock.execute.return_value = Mock(data=[{"tier": "byok"}, {"tier": "pro"}])
 
-        # Mock usage metrics for messages
-        usage_mock = MagicMock()
-        usage_mock.select.return_value = usage_mock
-        usage_mock.gte.return_value = usage_mock
-        usage_mock.order.return_value = usage_mock
-        usage_mock.execute.return_value = Mock(data=[])
-
         # Mock all instances for status counts
         all_instances_mock = MagicMock()
         all_instances_mock.select.return_value = all_instances_mock
@@ -601,8 +594,6 @@ class TestAdminEndpoints:
 
                 mock.execute = MagicMock(side_effect=execute_side_effect)
                 return mock
-            elif table_name == "usage_metrics":
-                return usage_mock
             elif table_name == "audit_logs":
                 return audit_mock
             return MagicMock()

@@ -157,6 +157,20 @@ describe('BillingPage', () => {
     expect(screen.queryByText(new Date('2026-09-04T12:00:00Z').toLocaleDateString())).not.toBeInTheDocument()
   })
 
+  it('asks an ended plan to choose a plan instead of updating its old payment method', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: { tier: 'hobby', status: 'cancelled', can_run_instances: false, stripe_subscription_ended: true, stripe_subscription_id: 'sub_123' },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue(enterprisePricing)
+
+    render(<BillingPage />)
+
+    expect(await screen.findByText('Choose a plan to add a payment method.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Update Payment Method/ })).not.toBeInTheDocument()
+  })
+
   it('keeps an unpaid plan current and points to fixing billing instead of a new checkout', async () => {
     ;(useSubscription as jest.Mock).mockReturnValue({
       subscription: { tier: 'hobby', status: 'unpaid', can_run_instances: false, stripe_subscription_ended: false, stripe_subscription_id: 'sub_123' },

@@ -159,35 +159,6 @@ export type Database = {
           updated_at?: string
         }
       }
-      usage_metrics: {
-        Row: {
-          id: string
-          subscription_id: string
-          date: string
-          messages_sent: number
-          agents_used: number
-          storage_used_gb: number
-          created_at: string
-        }
-        Insert: {
-          id?: string
-          subscription_id: string
-          date: string
-          messages_sent: number
-          agents_used: number
-          storage_used_gb: number
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          subscription_id?: string
-          date?: string
-          messages_sent?: number
-          agents_used?: number
-          storage_used_gb?: number
-          created_at?: string
-        }
-      }
     }
     Views: {
       [_ in never]: never

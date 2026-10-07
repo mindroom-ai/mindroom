@@ -626,7 +626,7 @@ Expected outcome: Consent changes use the intended optimistic behavior and delet
 - [ ] `SAAS-017` Attempt to access admin routes as a non-admin user.
 Expected outcome: Admin gatekeeping blocks access instead of rendering privileged pages.
 
-- [ ] `SAAS-018` Exercise the admin dashboard, accounts, instances, subscriptions, audit logs, and usage pages as an admin user.
+- [ ] `SAAS-018` Exercise the admin dashboard, accounts, instances, subscriptions, and audit logs pages as an admin user.
 Expected outcome: Admin tables, metrics, detail pages, and state-specific instance actions all render and operate against the real backend.
 
 - [ ] `SAAS-019` Exercise backend-only platform endpoints such as `/health`, pricing endpoints, provisioner endpoints, and Stripe webhooks.

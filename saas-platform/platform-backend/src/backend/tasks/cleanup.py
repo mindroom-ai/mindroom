@@ -3,7 +3,6 @@ Nightly cleanup job: data retention, GDPR hard deletes, and the hosted instance 
 Each task runs independently, and every run is recorded in `cleanup_runs` for the admin portal.
 """
 
-from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 import logging
@@ -139,25 +138,6 @@ def cleanup_old_audit_logs(retention_days: int = 90) -> dict:
     }
 
 
-def cleanup_old_usage_metrics(retention_days: int = 365) -> dict:
-    """
-    Clean up old usage metrics beyond retention period.
-    Keep aggregated data for longer-term analytics.
-    """
-    sb = ensure_supabase()
-    cutoff_date = datetime.now(UTC) - timedelta(days=retention_days)
-
-    result = sb.table("usage_metrics").delete().lt("metric_date", cutoff_date.date().isoformat()).execute()
-
-    metrics_deleted = len(result.data or [])
-
-    return {
-        "usage_metrics_deleted": metrics_deleted,
-        "cutoff_date": cutoff_date.isoformat(),
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
-
-
 async def run_cleanup_job() -> dict[str, Any]:
     """Run every nightly task independently and record the run.
 
@@ -174,17 +154,12 @@ async def run_cleanup_job() -> dict[str, Any]:
         summary["accounts"] = {"error": str(exc)}
         ok = False
 
-    retention_tasks: dict[str, Callable[[], dict]] = {
-        "audit_logs": cleanup_old_audit_logs,
-        "usage_metrics": cleanup_old_usage_metrics,
-    }
-    for name, task in retention_tasks.items():
-        try:
-            summary[name] = task()
-        except Exception as exc:
-            logger.exception("Cleanup task %s failed", name)
-            summary[name] = {"error": str(exc)}
-            ok = False
+    try:
+        summary["audit_logs"] = cleanup_old_audit_logs()
+    except Exception as exc:
+        logger.exception("Cleanup task audit_logs failed")
+        summary["audit_logs"] = {"error": str(exc)}
+        ok = False
 
     try:
         lifecycle = await reconcile_all_subscriptions()

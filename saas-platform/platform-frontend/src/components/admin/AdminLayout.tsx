@@ -7,7 +7,6 @@ import {
   CreditCard,
   Server,
   FileText,
-  BarChart3,
   Home,
   Hourglass,
   LogOut
@@ -20,7 +19,6 @@ const navItems = [
   { name: 'Instances', href: '/admin/instances', icon: Server },
   { name: 'Lifecycle', href: '/admin/lifecycle', icon: Hourglass },
   { name: 'Audit Logs', href: '/admin/audit-logs', icon: FileText },
-  { name: 'Usage Metrics', href: '/admin/usage', icon: BarChart3 },
 ]
 
 export function AdminLayout({ children }: { children: React.ReactNode }) {
