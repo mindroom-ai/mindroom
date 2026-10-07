@@ -18,7 +18,6 @@ from mindroom.automations.steps import Ask, Done
 from mindroom.automations.threads import record_automation_thread
 from mindroom.config.agent import AgentConfig
 from mindroom.config.automations import DreamingAutomation
-from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
@@ -42,7 +41,6 @@ class _Workspace:
     def __init__(self, tmp_path: Path, **agent_fields: object) -> None:
         self.tmp_path = tmp_path
         self.agent_fields = agent_fields
-        self.knowledge_bases: dict[str, KnowledgeBaseConfig] = {}
         self.config, self.paths, self.root = self._build()
 
     def _build(self) -> tuple[Config, RuntimePaths, Path]:
@@ -52,21 +50,11 @@ class _Workspace:
             automations=[DreamingAutomation()],
             **self.agent_fields,
         )
-        config = Config(
-            agents={"mind": agent},
-            router=RouterConfig(model="default"),
-            knowledge_bases=self.knowledge_bases,
-        )
+        config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
         paths = resolve_runtime_paths(config_path=self.tmp_path / "config.yaml", storage_path=self.tmp_path)
         root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
         assert root is not None
         return config, paths, root
-
-    def add_knowledge_base(self, base_id: str, path: str) -> None:
-        (self.root / path).mkdir(parents=True, exist_ok=True)
-        self.knowledge_bases[base_id] = KnowledgeBaseConfig(path=str(self.root / path), mode="files")
-        self.agent_fields["knowledge_bases"] = [base_id]
-        self.config, self.paths, self.root = self._build()
 
     def write(self, path: str, text: str, *, age: timedelta | None = None) -> None:
         target = self.root / path
@@ -127,7 +115,7 @@ class _Workspace:
     def state(self) -> dict[str, object]:
         path = self.tmp_path / "tracking" / "automations" / "mind" / "dreaming.json"
         if not path.exists():
-            return {"reviewed": {}, "attempted": {}, "pending_run": None, "latest_run": None, "notes": None}
+            return {"reviewed": {}, "attempted": {}, "pending_run": None, "latest_run": None}
         return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -262,18 +250,6 @@ def test_a_rejected_capped_run_returns_only_for_inputs_no_agenda_has_listed(tmp_
     assert workspace.check() is None
 
 
-def test_the_note_that_starts_a_run_leads_its_agenda_even_behind_many_dead_citations(tmp_path: Path) -> None:
-    """Unlisted sources follow unlisted conversations and notes, so the cap never leaves out the evidence that started the run."""
-    workspace = _workspace(tmp_path)
-    citations = "".join(f"- Fact {index} (`knowledge/gone/{index}.md`).\n" for index in range(45))
-    workspace.write("memory/cited.md", citations, age=timedelta(days=30))
-    workspace.write(YESTERDAY, "- A new note.\n")
-
-    _started(workspace)
-
-    assert f"- `{YESTERDAY}`" in workspace.agenda()
-
-
 def test_a_run_a_restart_cut_short_waits_for_new_evidence(tmp_path: Path) -> None:
     """The agenda counts as attempted once posted, so a chain the runner lost does not start again on the same inputs."""
     workspace = _workspace(tmp_path)
@@ -302,98 +278,6 @@ def test_an_input_a_failed_run_listed_is_not_seeded_while_the_agent_is_idle(
 
     _started(workspace)
     assert f"- `{EXPORT}`" in workspace.agenda()
-
-
-def test_changed_and_dead_citations_are_on_the_agenda_under_the_path_memory_uses(tmp_path: Path) -> None:
-    """A knowledge alias maps to its workspace target; a dead citation is reviewed once, and a changed source waits for a note."""
-    workspace = _Workspace(tmp_path)
-    workspace.add_knowledge_base("docs", "source_docs")
-    workspace.write("source_docs/setup.md", "Install with uv.\n")
-    workspace.write(YESTERDAY, "- Checked the setup docs.\n")
-    workspace.write(
-        "memory/setup.md",
-        "- Install with uv (source: `knowledge/docs/setup.md`).\n- Old plan (source: thread_exports/gone/x.yaml).\n",
-        age=timedelta(days=30),
-    )
-
-    ask = _started(workspace)
-    agenda = workspace.agenda()
-    assert "## 2. Changed cited sources" in agenda
-    assert "- `knowledge/docs/setup.md`, cited by `memory/setup.md`" in agenda
-    assert "- `thread_exports/gone/x.yaml`, cited by `memory/setup.md`: no longer exists" in agenda
-    assert set(workspace.state()["reviewed"]) == set()
-
-    workspace.dream(ask)
-
-    assert workspace.state()["reviewed"]["thread_exports/gone/x.yaml"] == "missing"
-    assert "source_docs/setup.md" in workspace.state()["reviewed"]
-    assert workspace.check() is None
-    workspace.write("source_docs/setup.md", "Install with uv sync.\n")
-    assert workspace.check() is None
-    workspace.write(EXPORT, "messages: [hello]\n")
-    assert workspace.check() is not None
-    assert "- `knowledge/docs/setup.md`, cited by `memory/setup.md`" in workspace.agenda()
-
-
-def test_a_citation_with_an_anchor_or_line_number_cites_the_file(tmp_path: Path) -> None:
-    """`#section` and `:line` suffixes point into a file that exists, so it is not a dead citation."""
-    workspace = _Workspace(tmp_path)
-    workspace.add_knowledge_base("docs", "source_docs")
-    workspace.write("source_docs/setup.md", "Install with uv.\n", age=timedelta(days=30))
-    workspace.write(EXPORT, "messages: []\n", age=timedelta(days=30))
-    workspace.write(
-        "memory/setup.md",
-        f"- Install with uv (`knowledge/docs/setup.md#install`).\n- Decided in {EXPORT}:12.\n",
-        age=timedelta(days=30),
-    )
-
-    assert workspace.check() is None
-    assert {"source_docs/setup.md", EXPORT} <= set(workspace.state()["reviewed"])
-
-
-def test_a_citation_with_spaces_in_backticks_tracks_the_whole_path(tmp_path: Path) -> None:
-    """A code span holds the whole path, so a file name with spaces is tracked, not its first word."""
-    workspace = _Workspace(tmp_path)
-    workspace.add_knowledge_base("docs", "source_docs")
-    workspace.write("source_docs/Meeting Notes.md", "Agenda.\n", age=timedelta(days=30))
-    workspace.write(
-        "memory/meetings.md",
-        "- Weekly sync (`knowledge/docs/Meeting Notes.md#agenda`).\n",
-        age=timedelta(days=30),
-    )
-
-    assert workspace.check() is None
-    assert "source_docs/Meeting Notes.md" in workspace.state()["reviewed"]
-
-    workspace.write("source_docs/Meeting Notes.md", "New agenda.\n")
-    workspace.write(YESTERDAY, "- Weekly sync moved.\n")
-    assert workspace.check() is not None
-    assert "- `knowledge/docs/Meeting Notes.md`, cited by `memory/meetings.md`" in workspace.agenda()
-
-
-def test_a_file_directly_under_knowledge_is_tracked(tmp_path: Path) -> None:
-    """A note saved straight into knowledge/ is a source like any other."""
-    workspace = _Workspace(tmp_path)
-    workspace.write("knowledge/notes.md", "Decision log.\n", age=timedelta(days=30))
-    workspace.write("memory/topic.md", "- Decided in `knowledge/notes.md`.\n", age=timedelta(days=30))
-
-    assert workspace.check() is None
-    workspace.write("knowledge/notes.md", "Decision log, revised.\n")
-    workspace.write(YESTERDAY, "- Revised the decision log.\n")
-
-    assert workspace.check() is not None
-    assert "- `knowledge/notes.md`, cited by `memory/topic.md`" in workspace.agenda()
-
-
-def test_a_citation_through_an_unassigned_knowledge_base_is_dead(tmp_path: Path) -> None:
-    """A base removed from the agent loses its knowledge/ link, so claims citing it are reviewed as dead citations."""
-    workspace = _workspace(tmp_path)
-    workspace.write("memory/setup.md", "- Install with uv (`knowledge/old_docs/setup.md`).\n", age=timedelta(days=30))
-    workspace.write(YESTERDAY, "- Removed the old docs base.\n")
-
-    _started(workspace)
-
-    assert "- `knowledge/old_docs/setup.md`, cited by `memory/setup.md`: no longer exists" in workspace.agenda()
 
 
 def test_an_entry_that_vanishes_during_the_scan_is_skipped(tmp_path: Path) -> None:
@@ -432,7 +316,7 @@ def test_an_entry_that_vanishes_during_the_scan_is_skipped(tmp_path: Path) -> No
 
 
 def test_threads_any_automation_started_are_never_read_back(tmp_path: Path) -> None:
-    """Threads the runner recorded for any built-in, such as a prompt_curation thread, are not conversations or sources."""
+    """Threads the runner recorded for any built-in, such as a prompt_curation thread, are never read as conversations."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
@@ -440,7 +324,6 @@ def test_threads_any_automation_started_are_never_read_back(tmp_path: Path) -> N
     record_automation_thread(workspace.paths, "$curation:example.test")
     export = f"thread_exports/room/{quote('$curation:example.test', safe='')}.yaml"
     workspace.write(export, "messages: [maintenance]\n")
-    workspace.write("memory/maintenance.md", f"- Condensed in {export}.\n", age=timedelta(days=30))
 
     assert workspace.check() is None
 
@@ -505,8 +388,8 @@ def test_an_unfinished_dream_is_incomplete_and_keeps_its_inputs_due(
     assert f"- `{EXPORT}`" in workspace.agenda()
 
 
-def test_moves_dedupes_and_annotations_are_kept_lines(tmp_path: Path) -> None:
-    """Lines that survive inside any staged line are listed as kept, so ordinary consolidation fits the budget."""
+def test_a_valid_proposal_is_saved_as_a_patch_and_reviewed_in_a_thread_of_its_own(tmp_path: Path) -> None:
+    """Moves, dedupes, and annotations become one reversible patch that a fresh run reviews."""
     workspace = _workspace(tmp_path)
     workspace.write(YESTERDAY, "- Sam moved to Utrecht.\n- Prefers tea.\n")
     workspace.write("memory/people.md", "- Prefers tea.\n", age=timedelta(days=30))
@@ -517,66 +400,16 @@ def test_moves_dedupes_and_annotations_are_kept_lines(tmp_path: Path) -> None:
     review = workspace.dream(ask)
 
     assert isinstance(review, Ask)
+    assert review.new_thread
     assert review.text.startswith("🔍 Dreaming review:")
-    assert "(2 deleted lines, 0 of them found nowhere else in the proposal)" in review.text
-    deleted = (workspace.run_dir() / "deleted.txt").read_text(encoding="utf-8")
-    assert f"{YESTERDAY}:1 (kept elsewhere)" in deleted
-    assert f"{YESTERDAY}:2 (kept elsewhere)" in deleted
     patch_text = (workspace.run_dir() / "proposal.patch").read_text(encoding="utf-8")
     assert f"--- a/{YESTERDAY}" in patch_text
     assert "+- Sam moved to Utrecht." in patch_text
 
 
-def test_a_short_line_found_only_inside_another_line_is_removed(tmp_path: Path) -> None:
-    """Deleting `- Done.` is not hidden by an unrelated staged line that merely contains those characters."""
-    workspace = _workspace(tmp_path)
-    workspace.write("memory/tasks.md", "- Done.\n- Ship the release.\n", age=timedelta(days=30))
-    workspace.write(EXPORT, "messages: [hello]\n")
-    ask = _started(workspace)
-    workspace.stage("memory/tasks.md", "- Ship the release. Status: - Done. elsewhere\n")
-
-    review = workspace.dream(ask)
-
-    assert isinstance(review, Ask)
-    assert "(2 deleted lines, 1 of them found nowhere else in the proposal)" in review.text
-
-
-def test_an_ordinary_correction_fits_the_absolute_allowance_in_a_small_corpus(tmp_path: Path) -> None:
-    """Replacing one line in a tiny memory is not blocked by the percentage budget."""
-    workspace = _Workspace(tmp_path)
-    workspace.write("memory/people.md", "- Sam lives in Delft.\n", age=timedelta(days=30))
-    workspace.write(YESTERDAY, "- Sam said he moved to Utrecht.\n")
-    ask = _started(workspace)
-    workspace.stage("memory/people.md", f"- Sam lives in Utrecht (source: {YESTERDAY}).\n")
-
-    assert isinstance(workspace.dream(ask), Ask)
-
-
-def test_a_proposal_over_budget_gets_one_recheck_then_stops(tmp_path: Path) -> None:
-    """Deleting most of memory asks for a re-check in the same thread, and a second failure ends the run."""
-    workspace = _workspace(tmp_path)
-    workspace.write(EXPORT, "messages: [hello]\n")
-    ask = _started(workspace)
-    workspace.stage("memory/projects.md", "- Project 0 is owned by person 0.\n")
-
-    recheck = workspace.dream(ask)
-
-    assert isinstance(recheck, Ask)
-    assert not recheck.new_thread
-    assert recheck.text.startswith("⚠️ Dreaming needs a re-check before review: 19 lines are deleted")
-    assert "memory/projects.md loses 19 of its 20 lines" in recheck.text
-    assert recheck.then is not None
-    done = recheck.then(workspace.config, "$dream", False)
-    assert isinstance(done, Done)
-    assert done.notice is not None
-    assert done.notice.startswith("⚠️ Dreaming stopped: 19 lines are deleted")
-    assert workspace.read("memory/projects.md") == PROJECTS
-    assert workspace.state()["pending_run"] is None
-
-
 @pytest.mark.parametrize("path", [TODAY_NOTE, "memory/profile.md", "memory/notes.txt", "MEMORY.md"])
 def test_staged_files_outside_what_the_run_may_change_are_findings(tmp_path: Path, path: str) -> None:
-    """Today's note, context files, non-Markdown files, and anything outside memory/ are never proposed."""
+    """Today's note, context files, non-Markdown files, and anything outside memory/ stop the run unapplied."""
     workspace = _workspace(tmp_path, context_files=["memory/profile.md"])
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
@@ -585,11 +418,12 @@ def test_staged_files_outside_what_the_run_may_change_are_findings(tmp_path: Pat
     else:
         workspace.stage(path, "New text.\n")
 
-    recheck = workspace.dream(ask)
+    done = workspace.dream(ask)
 
-    assert isinstance(recheck, Ask)
-    assert not recheck.new_thread
-    assert path in recheck.text
+    assert isinstance(done, Done)
+    assert done.notice.startswith("⚠️ Dreaming stopped:")
+    assert path in done.notice
+    assert workspace.state()["pending_run"] is None
 
 
 def test_a_staged_link_is_a_finding_and_never_followed(tmp_path: Path) -> None:
@@ -600,10 +434,10 @@ def test_a_staged_link_is_a_finding_and_never_followed(tmp_path: Path) -> None:
     ask = _started(workspace)
     (workspace.run_dir() / "staging" / "memory" / "link.md").symlink_to(workspace.root / "secret.md")
 
-    recheck = workspace.dream(ask)
+    done = workspace.dream(ask)
 
-    assert isinstance(recheck, Ask)
-    assert "memory/link.md cannot be staged" in recheck.text
+    assert isinstance(done, Done)
+    assert "memory/link.md cannot be staged" in done.notice
 
 
 def test_a_run_that_changes_nothing_acknowledges_its_inputs_unless_memory_moved(tmp_path: Path) -> None:
@@ -714,16 +548,11 @@ def test_a_daily_note_the_run_edited_is_not_due_again(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("verdict", "notes"),
-    [
-        ("- VERDICT: APPROVE", None),
-        ("VERDICT: APPROVE.", None),
-        ("**VERDICT:** APPROVE", None),
-        ("> VERDICT: APPROVE WITH NOTES - count the moved lines", "count the moved lines"),
-    ],
+    "verdict",
+    ["- VERDICT: APPROVE", "VERDICT: APPROVE.", "**VERDICT:** APPROVE", "> VERDICT: APPROVE"],
 )
-def test_a_verdict_line_with_markdown_marks_still_counts(tmp_path: Path, verdict: str, notes: str | None) -> None:
-    """A copied bullet, bold label, quote, or spelled-out notes verdict is read as the model meant it."""
+def test_a_verdict_line_with_markdown_marks_still_counts(tmp_path: Path, verdict: str) -> None:
+    """A copied bullet, bold label, or quote is read as the model meant it."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
@@ -732,7 +561,6 @@ def test_a_verdict_line_with_markdown_marks_still_counts(tmp_path: Path, verdict
     done = workspace.review(workspace.dream(ask, report="Done.\n**DREAM:** DONE\n"), verdict)
 
     assert done.notice.startswith("✅ Dreaming applied")
-    assert workspace.state()["notes"] == notes
 
 
 def test_an_applied_file_keeps_its_permissions(tmp_path: Path) -> None:
@@ -750,24 +578,6 @@ def test_an_applied_file_keeps_its_permissions(tmp_path: Path) -> None:
     assert (workspace.root / "memory/preferences.md").stat().st_mode & 0o777 == 0o644
 
 
-def test_approve_with_notes_applies_and_hands_the_notes_to_the_next_run(tmp_path: Path) -> None:
-    """Process notes do not hold back a sound patch; they lead the next agenda."""
-    workspace = _workspace(tmp_path)
-    workspace.write(EXPORT, "messages: [hello]\n")
-    ask = _started(workspace)
-    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
-
-    done = workspace.review(workspace.dream(ask), "`VERDICT: APPROVE-WITH-NOTES — the report miscounts the changes`")
-
-    assert done.notice == (
-        "✅ Dreaming applied the reviewed proposal (files written: 1, removed: 0). "
-        "Notes for the next run: the report miscounts the changes"
-    )
-    workspace.write(EXPORT, "messages: [hello, again]\n")
-    _started(workspace)
-    assert "## Notes from the last review\n\nthe report miscounts the changes" in workspace.agenda()
-
-
 def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
     """Only the review writes the verdict, so an approval written during the dream is removed before the review starts."""
     workspace = _workspace(tmp_path)
@@ -779,7 +589,7 @@ def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
     done = workspace.review(workspace.dream(ask), None)
 
     assert done.notice.startswith(
-        "⚠️ Dreaming was not applied: the review did not end with one of the three verdict lines.",
+        "⚠️ Dreaming was not applied: the review did not end with one of the two verdict lines.",
     )
     assert workspace.read("memory/projects.md") == PROJECTS
 
@@ -788,18 +598,23 @@ def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
     ("verdict", "timed_out", "reason"),
     [
         ("VERDICT: REJECT — the move drops a measured result.", False, "the move drops a measured result"),
-        (None, False, "the review did not end with one of the three verdict lines"),
-        ("Looks fine to me.", False, "the review did not end with one of the three verdict lines"),
+        (None, False, "the review did not end with one of the two verdict lines"),
+        ("Looks fine to me.", False, "the review did not end with one of the two verdict lines"),
         ("VERDICT: APPROVE", True, "the review did not finish within an hour"),
         (
             "VERDICT: APPROVE-WITH-CHANGES - remove the unsupported claim first",
             False,
-            "the review did not end with one of the three verdict lines",
+            "the review did not end with one of the two verdict lines",
         ),
         (
             "VERDICT: APPROVE only after correcting the date",
             False,
-            "the review did not end with one of the three verdict lines",
+            "the review did not end with one of the two verdict lines",
+        ),
+        (
+            "VERDICT: APPROVE-WITH-NOTES — count the moved lines",
+            False,
+            "the review did not end with one of the two verdict lines",
         ),
     ],
 )

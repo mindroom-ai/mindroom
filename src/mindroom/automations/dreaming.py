@@ -1,8 +1,7 @@
 """The dreaming automation: reconcile memory/ with what changed since it was last reconciled.
 
-The check lists inputs that changed since a run last handled them: exported conversations, past daily notes, and the
-workspace files memory cites.
-When a conversation or daily note no agenda has listed is due, the agent edits a staging copy of memory/ in a visible
+The check lists inputs that changed since a run last handled them: exported conversations and past daily notes.
+When an input no agenda has listed is due, the agent edits a staging copy of memory/ in a visible
 run, code validates the staging, and a second run in a thread of its own reviews the proposal against its sources.
 Code applies an approved proposal only when memory did not change during the runs, and records progress only after a
 run that applied or needed no change, so every other outcome leaves its inputs due until new evidence starts a run.
@@ -17,7 +16,6 @@ import os
 import re
 import shutil
 import stat
-from bisect import bisect_left
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -49,14 +47,7 @@ logger = get_logger(__name__)
 _RUNS_DIR = ".mindroom/dreaming/runs"
 _MEMORY_DIR = "memory"
 _EXPORTS_DIR = "thread_exports"
-_KNOWLEDGE_DIR = "knowledge"
 _DAILY_NOTE = re.compile(r"memory/(\d{4}-\d{2}-\d{2})\.md")
-# A workspace path memory cites, such as `knowledge/docs/Meeting Notes.md` or thread_exports/<room>/<thread>.yaml: the
-# whole of a code span that starts with one, or a bare path up to whitespace or markup; either without a trailing
-# anchor, line number, or punctuation.
-_CODE_SPAN_CITATION = re.compile(r"`((?:knowledge|thread_exports)/[^`\n]+)`")
-_CITATION = re.compile(r"(?<![\w./-])((?:knowledge|thread_exports)/[^\s`'\"<>()\[\]{}|*#]+)")
-_CITATION_SUFFIX = re.compile(r"(?::\d+(?:[-:]\d+)*)?[.,;:!?]*$")
 _MAX_INPUTS = 40
 # Enabling the automation starts from recent history instead of the whole archive.
 _SEED_AGE = timedelta(days=7)
@@ -64,25 +55,13 @@ _KEPT_RUNS = 30
 _MAX_FILE_BYTES = 1 << 20
 # The exporter caps a room's index.json at 8 MiB.
 _MAX_INDEX_BYTES = 8 << 20
-# Removed lines are deleted lines found nowhere in the staged files; ordinary corrections fit the absolute allowances.
-_MAX_REMOVED_FRACTION = 0.08
-_MIN_REMOVED_ALLOWANCE = 10
-_MAX_FILE_REMOVED_FRACTION = 0.5
-_MIN_FILE_REMOVED_ALLOWANCE = 2
 _DONE_LINE = "DREAM: DONE"
-# Exactly one of the three verdict forms, with notes or a reason after an em dash, en dash, or hyphen; anything else,
-# such as "APPROVE-WITH-CHANGES" or "APPROVE once fixed", is a rejection.
-_VERDICT = re.compile(
-    r"VERDICT:\s*(?:"
-    r"(?P<approve>APPROVE)\.?"
-    r"|(?P<notes>APPROVE[- ]WITH[- ]NOTES)(?:\s*[\u2014\u2013-]+\s*(?P<detail>.*))?"
-    r"|(?P<reject>REJECT)(?:\s*[\u2014\u2013-]+\s*(?P<reason>.*))?"
-    r")",
-)
-_MISSING = "missing"
+# Exactly APPROVE, or REJECT with a reason after an em dash, en dash, or hyphen; anything else, such as
+# "APPROVE-WITH-CHANGES" or "APPROVE once fixed", is a rejection.
+_VERDICT = re.compile(r"VERDICT:\s*(?:(?P<approve>APPROVE)\.?|REJECT(?:\s*[\u2014\u2013-]+\s*(?P<reason>.*))?)")
 
-# An input's version: its modification time and size, or missing for a cited file that no longer exists.
-type _Version = tuple[int, int] | Literal["missing"]
+# An input's version: its modification time and size.
+type _Version = tuple[int, int]
 type _Outcome = Literal["applied", "unchanged", "incomplete", "invalid", "rejected", "conflict"]
 
 
@@ -98,7 +77,6 @@ class _State:
     # explains the latest failure; both lead the next agenda until a run applies or needs no change.
     pending_run: str | None = None
     latest_run: str | None = None
-    notes: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,13 +84,10 @@ class _Input:
     """One changed workspace file the run reviews."""
 
     path: str
-    kind: Literal["conversation", "daily_note", "source"]
+    kind: Literal["conversation", "daily_note"]
     version: _Version
     # When its content last changed, in nanoseconds: a conversation's last message, otherwise the file's mtime.
-    changed_ns: int = 0
-    # For a cited source, the path as memory spells it and the memory files that cite it.
-    cited_as: str = ""
-    cited_by: tuple[str, ...] = ()
+    changed_ns: int
 
 
 @dataclass(frozen=True)
@@ -173,12 +148,11 @@ def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State:
         attempted=_versions(payload["attempted"]),
         pending_run=payload["pending_run"],
         latest_run=payload["latest_run"],
-        notes=payload["notes"],
     )
 
 
 def _versions(payload: dict[str, Any]) -> dict[str, _Version]:
-    return {path: version if version == _MISSING else (version[0], version[1]) for path, version in payload.items()}
+    return {path: (version[0], version[1]) for path, version in payload.items()}
 
 
 def _update_state(runtime_paths: RuntimePaths, agent_name: str, change: Callable[[_State], None]) -> None:
@@ -194,7 +168,6 @@ def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> 
         "attempted": state.attempted,
         "pending_run": state.pending_run,
         "latest_run": state.latest_run,
-        "notes": state.notes,
     }
     write_file_within_root(
         _state_root(runtime_paths, agent_name),
@@ -289,67 +262,18 @@ def _read_markdown(base_fd: int, path: str) -> bytes | None:
 
 
 def _version(root: Path, path: str) -> _Version | None:
-    """Return a cited workspace file's version, missing when it is gone, or None when it is not a regular file."""
+    """Return a workspace file's version, or None when it is gone, behind a link, or not a regular file."""
     parent, name = path.rsplit("/", 1)
     try:
         with open_directory_within_root(root, parent) as parent_fd:
             status = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return _MISSING
     except OSError:
-        # A link or a file on the way is not a path memory can cite.
         return None
     return (status.st_mtime_ns, status.st_size) if stat.S_ISREG(status.st_mode) else None
 
 
 def _thread_id(export_path: str) -> str:
     return unquote(PurePosixPath(export_path).stem)
-
-
-def _knowledge_aliases(root: Path) -> dict[str, str]:
-    """Map each entry of the workspace's `knowledge/` to the workspace-relative path it shows, reading links unfollowed.
-
-    MindRoom links each workspace-local knowledge base there; a link that leaves the workspace is skipped.
-    """
-    workspace = root.resolve()
-    knowledge_root = workspace / _KNOWLEDGE_DIR
-    aliases: dict[str, str] = {}
-    try:
-        with open_directory_within_root(root, _KNOWLEDGE_DIR) as knowledge_fd, os.scandir(knowledge_fd) as entries:
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False):
-                    aliases[entry.name] = f"{_KNOWLEDGE_DIR}/{entry.name}"
-                elif entry.is_symlink():
-                    target = Path(os.path.normpath(knowledge_root / os.readlink(entry.name, dir_fd=knowledge_fd)))
-                    if target.is_relative_to(workspace) and target != workspace:
-                        aliases[entry.name] = target.relative_to(workspace).as_posix()
-    except FileNotFoundError:
-        pass
-    return aliases
-
-
-def _canonical_citation(cited: str, aliases: Mapping[str, str]) -> str | None:
-    parts = cited.split("/")
-    if "" in parts or "." in parts or ".." in parts:
-        return None
-    if parts[0] == _EXPORTS_DIR:
-        return cited if len(parts) > 1 else None
-    if len(parts) == 2 or parts[1] not in aliases:
-        # A file directly under knowledge/, or one in a base no longer assigned to the agent, whose link is gone.
-        return cited
-    return "/".join([aliases[parts[1]], *parts[2:]])
-
-
-def _citations(snapshot: Mapping[str, bytes]) -> dict[str, list[str]]:
-    """Return each cited workspace path, as memory spells it, with the memory files that cite it."""
-    cited: dict[str, set[str]] = {}
-    for path, payload in snapshot.items():
-        text = payload.decode()
-        spans = [match.group(1).partition("#")[0].strip() for match in _CODE_SPAN_CITATION.finditer(text)]
-        bare = [match.group(1) for match in _CITATION.finditer(_CODE_SPAN_CITATION.sub(" ", text))]
-        for spelled in spans + bare:
-            cited.setdefault(_CITATION_SUFFIX.sub("", spelled), set()).add(path)
-    return {spelled: sorted(paths) for spelled, paths in cited.items()}
 
 
 def _last_messages(root: Path, exports: Mapping[str, os.stat_result]) -> dict[str, int]:
@@ -390,18 +314,6 @@ def _collect_inputs(
     for path, version in versions.items():
         if path in snapshot and (match := _DAILY_NOTE.fullmatch(path)) and match.group(1) < today:
             inputs[path] = _Input(path, "daily_note", version, version[0])
-    aliases = _knowledge_aliases(root)
-    for spelled, cited_by in sorted(_citations(snapshot).items()):
-        path = _canonical_citation(spelled, aliases)
-        if (
-            path is None
-            or path in inputs
-            or (path.startswith(f"{_EXPORTS_DIR}/") and _thread_id(path) in automation_thread_ids)
-        ):
-            continue
-        if (version := _version(root, path)) is not None:
-            changed_ns = 0 if version == _MISSING else version[0]
-            inputs[path] = _Input(path, "source", version, changed_ns, cited_as=spelled, cited_by=tuple(cited_by))
     return inputs
 
 
@@ -414,16 +326,12 @@ def _unseen_and_old(inputs: Iterable[_Input], state: _State, now: datetime) -> d
     return {
         item.path: item.version
         for item in inputs
-        if item.path not in state.reviewed
-        and item.path not in state.attempted
-        and item.version != _MISSING
-        and item.changed_ns < cutoff
+        if item.path not in state.reviewed and item.path not in state.attempted and item.changed_ns < cutoff
     }
 
 
-def _order(item: _Input) -> tuple[int, int, str]:
-    # Dead citations have no time, so they come first; everything else oldest first.
-    return (0, 0, item.path) if item.version == _MISSING else (1, item.changed_ns, item.path)
+def _order(item: _Input) -> tuple[int, str]:
+    return (item.changed_ns, item.path)
 
 
 def _prune_runs(root: Path, keep: tuple[str, ...]) -> None:
@@ -439,7 +347,7 @@ def _prune_runs(root: Path, keep: tuple[str, ...]) -> None:
         return
 
 
-def _agenda(run: _Run, state: _State, waiting: int) -> str:
+def _agenda(run: _Run, waiting: int) -> str:
     lines = ["# Dreaming agenda", "", f"Run `{run.run_id}`; paths are relative to your workspace."]
     if run.carried:
         lines += [
@@ -450,8 +358,6 @@ def _agenda(run: _Run, state: _State, waiting: int) -> str:
             "",
             *(f"- `{_RUNS_DIR}/{run_id}/`" for run_id in run.carried),
         ]
-    if state.notes:
-        lines += ["", "## Notes from the last review", "", state.notes]
     sections = (
         ("conversation", "## 1. New or updated conversations"),
         ("daily_note", "## 1. New or updated daily notes"),
@@ -460,18 +366,6 @@ def _agenda(run: _Run, state: _State, waiting: int) -> str:
         items = [f"- `{item.path}`" for item in run.due if item.kind == kind]
         if items:
             lines += ["", heading, "", *items]
-    changed = [item for item in run.due if item.kind == "source" and item.version != _MISSING]
-    dead = [item for item in run.due if item.kind == "source" and item.version == _MISSING]
-    for heading, items, suffix in (
-        ("## 2. Changed cited sources", changed, ""),
-        ("## 2. Dead citations", dead, ": no longer exists"),
-    ):
-        if items:
-            lines += ["", heading, ""]
-            lines += [
-                f"- `{item.cited_as}`, cited by {', '.join(f'`{path}`' for path in item.cited_by)}{suffix}"
-                for item in items
-            ]
     if waiting:
         lines += ["", f"{waiting} more changed inputs wait for later runs."]
     return "\n".join(lines) + "\n"
@@ -482,7 +376,7 @@ def _context_files(config: Config, agent_name: str) -> set[str]:
 
 
 def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Ask | None:
-    """Return the dream prompt when a conversation or daily note no agenda has listed is due, or None.
+    """Return the dream prompt when an input no agenda has listed is due, or None.
 
     Raises ``OSError`` or ``ValueError`` when memory or the state cannot be read safely.
     """
@@ -507,14 +401,14 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
     def seen(item: _Input) -> bool:
         return state.attempted.get(item.path) == item.version
 
-    # Conversations and notes no agenda has listed lead, so the evidence that starts a run is always on its agenda.
+    # Inputs no agenda has listed lead, so the evidence that starts a run is always on its agenda.
     due = sorted(
         (item for item in inputs.values() if state.reviewed.get(item.path) != item.version),
-        key=lambda item: (seen(item), item.kind == "source", _order(item)),
+        key=lambda item: (seen(item), _order(item)),
     )
-    # Only a conversation or daily note no agenda has listed starts a run; changed sources and unapplied proposals
-    # join it, so an idle agent costs nothing and a failed run is not repeated on the same evidence.
-    if all(seen(item) or item.kind == "source" for item in due):
+    # Only an input no agenda has listed starts a run; unapplied proposals join it, so an idle agent costs nothing and
+    # a failed run is not repeated on the same evidence.
+    if all(seen(item) for item in due):
         return None
     carried = tuple(dict.fromkeys(run_id for run_id in (state.pending_run, state.latest_run) if run_id is not None))
     run = _Run(
@@ -529,7 +423,7 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
         carried=carried,
     )
     _prune_runs(root, keep=carried)
-    write_file_within_root(root, f"{run.run_dir}/agenda.md", _agenda(run, state, len(due) - len(run.due)).encode())
+    write_file_within_root(root, f"{run.run_dir}/agenda.md", _agenda(run, len(due) - len(run.due)).encode())
     with open_directory_within_root(root, f"{run.run_dir}/staging/{_MEMORY_DIR}", create=True):
         pass
     for path, payload in snapshot.items():
@@ -570,70 +464,6 @@ def _last_line(text: str | None) -> str:
     return lines[-1] if lines else ""
 
 
-@dataclass(frozen=True)
-class _Deletion:
-    path: str
-    line: int
-    text: str
-    kept: bool
-    before: str | None
-    after: str | None
-
-
-def _deletions(run: _Run, staged: Mapping[str, bytes]) -> list[_Deletion]:
-    """List every deleted non-blank line, kept when a staged line is it or starts with it.
-
-    That covers a line moved to another file, a duplicate removed, and a line marked superseded by appending to it.
-    """
-    staged_lines = sorted({line.strip() for payload in staged.values() for line in payload.decode().splitlines()})
-
-    def kept(text: str) -> bool:
-        # Lines that start with ``text`` sort right at or after it.
-        index = bisect_left(staged_lines, text)
-        return index < len(staged_lines) and staged_lines[index].startswith(text)
-
-    deletions: list[_Deletion] = []
-    for path, before in run.snapshot.items():
-        old = before.decode().splitlines()
-        new = staged[path].decode().splitlines() if path in staged else []
-        if path in staged and staged[path] == before:
-            continue
-        matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
-        for tag, start, end, _new_start, _new_end in matcher.get_opcodes():
-            if tag not in {"replace", "delete"}:
-                continue
-            for index in range(start, end):
-                text = old[index].strip()
-                if text:
-                    deletions.append(
-                        _Deletion(
-                            path=path,
-                            line=index + 1,
-                            text=old[index],
-                            kept=kept(text),
-                            before=old[index - 1] if index > 0 else None,
-                            after=old[index + 1] if index + 1 < len(old) else None,
-                        ),
-                    )
-    return deletions
-
-
-def _budget_findings(run: _Run, deletions: list[_Deletion]) -> list[str]:
-    def nonblank(payload: bytes) -> int:
-        return sum(1 for line in payload.decode().splitlines() if line.strip())
-
-    removed = [deletion for deletion in deletions if not deletion.kept]
-    findings: list[str] = []
-    allowance = max(_MIN_REMOVED_ALLOWANCE, round(_MAX_REMOVED_FRACTION * sum(map(nonblank, run.snapshot.values()))))
-    if len(removed) > allowance:
-        findings.append(f"{len(removed)} lines are deleted and found nowhere else (at most {allowance})")
-    for path, payload in run.snapshot.items():
-        count = sum(1 for deletion in removed if deletion.path == path)
-        if count > max(_MIN_FILE_REMOVED_ALLOWANCE, _MAX_FILE_REMOVED_FRACTION * nonblank(payload)):
-            findings.append(f"{path} loses {count} of its {nonblank(payload)} lines without keeping them elsewhere")
-    return findings
-
-
 def _patch(run: _Run, proposal: _Proposal) -> str:
     chunks: list[str] = []
     for path in sorted({*proposal.changed, *proposal.deleted}):
@@ -651,27 +481,7 @@ def _patch(run: _Run, proposal: _Proposal) -> str:
     return "".join(chunk if chunk.endswith("\n") else f"{chunk}\n\\ No newline at end of file\n" for chunk in chunks)
 
 
-def _deletion_report(deletions: list[_Deletion]) -> str:
-    lines: list[str] = []
-    for deletion in deletions:
-        lines.append(f"{deletion.path}:{deletion.line} ({'kept elsewhere' if deletion.kept else 'removed'})")
-        if deletion.before is not None:
-            lines.append(f"  {deletion.line - 1:>5}  {deletion.before}")
-        lines.append(f"- {deletion.line:>5}  {deletion.text}")
-        if deletion.after is not None:
-            lines.append(f"  {deletion.line + 1:>5}  {deletion.after}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _after_dream(
-    run: _Run,
-    config: Config,
-    thread_id: str,
-    timed_out: bool,
-    *,
-    rechecked: bool = False,
-) -> Ask | Done:
+def _after_dream(run: _Run, config: Config, thread_id: str, timed_out: bool) -> Ask | Done:
     """Validate the dream's staging, then ask for a review in a thread of its own."""
     if timed_out:
         return _end(run, "incomplete", "⚠️ Dreaming stopped: the run did not finish within an hour.")
@@ -679,24 +489,11 @@ def _after_dream(
         reason = f"the run's report does not end with `{_DONE_LINE}`, so its agenda was not finished"
         return _end(run, "incomplete", f"⚠️ Dreaming stopped: {reason}.")
     staged = _read_memory_tree(run.root, f"{run.run_dir}/staging")
-    deletions = _deletions(run, staged.files)
     findings = [f"{name} is outside memory/, which is all this run may change" for name in _outside_memory(run)]
     findings += [f"{path} cannot be staged, only Markdown under memory/ can" for path in staged.rejected]
     findings += [f"{path} is outside what this run may change" for path in staged.files if path in run.excluded]
-    findings += _budget_findings(run, deletions)
     if findings:
-        if rechecked:
-            return _end(run, "invalid", f"⚠️ Dreaming stopped: {'; '.join(findings)}.")
-        return Ask(
-            config.render_prompt(
-                "DREAMING_RECHECK_TEMPLATE",
-                findings="; ".join(findings),
-                staging_path=f"{run.run_dir}/staging/{_MEMORY_DIR}",
-                report_path=f"{run.run_dir}/report.md",
-            ),
-            new_thread=False,
-            then=partial(_after_dream, run, rechecked=True),
-        )
+        return _end(run, "invalid", f"⚠️ Dreaming stopped: {'; '.join(findings)}.")
     proposal = _Proposal(
         changed={path: payload for path, payload in staged.files.items() if run.snapshot.get(path) != payload},
         deleted=tuple(path for path in run.snapshot if path not in staged.files),
@@ -705,7 +502,6 @@ def _after_dream(
     if not proposal.changed and not proposal.deleted:
         return _end_without_change(run, thread_id)
     write_file_within_root(run.root, f"{run.run_dir}/proposal.patch", _patch(run, proposal).encode())
-    write_file_within_root(run.root, f"{run.run_dir}/deleted.txt", _deletion_report(deletions).encode())
     # Only the review may write a verdict, so a file the dream left there never counts as one.
     _remove(run.root, f"{run.run_dir}/verdict.md")
     # Pending from now on, so a restart before the review finishes still carries the proposal forward.
@@ -717,9 +513,6 @@ def _after_dream(
             changed_files=len(proposal.changed) + len(proposal.deleted),
             agenda_path=f"{run.run_dir}/agenda.md",
             report_path=f"{run.run_dir}/report.md",
-            deleted_path=f"{run.run_dir}/deleted.txt",
-            deleted_lines=len(deletions),
-            removed_lines=sum(1 for deletion in deletions if not deletion.kept),
             verdict_path=f"{run.run_dir}/verdict.md",
         ),
         new_thread=True,
@@ -762,17 +555,16 @@ def _unchanged_since_fire(run: _Run) -> bool:
 def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str, timed_out: bool) -> Done:
     """Apply an approved proposal when memory did not change since the run fired."""
     if timed_out:
-        verdict, detail = "REJECT", "the review did not finish within an hour"
+        approved, reason = False, "the review did not finish within an hour"
     elif match := _VERDICT.fullmatch(_last_line(_read_optional(run.root, f"{run.run_dir}/verdict.md"))):
-        verdict = "APPROVE" if match["approve"] else "APPROVE-WITH-NOTES" if match["notes"] else "REJECT"
-        detail = (match["detail"] or match["reason"] or "").strip().rstrip(".")
+        approved, reason = match["approve"] is not None, (match["reason"] or "").strip().rstrip(".")
     else:
-        verdict, detail = "REJECT", "the review did not end with one of the three verdict lines"
-    if verdict == "REJECT":
+        approved, reason = False, "the review did not end with one of the two verdict lines"
+    if not approved:
         return _end(
             run,
             "rejected",
-            f"⚠️ Dreaming was not applied: {detail or 'the review rejected it'}. "
+            f"⚠️ Dreaming was not applied: {reason or 'the review rejected it'}. "
             "The next run carries the proposal forward.",
         )
     # A config reload during the run can make a proposed file a context file, which the automation never writes.
@@ -790,17 +582,12 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         write_scope_markdown_file(run.root, Path(path), payload)
     for path in proposal.deleted:
         _remove(run.root, path)
-    notes = detail if verdict == "APPROVE-WITH-NOTES" and detail else None
-    summary = (
-        f"✅ Dreaming applied the reviewed proposal "
-        f"(files written: {len(proposal.changed)}, removed: {len(proposal.deleted)})."
-    )
     return _end(
         run,
         "applied",
-        f"{summary} Notes for the next run: {notes}" if notes else summary,
+        f"✅ Dreaming applied the reviewed proposal "
+        f"(files written: {len(proposal.changed)}, removed: {len(proposal.deleted)}).",
         resolve=(proposal.dream_thread, thread_id),
-        notes=notes,
         applied=tuple(proposal.changed),
         # The refresh is scheduled on the event loop, which this step does not run on.
         on_loop=partial(refresh_agent_memory_search, run.agent_name, run.root, config, run.runtime_paths),
@@ -827,7 +614,6 @@ def _end(
     notice: str,
     *,
     resolve: tuple[str, ...] = (),
-    notes: str | None = None,
     applied: tuple[str, ...] = (),
     on_loop: Callable[[], None] | None = None,
 ) -> Done:
@@ -848,7 +634,6 @@ def _end(
         state.reviewed = reviewed
         state.pending_run = None
         state.latest_run = None
-        state.notes = notes
 
     if outcome in {"applied", "unchanged"}:
         _update_state(run.runtime_paths, run.agent_name, record_progress)

@@ -297,8 +297,8 @@ agents:
 
 ## Dreaming
 
-Facts in `memory/` go stale when a later conversation corrects them or a cited source changes.
-Enable the [`dreaming`](scheduling.md#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations, daily notes, and changed cited sources, through a proposal that a second run reviews before MindRoom applies it.
+Facts in `memory/` go stale when a later conversation corrects them.
+Enable the [`dreaming`](scheduling.md#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
 
 ```yaml
 memory:
