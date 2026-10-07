@@ -184,14 +184,13 @@ async def store_main_continuation(store: PrincipalStore, continuation: ApprovalC
         transaction.execute(
             """
             INSERT INTO approval_continuations (
-                principal_id, approval_id, entity_name, span_id, state,
+                principal_id, approval_id, span_id, state,
                 generation, runtime_generation, failure_reason, context_json, created_at_ns
-            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
             """,
             (
                 store._principal_id,
                 continuation.approval_id,
-                continuation.entity_name,
                 "ready" if claimed else continuation.state,
                 continuation.generation,
                 None if claimed else continuation.runtime_generation,

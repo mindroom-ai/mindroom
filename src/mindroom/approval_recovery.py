@@ -83,23 +83,15 @@ class ApprovalRecovery:
         if journal is None:
             return True
         complete = True
-        cursor: tuple[str, str] | None = None
+        cursor: str | None = None
         while True:
-            if entity_names is None:
-                owners = await journal.approval_continuations(
-                    limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
-                    after=cursor,
-                )
-            else:
-                owners = await journal.approval_continuations_for_entities(
-                    entity_names,
-                    limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
-                    after=cursor,
-                )
+            owners = await journal.approval_continuations(limit=_UNAVAILABLE_OWNER_SCAN_LIMIT, after=cursor)
             if not owners:
                 break
-            cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
+            cursor = owners[-1][1].approval_id
             for principal_id, continuation in owners:
+                if entity_names is not None and continuation.entity_name not in entity_names:
+                    continue
                 reason = self._unavailable_entity_reason(continuation.entity_name)
                 if reason is not None:
                     complete = await self._discard_unavailable(principal_id, continuation, reason) and complete

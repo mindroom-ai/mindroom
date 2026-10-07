@@ -1,13 +1,17 @@
 """Released continuations keep the reply identity they answer across the upgrade that names their span."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from mindroom.event_journal import legacy_response_attempts, postgres_backend, sqlite_backend
+from mindroom.event_journal import EventJournalStore, legacy_response_attempts, postgres_backend, sqlite_backend
 from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
+from mindroom.event_journal.approvals import StoredApprovalCard
+from tests.legacy_reply_helpers import store_main_continuation
+from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_journal_upgrade_boundary import _LegacyDatabase
 from tests.test_journal_upgrade_boundary import legacy_database as _legacy_database
 
@@ -118,6 +122,13 @@ async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legac
     # Its held sources moved with its identity; reply classification moves them onto its paused span.
     assert approval.source_event_ids == ("$first",)
     assert legacy_database.query(_table_query(legacy_database.postgres, "approval_continuation_sources")) == []
+    # Its entity moved too: the paused reply names it once classified.
+    assert legacy_database.query(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'approval_continuations' AND column_name = 'entity_name'"
+        if legacy_database.postgres
+        else "SELECT name FROM pragma_table_info('approval_continuations') WHERE name = 'entity_name'",
+    ) == []
 
 
 @pytest.mark.asyncio
@@ -227,3 +238,21 @@ async def test_an_unclassified_continuation_settles_its_adopted_sources(legacy_d
         assert not await principal.is_pending("$first")
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_card_of_an_unclassified_continuation_names_its_adopted_entity(
+    journal_store: EventJournalStore,
+) -> None:
+    """Until reply classification names its span, a continuation's card is authorized for the entity it adopted."""
+    principal = journal_store.principal("agent@alice")
+    await _ApprovalContinuations.admit_sources(principal)
+    # The run that published its cards still holds it.
+    continuation = replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="runtime-a")
+    await store_main_continuation(principal, continuation)
+    await _ApprovalContinuations.remember_card(principal)
+
+    (card,) = await principal.pending_approval_cards(room_id=continuation.room_id)
+
+    assert isinstance(card, StoredApprovalCard)
+    assert card.continuation_entity_name == continuation.entity_name

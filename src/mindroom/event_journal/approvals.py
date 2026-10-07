@@ -31,6 +31,7 @@ from . import (
 )
 from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
 from .identity import decode_thread_id
+from .legacy_response_attempts import adopted_entity_name
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
@@ -46,7 +47,8 @@ _CARD_COLUMNS = """
     cards.continuation_id AS continuation_id,
     cards.continuation_generation AS continuation_generation,
     cards.tool_call_id AS tool_call_id,
-    continuations.entity_name AS continuation_entity_name,
+    paused_reply.entity_name AS continuation_entity_name,
+    continuations.context_json AS continuation_context_json,
     background.run_id AS background_run_id,
     background.call_id AS background_call_id
 """
@@ -65,6 +67,12 @@ _CARD_DELIVERY_JOINS = """
     LEFT JOIN approval_continuations AS continuations
       ON continuations.approval_id = cards.continuation_id
      AND continuations.generation = cards.continuation_generation
+    LEFT JOIN reply_spans AS paused_span
+      ON paused_span.principal_id = continuations.principal_id
+     AND paused_span.span_id = continuations.span_id
+    LEFT JOIN reply_messages AS paused_reply
+      ON paused_reply.principal_id = paused_span.principal_id
+     AND paused_reply.reply_id = paused_span.reply_id
 """
 
 
@@ -327,7 +335,7 @@ def _resolve_continuation(
     generation = int(generation_value)
     continuation = transaction.fetchone(
         """
-        SELECT principal_id, entity_name, state, generation, failure_reason
+        SELECT principal_id, state, generation, failure_reason
         FROM approval_continuations WHERE approval_id = ?
         """,
         (continuation_id,),
@@ -335,7 +343,6 @@ def _resolve_continuation(
     if continuation is None or int(continuation["generation"]) != generation:
         return RecordedApprovalDecision(resolution=None, recorded=False)
     continuation_principal_id = str(continuation["principal_id"])
-    entity_name = str(continuation["entity_name"])
     call = transaction.fetchone(
         """
         SELECT calls.expires_at_ns
@@ -413,16 +420,21 @@ def _resolve_continuation(
         """,
         (continuation_principal_id, continuation_id, generation),
     )
-    continuation = approval_continuations.get(transaction, continuation_principal_id, approval_id=continuation_id)
+    decided_continuation = approval_continuations.get(
+        transaction,
+        continuation_principal_id,
+        approval_id=continuation_id,
+    )
+    assert decided_continuation is not None, "a continuation decided in this transaction exists"
     return RecordedApprovalDecision(
         resolution=stored_resolution,
         recorded=True,
         delivery_id=str(card["delivery_id"]),
         card_event_id=card_event_id,
         continuation_ready=state is not None and state["state"] == "ready",
-        continuation_entity_name=entity_name,
+        continuation_entity_name=decided_continuation.entity_name,
         continuation_room_id=str(card["room_id"]),
-        source_event_ids=() if continuation is None else continuation.source_event_ids,
+        source_event_ids=decided_continuation.source_event_ids,
     )
 
 
@@ -893,6 +905,15 @@ def is_terminal_card(
     return row is not None
 
 
+def _continuation_entity_name(row: Row) -> str | None:
+    """Return the entity of a card's continuation: its paused reply's, or the one it was adopted with."""
+    entity_name = cast("str | None", row["continuation_entity_name"])
+    context_json = cast("str | None", row["continuation_context_json"])
+    if entity_name is not None or context_json is None:
+        return entity_name
+    return adopted_entity_name(json.loads(context_json))
+
+
 def pending_card(
     transaction: Transaction,
     principal_id: str,
@@ -1026,7 +1047,7 @@ def _card(row: Row) -> StoredApprovalCard | None:
         if background_run_id is None:
             target_kind: _ApprovalTargetKind = "continuation"
             card_identity = _native_identity(card)
-            continuation_entity_name = cast("str | None", row["continuation_entity_name"])
+            continuation_entity_name = _continuation_entity_name(row)
         else:
             continuation_entity_name = None
             background_call_id = _required_background_call_id(row)

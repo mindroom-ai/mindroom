@@ -2404,30 +2404,13 @@ class EventJournalStore:
             raise ValueError(msg)
         return PrincipalStore(_backend=self.backend, _principal_id=principal_id)
 
-    async def approval_continuations_for_entities(
-        self,
-        entity_names: set[str],
-        *,
-        limit: int = _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT,
-        after: tuple[str, str] | None = None,
-    ) -> tuple[tuple[str, ApprovalContinuation], ...]:
-        """Return one bounded page of owners for unavailable entities."""
-        return await self.backend.read(
-            lambda transaction: approval_continuations.for_entities(
-                transaction,
-                entity_names,
-                limit=limit,
-                after=after,
-            ),
-        )
-
     async def approval_continuations(
         self,
         *,
         limit: int = _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT,
-        after: tuple[str, str] | None = None,
+        after: str | None = None,
     ) -> tuple[tuple[str, ApprovalContinuation], ...]:
-        """Return one bounded page with its journal principals."""
+        """Return one bounded page of continuations after the approval id ``after``, with their journal principals."""
         return await self.backend.read(
             lambda transaction: approval_continuations.all_owners(
                 transaction,

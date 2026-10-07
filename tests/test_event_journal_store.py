@@ -7422,7 +7422,7 @@ class TestApprovalContinuations:
                 rival_stores.first.backend,
                 pause_after_continuation_read,
                 statement_matches=lambda sql: (
-                    "SELECT principal_id, entity_name, state, generation, failure_reason" in sql
+                    "SELECT principal_id, state, generation, failure_reason" in sql
                 ),
             ),
         ).principal("router@shared")
@@ -8141,9 +8141,11 @@ class TestApprovalContinuations:
         await self.admit_sources(alice)
         await paused_for_approval(alice, self.continuation(state="waiting"))
 
-        owners = await journal_store.approval_continuations_for_entities({"agent"})
-        assert [(principal, continuation.approval_id) for principal, continuation in owners] == [
-            ("agent@alice", "approval-1"),
+        owners = await journal_store.approval_continuations()
+        assert [
+            (principal, continuation.entity_name, continuation.approval_id) for principal, continuation in owners
+        ] == [
+            ("agent@alice", "agent", "approval-1"),
         ]
 
         failing = await alice.request_approval_failure(
@@ -8427,40 +8429,21 @@ class TestApprovalContinuations:
             assert await paused_for_approval(alice, continuation) == continuation
 
         first = await journal_store.approval_continuations(limit=2)
-        second = await journal_store.approval_continuations(
-            limit=2,
-            after=(first[-1][1].entity_name, first[-1][1].approval_id),
-        )
-        third = await journal_store.approval_continuations(
-            limit=2,
-            after=(second[-1][1].entity_name, second[-1][1].approval_id),
-        )
-        assert [continuation.approval_id for _principal, continuation in first] == [
-            "approval-page-2",
-            "approval-page-0",
+        second = await journal_store.approval_continuations(limit=2, after=first[-1][1].approval_id)
+        third = await journal_store.approval_continuations(limit=2, after=second[-1][1].approval_id)
+        pages = [[continuation.approval_id for _principal, continuation in page] for page in (first, second, third)]
+        assert pages == [
+            ["approval-page-0", "approval-page-1"],
+            ["approval-page-2", "approval-page-3"],
+            ["approval-page-4"],
         ]
-        assert [continuation.approval_id for _principal, continuation in second] == [
-            "approval-page-1",
-            "approval-page-3",
-        ]
-        assert [continuation.approval_id for _principal, continuation in third] == ["approval-page-4"]
-
-        removed_first = await journal_store.approval_continuations_for_entities(
-            {"removed"},
-            limit=2,
-        )
-        removed_second = await journal_store.approval_continuations_for_entities(
-            {"removed"},
-            limit=2,
-            after=(removed_first[-1][1].entity_name, removed_first[-1][1].approval_id),
-        )
-        assert [continuation.approval_id for _principal, continuation in removed_first] == [
-            "approval-page-0",
-            "approval-page-1",
-        ]
-        assert [continuation.approval_id for _principal, continuation in removed_second] == [
-            "approval-page-3",
-            "approval-page-4",
+        # Each continuation's entity is its paused reply's.
+        assert [continuation.entity_name for page in (first, second, third) for _principal, continuation in page] == [
+            "removed",
+            "removed",
+            "configured",
+            "removed",
+            "removed",
         ]
 
     async def test_room_departure_discards_continuation_and_cards_with_its_sources(
@@ -9592,14 +9575,7 @@ class TestHotQueriesAreIndexCovered:
             "WHERE initial.principal_id=? AND initial.acknowledged_event_id=? AND initial.stage='initial'"
         ),
         "continuation owner page": (
-            "SELECT * FROM approval_continuations "
-            "WHERE (entity_name, approval_id) > (?, ?) "
-            "ORDER BY entity_name, approval_id LIMIT 50"
-        ),
-        "continuation owners for entities": (
-            "SELECT * FROM approval_continuations WHERE entity_name IN (?, ?) "
-            "AND (entity_name, approval_id) > (?, ?) "
-            "ORDER BY entity_name, approval_id LIMIT 50"
+            "SELECT * FROM approval_continuations WHERE approval_id > ? ORDER BY approval_id LIMIT 50"
         ),
     }
 

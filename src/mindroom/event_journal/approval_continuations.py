@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 type ApprovalContinuationState = Literal["waiting", "ready", "claimed", "failing"]
 
 _CONTINUATION_COLUMNS = """
-    approval_id, entity_name, span_id, claim_span_id, state, generation,
+    approval_id, span_id, claim_span_id, state, generation,
     runtime_generation, failure_reason, context_json
 """
 
@@ -558,16 +558,15 @@ def create(
     inserted = transaction.fetchone(
         """
         INSERT INTO approval_continuations (
-            principal_id, approval_id, entity_name, span_id, state,
+            principal_id, approval_id, span_id, state,
             generation, runtime_generation, failure_reason, context_json, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (approval_id) DO NOTHING
         RETURNING approval_id
         """,
         (
             principal_id,
             continuation.approval_id,
-            continuation.entity_name,
             continuation.span_id,
             continuation.state,
             continuation.generation,
@@ -611,32 +610,6 @@ def _holder(transaction: Transaction, principal_id: str, event_id: str) -> str |
         (principal_id, event_id),
     )
     return None if row is None else str(row["approval_id"])
-
-
-def for_entities(
-    transaction: Transaction,
-    entity_names: set[str],
-    *,
-    limit: int,
-    after: tuple[str, str] | None = None,
-) -> tuple[tuple[str, ApprovalContinuation], ...]:
-    """Return one bounded page owned by exact managed entities."""
-    if not entity_names:
-        return ()
-    ordered_names = sorted(entity_names)
-    placeholders = ", ".join("?" for _name in ordered_names)
-    cursor_clause = "" if after is None else " AND (entity_name/*bytes*/, approval_id/*bytes*/) > (?, ?)"
-    cursor_params: tuple[object, ...] = () if after is None else after
-    rows = transaction.fetchall(
-        f"""
-        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
-        WHERE entity_name IN ({placeholders}){cursor_clause}
-        ORDER BY entity_name/*bytes*/, approval_id/*bytes*/
-        LIMIT ?
-        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
-        (*ordered_names, *cursor_params, limit),
-    )
-    return _load_owners(transaction, rows)
 
 
 def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple[str, ApprovalContinuation], ...]:
@@ -689,16 +662,16 @@ def all_owners(
     transaction: Transaction,
     *,
     limit: int,
-    after: tuple[str, str] | None = None,
+    after: str | None = None,
 ) -> tuple[tuple[str, ApprovalContinuation], ...]:
-    """Return one bounded owner page with its journal principals."""
-    cursor_clause = "" if after is None else " WHERE (entity_name/*bytes*/, approval_id/*bytes*/) > (?, ?)"
-    cursor_params: tuple[object, ...] = () if after is None else after
+    """Return one bounded page of every principal's continuations, ordered by approval id after ``after``."""
+    cursor_clause = "" if after is None else " WHERE approval_id/*bytes*/ > ?"
+    cursor_params: tuple[object, ...] = () if after is None else (after,)
     rows = transaction.fetchall(
         f"""
         SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
         {cursor_clause}
-        ORDER BY entity_name/*bytes*/, approval_id/*bytes*/
+        ORDER BY approval_id/*bytes*/
         LIMIT ?
         """,  # noqa: S608 - a fixed cursor clause, not input
         (*cursor_params, limit),

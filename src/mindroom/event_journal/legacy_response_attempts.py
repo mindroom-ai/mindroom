@@ -16,15 +16,15 @@ if TYPE_CHECKING:
     from .backend import Transaction
 
 # LEGACY_COMPAT: Approval continuations whose reply identity lived outside the continuation.
-# Legacy format: approval_continuations without a span_id column. Every release kept a continuation's pending sources in
-# approval_continuation_sources; v2026.10.178 kept its entity, room, visible event, logical and discovery sources, and
+# Legacy format: approval_continuations without a span_id column. Every release kept a continuation's entity in its
+# entity_name column and its pending sources in approval_continuation_sources; v2026.10.178 kept its entity, room, visible event, logical and discovery sources, and
 # edit receipt order in response_attempts and response_attempt_sources, keyed by its first pending source;
 # v2026.9.137 and earlier kept room_id, response_event_id, and any prepared edit record in context_json.
 # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages name the paused span in
 # approval_continuations.span_id and read the reply's identity and held sources from the reply's records.
 # Handling: the schema upgrade adds span_id, copies each continuation's identity and pending sources into its context
-# once, and drops approval_continuation_sources and the response attempt tables; such a continuation is read from that
-# copy until reply classification names its span.
+# once, and drops approval_continuation_sources, the entity_name column, and the response attempt tables; such a
+# continuation is read from that copy until reply classification names its span.
 # Coverage: tests/test_legacy_continuation_identity.py.
 
 # LEGACY_COMPAT: Approval continuations that stored their claim.
@@ -215,6 +215,9 @@ def upgrade_continuation_identity(
         "UPDATE approval_continuations SET state = 'ready', runtime_generation = NULL WHERE state = 'claimed'",
     )
     transaction.execute("DROP TABLE IF EXISTS approval_continuation_sources")
+    # The paused span's reply names the entity; the scan index on the copy goes with it.
+    transaction.execute("DROP INDEX IF EXISTS approval_continuations_owner_scan")
+    transaction.execute("ALTER TABLE approval_continuations DROP COLUMN entity_name")
     if attempts:
         transaction.execute("DROP TABLE IF EXISTS response_attempt_sources")
         transaction.execute("DROP TABLE IF EXISTS response_attempts")
@@ -271,6 +274,14 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _Lega
         "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
         "claimed": identity.get("claimed") is True,
     }
+
+
+def adopted_entity_name(context: Mapping[str, object]) -> str | None:
+    """Return the entity a continuation was adopted with, or nothing once reply classification named its span."""
+    identity = context.get(_IDENTITY_KEY)
+    if not isinstance(identity, dict):
+        return None
+    return _required_text(cast("dict[str, object]", identity).get("entity_name"))
 
 
 def _prepared_edit(raw: object) -> TurnRecord | None:

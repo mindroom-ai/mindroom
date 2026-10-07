@@ -1027,7 +1027,7 @@ async def test_transient_removed_owner_cleanup_rearms_startup_retry() -> None:
         discard_unavailable_approval_continuation=AsyncMock(),
     )
     journal = MagicMock(
-        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+        approval_continuations=AsyncMock(return_value=(("agent@removed", continuation),)),
     )
     journal.principal.return_value = principal
     transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
@@ -1080,7 +1080,7 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages() -> None:
 
     assert journal.approval_continuations.await_args_list == [
         call(limit=2, after=None),
-        call(limit=2, after=("removed", "approval-1")),
+        call(limit=2, after="approval-1"),
     ]
     assert [call.args[1].approval_id for call in discard.await_args_list] == [
         "approval-0",
@@ -1188,7 +1188,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         ),
     )
     journal = MagicMock(
-        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+        approval_continuations=AsyncMock(return_value=(("agent@removed", continuation),)),
     )
     journal.principal.return_value = principal
     client = MagicMock()

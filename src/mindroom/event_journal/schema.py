@@ -385,7 +385,6 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS approval_continuations (
         principal_id TEXT NOT NULL,
         approval_id TEXT NOT NULL UNIQUE,
-        entity_name TEXT NOT NULL,
         -- The span whose pause created the continuation; null only for one
         -- adopted from an earlier release until reply classification names it.
         span_id TEXT,
@@ -632,10 +631,6 @@ _INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS approval_cards_continuation
     ON approval_cards (continuation_id/*bytes*/, continuation_generation, tool_call_id/*bytes*/)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
-    ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
     """,
     """
     -- A continuation holds its paused span's pending sources; each span pauses at most one.
