@@ -432,7 +432,7 @@ async def test_command_turns_and_finished_answers_get_no_reply(journal_store: Ev
         await principal.adopt_legacy_replies(
             entity_name=ENTITY,
             presentations=LEGACY_PRESENTATIONS,
-                now_ns=NOW,
+            now_ns=NOW,
         )
         == ()
     )
