@@ -799,6 +799,29 @@ class _CancelSpy(SpanRegistry):
         return False
 
 
+@pytest.mark.parametrize("ended_by", ["departure", "deletion"])
+async def test_a_stop_button_landing_after_the_reply_ended_is_removed_unless_the_room_was_left(
+    journal_store: EventJournalStore,
+    ended_by: str,
+) -> None:
+    """A late button is redacted with the reply's other debt; a room the bot left owes nothing, so it stays."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, _span = await _claimed(principal)
+    if ended_by == "departure":
+        await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+    else:
+        await _delete(principal, "$source")
+    ended = await principal.replies.load(reply.reply_id)
+    assert ended is not None
+    assert ended.state is ReplyState.GONE
+
+    await principal.replies.record_stop_button(reply.reply_id, "$button", now_ns=100)
+
+    late = await principal.replies.load(reply.reply_id)
+    assert late is not None
+    assert ("$button" in late.redaction_pending) is (ended_by == "deletion")
+
+
 async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(journal_store: EventJournalStore) -> None:
     """Leaving the room between a span's claim and its task's registration cancels the task as it registers."""
     principal = journal_store.principal(PRINCIPAL)

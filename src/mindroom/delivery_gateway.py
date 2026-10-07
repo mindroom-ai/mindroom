@@ -1613,9 +1613,10 @@ class DeliveryGateway:
         button_event_id = await send_stop_button(self.ready_client(), handle.reply.room_id, event_id)
         if button_event_id is None:
             return
-        applied = await self.deps.outbox.replies.update(
+        applied = await self.deps.outbox.replies.record_stop_button(
             handle.reply_id,
-            lambda reply: rl.record_stop_button(reply, event_id=button_event_id, now_ns=time.time_ns()),
+            button_event_id,
+            now_ns=time.time_ns(),
         )
         if applied is None:
             return

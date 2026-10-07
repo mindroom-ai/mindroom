@@ -25,6 +25,7 @@ from mindroom.reply_lifecycle import (
 )
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
+from .membership_state import claim_membership_epoch
 from .projection import is_tombstoned
 
 if TYPE_CHECKING:
@@ -909,6 +910,27 @@ class ReplyStore:
         def write(transaction: Transaction) -> AppliedTransition | None:
             reply = reply_messages.lock(transaction, self._principal_id, reply_id)
             return None if reply is None else apply(transaction, self._principal_id, decide(reply))
+
+        return await self._backend.write(write)
+
+    async def record_stop_button(self, reply_id: str, event_id: str, *, now_ns: int) -> AppliedTransition | None:
+        """Record the Stop button sent for a reply, in the membership the reply was written in."""
+
+        def write(transaction: Transaction) -> AppliedTransition | None:
+            reply = reply_messages.lock(transaction, self._principal_id, reply_id)
+            if reply is None:
+                return None
+            membership_current = claim_membership_epoch(
+                transaction,
+                self._principal_id,
+                room_id=reply.room_id,
+                expected_membership_epoch=reply.membership_epoch,
+            )
+            return apply(
+                transaction,
+                self._principal_id,
+                rl.record_stop_button(reply, event_id=event_id, membership_current=membership_current, now_ns=now_ns),
+            )
 
         return await self._backend.write(write)
 
