@@ -340,10 +340,10 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 
 MindRoom never changes `MEMORY.md`, context files, or today's daily note; the agent suggests changes to them in its report.
 A proposal that deletes a large part of memory goes back to the agent once for a re-check, and is dropped if it still does.
-When the review rejects a proposal, a run does not finish, or memory changed during the run, nothing is applied, and the next run after new messages starts from that proposal and the reviewer's notes.
+When the review rejects a proposal, a run does not finish, or memory changed during the run, nothing is applied; the next run after new messages retries the same inputs and starts from any proposal that reached review and its reviewer's notes.
 A run handles at most 40 inputs; the rest wait for later runs.
-Turning the automation on reconciles only the last seven days; older history is left as it is.
-Each run keeps its agenda, report, patch, and verdict in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least; undo an applied run with `git apply -R .mindroom/dreaming/runs/<run>/proposal.patch` from the workspace root.
+Turning the automation on starts from conversations and notes of the last seven days instead of reviewing the older archive.
+Each run keeps its agenda and report, and a run that reached review also its patch and verdict, in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least; undo an applied run with `git apply -R .mindroom/dreaming/runs/<run>/proposal.patch` from the workspace root.
 
 | Field | Default | Description |
 |---|---|---|
