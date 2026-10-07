@@ -91,7 +91,8 @@ class _State:
     """Progress kept in primary storage: what was handled and which proposals are still unapplied."""
 
     reviewed: dict[str, _Version] = field(default_factory=dict)
-    # The versions the last run had on its agenda, so a run that applied nothing is not repeated on the same evidence.
+    # Each input's version when an agenda last listed it, so a run that applied nothing is not repeated on the same
+    # evidence.
     attempted: dict[str, _Version] = field(default_factory=dict)
     # The oldest unapplied proposal, whose changes a rejected successor may have dropped, and the newest, whose review
     # explains the latest failure; both lead the next agenda until a run applies or needs no change.
@@ -499,10 +500,18 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
     if seeded := _unseen_and_old(inputs.values(), state.reviewed, now):
         state.reviewed.update(seeded)
         _save_state(runtime_paths, agent_name, state)
-    due = sorted((item for item in inputs.values() if state.reviewed.get(item.path) != item.version), key=_order)
-    # Only a conversation or daily note the last run did not see starts a run; changed sources and unapplied
-    # proposals join it, so an idle agent costs nothing and a failed run is not repeated on the same evidence.
-    if not any(item.kind != "source" and state.attempted.get(item.path) != item.version for item in due):
+
+    def seen(item: _Input) -> bool:
+        return state.attempted.get(item.path) == item.version
+
+    # Inputs no agenda has listed lead, so the evidence that starts a run is always on its agenda.
+    due = sorted(
+        (item for item in inputs.values() if state.reviewed.get(item.path) != item.version),
+        key=lambda item: (seen(item), _order(item)),
+    )
+    # Only a conversation or daily note no agenda has listed starts a run; changed sources and unapplied proposals
+    # join it, so an idle agent costs nothing and a failed run is not repeated on the same evidence.
+    if all(seen(item) or item.kind == "source" for item in due):
         return None
     carried = tuple(dict.fromkeys(run_id for run_id in (state.pending_run, state.latest_run) if run_id is not None))
     run = _Run(
@@ -833,7 +842,9 @@ def _end(
         state.notes = notes
 
     def record_end(state: _State) -> None:
-        state.attempted = {item.path: item.version for item in run.due}
+        attempted = {path: version for path, version in state.attempted.items() if path in run.inputs}
+        attempted.update((item.path, item.version) for item in run.due)
+        state.attempted = attempted
         if outcome in {"applied", "unchanged"}:
             record_progress(state)
 

@@ -244,6 +244,24 @@ def test_the_cap_leaves_the_rest_due_for_the_next_run(tmp_path: Path) -> None:
     assert workspace.agenda().count("- `thread_exports/") == 5
 
 
+def test_a_rejected_capped_run_returns_only_for_inputs_no_agenda_has_listed(tmp_path: Path) -> None:
+    """The input the cap left out starts the next run and leads its agenda; after that, the same evidence waits."""
+    workspace = _workspace(tmp_path)
+    for index in range(41):
+        workspace.write(f"thread_exports/room/t{index:02}.yaml", "messages: []\n", age=timedelta(days=6, minutes=index))
+    ask = _started(workspace)
+    assert "`thread_exports/room/t00.yaml`" not in workspace.agenda()
+    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+    workspace.review(workspace.dream(ask), "VERDICT: REJECT — wrong source")
+
+    ask = _started(workspace)
+    assert "`thread_exports/room/t00.yaml`" in workspace.agenda()
+    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+    workspace.review(workspace.dream(ask), "VERDICT: REJECT — still wrong")
+
+    assert workspace.check() is None
+
+
 def test_changed_and_dead_citations_are_on_the_agenda_under_the_path_memory_uses(tmp_path: Path) -> None:
     """A knowledge alias maps to its workspace target; a dead citation is reviewed once, and a changed source waits for a note."""
     workspace = _Workspace(tmp_path)
