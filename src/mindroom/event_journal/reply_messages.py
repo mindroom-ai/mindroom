@@ -398,6 +398,7 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             owed_write_json, reply_sequence, created_at_ns, updated_at_ns
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
+            membership_epoch = excluded.membership_epoch,
             event_id = excluded.event_id,
             state = excluded.state,
             current_span_id = excluded.current_span_id,

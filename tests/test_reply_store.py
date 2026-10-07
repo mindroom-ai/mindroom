@@ -698,6 +698,30 @@ async def _answered_and_regenerating(principal: PrincipalStore) -> rl.Span:
     return claimed.claimed
 
 
+async def test_a_regeneration_keeps_the_membership_its_edit_was_admitted_in(journal_store: EventJournalStore) -> None:
+    """After the bot left and rejoined, the regenerated reply's records name the membership its rows now belong to."""
+    principal = journal_store.principal(PRINCIPAL)
+    regeneration = await _answered_and_regenerating(principal)
+    await principal.replies.decide(
+        reply_id="reply-1",
+        span_id=regeneration.span_id,
+        decide=lambda reply, span: rl.release(reply, span, now_ns=60),
+    )
+    await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+    rejoined = await admit_room_membership(principal, ROOM, "join")
+    await admit(principal, "$edit-2")
+    retry = replace(
+        _request("span-3", source="$edit-2"),
+        sources=SpanSources(pending=("$edit-2",), logical=("$source",)),
+        driving_edit_id="$edit-2",
+    )
+    claimed = (await principal.replies.claim(retry, ClaimLookup(existing_event_id="$answer"))).transition
+    assert claimed.claimed is not None
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    assert stored.membership_epoch == rejoined
+
+
 async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_answer(
     journal_store: EventJournalStore,
 ) -> None:
