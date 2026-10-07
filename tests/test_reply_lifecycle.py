@@ -883,6 +883,20 @@ def _held(reply: Reply, approval_id: str | None = "approval-1") -> Reply:
     return replace(reply, approval_id=approval_id)
 
 
+def test_suppressing_a_span_approved_in_place_leaves_the_reply_to_its_approval() -> None:
+    """Even before its create is acknowledged, the approval's failure settlement writes the end its finish waits for."""
+    reply, span, _transition = _paused(in_place=True)
+    unbound = replace(reply, event_id=None)
+    approved = rl.resumed_in_place(unbound, span, approval_id="approval-1", now_ns=NOW)
+    assert approved.reply is not None
+    suppressed = rl.suppress(approved.reply, span, reason="suppressed", now_ns=NOW)
+    assert suppressed.reply is not None
+    assert suppressed.reply.state is ReplyState.ACTIVE
+    assert suppressed.reply.current_span_id is None
+    assert suppressed.effects == ()
+    assert _span_after(suppressed, span.span_id).outcome is SpanOutcome.SUPPRESSED
+
+
 def test_a_failed_approval_ends_a_resume_an_older_instance_left_current() -> None:
     """Nothing runs that resume any more: the failure ends it lost, and the reply no longer names the approval."""
     reply, _span, _transition = _paused()

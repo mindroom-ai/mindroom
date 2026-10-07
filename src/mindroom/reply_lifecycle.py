@@ -1208,13 +1208,14 @@ def suppress(
     updated = _clear_current(reply, span.span_id)
     effects = _settle_sources(reply, span)
     ended = (_end(span, outcome, now_ns),)
+    if for_approval:
+        # Its failure settlement writes the reply's end, the FINAL that lets the approval finish.
+        return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=ended)
     if reply.event_id is None or reply.placeholder_only:
         gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=ended, effects=effects)
     if _keeps_earlier_answer(reply, span):
         return _restored(reply, span, now_ns, *effects)
-    if for_approval:
-        return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=ended)
     # What the reply showed stays, ended by a note: nothing else would replace the in-progress status it shows.
     if outcome is SpanOutcome.CANCELLED:
         updated, state, note = _stop_applied(updated), ReplyState.CANCELLED, _NOTE_CANCELLED
