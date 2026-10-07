@@ -108,15 +108,16 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
 
 # LEGACY_COMPAT: Approvals whose reply a newer edit's answer already replaced.
 # Legacy format: a continuation whose response attempt a newer attempt of the same reply, room, membership, entity, and
-# logical sources superseded with a higher edit receipt order and an acknowledged answer FINAL editing the same event,
-# while its own FINAL holds no answer; v2026.10.201 retired such an approval's failure without a note.
+# logical sources superseded with a higher edit receipt order and an answer FINAL editing the same event, acknowledged
+# or still owed, while its own FINAL holds no answer; v2026.10.201 retired such an approval's failure without a note
+# once that answer was acknowledged.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages fence an approval superseded
 # when the edit's regeneration claims its reply.
-# Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows and
-# keeps the approval's pause on it until its cleanup settles the sources it holds.
+# Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows, with an
+# owed answer as its next write, and keeps the approval's pause on it until its cleanup settles the sources it holds.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded.
 def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool:
-    """Return whether a newer edit's acknowledged answer replaced the reply this attempt paused."""
+    """Return whether a newer edit's answer, acknowledged or still owed, replaced the reply this attempt paused."""
     row = transaction.fetchone(
         """SELECT 1 AS present FROM response_attempts AS attempt
         JOIN response_attempts AS newer
@@ -130,8 +131,7 @@ def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool
          AND delivery.room_id = newer.room_id AND delivery.membership_epoch = newer.membership_epoch
          AND delivery.edits_event_id = newer.response_event_id
         WHERE attempt.principal_id = ? AND attempt.driving_event_id = ? AND delivery.stage = 'final'
-          AND delivery.acknowledged_event_id IS NOT NULL AND delivery.result_json IS NOT NULL
-          AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
+          AND delivery.result_json IS NOT NULL AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM matrix_delivery_outbox AS own
             WHERE own.principal_id = attempt.principal_id AND own.delivery_id = attempt.driving_event_id

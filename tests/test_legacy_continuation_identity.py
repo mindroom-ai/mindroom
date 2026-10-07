@@ -8,7 +8,13 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.event_journal import EventJournalStore, legacy_response_attempts, postgres_backend, sqlite_backend
+from mindroom.event_journal import (
+    DeliveryStage,
+    EventJournalStore,
+    legacy_response_attempts,
+    postgres_backend,
+    sqlite_backend,
+)
 from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from mindroom.event_journal.approvals import StoredApprovalCard
 from mindroom.handled_turns import TurnRecordCodec
@@ -286,6 +292,7 @@ INSERT INTO matrix_delivery_outbox (
 """  # noqa: S608
 
 
+@pytest.mark.parametrize("delivered", [True, False])
 @pytest.mark.parametrize("with_turn_rows", [False, True])
 @pytest.mark.parametrize("failing", [False, True])
 @pytest.mark.asyncio
@@ -294,14 +301,20 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
     *,
     failing: bool,
     with_turn_rows: bool,
+    delivered: bool,
 ) -> None:
     """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it.
 
     One that already failed is superseded too, so its failure is never published over the newer answer, and the
-    placeholder row of the turn it paused does not make that turn look in flight.
+    placeholder row of the turn it paused does not make that turn look in flight. An answer still owed is the
+    reply's next write.
     """
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(_NEWER_ANSWER)
+    if not delivered:
+        legacy_database.execute(
+            "UPDATE matrix_delivery_outbox SET acknowledged_event_id = NULL WHERE delivery_id = '$edit'",
+        )
     if with_turn_rows:
         legacy_database.execute(_paused_turn_rows())
     if failing:
@@ -321,10 +334,16 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
         assert reply is not None
         assert reply.state is ReplyState.COMPLETED
         assert reply.approval_id is None
-        answer = await principal.replies.span(reply.last_span_id)
-        assert answer is not None
-        # The answer the newer edit delivered is the reply's own span, so a later edit rolls back to it.
-        assert (answer.kind, answer.outcome, answer.delivery_id) == (SpanKind.TURN, SpanOutcome.COMPLETED, "$answer")
+        spans = [(span.kind, span.outcome, span.delivery_id) for span in await principal.replies.spans(reply.reply_id)]
+        # The answer the newer edit delivered is the reply's own span, so a later edit rolls back to it; one still owed
+        # is the reply's next write.
+        answer = (SpanKind.TURN, SpanOutcome.COMPLETED, "$answer")
+        owed = (SpanKind.REGENERATION, SpanOutcome.COMPLETED, "$edit")
+        expected = [answer] if delivered else [answer, owed]
+        assert spans[-len(expected) :] == expected
+        row = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
+        assert row is not None
+        assert row.reply_id == (None if delivered else reply.reply_id)
         assert await principal.finish_approval_continuation("approval") is not None
         assert not await principal.is_pending("$first")
     finally:
