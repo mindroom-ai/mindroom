@@ -279,18 +279,20 @@ agents:
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
+      - memory_consolidation
 ```
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
 - `cron` is a five-field expression in the configured [timezone](#timezone).
-- `room` is a room alias or ID; it defaults to the agent's first configured room, and each prompt starts a new thread.
+- `room` is a room alias or ID; it defaults to the agent's first configured room, and each prompt starts a new thread, even for an agent with `thread_mode: room`.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
-- An automation does not post again while its previous prompt awaits verify.
-- A restart skips an occurrence it missed, and prompts posted before the restart get no verify notice.
+- When the response to a prompt is final, or after an hour without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
+- An automation does not start again until its previous run has ended.
+- A check that cannot read what it checks posts a warning in the room.
+- A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
 For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](https://docs.mindroom.chat/hooks/#event-notes), which can suppress a fire or rewrite its message.
 
@@ -324,3 +326,27 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 | `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
+
+### `memory_consolidation`
+
+Memory keeps claims that later conversations correct and that their sources stop supporting.
+`memory_consolidation` reconciles the agent's `memory/` files nightly with what changed since its last run, through a proposal that a second run reviews before MindRoom applies it.
+
+1. The check lists inputs that changed since a run last handled them: [thread exports](https://docs.mindroom.chat/thread-exports/) in the workspace, daily notes from before today, and the `knowledge/` and `thread_exports/` paths that `memory/` files cite, including cited files that no longer exist; when nothing changed, it posts nothing.
+2. The agent works through an agenda of at most 40 inputs, oldest first, in a copy of `memory/`: it reconciles memory with the new evidence, records whether each changed source still supports the claims that cite it, and removes duplicates, giving each fact a source path and date and recording conflicting sources with both versions.
+3. MindRoom checks the copy and asks the agent once to re-check when anything but Markdown under `memory/` changed, when today's daily note or a file in `context_files` changed, or when more than the larger of 10 lines and 8% of memory, or more than half of one file, was deleted without the lines appearing anywhere else.
+4. A second run, in a thread of its own, reviews the proposed patch against the cited sources and ends its verdict with `APPROVE`, `APPROVE-WITH-NOTES` (applied, with notes for the next run), or `REJECT`.
+5. MindRoom applies an approved patch when no memory file changed since the run started, refreshes semantic memory search, and marks both threads resolved.
+
+A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due, and the next run starts by carrying forward a proposal that was never applied.
+`MEMORY.md` and context files never change; the agent suggests changes to them in its report.
+When first enabled, it reviews only inputs from the last seven days, so older conversations and notes are never reconciled.
+Each run keeps its agenda, report, patch, list of deleted lines, and verdict in `.mindroom/memory_consolidation/runs/<run>/` in the workspace, the newest 30 runs at least, so an applied patch can be undone with `git apply -R` from the workspace root.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `15 3 * * *` | When to check |
+| `room` | first configured room | Where both prompts are posted |
+| `model` | the agent's model | A key of `models` to run both prompts with |
+
+`memory_consolidation` needs `memory_backend: file`, and its prompt templates are overridable as `MEMORY_CONSOLIDATION_DREAM_TEMPLATE`, `MEMORY_CONSOLIDATION_RECHECK_TEMPLATE`, and `MEMORY_CONSOLIDATION_VERIFY_TEMPLATE`.

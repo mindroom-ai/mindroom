@@ -157,8 +157,10 @@ Matrix sync callback
 | `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
 | `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
-| `automations/runner.py` | Built-in automation schedule loop: cron timing, the visible hook-dispatched prompt, and the verify step after its run |
+| `automations/runner.py` | Built-in automation schedule loop: cron timing, the visible hook-dispatched prompts, and the steps after their runs |
+| `automations/steps.py` | The `Ask` and `Done` steps a built-in automation returns to the runner |
 | `automations/prompt_curation.py` | The `prompt_curation` automation: size check over always-loaded files, the bounded prompt, and the verify that asks for a re-check |
+| `automations/memory_consolidation.py` | The `memory_consolidation` automation: changed-input agenda, per-run staging of `memory/`, proposal validation, the fresh-thread review, and batch-conflict apply with progress under `tracking/automations/` |
 | `config/automations.py` | Built-in automation settings and validation |
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |

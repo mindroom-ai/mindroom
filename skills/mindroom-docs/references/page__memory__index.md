@@ -244,6 +244,8 @@ It applies only to agents whose effective backend is `file`.
 4. When the model answers with the `no_reply_token`, nothing is written.
 5. Results are appended to `memory/YYYY-MM-DD.md`.
 
+Turns that [built-in automations](https://docs.mindroom.chat/scheduling/#built-in-automations) start are not auto-flushed.
+
 ```yaml
 memory:
   backend: file
@@ -287,6 +289,19 @@ agents:
   mind:
     memory_backend: file
     automations: [prompt_curation]
+```
+
+## Memory Consolidation
+
+Facts in `memory/` go stale when a later conversation corrects them or a cited source changes.
+Enable the [`memory_consolidation`](https://docs.mindroom.chat/scheduling/#memory_consolidation) automation to have the agent reconcile `memory/` nightly with new conversations, daily notes, and changed cited sources, through a proposal that a second run reviews before MindRoom applies it.
+
+```yaml
+agents:
+  mind:
+    memory_backend: file
+    thread_exports: true    # optional: adds conversations as input
+    automations: [memory_consolidation]
 ```
 
 ## [`memory`]
