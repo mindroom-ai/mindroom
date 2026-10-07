@@ -646,6 +646,50 @@ async def test_regenerating_an_answer_older_than_the_records_adopts_it(tmp_path:
     assert edit["m.new_content"]["body"] == "New answer."
 
 
+async def test_an_interrupted_regeneration_of_an_older_answer_leaves_that_answer_shown(tmp_path: Path) -> None:
+    """A regeneration cancelled before it wrote anything writes no note over the answer it was replacing."""
+    bot = await _streaming_bot(tmp_path)
+    target = _target()
+    await bot._reply_runtime.adopt_historical_answer(
+        "$older",
+        sources=rl.SpanSources(pending=(), logical=("$event",)),
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+    )
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    preparing = asyncio.Event()
+
+    async def stalled_prepare(*_args: object, **_kwargs: object) -> object:
+        preparing.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    with (
+        patch.object(ResponseRunner, "prepare_response_runtime", new=stalled_prepare),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="Never."),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        response = asyncio.create_task(runner.generate_response(_regeneration(answer_event_id="$older")))
+        await asyncio.wait_for(preparing.wait(), timeout=5)
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+    assert _sent_bodies(bot) == []
+    reply = await bot._reply_runtime.store.replies.for_event("$older")
+    assert reply is not None
+    assert reply.current_span_id is None
+    spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
+    # Its sources wait for the retry, which regenerates with the same rollback.
+    assert [(span.kind, span.outcome) for span in spans] == [
+        (rl.SpanKind.TURN, rl.SpanOutcome.COMPLETED),
+        (rl.SpanKind.REGENERATION, rl.SpanOutcome.RELEASED),
+    ]
+
+
 async def _acknowledge_selection(bot: AgentBot) -> tuple[str | None, str | None]:
     return await bot._visible_responses.deliver_selection_acknowledgement(
         TurnRecord.create(["$event"], requester_id="@user:localhost"),

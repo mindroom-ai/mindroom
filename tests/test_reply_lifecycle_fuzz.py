@@ -404,7 +404,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if "$source" in self.model.deleted:
             # The source gate finds the message deleted, and the reply ends as a deletion ends it.
             self._apply(rl.sources_deleted(self.model.reply, last, now_ns=self._now()))  # type: ignore[arg-type]
-        elif last.kind is SpanKind.REGENERATION:
+        elif last.delivery_id in self.model.edit_orders:
+            # The pending source is an edit, a regeneration's or its approved resume's: the regenerator replays it
+            # with the edit it selected.
             self._claim(edit=last.delivery_id)
         else:
             self._claim(replay_of=last)
@@ -1358,8 +1360,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert not self.model.deferred, self.model.deferred
         reply = self.model.reply
         if reply is not None and self.model.removed:
-            # A removed entity's reply keeps what it owes for a bot that may come back, but no source waits on it.
+            # No bot remains for a removed entity: its reply ended owing nothing, and no source waits on it.
             assert self._is_settled(reply.last_span_id), (reply, self._last())
+            assert reply.terminal, reply
+            assert reply.owed_write is None, reply
+            assert not reply.redaction_pending, reply
         if reply is None or self.model.removed:
             return
         assert not self.model.rows, self.model.rows
@@ -1377,14 +1382,13 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             assert self._is_settled(span.span_id), span
             answered = span.outcome is SpanOutcome.COMPLETED or self.model.paused_by.get(span.span_id) in resumed
             if (
-                span.kind is SpanKind.REGENERATION
-                and answered
+                answered
                 and span.prepared_edit is not None
                 and "$source" not in self.model.deleted
                 and span.span_id not in self.model.unanswered
             ):
-                # S5: a regeneration whose answer it or its approval's resume completed consumed the edit it
-                # selected, whatever Matrix then did with that answer.
+                # S5: a span carrying an edit, a regeneration or a replay of one, whose answer it or its approval's
+                # resume completed consumed the edit it selected, whatever Matrix then did with that answer.
                 assert span.prepared_edit in self.model.consumed, span
 
     def _drain_step(self) -> bool:  # noqa: C901, PLR0911, PLR0912, PLR0915

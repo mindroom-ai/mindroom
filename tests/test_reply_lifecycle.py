@@ -876,6 +876,21 @@ def test_stopped_without_a_recorded_stop_is_invalid() -> None:
         rl.stopped(reply, span, _write(reply, ReplyState.CANCELLED), now_ns=NOW)
 
 
+def test_an_interrupted_regeneration_that_wrote_nothing_leaves_the_answer_without_a_note() -> None:
+    """The note an interruption renders would replace the answer the regeneration never touched; the retry reruns it."""
+    reply, span = _regenerating()
+    note = replace(_write(reply, ReplyState.ACTIVE, shown="interrupted"), prepared_revision=reply.revision)
+
+    transition = rl.fail(reply, span, note, phase="pre_delivery", now_ns=NOW)
+
+    assert transition.row is None
+    assert transition.reply is not None
+    assert transition.reply.presentation == reply.presentation
+    assert transition.reply.current_span_id is None
+    assert _span_after(transition, "span-2").outcome is SpanOutcome.RELEASED
+    assert transition.effects == ()
+
+
 def test_pre_delivery_failure_releases_the_span_and_keeps_the_placeholder() -> None:
     """Main retries the sources, and the retry streams into the kept placeholder."""
     reply, span = _turn()
@@ -1981,6 +1996,24 @@ def test_removed_entity_fails_without_writing() -> None:
     assert waiting.effects == (SettleSources(span.span_id, answered=False),)
 
 
+def test_removed_entity_drops_what_an_ended_reply_still_owed() -> None:
+    """No bot remains to redact a Stop button or write a note, so the reply stops owing them and retention can go."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.FAILED)
+    owing = replace(
+        reply,
+        state=ReplyState.FAILED,
+        redaction_pending=("$button",),
+        owed_write=rl.OwedWrite(span.span_id, "error"),
+    )
+    transition = rl.removed_entity(owing, span, now_ns=NOW)
+    assert transition.outcome is Outcome.APPLIED
+    assert transition.reply is not None
+    assert (transition.reply.redaction_pending, transition.reply.owed_write) == ((), None)
+    assert transition.effects == ()
+    assert rl.removed_entity(transition.reply, span, now_ns=NOW).outcome is Outcome.DUPLICATE
+
+
 def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
     """The discard ends it without writes; an owner that comes back settles it with its note instead."""
     reply, span, transition = _paused()
@@ -2001,6 +2034,20 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
     assert discarded.reply is not None
     assert discarded.reply.state is ReplyState.FAILED
     assert discarded.effects == (SettleSources(span.span_id, answered=False),)
+    # Its Stop button would wait for a bot that never comes: the discard drops it with the rest of the reply's debt.
+    buttoned = rl.approval_settled(
+        replace(removed.reply, stop_button_event_id="$button"),
+        _span_after(transition, span.span_id),
+        approval_id="approval-1",
+        paused_span_id=span.span_id,
+        result="failed",
+        disposition="failed",
+        answers_turn=False,
+        now_ns=NOW,
+    )
+    assert buttoned.reply is not None
+    assert buttoned.reply.state is ReplyState.FAILED
+    assert (buttoned.reply.stop_button_event_id, buttoned.reply.redaction_pending) == (None, ())
     # An owner that comes back first writes the approval's note and finishes it with its turn answered.
     paused = _span_after(transition, span.span_id)
     noted = rl.approval_failure_note(

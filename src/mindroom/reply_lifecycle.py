@@ -115,7 +115,7 @@ class SpanSources:
 
 @dataclass(frozen=True, slots=True)
 class Rollback:
-    """What a regeneration restores when it ends before its first acknowledged write.
+    """What a regeneration restores when it ends before it recorded any write Matrix may show.
 
     The Stop button is not part of it: a button belongs to the span that sent
     it and is removed when the reply stops being active (I8).
@@ -1171,7 +1171,8 @@ def fail(  # noqa: C901, PLR0911
         # and whatever drops the retry instead puts the earlier answer back.
         updated = _touch(_clear_current(reply, span.span_id), now_ns)
         ended = _end(span, SpanOutcome.RELEASED, now_ns)
-        if write is None:
+        if write is None or _keeps_earlier_answer(reply, span):
+            # A regeneration that wrote nothing leaves the answer it was replacing as the room shows it.
             return Transition(outcome=Outcome.APPLIED, reply=updated, spans=(ended,))
         recompute = _check_revision(reply, write.prepared_revision)
         if recompute is not None:
@@ -1371,6 +1372,12 @@ def approval_settled(
         )
     )
     settle = SettleSources(paused_span_id, consumes_edit=answers_turn and completed, answered=answers_turn)
+    ended = decided.reply
+    if not answers_turn and decided.outcome is not Outcome.STALE and ended is not None and ended.terminal:
+        # No owner is left: the reply ends owing Matrix nothing, as one no approval held does.
+        dropped = _without_matrix_work(ended, now_ns)
+        if replace(dropped, updated_at_ns=ended.updated_at_ns) != ended:
+            decided = replace(decided, outcome=Outcome.APPLIED, reply=dropped)
     return replace(decided, effects=(settle, *decided.effects))
 
 
@@ -1855,10 +1862,13 @@ def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
 
     ``span`` is the reply's current span, or its last one when none runs. Its
     sources settle unanswered, unless an approval holds the reply: its
-    settlement ends the reply and settles them.
+    settlement ends the reply and settles them. A reply that already ended
+    drops what it still owed Matrix.
     """
     if reply.terminal:
-        return _unchanged(Outcome.DUPLICATE, reply)
+        if reply.owed_write is None and not reply.redaction_pending and reply.stop_button_event_id is None:
+            return _unchanged(Outcome.DUPLICATE, reply)
+        return Transition(outcome=Outcome.APPLIED, reply=_without_matrix_work(reply, now_ns))
     spans: tuple[Span, ...] = ()
     updated = reply
     if span.span_id == reply.current_span_id and not span.ended:
@@ -1870,17 +1880,15 @@ def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     # No bot remains to answer, write, or redact anything for this entity.
     return Transition(
         outcome=Outcome.APPLIED,
-        reply=_set_state(
-            _stop_applied(updated),
-            ReplyState.FAILED,
-            now_ns,
-            owed_write=None,
-            redaction_pending=(),
-            stop_button_event_id=None,
-        ),
+        reply=_without_matrix_work(_set_state(_stop_applied(updated), ReplyState.FAILED, now_ns), now_ns),
         spans=spans,
         effects=_settle_sources(reply, span, answered=False),
     )
+
+
+def _without_matrix_work(reply: Reply, now_ns: int) -> Reply:
+    """Drop what a removed entity's reply still owed Matrix: no bot remains to write or redact it."""
+    return _touch(reply, now_ns, owed_write=None, redaction_pending=(), stop_button_event_id=None)
 
 
 def owed_write_refused(reply: Reply, owed: OwedWrite, *, now_ns: int) -> Transition:

@@ -89,7 +89,7 @@ The new attempt's prompt carries an account of what the stopped attempt showed, 
 The account names no calls as forbidden: with it in the current message, models left side-effecting calls alone while still re-running a read-only call whose shortened result was not enough.
 Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a call started just before the stop may not have reached Matrix, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the account.
 A recovered reply whose record shows no work instead gets an account warning that side effects may already have happened.
-A replayed turn whose earlier attempt left no reply to adopt, such as a silent scheduled run or a turn whose placeholder was never sent, gets no account.
+A replayed turn whose earlier attempt stopped before it claimed a reply gets no account.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
 Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
 Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
@@ -314,7 +314,7 @@ One draining owner folds each source's newest Matrix revision into a complete re
 A drain asked to rebuild more than eight times in a row drops the edit with an error log instead of holding the room's event lane.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
 An interrupted turn stays pending, and replay continues its reply in place.
-An interrupted edit regeneration also stays pending but starts over, because a newer edit may have replaced the prompt its stopped attempt answered.
+An interrupted edit regeneration also stays pending but starts over, because a newer edit may have replaced the prompt its stopped attempt answered; a regeneration's approved resume that was cut short continues below what it showed, as an interrupted turn does.
 Each bot instance ends what an earlier instance left running from the reply records at startup (see [Reply messages](reply-messages.md#lifetime)); a reply whose sources still replay waits for its replay.
 Same-requester supersession of a replay follows its reply's records (see [Reply messages](reply-messages.md#lifetime)).
 When every current source is deleted, the reply records end a reply that has not answered and owe the redaction of what it showed, and stale history for a surviving request retries canonical preparation with a refreshed payload.

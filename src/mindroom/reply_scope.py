@@ -169,7 +169,7 @@ class ClaimRefused(Enum):
     # The reply cannot be claimed yet; what blocks it retries the sources once it resolves.
     DEFERRED = "deferred"
     # Nothing runs for these sources: the reply already answered the edit, a
-    # Stop ended the reply or covers the edit, or a Stop ended a selection.
+    # Stop, deletion, or departure ended the reply, or a Stop covers the edit.
     NOTHING_TO_RUN = "nothing_to_run"
     # Another bot instance took this principal's replies over; it replays the sources.
     RETIRED = "retired"
