@@ -3,6 +3,12 @@
 `tach check --interfaces` checks `from mindroom.x import name`, but not `x.name` after
 `from mindroom import x` or `import mindroom.x as x`, so an interface's `expose` list can
 silently fall behind code that reaches the module through an attribute.
+
+This is a best-effort guard, not a full copy of Tach. It applies Tach's interface visibility
+rules to attribute access through module-level runtime aliases only:
+- function-local imports are not checked, although Tach checks the equivalent `from` import;
+- the `else` branch of an `if TYPE_CHECKING:` guard is checked, although Tach skips it;
+- a local name that shadows a module alias is reported as access to that module.
 """
 
 from __future__ import annotations
@@ -46,9 +52,8 @@ def _is_type_checking_guard(test: ast.expr) -> bool:
 def _module_level_runtime_imports(statements: list[ast.stmt]) -> list[ast.Import | ast.ImportFrom]:
     """Return module-level imports that run at import time.
 
-    Imports under `if TYPE_CHECKING:` are skipped, as this repository's Tach setup ignores them.
-    Function and class bodies are skipped too, so a function-local import cannot leak its alias
-    to the rest of the file.
+    Imports in the body of an `if TYPE_CHECKING:` guard are skipped, and function and class bodies
+    are not read, so a function-local import cannot lend its alias to the rest of the file.
     """
     imports: list[ast.Import | ast.ImportFrom] = []
     for statement in statements:
@@ -136,7 +141,7 @@ def test_module_attribute_access_uses_exposed_interface_members() -> None:
 
 
 def test_checker_applies_tach_interface_rules(tmp_path: Path) -> None:
-    """The checker reports what Tach would reject for the equivalent `from` import, and nothing else."""
+    """The checker applies Tach's visibility and exclusive rules to module-level aliases, as documented above."""
     sources = {
         "__init__.py": "",
         "lib.py": "public = shared = hidden = 1\n",
