@@ -190,8 +190,11 @@ def lock_paused_reply(
 ) -> Reply | None:
     """Lock the reply a continuation paused, before the continuation itself.
 
-    A departure locks a room's replies before their continuations, so every
-    path that holds both takes them in that order.
+    A departure locks a room's replies before their continuations, and so
+    does every path that reads a continuation to change its reply. A pause or
+    an advance writes its continuation first and then locks the reply, as a
+    source deletion it races locks the source and then the reply; one writer
+    per journal runs them one at a time.
     """
     if continuation.span_id is None:
         # Adopted from an earlier release and not yet classified: no reply exists for it.

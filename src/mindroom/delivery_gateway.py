@@ -58,7 +58,6 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.legacy_delivery_payloads import add_legacy_final_outcome_marker
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -1953,7 +1952,6 @@ class DeliveryGateway:
         delivery_result: dict[str, object] | None = None
         metadata = interactive_response.interactive_metadata
         if handle.span.kind is rl.SpanKind.APPROVAL_RESUME:
-            add_legacy_final_outcome_marker(delivery_extra_content)
             # Recovery after a restart registers an approved run's question from its frozen answer.
             delivery_result = None if metadata is None else {"interactive": metadata.to_metadata()}
 

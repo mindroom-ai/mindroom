@@ -1230,8 +1230,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         prompt = new_content["io.mindroom.interactive"]
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
-        assert new_content[DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
-        # The reply's records hold the body; the result keeps only the question's registration facts.
+        # The reply's records hold the body and its success; the result keeps only the question's registration facts.
+        assert DURABLE_FINAL_OUTCOME_KEY not in new_content
         assert delivery.result is not None
         assert set(delivery.result) == {"interactive"}
         assert delivery.result["interactive"]["question_text"] == "Pick"

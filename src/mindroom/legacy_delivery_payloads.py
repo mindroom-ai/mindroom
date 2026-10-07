@@ -37,16 +37,6 @@ def _is_compatibility_marker(result: Mapping[str, object]) -> bool:
     return set(result) == {"version"} and isinstance(version, int) and not isinstance(version, bool)
 
 
-def add_legacy_final_outcome_marker(content: dict[str, object]) -> None:
-    """Add the bounded signal that released readers require for successful FINAL delivery.
-
-    The complete semantic result belongs in local outbox state. Keeping this
-    fresh one-field mapping on Matrix lets rolling readers recognize success
-    without making the event too large to deliver.
-    """
-    content[DURABLE_FINAL_OUTCOME_KEY] = {"version": DURABLE_FINAL_OUTCOME_VERSION}
-
-
 def decode_delivery_result(
     payload: Mapping[str, object],
     raw_result: str | None,
