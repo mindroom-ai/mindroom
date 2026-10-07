@@ -87,8 +87,6 @@ _STARTUP_MAINTENANCE_PHASES = frozenset(
     {
         "startup_maintenance.rooms_and_memberships",
         "startup_maintenance.runtime_support",
-        "startup_maintenance.stale_stream_recovery.initial",
-        "startup_maintenance.stale_stream_recovery.joined_room_delta",
     },
 )
 _STARTUP_PHASE_PATTERN = re.compile(r"\bphase=(startup_maintenance\.[^\s\]]+)")

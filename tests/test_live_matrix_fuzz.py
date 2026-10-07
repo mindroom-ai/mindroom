@@ -4743,8 +4743,6 @@ def test_startup_maintenance_wait_uses_only_current_process_generation(tmp_path:
     phases = {
         "startup_maintenance.rooms_and_memberships",
         "startup_maintenance.runtime_support",
-        "startup_maintenance.stale_stream_recovery.initial",
-        "startup_maintenance.stale_stream_recovery.joined_room_delta",
     }
     assert phases == live_fuzz._STARTUP_MAINTENANCE_PHASES
 
@@ -4781,7 +4779,7 @@ def test_startup_maintenance_wait_rejects_failed_current_phase(tmp_path: Path) -
 
     log_path = tmp_path / "mindroom.log"
     log_path.write_text(
-        "startup_phase_finished phase=startup_maintenance.stale_stream_recovery.initial status=failed\n",
+        "startup_phase_finished phase=startup_maintenance.runtime_support status=failed\n",
         encoding="utf-8",
     )
     stack = object.__new__(ManagedTuwunelStack)
