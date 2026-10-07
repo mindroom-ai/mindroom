@@ -863,6 +863,7 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
                 entry_config=PluginEntryConfig(path="audit.py"),
                 plugin_order=0,
                 discovered_hooks=(before, after),
+                discovered_automations=(),
             ),
         ],
     )

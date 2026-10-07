@@ -180,6 +180,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 SimpleNamespace(
                     name="room-owner",
                     discovered_hooks=(retain_rooms, backfill),
+                    discovered_automations=(),
                     plugin_order=0,
                     entry_config=PluginEntryConfig(path="./plugins/room-owner"),
                 ),

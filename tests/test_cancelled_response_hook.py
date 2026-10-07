@@ -95,6 +95,7 @@ def _plugin(name: str, callbacks: list[object]) -> object:
         {
             "name": name,
             "discovered_hooks": tuple(callbacks),
+            "discovered_automations": (),
             "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
             "plugin_order": 0,
         },

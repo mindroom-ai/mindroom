@@ -36,6 +36,7 @@ def install_schedule_hook(monkeypatch: pytest.MonkeyPatch, callback: HookCallbac
     plugin = SimpleNamespace(
         name="schedule-test",
         discovered_hooks=(callback,),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path="./schedule-test"),
         plugin_order=0,
     )
