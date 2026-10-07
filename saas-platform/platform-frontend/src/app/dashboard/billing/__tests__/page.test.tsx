@@ -134,6 +134,29 @@ describe('BillingPage', () => {
     expect(screen.queryByText('Contact support to downgrade')).not.toBeInTheDocument()
   })
 
+  it('dates a paid plan cancelled after its trial by the billing period, not the old trial end', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: {
+        tier: 'hobby',
+        status: 'active',
+        can_run_instances: true,
+        stripe_subscription_ended: false,
+        stripe_subscription_id: 'sub_123',
+        trial_ends_at: '2026-09-04T12:00:00Z',
+        current_period_end: '2026-11-04T12:00:00Z',
+        cancelled_at: '2026-10-05T12:00:00Z',
+      },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue(enterprisePricing)
+
+    render(<BillingPage />)
+
+    expect(await screen.findByText(new Date('2026-11-04T12:00:00Z').toLocaleDateString())).toBeInTheDocument()
+    expect(screen.queryByText(new Date('2026-09-04T12:00:00Z').toLocaleDateString())).not.toBeInTheDocument()
+  })
+
   it('keeps an unpaid plan current and points to fixing billing instead of a new checkout', async () => {
     ;(useSubscription as jest.Mock).mockReturnValue({
       subscription: { tier: 'hobby', status: 'unpaid', can_run_instances: false, stripe_subscription_ended: false, stripe_subscription_id: 'sub_123' },

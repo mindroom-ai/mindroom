@@ -108,7 +108,7 @@ export default function BillingPage() {
                 SUBSCRIPTION ENDING SOON
               </h3>
               <div className="mt-2 text-sm text-yellow-700 dark:text-yellow-300">
-                <p>Your {tierInfo.name} subscription will end on <strong>{subscription?.trial_ends_at
+                <p>Your {tierInfo.name} subscription will end on <strong>{subscription?.status === 'trialing' && subscription.trial_ends_at
                   ? new Date(subscription.trial_ends_at).toLocaleDateString()
                   : subscription?.current_period_end
                   ? new Date(subscription.current_period_end).toLocaleDateString()
