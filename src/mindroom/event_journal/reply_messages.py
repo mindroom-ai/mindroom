@@ -7,6 +7,7 @@ module never imports tool-system or presentation types.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.reply_lifecycle import (
@@ -250,23 +251,35 @@ def waiting_to_replay(transaction: Transaction, principal_id: str, event_ids: tu
     return tuple(str(row["reply_id"]) for row in rows)
 
 
-def ended_by_deletion(transaction: Transaction, principal_id: str, event_id: str) -> tuple[Reply, ...]:
-    """Return the replies deleting this source ended or put back to their earlier answer, with their last span."""
-    rows = transaction.fetchall(
+@dataclass(frozen=True, slots=True)
+class DeletionEnding:
+    """A reply a source deletion ended, and the span it cancelled when one was running."""
+
+    reply_id: str
+    span_id: str | None
+
+
+def record_deletion_ending(transaction: Transaction, principal_id: str, ending: DeletionEnding) -> None:
+    """Record, in the deletion's transaction, a reply it ended and the span it cancelled."""
+    transaction.execute(
         """
-        SELECT DISTINCT reply.reply_id FROM reply_span_sources AS source
-        JOIN reply_spans AS span ON span.principal_id = source.principal_id AND span.span_id = source.span_id
-        JOIN reply_messages AS reply
-            ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id
-            AND reply.last_span_id = span.span_id
-        WHERE source.principal_id = ? AND source.role = 'logical' AND source.event_id = ?
-            AND ((span.outcome = 'cancelled' AND reply.state = 'gone') OR span.outcome = 'restored')
-        ORDER BY reply.reply_id
+        INSERT INTO reply_deletion_endings (principal_id, reply_id, span_id) VALUES (?, ?, ?)
+        ON CONFLICT (principal_id, reply_id) DO NOTHING
         """,
-        (principal_id, event_id),
+        (principal_id, ending.reply_id, ending.span_id),
     )
-    replies = (load(transaction, principal_id, str(row["reply_id"])) for row in rows)
-    return tuple(reply for reply in replies if reply is not None)
+
+
+def take_deletion_endings(transaction: Transaction, principal_id: str) -> tuple[DeletionEnding, ...]:
+    """Remove and return the replies source deletions ended since the last take."""
+    rows = transaction.fetchall(
+        "DELETE FROM reply_deletion_endings WHERE principal_id = ? RETURNING reply_id, span_id",
+        (principal_id,),
+    )
+    endings = (
+        DeletionEnding(str(row["reply_id"]), None if row["span_id"] is None else str(row["span_id"])) for row in rows
+    )
+    return tuple(sorted(endings, key=lambda ending: ending.reply_id))
 
 
 def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: int, limit: int) -> int:

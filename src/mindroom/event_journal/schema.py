@@ -520,6 +520,17 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS reply_deletion_endings (
+        -- A reply a source deletion ended in the tombstone's commit, and the
+        -- span that deletion cancelled, until the bot stops that span and
+        -- settles what the reply owes Matrix.
+        principal_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        span_id TEXT,
+        PRIMARY KEY (principal_id, reply_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS pending_reply_stops (
         -- A Stop on an event no reply is bound to yet; the create
         -- acknowledgement that binds the event in the same room applies it.

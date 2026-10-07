@@ -279,15 +279,16 @@ class ReplyRuntime:
         for span_id in await self.store.replies.spans_in_room(room_id, self.spans.live_span_ids()):
             self.spans.cancel(span_id, cancel_source=None)
 
-    async def source_deleted(self, event_id: str) -> tuple[str, ...]:
-        """Cancel the spans this instance runs for replies deleting this source ended; return those replies.
+    async def deletions_ended(self) -> tuple[str, ...]:
+        """Cancel the spans source deletions ended; return the replies they ended, whose debt is now due.
 
-        The tombstone's projection ended them; what they showed is their debt.
+        Each tombstone's projection ended its replies in its own commit and recorded the span it cancelled.
         """
-        replies = await self.store.replies.ended_by_deletion(event_id)
-        for reply in replies:
-            self.spans.cancel(reply.last_span_id, cancel_source=None)
-        return tuple(reply.reply_id for reply in replies)
+        endings = await self.store.replies.take_deletion_endings()
+        for ending in endings:
+            if ending.span_id is not None:
+                self.spans.cancel(ending.span_id, cancel_source=None)
+        return tuple(ending.reply_id for ending in endings)
 
     async def forget_finished(self) -> None:
         """Drop the records of replies finished as long ago as the handled-turn ledger forgets their turns."""
@@ -308,6 +309,8 @@ class ReplyRuntime:
         recovery after each room syncs.
         """
         await self.take_ownership()
+        # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
+        await self.store.replies.take_deletion_endings()
         adopted = await self.store.adopt_legacy_replies(
             entity_name=self.entity_name,
             presentations=LEGACY_PRESENTATIONS,

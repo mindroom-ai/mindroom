@@ -35,6 +35,7 @@ from mindroom.reply_lifecycle import (
     SpanSources,
 )
 from mindroom.reply_presentation import Presentation, encode_presentation
+from mindroom.stop import SpanRegistry
 from mindroom.turn_record import TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.approval_continuation_helpers import claim_continuation
@@ -43,6 +44,7 @@ from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
+    from mindroom.cancellation import TaskCancelSource
     from mindroom.event_journal import EventJournalStore, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
@@ -629,7 +631,7 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     assert running is not None
     assert running.state is ReplyState.ACTIVE
     assert running.current_span_id == span.span_id
-    assert await principal.replies.ended_by_deletion("$first") == ()
+    assert await principal.replies.take_deletion_endings() == ()
 
     await _delete(principal, "$second")
     gone = await principal.replies.load("reply-1")
@@ -645,14 +647,13 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$first"))
     assert record is not None
     assert not record.completed
-    assert await principal.replies.ended_by_deletion("$second") == (gone,)
+    # The bot cancels exactly the span the deletion ended, once.
+    assert await principal.replies.take_deletion_endings() == (reply_messages.DeletionEnding("reply-1", span.span_id),)
+    assert await principal.replies.take_deletion_endings() == ()
 
 
-async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_answer(
-    journal_store: EventJournalStore,
-) -> None:
-    """An edit regeneration a restart stopped before it wrote anything still leaves the answer it would replace."""
-    principal = journal_store.principal(PRINCIPAL)
+async def _answered_and_regenerating(principal: PrincipalStore) -> rl.Span:
+    """Answer ``$source``, then claim an edit's regeneration of it that has written nothing yet."""
     reply, span = await _claimed(principal)
     await principal.enqueue_reply_row(
         request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
@@ -667,9 +668,6 @@ async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_an
         event_id="$answer",
         delivered_projections=(),
     )
-    answered = await principal.replies.load("reply-1")
-    assert answered is not None
-    assert answered.state is ReplyState.COMPLETED
     await admit(principal, "$edit")
     regeneration = replace(
         _request("span-2", source="$edit"),
@@ -678,7 +676,17 @@ async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_an
     )
     claimed = (await principal.replies.claim(regeneration, ClaimLookup(existing_event_id="$answer"))).transition
     assert claimed.claimed is not None
-    assert claimed.claimed.kind is rl.SpanKind.REGENERATION
+    return claimed.claimed
+
+
+async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_answer(
+    journal_store: EventJournalStore,
+) -> None:
+    """An edit regeneration a restart stopped before it wrote anything still leaves the answer it would replace."""
+    principal = journal_store.principal(PRINCIPAL)
+    await _answered_and_regenerating(principal)
+    answered = await principal.replies.load("reply-1")
+    assert answered is not None
     await principal.replies.write_generation("gen-2", now_ns=60)
     assert len(await principal.replies.owner_lost("gen-2", now_ns=70)) == 1
 
@@ -690,6 +698,78 @@ async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_an
     assert kept.presentation == answered.presentation
     assert kept.redaction_pending == ()
     assert not await principal.is_pending("$edit")
+    # No span runs for it any more.
+    assert await principal.replies.take_deletion_endings() == (reply_messages.DeletionEnding("reply-1", None),)
+
+
+async def test_deleting_a_running_regenerations_source_cancels_exactly_its_span(
+    journal_store: EventJournalStore,
+) -> None:
+    """The restored answer stands, and the regeneration still running for it is the span the bot cancels."""
+    principal = journal_store.principal(PRINCIPAL)
+    regeneration = await _answered_and_regenerating(principal)
+    await _delete(principal, "$source")
+    kept = await principal.replies.load("reply-1")
+    assert kept is not None
+    assert kept.state is ReplyState.COMPLETED
+    assert await principal.replies.take_deletion_endings() == (
+        reply_messages.DeletionEnding("reply-1", regeneration.span_id),
+    )
+
+
+async def test_a_deletion_that_ends_nothing_cancels_nothing(journal_store: EventJournalStore) -> None:
+    """A reply an earlier rule already restored keeps whatever it still runs, such as the delivery of its note."""
+    principal = journal_store.principal(PRINCIPAL)
+    regeneration = await _answered_and_regenerating(principal)
+    restored = await principal.replies.decide(
+        reply_id="reply-1",
+        span_id=regeneration.span_id,
+        decide=lambda reply, span: rl.dispatch_failed(reply, span, error_text="setup failed", now_ns=60),
+    )
+    assert _span_outcome(restored, regeneration.span_id) is SpanOutcome.RESTORED
+    await _delete(principal, "$source")
+    assert await principal.replies.take_deletion_endings() == ()
+
+
+class _CancelSpy(SpanRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled: list[str] = []
+
+    def cancel(self, span_id: str, *, cancel_source: TaskCancelSource | None) -> bool:
+        assert cancel_source is None
+        self.cancelled.append(span_id)
+        return False
+
+
+async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_them(
+    journal_store: EventJournalStore,
+) -> None:
+    """Each recorded ending is taken once; a new bot instance runs none of the spans an older one recorded."""
+    principal = journal_store.principal(PRINCIPAL)
+    regeneration = await _answered_and_regenerating(principal)
+    spans = _CancelSpy()
+    runtime = reply_scope.ReplyRuntime(
+        store=principal,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+        clean_up_superseded=lambda _continuation: None,
+        spans=spans,
+    )
+    await _delete(principal, "$source")
+    assert await runtime.deletions_ended() == ("reply-1",)
+    assert spans.cancelled == [regeneration.span_id]
+    assert await runtime.deletions_ended() == ()
+    ending = reply_messages.DeletionEnding("reply-1", regeneration.span_id)
+    await journal_store.backend.write(lambda tx: reply_messages.record_deletion_ending(tx, PRINCIPAL, ending))
+    await runtime.start()
+    assert await principal.replies.take_deletion_endings() == ()
+
+
+def _span_outcome(applied: AppliedTransition, span_id: str) -> SpanOutcome | None:
+    return next(span.outcome for span in applied.transition.spans if span.span_id == span_id)
 
 
 async def _regeneration_with_selected_edit(

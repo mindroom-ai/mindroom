@@ -47,6 +47,7 @@ Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`
 `pending_reply_stops` holds a Stop on an event no reply is bound to yet.
 `reply_principal_generations` holds the bot instance that owns each principal's replies.
 `reply_legacy_classifications` marks principals whose earlier-release replies were adopted.
+`reply_deletion_endings` holds the replies a source deletion ended, with the span it cancelled, until the bot stops that span and delivers what the reply owes.
 
 ## Rules and outcomes
 
@@ -96,7 +97,7 @@ A membership departure ends the room's replies `gone` inside the departure fence
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
-Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit; the bot then cancels its running span and redacts what it showed, while a reply an approval holds and a written answer are kept, including the answer an edit was regenerating before the regeneration showed anything.
+Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit, which records the reply and the span it cancelled; the bot then cancels exactly that span and redacts what the reply showed, while a reply an approval holds and a written answer are kept, including the finished answer an edit was regenerating before the regeneration showed anything.
 An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
 

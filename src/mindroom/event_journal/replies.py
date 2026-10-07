@@ -239,7 +239,14 @@ def end_replies_of_deleted_source(
             continue
         transition = rl.sources_deleted(reply, span, now_ns=now_ns)
         if transition.applied:
-            apply(transaction, principal_id, transition)
+            # The projection cannot run post-commit effects; the bot takes the span to cancel from this record.
+            applied = apply(transaction, principal_id, transition)
+            cancelled = next((effect.span_id for effect in applied.post_commit if isinstance(effect, CancelSpan)), None)
+            reply_messages.record_deletion_ending(
+                transaction,
+                principal_id,
+                reply_messages.DeletionEnding(reply.reply_id, cancelled),
+            )
 
 
 def approval_finished(
@@ -952,10 +959,10 @@ class ReplyStore:
             ),
         )
 
-    async def ended_by_deletion(self, event_id: str) -> tuple[Reply, ...]:
-        """Return the replies deleting this source ended or put back to their earlier answer, with their last span."""
-        return await self._backend.read(
-            lambda transaction: reply_messages.ended_by_deletion(transaction, self._principal_id, event_id),
+    async def take_deletion_endings(self) -> tuple[reply_messages.DeletionEnding, ...]:
+        """Remove and return the replies source deletions ended, with the spans they cancelled."""
+        return await self._backend.write(
+            lambda transaction: reply_messages.take_deletion_endings(transaction, self._principal_id),
         )
 
     async def spans_in_room(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:

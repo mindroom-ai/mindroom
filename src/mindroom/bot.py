@@ -2715,7 +2715,7 @@ class AgentBot:
         """
         assert isinstance(event, nio.RedactionEvent)
         await self._turn_store.mark_source_redacted(event.redacts, room_id=room.room_id)
-        self._replies_ended(await self._reply_runtime.source_deleted(event.redacts))
+        self._replies_ended(await self._reply_runtime.deletions_ended())
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
