@@ -86,9 +86,9 @@ def without_inline_final_result(content: dict[str, Any]) -> dict[str, Any]:
 # prepared_edit_record.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages keep the selected edit
 # on the regeneration span and commit it when the answer settles its sources.
-# Handling: reply classification adopts an owed row as its reply's first write on a regeneration span carrying that
-# edit, which it commits as a regeneration's terminal row does now, so a newer edit waits for the row's delivery.
-# Coverage: tests/test_legacy_reply_messages.py::test_an_edit_answer_still_in_flight_is_written_by_its_reply.
+# Handling: reply classification makes an owed row the next write of the reply it edits, on a regeneration span
+# carrying that edit, which it commits as a regeneration's terminal row does now; a newer edit waits for its delivery.
+# Coverage: tests/test_legacy_reply_messages.py::test_edit_answers_still_in_flight_are_written_by_their_reply.
 def legacy_prepared_edit(result: Mapping[str, object] | None) -> tuple[str, dict[str, object]] | None:
     """Return the selected edit an earlier release's regeneration FINAL carries, with the source it is stored under."""
     prepared = (result or {}).get("prepared_edit_record")

@@ -691,54 +691,80 @@ async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store:
     assert (await principal.approval_continuation("approval-1")) == adopted
 
 
-async def test_an_edit_answer_still_in_flight_is_written_by_its_reply(journal_store: EventJournalStore) -> None:
-    """An earlier release's regeneration answer, keyed by its edit, commits that edit; a newer edit waits for it.
+@pytest.mark.parametrize(
+    "queued",
+    [("completed",), ("cancelled",), ("error",), ("cancelled", "completed")],
+    ids=["completed", "cancelled", "error", "two"],
+)
+async def test_edit_answers_still_in_flight_are_written_by_their_reply(
+    journal_store: EventJournalStore,
+    queued: tuple[str, ...],
+) -> None:
+    """An earlier release's regeneration answers, keyed by their edits, become the reply's next writes in queue order.
 
-    The newer edit's answer is therefore never overwritten by the older one.
+    A newer edit waits for their delivery, so an older answer never overwrites
+    it. A completed one commits the edit it selected; that release attached it
+    to completed runs only.
     """
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await principal.settle_many(("$source",))
-    await admit(principal, "$edit")
-    # Ingress kept the edit on the turn it revises before the regeneration selected it.
-    edited = {"$edit": RevisionReplay("$source", 20)}
+    edits = tuple(f"$edit-{index}" for index in range(len(queued)))
+    # Ingress kept each edit on the turn it revises before a regeneration selected it.
     original = await _turn(
         journal_store,
         "$source",
         completed=True,
         response_event_id="$reply",
-        revision_replay=edited,
+        revision_replay={edit: RevisionReplay("$source", 20 + index) for index, edit in enumerate(edits)},
     )
-    selected = replace(
-        original,
-        source_event_prompts={"$source": "Edited request"},
-        source_event_revisions={"$source": (20, "$edit")},
-    )
-    await _row(
-        principal,
-        "$edit",
-        DeliveryStage.FINAL,
-        "Edited answer.",
-        status="completed",
-        edits="$reply",
-        result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(selected)},
-    )
+    for index, (edit, status) in enumerate(zip(edits, queued, strict=True)):
+        await admit(principal, edit)
+        selected = replace(
+            original,
+            source_event_prompts={"$source": f"Edited request {index}"},
+            source_event_revisions={"$source": (20 + index, edit)},
+        )
+        await _row(
+            principal,
+            edit,
+            DeliveryStage.FINAL,
+            f"Edited answer {index}.",
+            status=status,
+            edits="$reply",
+            result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(selected)}
+            if status == "completed"
+            else None,
+        )
 
     await _adopt(principal)
     reply = await principal.replies.for_event("$reply")
     assert reply is not None
-    assert reply.state is rl.ReplyState.COMPLETED
-    assert await _spans(principal, reply) == [(rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED)]
-    row = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
-    assert row is not None
-    assert row.reply_id == reply.reply_id
-    # Its answer is enqueued, so the edit it selected is consumed, as a regeneration's terminal row does now.
-    assert not await principal.is_pending("$edit")
+    outcomes = {
+        "completed": rl.SpanOutcome.COMPLETED,
+        "cancelled": rl.SpanOutcome.CANCELLED,
+        "error": rl.SpanOutcome.FAILED,
+    }
+    assert await _spans(principal, reply) == [
+        (rl.SpanKind.TURN, rl.SpanOutcome.COMPLETED),
+        *((rl.SpanKind.REGENERATION, outcomes[status]) for status in queued),
+    ]
+    assert reply.state is {"completed": rl.ReplyState.COMPLETED, "cancelled": rl.ReplyState.CANCELLED}.get(
+        queued[-1],
+        rl.ReplyState.FAILED,
+    )
+    for sequence, edit in enumerate(edits, start=1):
+        row = await principal.load_matrix_delivery(delivery_id=edit, stage=DeliveryStage.FINAL)
+        assert row is not None
+        assert (row.reply_id, row.reply_sequence) == (reply.reply_id, sequence)
+        # Its answer is enqueued, so its edit is answered, as a regeneration's terminal row records now.
+        assert not await principal.is_pending(edit)
     consumed = await journal_store.backend.read(
         lambda transaction: turn_records.load_record(transaction, ENTITY, "$source"),
     )
     assert consumed is not None
-    assert consumed.source_event_revisions == {"$source": (20, "$edit")}
+    completed = [(20 + index, edit) for index, edit in enumerate(edits) if queued[index] == "completed"]
+    assert consumed.source_event_revisions == ({"$source": completed[-1]} if completed else None)
 
     await admit(principal, "$newer")
     newer = rl.ClaimRequest(
@@ -755,7 +781,7 @@ async def test_an_edit_answer_still_in_flight_is_written_by_its_reply(journal_st
         empty_presentation=encode_presentation(Presentation()),
         driving_edit_id="$newer",
     )
-    waiting = await principal.replies.claim(newer, ClaimLookup(existing_event_id="$reply", edit_receipt_order=30))
+    waiting = await principal.replies.claim(newer, ClaimLookup(existing_event_id="$reply", edit_receipt_order=99))
     assert waiting.transition.outcome is rl.Outcome.DEFERRED
 
 
