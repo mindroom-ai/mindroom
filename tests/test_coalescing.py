@@ -752,21 +752,22 @@ async def test_room_message_sent_while_voice_is_preparing_keeps_its_own_turn() -
 
 
 @pytest.mark.asyncio
-async def test_room_level_media_backlog_splits_a_message_sent_much_later() -> None:
-    """An upload flushes at once when the next queued message was sent outside its burst."""
+async def test_room_level_media_backlog_flushes_before_an_upload_sent_much_later() -> None:
+    """An upload flushes at once when the next queued upload was sent outside its burst."""
     gate, batches = _recording_gate(10.0)
     key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
     await _admit_ready(gate, key, _image_pending("$image:localhost", 1_000_000))
-    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "later", 1_037_000)))
-    # The wait deadline is far shorter than the 10 s debounce, so the upload must not wait for a caption.
-    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+    await _admit_ready(gate, key, _image_pending("$later:localhost", 1_037_000))
+    # The wait deadline is far shorter than the 10 s debounce, so the first upload must not wait for the later one.
+    await _wait_for(lambda: _dispatched_source_count(batches) == 1)
 
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$image:localhost"]]
+    await gate.drain_all()
     assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
         ["$image:localhost"],
-        ["$text:localhost"],
+        ["$later:localhost"],
     ]
-    await gate.drain_all()
 
 
 @pytest.mark.asyncio
@@ -805,19 +806,22 @@ async def test_thread_backlog_still_combines_messages_sent_far_apart() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("send_gap_ms", "expected_batches"),
+    ("window_seconds", "send_gap_ms", "expected_batches"),
     [
-        (1_000, [["$voice:localhost", "$text:localhost"]]),
-        (1_001, [["$voice:localhost"], ["$text:localhost"]]),
-        (-500, [["$voice:localhost", "$text:localhost"]]),
+        (1.0, 1_000, [["$voice:localhost", "$text:localhost"]]),
+        (1.0, 1_001, [["$voice:localhost"], ["$text:localhost"]]),
+        (1.0, -1_000, [["$voice:localhost", "$text:localhost"]]),
+        (1.0, -1_001, [["$voice:localhost"], ["$text:localhost"]]),
+        (1.001, 1_001, [["$voice:localhost", "$text:localhost"]]),
     ],
 )
 async def test_room_level_send_burst_window_includes_its_boundary(
+    window_seconds: float,
     send_gap_ms: int,
     expected_batches: list[list[str]],
 ) -> None:
     """Room-level messages sent up to one debounce window apart, in either order, share a burst."""
-    gate, batches = _recording_gate(1.0)
+    gate, batches = _recording_gate(window_seconds)
     key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
     await _admit_ready(gate, key, _voice_pending("$voice:localhost", "voice transcript", 1_000_000))
