@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 _SPAN_COLUMNS = """
     span_id, reply_id, kind, delivery_id, approval_id, bot_generation,
-    base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns, prepared_edit_json
+    base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns
 """
 _ROLES = ("pending", "logical", "discovery")
 
@@ -90,7 +90,6 @@ def _span(transaction: Transaction, principal_id: str, row: Row) -> Span:
         rollback=_rollback(cast("str | None", row["rollback_json"])),
         outcome=None if outcome is None else SpanOutcome(str(outcome)),
         ended_at_ns=None if ended_at_ns is None else int(ended_at_ns),
-        prepared_edit=cast("str | None", row["prepared_edit_json"]),
     )
 
 
@@ -169,9 +168,8 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
             """
             INSERT INTO reply_spans (
                 principal_id, span_id, reply_id, kind, delivery_id, approval_id,
-                bot_generation, base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns,
-                prepared_edit_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                bot_generation, base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 principal_id,
@@ -186,7 +184,6 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
                 None if span.outcome is None else span.outcome.value,
                 span.claimed_at_ns,
                 span.ended_at_ns,
-                span.prepared_edit,
             ),
         )
         roles = (

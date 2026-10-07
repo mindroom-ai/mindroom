@@ -87,7 +87,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store, agent_name=AGENT_NAME)
     await store.record_responded_turn(_turn_record(source_event_prompts={ORIGINAL_EVENT_ID: "original"}))
-    harness = _harness(tmp_path, turn_record=None, journal_store=journal_store)
+    harness = _harness(tmp_path, turn_record=None)
     started = asyncio.Event()
     attempt = ResponseAttemptRunner(
         ResponseAttemptDeps(
@@ -146,7 +146,8 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     assert await principal.is_pending(EDIT_EVENT_ID)
     interrupted = store.get_turn_record(ORIGINAL_EVENT_ID)
     assert interrupted is not None
-    assert not interrupted.source_event_revisions
+    # The turn took the edit when its regeneration claimed the reply.
+    assert interrupted.source_event_revisions == {ORIGINAL_EVENT_ID: (1_000_001, EDIT_EVENT_ID)}
 
     async def recover(_request: ResponseRequest) -> str:
         # Its answer's span settles the edit it answered.

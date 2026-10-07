@@ -4590,8 +4590,8 @@ def _reply_answers(database: sqlite3.Connection) -> tuple[dict[str, str], dict[s
 
     Reply records own AI answers and the turn ledger keeps only that the turn
     was answered, so the oracle reads the answering event from the reply
-    whose spans name the source, and an answered edit from the selected edit
-    a completed regeneration of that reply carried.
+    whose spans name the source, and an answered edit from the edit event
+    that drove a completed regeneration of that reply.
     """
     rows = database.execute(
         "SELECT source.event_id, reply.event_id FROM reply_span_sources AS source "
@@ -4603,15 +4603,14 @@ def _reply_answers(database: sqlite3.Connection) -> tuple[dict[str, str], dict[s
         (AGENT_NAME,),
     ).fetchall()
     regenerated: dict[str, set[str]] = defaultdict(set)
-    for answer, prepared_edit_json in database.execute(
-        "SELECT reply.event_id, span.prepared_edit_json FROM reply_spans AS span "
+    for answer, edit_event_id in database.execute(
+        "SELECT reply.event_id, span.delivery_id FROM reply_spans AS span "
         "JOIN reply_messages AS reply ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id "
         "WHERE reply.entity_name = ? AND reply.event_id IS NOT NULL AND span.kind = 'regeneration' "
-        "AND span.outcome = 'completed' AND span.prepared_edit_json IS NOT NULL",
+        "AND span.outcome = 'completed'",
         (AGENT_NAME,),
     ).fetchall():
-        selected = json.loads(prepared_edit_json).get("source_event_revisions") or {}
-        regenerated[answer].update(revision[1] for revision in selected.values())
+        regenerated[answer].add(edit_event_id)
     return dict(rows), {answer: frozenset(edits) for answer, edits in regenerated.items()}
 
 
@@ -9864,7 +9863,7 @@ def _ledger_evidence_snapshot(ledger_path: Path, *, principal_id: object = None)
                 dict(row)
                 for row in database.execute(
                     "SELECT span.span_id, span.reply_id, span.kind, span.delivery_id, span.outcome, "
-                    "span.prepared_edit_json, reply.event_id, reply.state, reply.placeholder_only, "
+                    "reply.event_id, reply.state, reply.placeholder_only, "
                     "(SELECT json_group_array(json_array(source.role, source.event_id)) FROM reply_span_sources AS source "
                     "WHERE source.principal_id = span.principal_id AND source.span_id = span.span_id) AS sources "
                     "FROM reply_spans AS span JOIN reply_messages AS reply "

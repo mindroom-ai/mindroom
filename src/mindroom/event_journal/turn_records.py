@@ -171,18 +171,6 @@ def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> Te
     return write
 
 
-def encode_prepared_edit(record: TurnRecord) -> str:
-    """Encode a regeneration's selected edit for its span."""
-    return json.dumps(TurnRecordCodec._to_ledger_record(record))
-
-
-def decode_prepared_edit(stored: str, index_event_id: str) -> TurnRecord:
-    """Decode the selected edit a regeneration span carries."""
-    record = TurnRecordCodec._from_ledger_record(index_event_id, json.loads(stored))
-    assert record is not None, "Corrupt prepared edit on a regeneration span"
-    return record
-
-
 def settle_turn(
     transaction: Transaction,
     principal_id: str,
@@ -190,14 +178,13 @@ def settle_turn(
     *,
     pending: tuple[str, ...],
     logical: tuple[str, ...],
-    prepared_edit: TurnRecord | None,
 ) -> TurnRecord | None:
     """Settle the sources an AI reply answers and record their turn answered, in one transaction.
 
     A reply rule's ``SettleSources`` is its only caller.
     """
     journal.settle_many(transaction, principal_id, pending)
-    return _complete_turn(transaction, agent_name, logical_event_ids=logical, prepared_edit=prepared_edit)
+    return _complete_turn(transaction, agent_name, logical_event_ids=logical)
 
 
 def _complete_turn(
@@ -205,41 +192,18 @@ def _complete_turn(
     agent_name: str,
     *,
     logical_event_ids: tuple[str, ...],
-    prepared_edit: TurnRecord | None,
 ) -> TurnRecord | None:
-    """Record that this agent answered the turn these sources name, committing an answered regeneration's edit.
+    """Record that this agent answered the turn these sources name.
 
     Returns the record written, or ``None`` when nothing changed: the turn was
     already answered, or it has no record, which only the crash window before
-    ingress persisted it leaves, and which run-metadata recovery restores.
+    ingress persisted it leaves.
     """
-    candidate = prepared_edit if prepared_edit is not None else TurnRecord.create(list(logical_event_ids))
-    records = _claim_turn_records(transaction, agent_name, candidate)
+    records = _claim_turn_records(transaction, agent_name, TurnRecord.create(list(logical_event_ids)))
     current = next((records[event_id] for event_id in logical_event_ids if event_id in records), None)
-    if current is None:
-        if prepared_edit is None:
-            return None
-        completed = canonicalize_turn_record(prepared_edit, completed=True)
-    else:
-        tombstones = tuple(
-            event_id
-            for event_id, record in records.items()
-            if record is not None and event_id in record.redacted_source_event_ids
-        )
-        merged = (
-            None
-            if prepared_edit is None
-            else merge_committed_response(
-                current,
-                canonicalize_turn_record(prepared_edit, completed=True),
-                tombstoned_event_ids=tombstones,
-            )
-        )
-        if merged is None:
-            if current.completed:
-                return None
-            merged = canonicalize_turn_record(current, completed=True)
-        completed = merged
+    if current is None or current.completed:
+        return None
+    completed = canonicalize_turn_record(current, completed=True)
     assert completed.anchor_event_id is not None
     upsert(
         transaction,
@@ -361,8 +325,6 @@ def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequen
 
 __all__ = [
     "commit_terminal",
-    "decode_prepared_edit",
-    "encode_prepared_edit",
     "forget",
     "load_all",
     "load_record",

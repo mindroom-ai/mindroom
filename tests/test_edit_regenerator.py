@@ -18,10 +18,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from mindroom.event_journal import (
-    EventJournalStore,
-    turn_records,
-)
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks.ingress import HookIngressPolicy
@@ -168,7 +164,6 @@ def _harness(
     *,
     turn_record: TurnRecord | None,
     receipt_order: int = 1,
-    journal_store: EventJournalStore | None = None,
 ) -> _Harness:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -206,7 +201,7 @@ def _harness(
 
     turn_store.record_turn.side_effect = record_turn
     turn_store.record_responded_turn.side_effect = record_turn
-    turn_store.publish_completed_turn.side_effect = record_turn
+    turn_store.record_edit.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
     turn_store._prepare_response_for_redactions.return_value = False
 
@@ -242,7 +237,6 @@ def _harness(
             event_id = await generate_response(request)
             if event_id is None:
                 return
-            await _acknowledge_test_edit(tmp_path, request, regenerator.deps.turn_store, journal_store=journal_store)
             # The reply records own the answer from then on, which is what a later edit regenerates.
             reply_for_sources.return_value = _reply(event_id=event_id)
 
@@ -289,38 +283,9 @@ async def _handle_edit(harness: _Harness, event: nio.RoomMessageText, event_info
     return handed_off
 
 
-async def _acknowledge_test_edit(
-    tmp_path: Path,
-    request: ResponseRequest,
-    store: TurnStore,
-    *,
-    journal_store: EventJournalStore | None = None,
-) -> None:
-    """Model a completed regeneration: its answer's settlement commits the edit it selected, as its reply does."""
-    selected = request.prepared_edit_record
-    assert selected is not None
-    journal = journal_store or EventJournalStore.open_sqlite(tmp_path / "edit-delivery.sqlite")
-    try:
-        completed = await journal.backend.write(
-            lambda transaction: turn_records.settle_turn(
-                transaction,
-                "assistant@test",
-                AGENT_NAME,
-                pending=(request.correlation_id,),
-                logical=selected.source_event_ids,
-                prepared_edit=selected,
-            ),
-        )
-    finally:
-        if journal_store is None:
-            await journal.close()
-    if completed is not None:
-        await store.publish_completed_turn(completed)
-
-
 def _assert_no_regeneration(harness: _Harness) -> None:
     harness.generate_response.assert_not_awaited()
-    harness.turn_store.record_turn.assert_not_called()
+    harness.turn_store.record_edit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -353,8 +318,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
     assert metadata_kwargs["additional_discovery_event_ids"] == ()
 
-    harness.turn_store.publish_completed_turn.assert_called_once()
-    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
+    harness.turn_store.record_edit.assert_called_once()
+    recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_ids == (ORIGINAL_EVENT_ID,)
     assert recorded.anchor_event_id == ORIGINAL_EVENT_ID
@@ -401,7 +366,7 @@ async def test_persisted_revision_rejects_stale_edit_after_regenerator_restart(t
         server_timestamp=1_000_020,
     )
     await _handle_edit(first_harness, newer, newer_info)
-    persisted_record = first_harness.turn_store.publish_completed_turn.call_args.args[0]
+    persisted_record = first_harness.turn_store.record_edit.call_args.args[0]
 
     restarted_harness = _harness(tmp_path, turn_record=persisted_record)
     older, older_info = _edit_event(
@@ -444,7 +409,7 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     }
     assert metadata_call.kwargs["additional_discovery_event_ids"] == ()
 
-    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
+    recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_prompts == {
         first_event_id: "edited first message",
@@ -734,7 +699,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_metadata == record.source_event_metadata
-    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
+    recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.source_event_metadata == record.source_event_metadata
 
 
@@ -829,7 +794,7 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
     assert "human edited" in request.prompt
     assert "human base" not in request.prompt
     assert "relay base" in request.prompt
-    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
+    recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.source_event_prompts == {
         relay_event_id: "relay base",
         human_event_id: "human edited",
@@ -890,7 +855,7 @@ async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: 
     request = harness.generate_response.await_args.args[0]
     assert "first edited" in request.prompt
     assert "first base" not in request.prompt
-    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
+    recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.source_event_prompts == {first_relay: "first edited", second_relay: "second base"}
     assert recorded.source_event_revisions == {first_human: (event.server_timestamp, event.event_id)}
 

@@ -277,8 +277,10 @@ class EditRegenerator:
                 thread_history=history,
             )
 
-        async def prune_replaced_history() -> None:
-            # The claimed reply holds the answer, so the history run this edit replaces may go.
+        async def commit_edit() -> None:
+            # The claimed reply answers the edited text from now on, so the turn holds it and the history run
+            # this edit replaces may go.
+            await self.deps.turn_store.record_edit(record)
             await self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
 
         return ResponseRequest(
@@ -305,8 +307,8 @@ class EditRegenerator:
             current_timestamp_ms=normalize_timestamp_ms(revision[0]),
             current_prompt_is_structured=structured,
             prepare_source_turn=prepare_snapshot,
-            on_reply_claimed=prune_replaced_history,
-            prepared_edit_record=record,
+            on_reply_claimed=commit_edit,
+            edit_regeneration=True,
             source_handoff=asyncio.Event(),
         )
 
@@ -317,12 +319,12 @@ class EditRegenerator:
         edit, and after it the regeneration's span settles it.
         """
         claimed = asyncio.Event()
-        prune = request.on_reply_claimed
-        assert prune is not None
+        commit_edit = request.on_reply_claimed
+        assert commit_edit is not None
 
         async def on_claimed() -> None:
             claimed.set()
-            await prune()
+            await commit_edit()
 
         handoff = request.source_handoff
         assert handoff is not None

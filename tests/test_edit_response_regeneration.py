@@ -2109,7 +2109,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
                 tool_trace=None,
                 extra_content=None,
             ),
-            prepared_edit=request.prepared_edit_record,
+            regenerates=request.edit_regeneration,
         )
         # The failed edit stays owed to recovery instead of ending the reply.
         assert outcome.terminal_status == "suspended"
@@ -2158,7 +2158,8 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
     persisted = TurnRecordCodec._from_ledger_record("$original:example.com", json.loads(rows[0][2]))
     assert persisted is not None
     assert persisted.response_event_id == "$response:example.com"
-    assert persisted.source_event_revisions is None
+    # The turn took the edit when its regeneration claimed the reply; no answer to it was delivered.
+    assert persisted.source_event_revisions == {"$original:example.com": (1000001, "$edit:example.com")}
     assert persisted.revision_replay["$edit:example.com"].response_event_id is None
 
 

@@ -53,7 +53,12 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_record import PreparedVoiceSource, RevisionReplay, RevisionSnapshotChangedError
+from mindroom.turn_record import (
+    PreparedVoiceSource,
+    RevisionReplay,
+    RevisionSnapshotChangedError,
+    canonicalize_turn_record,
+)
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -3056,3 +3061,56 @@ async def test_prepared_voice_checkpoint_retention_follows_unsettled_sources(
     _reset_handled_turn_ledger_runtime()
     restored = await _store(journal_store)
     assert (restored.prepared_voice_for_source("$voice") is not None) == (state != "settled")
+
+
+async def _edited(store: TurnStore, revision: tuple[int, str], text: str) -> TurnRecord:
+    """Return the record an edit's regeneration commits: the turn with the edit's text and revision."""
+    registered = await store.register_edit_revision("$source", revision)
+    assert registered is not None
+    return canonicalize_turn_record(
+        registered,
+        source_event_prompts={"$source": text},
+        source_event_revisions={"$source": revision},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answered", [False, True])
+async def test_an_edit_reaches_its_turn_when_its_regeneration_starts(
+    journal_store: EventJournalStore,
+    answered: bool,
+) -> None:
+    """The turn takes the edit's text at once; whether it was answered stays as it was until the answer records it."""
+    store = await _store(journal_store)
+    original = TurnRecord.create(["$source"], source_event_prompts={"$source": "original"}, completed=answered)
+    if answered:
+        await store.record_responded_turn(replace(original, response_event_id="$answer"))
+    else:
+        await store.record_pending_turn(original)
+
+    await store.record_edit(await _edited(store, (20, "$edit"), "edited"))
+
+    _reset_handled_turn_ledger_runtime()
+    record = (await _store(journal_store)).get_turn_record("$source")
+    assert record is not None
+    assert record.source_event_prompts == {"$source": "edited"}
+    assert record.source_event_revisions == {"$source": (20, "$edit")}
+    assert record.completed is answered
+
+
+@pytest.mark.asyncio
+async def test_an_older_edit_does_not_replace_a_newer_one(journal_store: EventJournalStore) -> None:
+    """A regeneration of an older edit that starts late leaves the newer edit's text."""
+    store = await _store(journal_store)
+    await store.record_responded_turn(
+        TurnRecord.create(["$source"], response_event_id="$answer", source_event_prompts={"$source": "original"}),
+    )
+    older = await _edited(store, (20, "$older"), "older")
+    await store.record_edit(await _edited(store, (30, "$newer"), "newer"))
+
+    await store.record_edit(older)
+
+    record = store.get_turn_record("$source")
+    assert record is not None
+    assert record.source_event_prompts == {"$source": "newer"}
+    assert record.source_event_revisions == {"$source": (30, "$newer")}

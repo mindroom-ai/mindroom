@@ -25,13 +25,13 @@ from . import (
     approval_continuations,
     approval_grants,
     background_approvals,
+    legacy_response_attempts,
     outbox,
     reads,
     scheduled_approvals,
 )
 from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
 from .identity import decode_thread_id
-from .legacy_response_attempts import adopted_entity_name
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
@@ -911,7 +911,7 @@ def _continuation_entity_name(row: Row) -> str | None:
     context_json = cast("str | None", row["continuation_context_json"])
     if entity_name is not None or context_json is None:
         return entity_name
-    return adopted_entity_name(json.loads(context_json))
+    return legacy_response_attempts.adopted_entity_name(json.loads(context_json))
 
 
 def pending_card(

@@ -377,9 +377,18 @@ class TurnStore:
         The transaction already persisted it, but a ledger mutation derived
         before it could still overwrite that row. Going through the ledger waits
         for conflicting writes and derives from their settled state, so the
-        completion and any committed edit facts survive with intervening facts.
+        completion survives with intervening facts.
         """
+        await self._merge_edit_facts(committed, completes=True)
 
+    async def record_edit(self, edited: TurnRecord) -> None:
+        """Commit an edit's text and revision to its turn as its regeneration claims the reply.
+
+        Whether the turn was answered stays as it was: the regeneration's answer records that.
+        """
+        await self._merge_edit_facts(edited, completes=False)
+
+    async def _merge_edit_facts(self, committed: TurnRecord, *, completes: bool) -> None:
         def committed_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing = next(
                 (existing_records[source] for source in committed.source_event_ids if source in existing_records),
@@ -392,10 +401,12 @@ class TurnStore:
                     event_id for event_id in (committed.revision_replay or {}) if self._is_revision_redacted(event_id)
                 ),
             )
-            if merged is not None:
-                return canonicalize_turn_record(merged, timestamp=0.0)
-            assert existing is not None
-            return existing
+            if merged is None:
+                assert existing is not None
+                return existing
+            if not completes and existing is not None:
+                merged = canonicalize_turn_record(merged, completed=existing.completed)
+            return canonicalize_turn_record(merged, timestamp=0.0)
 
         await self._ledger.update_handled_turn(committed.indexed_event_ids, committed_record)
 

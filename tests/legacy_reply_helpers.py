@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.backend import Transaction
+    from mindroom.handled_turns import TurnRecord
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -75,10 +76,16 @@ async def resumed_main_left_approval(
         yield claimed
 
 
-async def store_main_continuation(store: PrincipalStore, continuation: ApprovalContinuation) -> None:
+async def store_main_continuation(
+    store: PrincipalStore,
+    continuation: ApprovalContinuation,
+    *,
+    prepared_edit_record: TurnRecord | None = None,
+) -> None:
     """Store a continuation as an earlier release left it, after the upgrade adopted its reply identity.
 
-    It names no paused span: reply classification gives it one.
+    It names no paused span: reply classification gives it one. ``prepared_edit_record`` is the edit a paused
+    regeneration selected, which an earlier release kept in the context.
     """
 
     def write(transaction: Transaction) -> None:
@@ -87,9 +94,7 @@ async def store_main_continuation(store: PrincipalStore, continuation: ApprovalC
             **approval_continuations._context(continuation),
             "show_tool_calls": continuation.show_tool_calls,
             "prepared_edit_record": (
-                None
-                if continuation.prepared_edit_record is None
-                else TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
+                None if prepared_edit_record is None else TurnRecordCodec._to_ledger_record(prepared_edit_record)
             ),
             "legacy_identity": {
                 "entity_name": continuation.entity_name,

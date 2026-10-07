@@ -87,15 +87,13 @@ async def reply_span(
     show_tool_calls: bool = True,
     placeholder_event_id: str | None = None,
     regenerated_event_id: str | None = None,
-    prepared_edit: TurnRecord | None = None,
     runtime: ReplyRuntime | None = None,
 ) -> AsyncIterator[SpanHandle]:
     """Claim a reply span for one source, admitted as ingress admits it, and run the block in it.
 
     With ``placeholder_event_id``, the reply's placeholder is already in the
     room as that event, the way a turn shows it before its answer. With
-    ``regenerated_event_id``, the source is an edit regenerating that answer,
-    and ``prepared_edit`` is the edit it selected.
+    ``regenerated_event_id``, the source is an edit regenerating that answer.
     ``runtime`` claims as an existing bot instance instead of a fresh one.
     """
     if not await principal.is_pending(source_event_id):
@@ -136,7 +134,6 @@ async def reply_span(
             show_tool_calls=show_tool_calls,
             driving_edit_id=None if regenerated_event_id is None else source_event_id,
             existing_event_id=regenerated_event_id,
-            prepared_edit=prepared_edit,
         )
         assert isinstance(handle, SpanHandle)
         slot.handle = handle
@@ -174,21 +171,20 @@ async def final_in_span(
     principal: PrincipalStore,
     request: FinalDeliveryRequest,
     *,
-    prepared_edit: TurnRecord | None = None,
+    regenerates: bool = False,
     complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> FinalDeliveryOutcome:
     """Deliver one final answer from inside the reply span its request names, as a locked response turn does.
 
-    A regeneration of the edit ``prepared_edit`` selected regenerates the
-    answer the request names, and its completed answer consumes that edit; any
-    other request with an existing event shows that event as its placeholder.
+    A regeneration regenerates the answer the request names; any other
+    request with an existing event shows that event as its placeholder.
     ``complete_turn`` sees each turn the reply records answered, as the bot's
     gateway runs its reply runtime's effects.
     """
     runtime = _runtime(principal, complete_turn=complete_turn)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     sources = request.identity.sources
-    regenerated = request.existing_event_id if prepared_edit is not None else None
+    regenerated = request.existing_event_id if regenerates else None
     async with reply_span(
         principal,
         source_event_id=request.identity.response_envelope.source_event_id,
@@ -197,10 +193,9 @@ async def final_in_span(
         logical_source_event_ids=sources.logical_source_event_ids,
         placeholder_event_id=None if regenerated is not None else request.existing_event_id,
         regenerated_event_id=regenerated,
-        prepared_edit=prepared_edit,
         runtime=runtime,
     ):
-        return await gateway.deliver_final(replace(request, consumes_edit=prepared_edit is not None))
+        return await gateway.deliver_final(request)
 
 
 async def final_in_resume_span(
@@ -265,7 +260,7 @@ def response_span(
     A regeneration's span regenerates the answer the request names, as the
     runner claims it.
     """
-    regenerated = request.existing_event_id if request.prepared_edit_record is not None else None
+    regenerated = request.existing_event_id if request.edit_regeneration else None
     return reply_span(
         runner.deps.replies.store,
         runtime=runner.deps.replies,
@@ -275,7 +270,6 @@ def response_span(
         logical_source_event_ids=request.sources.logical_source_event_ids,
         placeholder_event_id=None if regenerated is not None else placeholder_event_id,
         regenerated_event_id=regenerated,
-        prepared_edit=request.prepared_edit_record,
         show_tool_calls=show_tool_calls,
     )
 

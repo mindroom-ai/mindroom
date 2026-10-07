@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 
-from . import approval_continuations, journal, reply_messages, turn_records
+from . import approval_continuations, journal, reply_messages
 from .legacy_response_attempts import discard_continuation
 from .models import SUPERSEDED_FAILURE_REASON
 from .replies import AppliedTransition, apply
@@ -98,8 +98,9 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # reply_messages and reply_spans.
 # Handling: once per principal at bot start, before owner_lost, the newest continuation of each reply pauses it, and
 # its approval runtime resumes or settles it as any paused reply. Older continuations of the same reply, and ones an
-# earlier release superseded, are discarded with their cards and their sources settled unanswered. An upgrade runs
-# while no reply is in flight, so nothing else is adopted.
+# earlier release superseded, are discarded with their cards and their sources settled unanswered. A paused edit
+# regeneration resumes as any paused reply; the edited text it selected stays out of its turn record, which only a
+# later edit of a coalesced sibling reads. An upgrade runs while no reply is in flight, so nothing else is adopted.
 # Coverage: tests/test_legacy_reply_messages.py.
 def classify(
     transaction: Transaction,
@@ -227,7 +228,6 @@ def _span(
     now_ns: int,
     outcome: rl.SpanOutcome | None,
     approval_id: str | None = None,
-    prepared_edit: str | None = None,
 ) -> rl.Span:
     return rl.Span(
         span_id=_new_id(),
@@ -241,7 +241,6 @@ def _span(
         approval_id=approval_id,
         outcome=outcome,
         ended_at_ns=None if outcome is None else now_ns,
-        prepared_edit=prepared_edit,
     )
 
 
@@ -250,7 +249,7 @@ def _pause_span(reply_id: str, continuation: ApprovalContinuation, outcome: rl.S
     sources = continuation.sources
     return _span(
         reply_id,
-        kind=rl.SpanKind.REGENERATION if continuation.prepared_edit_record is not None else rl.SpanKind.TURN,
+        kind=rl.SpanKind.TURN,
         delivery_id=continuation.source_event_ids[0],
         sources=rl.SpanSources(
             pending=sources.pending_event_ids,
@@ -260,12 +259,6 @@ def _pause_span(reply_id: str, continuation: ApprovalContinuation, outcome: rl.S
         now_ns=now_ns,
         outcome=outcome,
         approval_id=continuation.approval_id,
-        # A regeneration's paused span carries the edit it selected.
-        prepared_edit=(
-            None
-            if continuation.prepared_edit_record is None
-            else turn_records.encode_prepared_edit(continuation.prepared_edit_record)
-        ),
     )
 
 

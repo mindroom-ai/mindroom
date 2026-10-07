@@ -31,7 +31,6 @@ from mindroom.response_runner import ResponseRunner, _DeliveryProgress
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
-from mindroom.turn_record import canonicalize_turn_record
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import (
@@ -132,12 +131,12 @@ class _ApprovalCase:
         assert failing is not None
         assert failing.state == "failing"
         assert await self.principal.is_pending("$edit")
-        assert self.store.get_turn_record("$source").source_event_revisions is None
+        assert self.store.get_turn_record("$source").source_event_revisions == {"$source": (20, "$edit")}
 
     async def assert_stopped_edit_settled(self) -> None:
         assert await self.principal.approval_continuation_for_source("$edit") is None
         assert not await self.principal.is_pending("$edit")
-        assert self.store.get_turn_record("$source").source_event_revisions is None
+        assert self.store.get_turn_record("$source").source_event_revisions == {"$source": (20, "$edit")}
         resumed = AsyncMock(side_effect=AssertionError("Stopped approval must not execute"))
         with patch.object(self.runner, "_continue_entity_call", resumed):
             await self.runner.handoff_approval_source("$edit")
@@ -152,7 +151,6 @@ class _ApprovalCase:
             runtime_generation=self.runner.deps.approval_runtime_generation,
         )
         assert claimed is not None
-        assert claimed.prepared_edit_record is not None
         assert claimed.claim_span_id is not None
         resume = await self.principal.replies.span(claimed.claim_span_id)
         assert resume is not None
@@ -399,7 +397,8 @@ async def _paused_case(  # noqa: PLR0915
         assert await principal.is_pending(edit_id)
         assert not await principal.is_pending(source_id)
         assert await principal.approval_continuation_for_source(source_id) is None
-        assert store.get_turn_record(source_id).source_event_revisions is None
+        # The turn took the edit when its regeneration claimed the reply.
+        assert store.get_turn_record(source_id).source_event_revisions == {source_id: (20, edit_id)}
 
         yield _ApprovalCase(
             bot,
@@ -523,7 +522,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     tmp_path: Path,
     journal_store: EventJournalStore,
 ) -> None:
-    """A regeneration whose pause fails keeps the answer it regenerated without claiming the edit was answered."""
+    """A regeneration whose pause fails keeps the answer it regenerated."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     principal = journal_store.principal("general@@mindroom_general:localhost")
@@ -538,13 +537,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
             completed=True,
             source_event_prompts={"$source": "original"},
         ),
-    )
-    registered = await store.register_edit_revision("$source", (20, "$edit"))
-    assert registered is not None
-    selected = canonicalize_turn_record(
-        registered,
-        source_event_prompts={"$source": "selected edit"},
-        source_event_revisions={"$source": (20, "$edit")},
     )
     bot._turn_store = store
     gateway = unwrap_extracted_collaborator(runner.deps.delivery_gateway)
@@ -567,7 +559,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     request = replace(
         _plain_request(_target(), source_event_id="$edit"),
         existing_event_id="$waiting",
-        prepared_edit_record=selected,
+        edit_regeneration=True,
         sources=ResponseSources(("$edit",), ("$source",)),
     )
     lifecycle = runner._build_lifecycle(
@@ -616,10 +608,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     persisted = (await _store(journal_store, agent_name="general")).get_turn_record("$source")
     assert persisted is not None
     assert persisted.response_event_id == "$waiting"
-    assert persisted.source_event_prompts == {"$source": "original"}
-    assert persisted.source_event_revisions is None
-    assert persisted.revision_watermark("$source") == (20, "$edit")
-    assert persisted.revision_replay["$edit"].response_event_id is None
 
 
 @pytest.mark.asyncio

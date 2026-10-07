@@ -123,7 +123,7 @@ def _run(
     post_commit: list[PostCommitEffect],
 ) -> None:
     match effect:
-        case SettleSources(span_id=span_id, consumes_edit=consumes_edit, answered=answered):
+        case SettleSources(span_id=span_id, answered=answered):
             span = _span_for(transaction, principal_id, transition, span_id)
             reply = transition.reply
             assert reply is not None, "a settlement belongs to a reply's transition"
@@ -139,11 +139,6 @@ def _run(
                 reply.entity_name,
                 pending=span.sources.pending,
                 logical=span.sources.logical,
-                prepared_edit=(
-                    turn_records.decode_prepared_edit(span.prepared_edit, span.sources.logical[0])
-                    if consumes_edit and span.prepared_edit is not None
-                    else None
-                ),
             )
             if completed is not None:
                 # The ledger's write ordering and cache learn it after the commit.

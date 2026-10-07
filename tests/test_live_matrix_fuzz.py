@@ -6785,7 +6785,6 @@ def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) ->
             "$unanswered": TurnRecord.create(source_event_ids=("$unanswered",), completed=True),
         },
     )
-    regeneration = json.dumps({"source_event_revisions": {"$root": [100, "$a"]}})
     with closing(sqlite3.connect(ledger_path)) as database:
         database.executemany(
             "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
@@ -6795,11 +6794,11 @@ def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) ->
         )
         database.executemany(
             "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
-            "base_sequence, outcome, claimed_at_ns, prepared_edit_json) VALUES ('p', ?, ?, ?, ?, 'g', 0, ?, ?, ?)",
+            "base_sequence, outcome, claimed_at_ns) VALUES ('p', ?, ?, ?, ?, 'g', 0, ?, ?)",
             [
-                ("turn", "answer", "turn", "$root", "completed", 1, None),
-                ("regenerated", "answer", "regeneration", "$a", "completed", 2, regeneration),
-                ("early", "stopped", "turn", "$unanswered", "cancelled", 3, None),
+                ("turn", "answer", "turn", "$root", "completed", 1),
+                ("regenerated", "answer", "regeneration", "$a", "completed", 2),
+                ("early", "stopped", "turn", "$unanswered", "cancelled", 3),
             ],
         )
         database.executemany(

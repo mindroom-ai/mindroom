@@ -295,8 +295,8 @@ async def test_a_stored_superseded_approval_is_discarded_at_adoption(journal_sto
     assert await principal.replies.for_event("$reply") is None
 
 
-async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store: EventJournalStore) -> None:
-    """A paused regeneration main left keeps the edit it selected once its reply is adopted."""
+async def test_an_adopted_regeneration_resumes_as_any_paused_reply(journal_store: EventJournalStore) -> None:
+    """A paused regeneration main left pauses its reply like any other once adopted."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
@@ -307,15 +307,14 @@ async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store:
         response_owner=ENTITY,
         conversation_target=MessageTarget.resolve(ROOM, None, "$source"),
     )
-    paused = replace(
-        _continuation("waiting"),
-        sources=ResponseSources(("$source",), ("$source",)),
-        prepared_edit_record=selected,
-    )
-    await _main_continuation(principal, paused)
+    paused = replace(_continuation("waiting"), sources=ResponseSources(("$source",), ("$source",)))
+    await store_main_continuation(principal, paused, prepared_edit_record=selected)
+    await keep_main_paused_answer(principal, paused.approval_id, text="Reading document")
 
     await _adopt(principal)
     adopted = await principal.approval_continuation("approval-1")
     assert adopted is not None
     assert adopted.span_id is not None
-    assert adopted.prepared_edit_record == selected
+    reply = await _only_reply(principal)
+    assert reply.state is rl.ReplyState.PAUSED
+    assert reply.approval_id == "approval-1"

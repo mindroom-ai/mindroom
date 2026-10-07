@@ -461,7 +461,7 @@ def _regeneration(*, answer_event_id: str, edit_event_id: str = "$edit") -> Resp
             pending_event_ids=(edit_event_id,),
             logical_source_event_ids=("$event",),
         ),
-        prepared_edit_record=TurnRecord.create(["$event"], response_event_id=answer_event_id, completed=True),
+        edit_regeneration=True,
         existing_event_id=answer_event_id,
     )
 

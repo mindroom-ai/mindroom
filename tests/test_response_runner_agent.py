@@ -86,7 +86,6 @@ from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch
-from mindroom.turn_record import TurnRecord
 from tests.ai_user_id_helpers import _prepared_prompt_result
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -1779,7 +1778,7 @@ class TestAgentBot(AgentBotTestBase):
                         existing_event_id="$existing",
                     ),
                     # A regeneration of the answer the reply shows.
-                    prepared_edit_record=TurnRecord.create(["$event456"], response_event_id="$existing"),
+                    edit_regeneration=True,
                 ),
             )
 

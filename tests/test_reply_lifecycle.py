@@ -1316,7 +1316,7 @@ def test_permanently_failed_pause_row_fences_the_approval() -> None:
 
 
 def test_approval_settlement_guards() -> None:
-    """Approval events from another approval are stale; a superseded approval no longer holds the reply, so it is too."""
+    """Approval events from another approval are stale, and so are those of an approval that no longer holds the reply."""
     reply, _span, _transition = _paused()
     other = rl.approval_settled(
         reply,
@@ -1329,42 +1329,19 @@ def test_approval_settlement_guards() -> None:
         now_ns=NOW,
     )
     assert other.outcome is Outcome.STALE
-    superseded = rl.approval_settled(
+    released = rl.approval_settled(
         _held(reply, None),
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
         result="failed",
-        disposition="superseded",
+        disposition="failed",
         answers_turn=True,
         now_ns=NOW,
     )
-    assert superseded.outcome is Outcome.STALE
-    # A finish settles what its pause held whatever the reply does; only a completed run consumes its edit.
-    assert other.effects == superseded.effects == (SettleSources("span-1", consumes_edit=False),)
-    # The span that ran the approved work says whether it answered: completed consumes the edit, failed does not.
-    # A completed answer Matrix refused for good fails the approval but still consumes it, as a queued answer does.
-    resume = replace(_span, span_id="span-2", kind=SpanKind.APPROVAL_RESUME, approval_id="approval-1")
-    in_place = replace(_span, span_id="span-1")
-    other = replace(_span, span_id="span-3")
-    for ran, outcome, result, consumed in (
-        (resume, SpanOutcome.COMPLETED, "finished", True),
-        (resume, SpanOutcome.FAILED, "finished", False),
-        (resume, SpanOutcome.COMPLETED, "failed", True),
-        (in_place, SpanOutcome.COMPLETED, "failed", True),
-        (other, SpanOutcome.COMPLETED, "finished", False),
-    ):
-        settled = rl.approval_settled(
-            reply,
-            replace(ran, outcome=outcome, ended_at_ns=NOW),
-            approval_id="approval-1",
-            paused_span_id="span-1",
-            result=result,
-            disposition=None if result == "finished" else "failed",
-            answers_turn=True,
-            now_ns=NOW,
-        )
-        assert settled.effects[0] == SettleSources("span-1", consumes_edit=consumed), (ran.span_id, outcome, result)
+    assert released.outcome is Outcome.STALE
+    # A finish settles what its pause held whatever the reply does.
+    assert other.effects == released.effects == (SettleSources("span-1"),)
     failed = rl.approval_settled(
         reply,
         None,

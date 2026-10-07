@@ -500,8 +500,6 @@ _TABLES = (
             'suppressed', 'restored', 'released', 'superseded', 'lost')),
         claimed_at_ns BIGINT NOT NULL,
         ended_at_ns BIGINT,
-        -- A regeneration's selected edit, committed to its turn when it answers.
-        prepared_edit_json TEXT,
         PRIMARY KEY (principal_id, span_id)
     )
     """,

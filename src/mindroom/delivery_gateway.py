@@ -542,8 +542,6 @@ class FinalDeliveryRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
     skip_mentions: bool = False
-    # Set when this answer completes a regeneration, which consumes the edit its span selected.
-    consumes_edit: bool = False
 
 
 @dataclass(frozen=True)
@@ -606,8 +604,6 @@ class StreamingDeliveryRequest:
     visible_event_id_callback: Callable[[str], None] | None = None
     visible_progress_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
-    # Whether the stream's answer completes a regeneration, known only once the run ends.
-    consumes_edit: Callable[[], bool] | None = None
     allow_new_terminal_message: Callable[[], bool] | None = None
 
 
@@ -678,7 +674,6 @@ class FinalizeStreamedResponseRequest:
     extra_content: dict[str, Any] | None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
-    consumes_edit: bool = False
 
 
 @dataclass(frozen=True)
@@ -1921,7 +1916,6 @@ class DeliveryGateway:
             handle,
             handle.presentation(display_text, tuple(draft.tool_trace or ())),
             state=ReplyState.COMPLETED,
-            consumes_edit=request.consumes_edit,
         )
         # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
         shown_text, _shown_trace = _reply_body(display_text, draft.tool_trace, reply_write.shown)
@@ -2236,11 +2230,7 @@ class DeliveryGateway:
         )
         handle = current_span()
         assert handle is not None, "every reply stream runs in its reply span"
-        reply_hooks = self._reply_stream_hooks(
-            handle,
-            request.target,
-            request.consumes_edit,
-        )
+        reply_hooks = self._reply_stream_hooks(handle, request.target)
         return await send_streaming_response(
             client,
             request.target,
@@ -2279,7 +2269,6 @@ class DeliveryGateway:
         self,
         handle: SpanHandle,
         target: MessageTarget,
-        consumes_edit: Callable[[], bool] | None,
         *,
         published: dict[str, Presentation] | None = None,
     ) -> dict[str, Any]:
@@ -2397,9 +2386,8 @@ class DeliveryGateway:
         def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite:
             status = state_content.get(constants.STREAM_STATUS_KEY)
             state = _reply_state_for_stream_status(status)
-            consumed = consumes_edit is not None and consumes_edit()
             if progress.untransformed_text is None:
-                return terminal_write(handle, shown(progress), state=state, consumes_edit=consumed)
+                return terminal_write(handle, shown(progress), state=state)
             # The final transform reshaped the whole reply: that is what it
             # shows from now on, and the span's own answer stays canonical.
             whole = Presentation(
@@ -2410,7 +2398,7 @@ class DeliveryGateway:
                 show_tool_calls=handle.base.show_tool_calls,
             )
             canonical = shown(replace(progress, text=progress.untransformed_text))
-            return terminal_write(handle, canonical, state=state, frozen_display=whole, consumes_edit=consumed)
+            return terminal_write(handle, canonical, state=state, frozen_display=whole)
 
         async def terminal_send(
             client: nio.AsyncClient,
@@ -2489,12 +2477,7 @@ class DeliveryGateway:
         handle = current_span()
         assert handle is not None, "progress streams into the reply of the span that runs it"
         published: dict[str, Presentation] = {}
-        hooks = self._reply_stream_hooks(
-            handle,
-            target,
-            None,
-            published=published,
-        )
+        hooks = self._reply_stream_hooks(handle, target, published=published)
         progress = stream_progress_edits(
             self._ready_client(),
             target,
@@ -2870,7 +2853,6 @@ class DeliveryGateway:
                         target=request.target,
                         existing_event_id=existing_event_id,
                         response_text=stream_outcome.canonical_final_body_candidate,
-                        consumes_edit=request.consumes_edit,
                         identity=request.identity,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,

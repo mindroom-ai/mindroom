@@ -146,8 +146,6 @@ class Span:
     rollback: Rollback | None = None
     outcome: SpanOutcome | None = None
     ended_at_ns: int | None = None
-    # A regeneration's selected edit (an encoded turn record), committed to the turn when the span answers.
-    prepared_edit: str | None = None
 
     @property
     def ended(self) -> bool:
@@ -230,8 +228,6 @@ class SettleSources:
     """In the transaction: settle every pending source of the span, which records its turn answered."""
 
     span_id: str
-    # Whether the span's answer consumes the selected edit its regeneration carries.
-    consumes_edit: bool = False
     # False when nothing answered the sources, deleted or terminal without an answer: their turn stays unanswered.
     answered: bool = True
 
@@ -522,8 +518,6 @@ class ClaimRequest:
     approval_id: str | None = None
     # Set when an interactive selection created this span at its acknowledgement.
     interactive_span_id: str | None = None
-    # Set for edit regenerations: the encoded turn record of the edit the run answers.
-    prepared_edit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,7 +569,6 @@ def _new_span(
         base_sequence=reply.reply_sequence,
         approval_id=request.approval_id,
         rollback=rollback,
-        prepared_edit=request.prepared_edit,
     )
 
 
@@ -963,8 +956,6 @@ class TerminalWrite:
     frozen_display: str | None = None
     # The span's last direct progress edit, which this durable write confirms.
     confirms: ProgressConfirmation | None = None
-    # Whether this answer consumes the regeneration's selected edit: its run completed.
-    consumes_edit: bool = False
 
 
 def _terminal_row(
@@ -993,8 +984,7 @@ def _terminal_row(
     )
     shown = write.shown if write.frozen_display is None else write.frozen_display
     updated, row = _row(updated, span, stage, shown=shown)
-    consumes_edit = write.consumes_edit and write.state is ReplyState.COMPLETED
-    effects: tuple[Effect, ...] = (SettleSources(span.span_id, consumes_edit=consumes_edit),) if settles else ()
+    effects: tuple[Effect, ...] = (SettleSources(span.span_id),) if settles else ()
     return Transition(
         outcome=Outcome.APPLIED,
         reply=updated,
@@ -1296,10 +1286,7 @@ def approval_settled(
     """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
 
     The turn stays unanswered when no owner is left to answer it
-    (``answers_turn``); the store also leaves a deleted turn unanswered. Only an answer the span that ran the
-    approved work completed consumes the edit a regeneration carries: a
-    resume, or a span approved in place. It consumes it even when Matrix then
-    refused that answer, as a regeneration's queued answer does.
+    (``answers_turn``); the store also leaves a deleted turn unanswered.
     """
     decided = _approval_finish(
         reply,
@@ -1309,15 +1296,7 @@ def approval_settled(
         disposition=disposition,
         now_ns=now_ns,
     )
-    completed = (
-        last_span is not None
-        and last_span.outcome is SpanOutcome.COMPLETED
-        and (
-            last_span.span_id == paused_span_id
-            or (last_span.kind is SpanKind.APPROVAL_RESUME and last_span.approval_id == approval_id)
-        )
-    )
-    settle = SettleSources(paused_span_id, consumes_edit=answers_turn and completed, answered=answers_turn)
+    settle = SettleSources(paused_span_id, answered=answers_turn)
     ended = decided.reply
     if not answers_turn and decided.outcome is not Outcome.STALE and ended is not None and ended.terminal:
         # No owner is left, as for a removed entity or one that permanently failed to start: the reply ends

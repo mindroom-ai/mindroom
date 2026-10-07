@@ -13,8 +13,6 @@ from . import journal
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.turn_record import TurnRecord
-
     from .approval_continuations import ApprovalContinuation
     from .backend import Transaction
 
@@ -47,7 +45,6 @@ class _LegacyIdentity(TypedDict):
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     show_tool_calls: bool
-    prepared_edit_record: TurnRecord | None
 
 
 _PAGE_SIZE = 128
@@ -344,7 +341,6 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _Lega
         "logical_source_event_ids": tuple(_event_ids(identity.get("logical_source_event_ids"))),
         "discovery_event_ids": tuple(_event_ids(identity.get("discovery_event_ids", []))),
         "show_tool_calls": _required_bool(context.get("show_tool_calls")),
-        "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
     }
 
 
@@ -354,13 +350,6 @@ def adopted_entity_name(context: Mapping[str, object]) -> str | None:
     if not isinstance(identity, dict):
         return None
     return _required_text(cast("dict[str, object]", identity).get("entity_name"))
-
-
-def _prepared_edit(raw: object) -> TurnRecord | None:
-    if not isinstance(raw, dict):
-        return None
-    stored = cast("dict[str, object]", raw)
-    return TurnRecordCodec._from_ledger_record(str(stored.get("anchor_event_id")), stored)
 
 
 # LEGACY_COMPAT: Settling an adopted continuation that reply classification never named a span for.

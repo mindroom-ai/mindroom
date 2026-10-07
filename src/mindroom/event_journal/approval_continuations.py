@@ -13,15 +13,13 @@ from mindroom.history.types import HistoryScope
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import membership_state, outbox, reply_messages, reply_spans, turn_records
+from . import membership_state, outbox, reply_messages, reply_spans
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .legacy_response_attempts import legacy_identity
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from mindroom.turn_record import TurnRecord
 
     from .backend import Row, Transaction
 
@@ -221,7 +219,6 @@ class ApprovalContinuation:
     runtime_generation: str | None = None
     failure_reason: str | None = None
     generation: int = 0
-    prepared_edit_record: TurnRecord | None = None
     cli_call: dict[str, object] | None = None
     continuation_count: int = 0
     # The span whose pause created this continuation; it names the reply, and
@@ -320,7 +317,6 @@ class _PausedReply:
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     show_tool_calls: bool
-    prepared_edit_record: TurnRecord | None
 
 
 def _shows_tool_calls(presentation: str) -> bool:
@@ -356,11 +352,6 @@ def _paused_reply(
         logical_source_event_ids=span.sources.logical,
         discovery_event_ids=span.sources.discovery,
         show_tool_calls=_shows_tool_calls(reply.presentation),
-        prepared_edit_record=(
-            None
-            if span.prepared_edit is None
-            else turn_records.decode_prepared_edit(span.prepared_edit, span.sources.logical[0])
-        ),
     )
 
 
@@ -457,7 +448,6 @@ def _from_rows(
         ),
         failure_reason=cast("str | None", row["failure_reason"]),
         generation=int(row["generation"]),
-        prepared_edit_record=identity.prepared_edit_record,
         span_id=cast("str | None", row["span_id"]),
         claim_span_id=claim_span_id,
     )

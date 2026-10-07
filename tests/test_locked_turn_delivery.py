@@ -19,7 +19,6 @@ from mindroom.matrix.client_delivery import (
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome, SpanSources
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
-from mindroom.turn_record import TurnRecord
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config_with_team,
@@ -248,7 +247,7 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
         **{
             **request.__dict__,
             "existing_event_id": "$prior_answer",
-            "prepared_edit_record": TurnRecord.create(["$event"], response_event_id="$prior_answer", completed=True),
+            "edit_regeneration": True,
         },
     )
 

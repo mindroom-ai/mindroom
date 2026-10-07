@@ -13,7 +13,6 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_runner_focused import _admit_approval_source, _in_reply_span, _ordered_pause
@@ -56,10 +55,7 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
             pending_event_ids=("$edit",),
             logical_source_event_ids=("$source",),
         ),
-        prepared_edit_record=TurnRecord.create(
-            ["$source"],
-            source_event_revisions={"$source": (20, "$edit")},
-        ),
+        edit_regeneration=True,
         matrix_run_metadata={MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$settled"]},
         # A regeneration replaces the answer it names.
         existing_event_id="$answer",
