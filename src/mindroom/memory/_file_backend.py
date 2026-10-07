@@ -351,12 +351,9 @@ def write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: by
         open_directory_within_root(scope_path) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
     ):
-        atomic_write_bytes_at(
-            directory_fd,
-            relative_path.name,
-            payload,
-            file_mode=existing_file_mode(directory_fd, relative_path.name),
-        )
+        mode = existing_file_mode(directory_fd, relative_path.name)
+        # A new file is readable like a hand-written one, not left at the temp file's 0o600.
+        atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=0o644 if mode is None else mode)
 
 
 def _append_scope_markdown_line(scope_path: Path, relative_path: Path, line: str, *, initial_text: bytes) -> None:

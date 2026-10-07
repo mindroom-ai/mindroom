@@ -304,8 +304,8 @@ Work through the agenda in order:
 
 0. If it names a previous proposal, carry forward every change in it that still holds, name each one you drop and why, and address the previous reviewer's notes.
 1. Reconcile memory with each new conversation and daily note: later evidence wins, an explicit correction outranks an earlier guess, and each durable fact belongs in the topic file that owns it, which you may create.
-   Before adding a fact, search memory/ and your context files for it; when it is already recorded, leave it or add only what is new.
-   When newer evidence supersedes a fact, search memory/ for its key terms, such as names and identifiers, and mark or update every line that still states the old version, not just the first one you find.
+   Before adding a fact, search the staged copy and your context files for it; when it is already recorded, leave it or add only what is new.
+   When newer evidence supersedes a fact, search the staged copy for its key terms, such as names and identifiers, and mark or update every line that still states the old version, not just the first one you find.
 2. Re-read each changed cited source and record whether it confirms, updates, or contradicts the claim that cites it; fix or mark a dead citation instead of deleting its claim.
 3. Remove duplicates within topic files.
 

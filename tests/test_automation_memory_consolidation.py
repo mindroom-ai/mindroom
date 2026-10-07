@@ -665,16 +665,18 @@ def test_a_verdict_line_with_markdown_marks_still_counts(tmp_path: Path, verdict
 
 
 def test_an_applied_file_keeps_its_permissions(tmp_path: Path) -> None:
-    """Rewriting a memory file keeps its mode, like the memory tool does."""
+    """Rewriting a memory file keeps its mode, like the memory tool does, and a created file is readable like a written one."""
     workspace = _workspace(tmp_path)
-    (workspace.root / "memory/projects.md").chmod(0o644)
+    (workspace.root / "memory/projects.md").chmod(0o640)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
     workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+    workspace.stage("memory/preferences.md", "- New preference.\n")
 
     workspace.review(workspace.dream(ask), "VERDICT: APPROVE")
 
-    assert (workspace.root / "memory/projects.md").stat().st_mode & 0o777 == 0o644
+    assert (workspace.root / "memory/projects.md").stat().st_mode & 0o777 == 0o640
+    assert (workspace.root / "memory/preferences.md").stat().st_mode & 0o777 == 0o644
 
 
 def test_approve_with_notes_applies_and_hands_the_notes_to_the_next_run(tmp_path: Path) -> None:
