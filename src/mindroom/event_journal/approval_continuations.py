@@ -937,12 +937,13 @@ def may_release(
     approval_id: str,
     expected_generation: int,
 ) -> ApprovalContinuation | None:
-    """Lock an interrupted continuation whose still-pending sources may go back to ordinary replay.
+    """Lock an interrupted continuation that may be released before any FINAL.
 
     A restart cut the approved run short before any FINAL, so its reply is still
-    the unfinished stream of one turn, which replay adopts and continues like
-    any reply a restart left streaming. The failure fence has already stopped
-    execution and the caller has ended the cards.
+    the unfinished stream of one turn. Replay adopts and continues it like any
+    reply a restart left streaming, unless a Stop the run left unapplied ends it
+    (``rl.approval_released``). The failure fence has already stopped execution
+    and the caller has ended the cards.
     """
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing" or continuation.generation != expected_generation:

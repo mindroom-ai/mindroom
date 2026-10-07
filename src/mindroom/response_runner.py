@@ -2254,10 +2254,11 @@ class ResponseRunner:
         *,
         reason: str,
     ) -> str | None:
-        """Hand an approved run a restart cut short back to replay, which continues its reply.
+        """Release an approved run a restart cut short, so replay continues its reply or its Stop ends it.
 
         Before a FINAL the reply is still the unfinished stream of one turn, so
-        the replayed turn adopts it like any reply a restart left streaming. A
+        the replayed turn adopts it like any reply a restart left streaming; a
+        Stop the run left unapplied ends it cancelled instead. A
         hand-back that cannot finish yet, such as cards that did not expire, is
         retried by the next recovery pass. A deleted reply, a resume that
         already failed before its failure was fenced, or a FINAL already owed

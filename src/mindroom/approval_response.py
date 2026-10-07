@@ -201,7 +201,7 @@ class ApprovalResponseCoordinator:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Finishes a paused run once its FINAL is terminal, settling its turn.
     finish_approval: Callable[[str], Awaitable[bool]]
-    # Hands an interrupted run's sources back to replay, with the generation it observed.
+    # Releases an interrupted run, with the generation it observed: replay continues its reply, or a Stop ends it.
     release_approval: Callable[[str, int], Awaitable[bool]]
 
     async def plan_pause(

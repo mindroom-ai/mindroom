@@ -35,6 +35,7 @@ _HELD_BY = f"""(
       ON held_span.principal_id = continuation.principal_id AND held_span.span_id = continuation.span_id
     WHERE held_span.principal_id = reply_messages.principal_id AND held_span.reply_id = reply_messages.reply_id
       AND NOT (continuation.state = 'failing' AND COALESCE(continuation.failure_reason, '') = '{SUPERSEDED_FAILURE_REASON}')
+    ORDER BY continuation.created_at_ns, continuation.approval_id
     LIMIT 1
 )"""  # noqa: S608 - a fixed constant, not input
 
