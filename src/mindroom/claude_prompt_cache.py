@@ -380,19 +380,18 @@ def _search_result_with_available_references(
     return {**block_dict, "content": {**content, "tool_references": available_references}}
 
 
-def _request_kwargs_with_replayable_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Repair replayed tool-search blocks and drop their references to tools absent from this request.
+def _request_kwargs_without_unavailable_tool_references(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop replayed tool-search references to tools absent from this request.
 
     Search results can reference tools that a later request no longer offers after
     its dynamic tool surface changes, which Claude rejects. A search left with no
     references stays as an empty result, like a search that matched nothing, so
     the signed thinking blocks around it are not moved together.
     """
-    prepared_kwargs = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
-    messages = prepared_kwargs.get("messages")
+    messages = request_kwargs.get("messages")
     if not isinstance(messages, list):
-        return prepared_kwargs
-    available_tool_names = _request_tool_names(prepared_kwargs)
+        return request_kwargs
+    available_tool_names = _request_tool_names(request_kwargs)
     prepared_messages = list(messages)
     changed = False
     for message_index, message in enumerate(messages):
@@ -414,8 +413,8 @@ def _request_kwargs_with_replayable_tool_search_results(request_kwargs: dict[str
             prepared_messages[message_index] = {**message_dict, "content": prepared_content}
             changed = True
     if not changed:
-        return prepared_kwargs
-    return {**prepared_kwargs, "messages": prepared_messages}
+        return request_kwargs
+    return {**request_kwargs, "messages": prepared_messages}
 
 
 def _request_kwargs_with_deferred_tool_search(
@@ -621,7 +620,8 @@ def prepare_claude_request_kwargs(
     request_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply MindRoom's wire transformations to one Claude request payload."""
-    prepared_kwargs = _request_kwargs_with_replayable_tool_search_results(request_kwargs)
+    prepared_kwargs = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared_kwargs = _request_kwargs_without_unavailable_tool_references(prepared_kwargs)
     prepared_kwargs = request_kwargs_without_replayed_citations(prepared_kwargs)
     prepared_kwargs = request_kwargs_with_leading_tool_results(prepared_kwargs)
     prepared_kwargs = request_kwargs_with_supported_inline_media(
