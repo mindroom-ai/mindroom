@@ -3202,17 +3202,17 @@ agents:
     automations: [prompt_curation]
 ```
 
-## Memory Consolidation
+## Dreaming
 
 Facts in `memory/` go stale when a later conversation corrects them or a cited source changes.
-Enable the [`memory_consolidation`](https://docs.mindroom.chat/scheduling/#memory_consolidation) automation to have the agent reconcile `memory/` nightly with new conversations, daily notes, and changed cited sources, through a proposal that a second run reviews before MindRoom applies it.
+Enable the [`dreaming`](https://docs.mindroom.chat/scheduling/#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations, daily notes, and changed cited sources, through a proposal that a second run reviews before MindRoom applies it.
 
 ```yaml
 agents:
   mind:
     memory_backend: file
     thread_exports: true    # optional: adds conversations as input
-    automations: [memory_consolidation]
+    automations: [dreaming]
 ```
 
 ## [`memory`]
@@ -4236,7 +4236,7 @@ agents:
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
-      - memory_consolidation
+      - dreaming
 ```
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
@@ -4284,10 +4284,10 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
 
-### `memory_consolidation`
+### `dreaming`
 
 Memory keeps claims that later conversations correct and that their sources stop supporting.
-`memory_consolidation` reconciles the agent's `memory/` files nightly with what changed since its last run, through a proposal that a second run reviews before MindRoom applies it.
+`dreaming` reconciles the agent's `memory/` files nightly with what changed since its last run, through a proposal that a second run reviews before MindRoom applies it.
 
 1. The check lists inputs that changed since a run last handled them: [thread exports](https://docs.mindroom.chat/thread-exports/) in the workspace, daily notes from before today, and the `knowledge/` and `thread_exports/` paths that `memory/` files cite, including cited files that no longer exist; when nothing changed and no proposal is waiting to be applied, it posts nothing.
 2. The agent works through an agenda of at most 40 inputs, oldest first, in a copy of `memory/`: it reconciles memory with the new evidence, records whether each changed source still supports the claims that cite it, and removes duplicates, giving each fact a source path and date and recording conflicting sources with both versions.
@@ -4299,7 +4299,7 @@ Memory keeps claims that later conversations correct and that their sources stop
 A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due, and the next run starts by carrying forward the proposals that were never applied.
 `MEMORY.md` and context files never change; the agent suggests changes to them in its report.
 An input no run has reviewed counts as handled once its content is more than seven days old, so turning on the automation or thread exports starts from recent history and never reconciles the older archive.
-Each run keeps its agenda, report, patch, list of deleted lines, and verdict in `.mindroom/memory_consolidation/runs/<run>/` in the workspace, the newest 30 runs at least, so an applied patch can be undone with `git apply -R` from the workspace root.
+Each run keeps its agenda, report, patch, list of deleted lines, and verdict in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least, so an applied patch can be undone with `git apply -R` from the workspace root.
 
 | Field | Default | Description |
 |---|---|---|
@@ -4307,8 +4307,8 @@ Each run keeps its agenda, report, patch, list of deleted lines, and verdict in 
 | `room` | first configured room | Where both prompts are posted |
 | `model` | the agent's model | A key of `models` to run both prompts with |
 
-`memory_consolidation` needs `memory_backend: file` and a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
-Its prompt templates are overridable as `MEMORY_CONSOLIDATION_DREAM_TEMPLATE`, `MEMORY_CONSOLIDATION_RECHECK_TEMPLATE`, and `MEMORY_CONSOLIDATION_VERIFY_TEMPLATE`.
+`dreaming` needs `memory_backend: file` and a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE`, `DREAMING_RECHECK_TEMPLATE`, and `DREAMING_VERIFY_TEMPLATE`.
 
 # Chat Commands
 
@@ -13747,10 +13747,10 @@ Kubernetes mounts such knowledge read-only, because kubelet follows links inside
 ### Workspace files the primary reads and writes
 
 The primary treats everything inside a mounted workspace as worker-controlled.
-Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, and the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `memory_consolidation` reads and the cited files it stats, are reached through `path_confinement` descriptors walked from the workspace root.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, and the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `dreaming` reads and the cited files it stats, are reached through `path_confinement` descriptors walked from the workspace root.
 Those descriptors refuse links, never write to a file that has another hard link, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
-`memory_consolidation` writes each run's agenda, staging copy of `memory/`, patch, and deleted-line list under `.mindroom/memory_consolidation/runs/`, and removes a run's staging when the run ends and run directories beyond the newest 30 through descriptor-relative deletes that never follow a link.
+`dreaming` writes each run's agenda, staging copy of `memory/`, patch, and deleted-line list under `.mindroom/dreaming/runs/`, and removes a run's staging when the run ends and run directories beyond the newest 30 through descriptor-relative deletes that never follow a link.
 It writes an approved proposal into `memory/` from bytes worker code staged, which gives the agent nothing it could not write itself; it writes only Markdown under `memory/` other than today's daily note and context files, and keeps its progress below `tracking/`, outside the workspace.
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
@@ -13770,8 +13770,8 @@ Reads of worker-controlled files are capped per surface.
 |---|---|---|
 | Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
 | `prompt_curation` snapshots of `MEMORY.md` and context files | 1 MiB per file | Refused, so the check is skipped with a warning or verify reports the file as unreadable |
-| `memory_consolidation` memory files, staging copies, reports, and verdicts | 1 MiB per file | A memory file is left out of the run, a staged file is a finding, and a report or verdict counts as missing, so the run stops or the proposal is rejected |
-| `memory_consolidation` thread-export `index.json` | 8 MiB per room | Ignored, so that room's conversations are aged by file modification time |
+| `dreaming` memory files, staging copies, reports, and verdicts | 1 MiB per file | A memory file is left out of the run, a staged file is a finding, and a report or verdict counts as missing, so the run stops or the proposal is rejected |
+| `dreaming` thread-export `index.json` | 8 MiB per room | Ignored, so that room's conversations are aged by file modification time |
 | Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |

@@ -87,20 +87,20 @@ class PromptCurationAutomation(_ScheduledAutomation):
         return self
 
 
-class MemoryConsolidationAutomation(_ScheduledAutomation):
+class DreamingAutomation(_ScheduledAutomation):
     """Nightly reconciliation of memory/ with new conversations, daily notes, and the sources memory cites."""
 
-    name: Literal["memory_consolidation"] = Field(
-        default="memory_consolidation",
+    name: Literal["dreaming"] = Field(
+        default="dreaming",
         description="Built-in automation name",
     )
     cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
 
 
-Automation = Annotated[PromptCurationAutomation | MemoryConsolidationAutomation, Field(discriminator="name")]
+Automation = Annotated[PromptCurationAutomation | DreamingAutomation, Field(discriminator="name")]
 # Every automation message carries its automation's name as its hook source, so the turns it starts can be recognized.
 AUTOMATION_NAMES = frozenset(
-    model.model_fields["name"].default for model in (PromptCurationAutomation, MemoryConsolidationAutomation)
+    model.model_fields["name"].default for model in (PromptCurationAutomation, DreamingAutomation)
 )
 
 

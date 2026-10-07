@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
-from mindroom.automations.memory_consolidation import check_consolidation
+from mindroom.automations.dreaming import check_dreaming
 from mindroom.automations.prompt_curation import check_curation
 from mindroom.automations.steps import Ask, Done
 from mindroom.automations.threads import record_automation_thread
@@ -83,7 +83,7 @@ def _check(config: Config, runtime_paths: RuntimePaths, agent_name: str, automat
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
     if isinstance(automation, PromptCurationAutomation):
         return check_curation(config, runtime_paths, agent_name, automation)
-    return check_consolidation(config, runtime_paths, agent_name)
+    return check_dreaming(config, runtime_paths, agent_name)
 
 
 @dataclass

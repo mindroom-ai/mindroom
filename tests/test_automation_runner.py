@@ -17,7 +17,7 @@ from mindroom.automations.steps import Ask, Done
 from mindroom.automations.threads import automation_threads
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
-from mindroom.config.automations import MemoryConsolidationAutomation, PromptCurationAutomation
+from mindroom.config.automations import DreamingAutomation, PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
@@ -439,13 +439,13 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
 
 
 @pytest.mark.asyncio
-async def test_memory_consolidation_runs_its_dream_and_review_through_the_runner(tmp_path: Path) -> None:
+async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: Path) -> None:
     """The dream and review each get a thread of their own, both are recorded as the automation's, and approval applies."""
     agent = AgentConfig(
         display_name="Mind",
         memory_backend="file",
         rooms=[ROOM],
-        automations=[MemoryConsolidationAutomation()],
+        automations=[DreamingAutomation()],
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
@@ -468,7 +468,7 @@ async def test_memory_consolidation_runs_its_dream_and_review_through_the_runner
     with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
-        (run_dir,) = (root / ".mindroom/memory_consolidation/runs").iterdir()
+        (run_dir,) = (root / ".mindroom/dreaming/runs").iterdir()
         (run_dir / "staging/memory/people.md").write_text("- Sam lives in Utrecht.\n", encoding="utf-8")
         (run_dir / "report.md").write_text("Moved Sam.\nDREAM: DONE\n", encoding="utf-8")
         runner.response_finished(["$event1"])
@@ -478,9 +478,9 @@ async def test_memory_consolidation_runs_its_dream_and_review_through_the_runner
         assert await wait_for_background_tasks(5)
 
     dream, review, notice = bot.sent
-    assert dream["body"].startswith("@mind 🌙 Memory consolidation: reconcile your memory")
-    assert review["body"].startswith("@mind 🔍 Memory consolidation review:")
-    assert notice["body"] == "✅ Memory consolidation applied the reviewed proposal (files written: 1, removed: 0)."
+    assert dream["body"].startswith("@mind 🌙 Dreaming: reconcile your memory")
+    assert review["body"].startswith("@mind 🔍 Dreaming review:")
+    assert notice["body"] == "✅ Dreaming applied the reviewed proposal (files written: 1, removed: 0)."
     assert [message["thread_id"] for message in bot.sent] == [None, None, "$event2"]
     assert (root / "memory" / "people.md").read_text(encoding="utf-8") == "- Sam lives in Utrecht.\n"
     assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
@@ -491,10 +491,10 @@ async def test_memory_consolidation_runs_its_dream_and_review_through_the_runner
 
 @pytest.mark.asyncio
 async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
-    """A curation due during a consolidation chain waits for it, since each changes what the other measures."""
+    """A curation due during a dreaming chain waits for it, since each changes what the other measures."""
     config, paths, runner, bot = _setup(tmp_path)
     config.agents["mind"].automations = [
-        MemoryConsolidationAutomation(cron="0 4 * * *"),
+        DreamingAutomation(cron="0 4 * * *"),
         PromptCurationAutomation(trigger_tokens=1_000),
     ]
     root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
@@ -505,14 +505,14 @@ async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     (dream,) = bot.sent
-    assert dream["body"].startswith("@mind 🌙 Memory consolidation")
+    assert dream["body"].startswith("@mind 🌙 Dreaming")
 
-    (run_dir,) = (root / ".mindroom/memory_consolidation/runs").iterdir()
+    (run_dir,) = (root / ".mindroom/dreaming/runs").iterdir()
     (run_dir / "report.md").write_text("Nothing to change.\nDREAM: DONE\n", encoding="utf-8")
     with patch.object(runner_module, "set_thread_tag", new=AsyncMock()):
         runner.response_finished(["$event1"])
         assert await wait_for_background_tasks(5)
     await _tick(runner, DAY_LATER + timedelta(minutes=1))
 
-    assert bot.sent[1]["body"].startswith("Memory consolidation changed nothing")
+    assert bot.sent[1]["body"].startswith("Dreaming changed nothing")
     assert bot.sent[2]["body"].startswith("@mind 🧹 Prompt maintenance")

@@ -7978,12 +7978,12 @@ visibility = [
 [[modules]]
 path = "mindroom.automations.threads"
 depends_on = ["mindroom.constants", "mindroom.path_confinement"]
-visibility = ["mindroom.automations.memory_consolidation", "mindroom.automations.runner"]
+visibility = ["mindroom.automations.dreaming", "mindroom.automations.runner"]
 
 [[modules]]
 path = "mindroom.automations.steps"
 depends_on = []
-visibility = ["mindroom.automations.memory_consolidation", "mindroom.automations.prompt_curation", "mindroom.automations.runner"]
+visibility = ["mindroom.automations.dreaming", "mindroom.automations.prompt_curation", "mindroom.automations.runner"]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
@@ -7998,7 +7998,7 @@ depends_on = [
 visibility = ["mindroom.automations.runner"]
 
 [[modules]]
-path = "mindroom.automations.memory_consolidation"
+path = "mindroom.automations.dreaming"
 depends_on = [
     "mindroom.automations.steps",
     "mindroom.automations.threads",
@@ -8012,7 +8012,7 @@ visibility = ["mindroom.automations.runner"]
 [[modules]]
 path = "mindroom.automations.runner"
 depends_on = [
-    "mindroom.automations.memory_consolidation",
+    "mindroom.automations.dreaming",
     "mindroom.automations.prompt_curation",
     "mindroom.automations.steps",
     "mindroom.automations.threads",

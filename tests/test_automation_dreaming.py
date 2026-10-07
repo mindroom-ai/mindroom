@@ -1,4 +1,4 @@
-"""The memory_consolidation built-in: what it reviews, how it validates a proposal, and when it applies one."""
+"""The dreaming built-in: what it reviews, how it validates a proposal, and when it applies one."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from urllib.parse import quote
 
 import pytest
 
-from mindroom.automations.memory_consolidation import check_consolidation
+from mindroom.automations.dreaming import check_dreaming
 from mindroom.automations.steps import Ask, Done
 from mindroom.automations.threads import record_automation_thread
 from mindroom.config.agent import AgentConfig
-from mindroom.config.automations import MemoryConsolidationAutomation
+from mindroom.config.automations import DreamingAutomation
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -49,7 +49,7 @@ class _Workspace:
         agent = AgentConfig(
             display_name="Mind",
             memory_backend="file",
-            automations=[MemoryConsolidationAutomation()],
+            automations=[DreamingAutomation()],
             **self.agent_fields,
         )
         config = Config(
@@ -80,10 +80,10 @@ class _Workspace:
         return (self.root / path).read_text(encoding="utf-8")
 
     def check(self) -> Ask | None:
-        return check_consolidation(self.config, self.paths, "mind")
+        return check_dreaming(self.config, self.paths, "mind")
 
     def run_dir(self) -> Path:
-        runs = sorted((self.root / ".mindroom/memory_consolidation/runs").iterdir())
+        runs = sorted((self.root / ".mindroom/dreaming/runs").iterdir())
         return runs[-1]
 
     def agenda(self) -> str:
@@ -114,7 +114,7 @@ class _Workspace:
         if verdict is not None:
             (self.run_dir() / "verdict.md").write_text(f"Checked every source.\n{verdict}\n", encoding="utf-8")
         assert ask.then is not None
-        with patch("mindroom.automations.memory_consolidation.refresh_agent_memory_search") as refresh:
+        with patch("mindroom.automations.dreaming.refresh_agent_memory_search") as refresh:
             done = ask.then(self.config, "$verify", timed_out)
             assert isinstance(done, Done)
             # The runner calls this on the event loop.
@@ -125,7 +125,7 @@ class _Workspace:
         return done
 
     def state(self) -> dict[str, object]:
-        path = self.tmp_path / "tracking" / "automations" / "mind" / "memory_consolidation.json"
+        path = self.tmp_path / "tracking" / "automations" / "mind" / "dreaming.json"
         if not path.exists():
             return {"reviewed": {}, "pending_run": None, "latest_run": None, "notes": None}
         return json.loads(path.read_text(encoding="utf-8"))
@@ -209,7 +209,7 @@ def test_recent_conversations_and_daily_notes_are_on_the_agenda_and_today_is_not
     ask = _started(workspace)
 
     assert ask.new_thread
-    assert ask.text.startswith("🌙 Memory consolidation: reconcile your memory")
+    assert ask.text.startswith("🌙 Dreaming: reconcile your memory")
     assert "(changed inputs this run: 2)" in ask.text
     agenda = workspace.agenda()
     assert f"- `{EXPORT}`" in agenda
@@ -238,7 +238,7 @@ def test_the_cap_leaves_the_rest_due_for_the_next_run(tmp_path: Path) -> None:
 
     done = workspace.dream(ask)
     assert isinstance(done, Done)
-    assert done.notice == "Memory consolidation changed nothing (inputs reviewed: 40)."
+    assert done.notice == "Dreaming changed nothing (inputs reviewed: 40)."
     assert done.resolve == ("$dream",)
     _started(workspace)
     assert workspace.agenda().count("- `thread_exports/") == 5
@@ -356,7 +356,7 @@ def test_an_entry_that_vanishes_during_the_scan_is_skipped(tmp_path: Path) -> No
         def __exit__(self, *exc: object) -> None:
             self._listing.__exit__(*exc)
 
-    with patch("mindroom.automations.memory_consolidation.os.scandir", side_effect=_Listing):
+    with patch("mindroom.automations.dreaming.os.scandir", side_effect=_Listing):
         ask = _started(workspace)
 
     assert f"- `{EXPORT}`" in workspace.agenda()
@@ -389,11 +389,11 @@ def test_an_agent_without_a_workspace_yet_is_skipped_quietly(tmp_path: Path) -> 
 def test_old_runs_are_pruned_but_unapplied_proposals_are_kept(tmp_path: Path) -> None:
     """The newest 30 run directories stay for undo, plus every proposal the next run still carries."""
     workspace = _workspace(tmp_path)
-    state_path = tmp_path / "tracking/automations/mind/memory_consolidation.json"
+    state_path = tmp_path / "tracking/automations/mind/dreaming.json"
     state_path.parent.mkdir(parents=True)
     state = {**workspace.state(), "pending_run": "20260101T000000000000Z"}
     state_path.write_text(json.dumps(state), encoding="utf-8")
-    runs = workspace.root / ".mindroom/memory_consolidation/runs"
+    runs = workspace.root / ".mindroom/dreaming/runs"
     for index in range(35):
         (runs / f"20260101T0000{index:02}000000Z" / "staging").mkdir(parents=True)
 
@@ -428,7 +428,7 @@ def test_an_unfinished_dream_is_incomplete_and_keeps_its_inputs_due(
 
     assert isinstance(done, Done)
     assert done.notice is not None
-    assert done.notice.startswith("⚠️ Memory consolidation stopped:")
+    assert done.notice.startswith("⚠️ Dreaming stopped:")
     assert not (workspace.run_dir() / "staging").exists()
     assert EXPORT not in workspace.state()["reviewed"]
     assert workspace.check() is not None
@@ -446,7 +446,7 @@ def test_moves_dedupes_and_annotations_are_kept_lines(tmp_path: Path) -> None:
     review = workspace.dream(ask)
 
     assert isinstance(review, Ask)
-    assert review.text.startswith("🔍 Memory consolidation review:")
+    assert review.text.startswith("🔍 Dreaming review:")
     assert "(2 deleted lines, 0 of them found nowhere else in the proposal)" in review.text
     deleted = (workspace.run_dir() / "deleted.txt").read_text(encoding="utf-8")
     assert f"{YESTERDAY}:1 (kept elsewhere)" in deleted
@@ -492,13 +492,13 @@ def test_a_proposal_over_budget_gets_one_recheck_then_stops(tmp_path: Path) -> N
 
     assert isinstance(recheck, Ask)
     assert not recheck.new_thread
-    assert recheck.text.startswith("⚠️ Memory consolidation needs a re-check before review: 19 lines are deleted")
+    assert recheck.text.startswith("⚠️ Dreaming needs a re-check before review: 19 lines are deleted")
     assert "memory/projects.md loses 19 of its 20 lines" in recheck.text
     assert recheck.then is not None
     done = recheck.then(workspace.config, "$dream", False)
     assert isinstance(done, Done)
     assert done.notice is not None
-    assert done.notice.startswith("⚠️ Memory consolidation stopped: 19 lines are deleted")
+    assert done.notice.startswith("⚠️ Dreaming stopped: 19 lines are deleted")
     assert workspace.read("memory/projects.md") == PROJECTS
     assert workspace.state()["pending_run"] is None
 
@@ -572,7 +572,7 @@ def test_an_approved_proposal_writes_only_what_changed_and_resolves_both_threads
 
     done = workspace.review(review, "VERDICT: APPROVE")
 
-    assert done.notice == "✅ Memory consolidation applied the reviewed proposal (files written: 2, removed: 1)."
+    assert done.notice == "✅ Dreaming applied the reviewed proposal (files written: 2, removed: 1)."
     assert done.resolve == ("$dream", "$verify")
     assert workspace.read("memory/projects.md") == corrected
     assert workspace.read("memory/people/person-7.md") == "- Owns project 3.\n"
@@ -660,7 +660,7 @@ def test_a_verdict_line_with_markdown_marks_still_counts(tmp_path: Path, verdict
 
     done = workspace.review(workspace.dream(ask, report="Done.\n**DREAM:** DONE\n"), verdict)
 
-    assert done.notice.startswith("✅ Memory consolidation applied")
+    assert done.notice.startswith("✅ Dreaming applied")
     assert workspace.state()["notes"] == notes
 
 
@@ -689,7 +689,7 @@ def test_approve_with_notes_applies_and_hands_the_notes_to_the_next_run(tmp_path
     done = workspace.review(workspace.dream(ask), "`VERDICT: APPROVE-WITH-NOTES — the report miscounts the changes`")
 
     assert done.notice == (
-        "✅ Memory consolidation applied the reviewed proposal (files written: 1, removed: 0). "
+        "✅ Dreaming applied the reviewed proposal (files written: 1, removed: 0). "
         "Notes for the next run: the report miscounts the changes"
     )
     workspace.write(EXPORT, "messages: [hello, again]\n")
@@ -708,7 +708,7 @@ def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
     done = workspace.review(workspace.dream(ask), None)
 
     assert done.notice.startswith(
-        "⚠️ Memory consolidation was not applied: the review did not end with one of the three verdict lines.",
+        "⚠️ Dreaming was not applied: the review did not end with one of the three verdict lines.",
     )
     assert workspace.read("memory/projects.md") == PROJECTS
 
@@ -747,9 +747,7 @@ def test_anything_but_an_approval_applies_nothing_and_carries_the_proposal(
 
     done = workspace.review(workspace.dream(ask), verdict, timed_out=timed_out)
 
-    assert done.notice == (
-        f"⚠️ Memory consolidation was not applied: {reason}. The next run carries the proposal forward."
-    )
+    assert done.notice == (f"⚠️ Dreaming was not applied: {reason}. The next run carries the proposal forward.")
     assert done.resolve == ()
     assert workspace.read("memory/projects.md") == PROJECTS
     assert workspace.state()["pending_run"] == first_run
@@ -767,15 +765,15 @@ def test_an_unresolved_proposal_stays_pending_across_rejected_successors_until_o
 
     ask = _started(workspace)
     second_run = workspace.run_dir().name
-    assert f"- `.mindroom/memory_consolidation/runs/{first_run}/`" in workspace.agenda()
+    assert f"- `.mindroom/dreaming/runs/{first_run}/`" in workspace.agenda()
     workspace.stage("memory/projects.md", PROJECTS + "- Second attempt.\n")
     workspace.review(workspace.dream(ask), "VERDICT: REJECT — still wrong")
     assert (workspace.state()["pending_run"], workspace.state()["latest_run"]) == (first_run, second_run)
 
     ask = _started(workspace)
     agenda = workspace.agenda()
-    assert f"- `.mindroom/memory_consolidation/runs/{first_run}/`" in agenda
-    assert f"- `.mindroom/memory_consolidation/runs/{second_run}/`" in agenda
+    assert f"- `.mindroom/dreaming/runs/{first_run}/`" in agenda
+    assert f"- `.mindroom/dreaming/runs/{second_run}/`" in agenda
     workspace.stage("memory/projects.md", PROJECTS + "- Third attempt.\n")
     workspace.review(workspace.dream(ask), "VERDICT: APPROVE")
 

@@ -295,17 +295,17 @@ agents:
     automations: [prompt_curation]
 ```
 
-## Memory Consolidation
+## Dreaming
 
 Facts in `memory/` go stale when a later conversation corrects them or a cited source changes.
-Enable the [`memory_consolidation`](scheduling.md#memory_consolidation) automation to have the agent reconcile `memory/` nightly with new conversations, daily notes, and changed cited sources, through a proposal that a second run reviews before MindRoom applies it.
+Enable the [`dreaming`](scheduling.md#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations, daily notes, and changed cited sources, through a proposal that a second run reviews before MindRoom applies it.
 
 ```yaml
 agents:
   mind:
     memory_backend: file
     thread_exports: true    # optional: adds conversations as input
-    automations: [memory_consolidation]
+    automations: [dreaming]
 ```
 
 ## [`memory`]

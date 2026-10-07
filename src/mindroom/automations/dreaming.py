@@ -1,4 +1,4 @@
-"""The memory_consolidation automation: reconcile memory/ with what changed since it was last reconciled.
+"""The dreaming automation: reconcile memory/ with what changed since it was last reconciled.
 
 The check lists inputs that changed since a run last handled them: exported conversations, past daily notes, and the
 workspace files memory cites.
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_RUNS_DIR = ".mindroom/memory_consolidation/runs"
+_RUNS_DIR = ".mindroom/dreaming/runs"
 _MEMORY_DIR = "memory"
 _EXPORTS_DIR = "thread_exports"
 _KNOWLEDGE_DIR = "knowledge"
@@ -123,7 +123,7 @@ class _Tree:
 
 @dataclass(frozen=True)
 class _Run:
-    """One consolidation run, as the check saw the workspace when it fired."""
+    """One dreaming run, as the check saw the workspace when it fired."""
 
     agent_name: str
     runtime_paths: RuntimePaths
@@ -161,7 +161,7 @@ def _state_root(runtime_paths: RuntimePaths, agent_name: str) -> Path:
 def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State:
     try:
         payload = json.loads(
-            read_regular_file_within_root(_state_root(runtime_paths, agent_name), "memory_consolidation.json"),
+            read_regular_file_within_root(_state_root(runtime_paths, agent_name), "dreaming.json"),
         )
     except FileNotFoundError:
         return _State()
@@ -192,7 +192,7 @@ def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> 
     }
     write_file_within_root(
         _state_root(runtime_paths, agent_name),
-        "memory_consolidation.json",
+        "dreaming.json",
         json.dumps(payload, indent=1, sort_keys=True).encode(),
     )
 
@@ -431,7 +431,7 @@ def _prune_runs(root: Path, keep: tuple[str, ...]) -> None:
 
 
 def _agenda(run: _Run, state: _State, waiting: int) -> str:
-    lines = ["# Memory consolidation agenda", "", f"Run `{run.run_id}`; paths are relative to your workspace."]
+    lines = ["# Dreaming agenda", "", f"Run `{run.run_id}`; paths are relative to your workspace."]
     if run.carried:
         lines += [
             "",
@@ -472,7 +472,7 @@ def _context_files(config: Config, agent_name: str) -> set[str]:
     return {PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files}
 
 
-def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Ask | None:
+def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Ask | None:
     """Return the dream prompt when an input changed or a proposal is unapplied, or None.
 
     Raises ``OSError`` or ``ValueError`` when memory or the state cannot be read safely.
@@ -515,10 +515,10 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
         pass
     for path, payload in snapshot.items():
         write_file_within_root(root, f"{run.run_dir}/staging/{path}", payload)
-    logger.info("Memory consolidation starts a run", agent=agent_name, run=run.run_id, inputs=len(run.due))
+    logger.info("Dreaming starts a run", agent=agent_name, run=run.run_id, inputs=len(run.due))
     return Ask(
         config.render_prompt(
-            "MEMORY_CONSOLIDATION_DREAM_TEMPLATE",
+            "DREAMING_PROMPT_TEMPLATE",
             input_count=len(run.due),
             agenda_path=f"{run.run_dir}/agenda.md",
             staging_path=f"{run.run_dir}/staging/{_MEMORY_DIR}",
@@ -650,10 +650,10 @@ def _after_dream(
 ) -> Ask | Done:
     """Validate the dream's staging, then ask for a review in a thread of its own."""
     if timed_out:
-        return _end(run, "incomplete", "⚠️ Memory consolidation stopped: the run did not finish within an hour.")
+        return _end(run, "incomplete", "⚠️ Dreaming stopped: the run did not finish within an hour.")
     if _last_line(_read_optional(run.root, f"{run.run_dir}/report.md")) != _DONE_LINE:
         reason = f"the run's report does not end with `{_DONE_LINE}`, so its agenda was not finished"
-        return _end(run, "incomplete", f"⚠️ Memory consolidation stopped: {reason}.")
+        return _end(run, "incomplete", f"⚠️ Dreaming stopped: {reason}.")
     staged = _read_memory_tree(run.root, f"{run.run_dir}/staging")
     deletions = _deletions(run, staged.files)
     findings = [f"{name} is outside memory/, which is all this run may change" for name in _outside_memory(run)]
@@ -662,10 +662,10 @@ def _after_dream(
     findings += _budget_findings(run, deletions)
     if findings:
         if rechecked:
-            return _end(run, "invalid", f"⚠️ Memory consolidation stopped: {'; '.join(findings)}.")
+            return _end(run, "invalid", f"⚠️ Dreaming stopped: {'; '.join(findings)}.")
         return Ask(
             config.render_prompt(
-                "MEMORY_CONSOLIDATION_RECHECK_TEMPLATE",
+                "DREAMING_RECHECK_TEMPLATE",
                 findings="; ".join(findings),
                 staging_path=f"{run.run_dir}/staging/{_MEMORY_DIR}",
                 report_path=f"{run.run_dir}/report.md",
@@ -688,7 +688,7 @@ def _after_dream(
     _update_state(run.runtime_paths, run.agent_name, partial(_keep_pending, run=run))
     return Ask(
         config.render_prompt(
-            "MEMORY_CONSOLIDATION_VERIFY_TEMPLATE",
+            "DREAMING_VERIFY_TEMPLATE",
             patch_path=f"{run.run_dir}/proposal.patch",
             changed_files=len(proposal.changed) + len(proposal.deleted),
             agenda_path=f"{run.run_dir}/agenda.md",
@@ -719,7 +719,7 @@ def _end_without_change(run: _Run, thread_id: str) -> Done:
     return _end(
         run,
         "unchanged",
-        f"Memory consolidation changed nothing (inputs reviewed: {len(run.due)}).",
+        f"Dreaming changed nothing (inputs reviewed: {len(run.due)}).",
         resolve=(thread_id,),
     )
 
@@ -748,7 +748,7 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         return _end(
             run,
             "rejected",
-            f"⚠️ Memory consolidation was not applied: {detail or 'the review rejected it'}. "
+            f"⚠️ Dreaming was not applied: {detail or 'the review rejected it'}. "
             "The next run carries the proposal forward.",
         )
     # A config reload during the run can make a proposed file a context file, which the automation never writes.
@@ -768,7 +768,7 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         _remove(run.root, path)
     notes = detail if verdict == "APPROVE-WITH-NOTES" and detail else None
     summary = (
-        f"✅ Memory consolidation applied the reviewed proposal "
+        f"✅ Dreaming applied the reviewed proposal "
         f"(files written: {len(proposal.changed)}, removed: {len(proposal.deleted)})."
     )
     return _end(
@@ -832,5 +832,5 @@ def _end(
             shutil.rmtree("staging", dir_fd=run_fd)
     except FileNotFoundError:
         pass
-    logger.info("Memory consolidation run ended", agent=run.agent_name, run=run.run_id, outcome=outcome)
+    logger.info("Dreaming run ended", agent=run.agent_name, run=run.run_id, outcome=outcome)
     return Done(notice, resolve=resolve, on_loop=on_loop)

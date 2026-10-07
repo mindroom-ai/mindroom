@@ -10183,7 +10183,7 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
 
 @pytest.mark.parametrize(
     ("hook_source", "flushed"),
-    [(None, True), ("memory_consolidation", False), ("prompt_curation", False)],
+    [(None, True), ("dreaming", False), ("prompt_curation", False)],
 )
 def test_a_built_in_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
     """A maintenance turn, such as an unreviewed memory proposal, never reaches auto-flush; other turns do."""

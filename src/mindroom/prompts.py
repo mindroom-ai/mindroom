@@ -19,6 +19,9 @@ __all__ = [
     "DATETIME_CONTEXT_TEMPLATE",
     "DEFAULT_UNSEEN_MESSAGES_HEADER",
     "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
+    "DREAMING_PROMPT_TEMPLATE",
+    "DREAMING_RECHECK_TEMPLATE",
+    "DREAMING_VERIFY_TEMPLATE",
     "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
     "DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS",
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
@@ -29,9 +32,6 @@ __all__ = [
     "INTERRUPTED_PARTIAL_REPLY_HEADER",
     "IN_PROGRESS_PARTIAL_REPLY_HEADER",
     "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE",
-    "MEMORY_CONSOLIDATION_DREAM_TEMPLATE",
-    "MEMORY_CONSOLIDATION_RECHECK_TEMPLATE",
-    "MEMORY_CONSOLIDATION_VERIFY_TEMPLATE",
     "MEMORY_CONTEXT_PROMPT_TEMPLATE",
     "MEMORY_EXISTING_SNIPPETS_TEMPLATE",
     "MEMORY_NO_EXISTING_SNIPPETS",
@@ -297,7 +297,7 @@ When you finish, MindRoom measures the files again and asks you to re-check if a
 Reply with one line saying what you changed."""
 PROMPT_CURATION_RECHECK_TEMPLATE = """⚠️ Prompt maintenance needs a re-check: {findings}.
 Compare your change with the commit you made before it, fix what is listed, and reply with one line saying what you fixed."""
-MEMORY_CONSOLIDATION_DREAM_TEMPLATE = """🌙 Memory consolidation: reconcile your memory with what changed since its last reconciliation, listed in the agenda `{agenda_path}` (changed inputs this run: {input_count}).
+DREAMING_PROMPT_TEMPLATE = """🌙 Dreaming: reconcile your memory with what changed since its last reconciliation, listed in the agenda `{agenda_path}` (changed inputs this run: {input_count}).
 
 Work only in `{staging_path}`, a copy of your memory/ files made for this run, and never edit memory/ itself; a separate review checks your change, and MindRoom applies it once approved.
 Work through the agenda in order:
@@ -323,9 +323,9 @@ Rules:
 
 Write `{report_path}` with one entry per agenda item saying what it changed or why it needed nothing, then each change with its reason and source, counted exactly, and end it with a line of exactly `DREAM: DONE` once every agenda item is handled.
 Reply with one line saying what you changed."""
-MEMORY_CONSOLIDATION_RECHECK_TEMPLATE = """⚠️ Memory consolidation needs a re-check before review: {findings}.
+DREAMING_RECHECK_TEMPLATE = """⚠️ Dreaming needs a re-check before review: {findings}.
 Fix these in `{staging_path}`, keep `{report_path}` ending with `DREAM: DONE`, and reply with one line saying what you fixed."""
-MEMORY_CONSOLIDATION_VERIFY_TEMPLATE = """🔍 Memory consolidation review: another run proposed `{patch_path}`, changing {changed_files} memory files to reconcile them with the inputs in `{agenda_path}`; its report is `{report_path}`.
+DREAMING_VERIFY_TEMPLATE = """🔍 Dreaming review: another run proposed `{patch_path}`, changing {changed_files} memory files to reconcile them with the inputs in `{agenda_path}`; its report is `{report_path}`.
 A confident, well-argued proposal is what a subtly wrong one looks like, so assume nothing until you have read the source yourself.
 
 Read the patch, the report, the agenda, and every entry of `{deleted_path}` ({deleted_lines} deleted lines, {removed_lines} of them found nowhere else in the proposal), open each cited source, and check that:
@@ -715,11 +715,11 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
             },
         ),
         "PROMPT_CURATION_RECHECK_TEMPLATE": frozenset({"findings"}),
-        "MEMORY_CONSOLIDATION_DREAM_TEMPLATE": frozenset(
+        "DREAMING_PROMPT_TEMPLATE": frozenset(
             {"input_count", "agenda_path", "staging_path", "report_path"},
         ),
-        "MEMORY_CONSOLIDATION_RECHECK_TEMPLATE": frozenset({"findings", "staging_path", "report_path"}),
-        "MEMORY_CONSOLIDATION_VERIFY_TEMPLATE": frozenset(
+        "DREAMING_RECHECK_TEMPLATE": frozenset({"findings", "staging_path", "report_path"}),
+        "DREAMING_VERIFY_TEMPLATE": frozenset(
             {
                 "patch_path",
                 "changed_files",

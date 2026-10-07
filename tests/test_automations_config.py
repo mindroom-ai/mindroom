@@ -34,22 +34,22 @@ def test_a_bare_name_enables_a_built_in_with_its_defaults() -> None:
     assert automation.max_content_loss == 0.05
 
 
-def test_memory_consolidation_runs_nightly_by_default() -> None:
-    """`- memory_consolidation` checks at 03:15 and posts in the agent's first room with the agent's model."""
-    (automation,) = _config(mind=_mind(automations=["memory_consolidation"])).resolve_entity("mind").automations
+def test_dreaming_runs_nightly_by_default() -> None:
+    """`- dreaming` checks at 03:15 and posts in the agent's first room with the agent's model."""
+    (automation,) = _config(mind=_mind(automations=["dreaming"])).resolve_entity("mind").automations
 
-    assert automation.name == "memory_consolidation"
+    assert automation.name == "dreaming"
     assert (automation.cron, automation.room, automation.model) == ("15 3 * * *", None, None)
 
 
 def test_both_built_ins_can_run_for_one_agent() -> None:
     """Each entry parses into its own built-in by name."""
-    entries = ["prompt_curation", {"name": "memory_consolidation", "cron": "0 2 * * *"}]
+    entries = ["prompt_curation", {"name": "dreaming", "cron": "0 2 * * *"}]
     automations = _config(mind=_mind(automations=entries)).resolve_entity("mind").automations
 
     assert [(automation.name, automation.cron) for automation in automations] == [
         ("prompt_curation", "0 4 * * *"),
-        ("memory_consolidation", "0 2 * * *"),
+        ("dreaming", "0 2 * * *"),
     ]
 
 
@@ -83,7 +83,7 @@ def test_eligible_agents_inherit_default_automations() -> None:
         (_mind(private=AgentPrivateConfig(per="user"), automations=["prompt_curation"]), "private"),
         (AgentConfig(display_name="Mem0", memory_backend="mem0", automations=["prompt_curation"]), "memory_backend"),
         (
-            AgentConfig(display_name="Mem0", memory_backend="mem0", automations=["memory_consolidation"]),
+            AgentConfig(display_name="Mem0", memory_backend="mem0", automations=["dreaming"]),
             "memory_backend",
         ),
     ],
@@ -104,8 +104,8 @@ def test_an_agent_cannot_list_automations_it_cannot_run(agent: AgentConfig, mess
         {"name": "prompt_curation", "min_reduction": 0.2, "max_reduction": 0.1},
         {"name": "prompt_curation", "min_reduction": 0.3, "max_reduction": 0.35},
         {"name": "prompt_curation", "unknown": 1},
-        {"name": "memory_consolidation", "trigger_tokens": 1},
-        {"name": "memory_consolidation", "cron": "0 0 31 2 *"},
+        {"name": "dreaming", "trigger_tokens": 1},
+        {"name": "dreaming", "cron": "0 0 31 2 *"},
     ],
 )
 def test_invalid_entries_fail_config_load(entry: object) -> None:
