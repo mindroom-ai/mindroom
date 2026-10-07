@@ -846,9 +846,28 @@ async def test_an_edit_answer_queued_before_a_delivered_one_is_superseded(journa
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await principal.settle_many(("$source",))
-    await _turn(journal_store, "$source", completed=True, response_event_id="$reply")
+    original = await _turn(
+        journal_store,
+        "$source",
+        completed=True,
+        response_event_id="$reply",
+        revision_replay={"$edit-old": RevisionReplay("$source", 20)},
+    )
     await admit(principal, "$edit-old")
-    await _row(principal, "$edit-old", DeliveryStage.FINAL, "Stale answer.", status="completed", edits="$reply")
+    selected = replace(
+        original,
+        source_event_prompts={"$source": "Stale request"},
+        source_event_revisions={"$source": (20, "$edit-old")},
+    )
+    await _row(
+        principal,
+        "$edit-old",
+        DeliveryStage.FINAL,
+        "Stale answer.",
+        status="completed",
+        edits="$reply",
+        result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(selected)},
+    )
     await _row(
         principal,
         "$edit-new",
@@ -868,9 +887,15 @@ async def test_an_edit_answer_queued_before_a_delivered_one_is_superseded(journa
     assert not await principal.is_pending("$edit-old")
     assert (rl.SpanKind.REGENERATION, rl.SpanOutcome.SUPERSEDED) in await _spans(principal, reply)
     assert not await principal.replies.has_unresolved_rows(reply.reply_id)
+    # Never sent, it consumes nothing, as a superseded regeneration does now.
+    record = await journal_store.backend.read(
+        lambda transaction: turn_records.load_record(transaction, ENTITY, "$source"),
+    )
+    assert record is not None
+    assert record.source_event_revisions is None
 
 
-@pytest.mark.parametrize("approval", ["answered", "waiting"])
+@pytest.mark.parametrize("approval", ["answered", "delivered", "waiting"])
 async def test_an_edit_answer_queued_before_an_approval_of_the_same_reply_is_superseded(
     journal_store: EventJournalStore,
     approval: str,
@@ -885,9 +910,17 @@ async def test_an_edit_answer_queued_before_an_approval_of_the_same_reply_is_sup
     await admit(principal, "$edit-old")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
     await _row(principal, "$edit-old", DeliveryStage.FINAL, "Stale answer.", status="error", edits="$reply")
-    if approval == "answered":
+    if approval in {"answered", "delivered"}:
         await _main_continuation(principal, _continuation("claimed"))
-        await _row(principal, "$source", DeliveryStage.FINAL, "Approved answer.", status="completed", edits="$reply")
+        await _row(
+            principal,
+            "$source",
+            DeliveryStage.FINAL,
+            "Approved answer.",
+            status="completed",
+            edits="$reply",
+            acknowledged="$approved" if approval == "delivered" else None,
+        )
     else:
         await _main_continuation(principal, _continuation("waiting"))
 
@@ -901,13 +934,14 @@ async def test_an_edit_answer_queued_before_an_approval_of_the_same_reply_is_sup
     assert not await principal.is_pending("$edit-old")
     spans = await _spans(principal, reply)
     assert spans[0] == (rl.SpanKind.REGENERATION, rl.SpanOutcome.SUPERSEDED)
-    if approval == "answered":
+    if approval in {"answered", "delivered"}:
         assert reply.state is rl.ReplyState.COMPLETED
         assert _text(reply.presentation) == "Approved answer."
+    if approval == "answered":
         approved = await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
         assert approved is not None
         assert (approved.reply_id, approved.reply_sequence) == (reply.reply_id, 1)
-    else:
+    if approval == "waiting":
         assert reply.state is rl.ReplyState.PAUSED
         assert reply.approval_id == "approval-1"
 

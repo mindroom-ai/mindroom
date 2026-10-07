@@ -140,7 +140,7 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # and their cleanup runs), the
 # state a frozen unacknowledged FINAL implies with its sources settled and its turn answered, each owed regeneration
 # FINAL keyed by its edit as the next write of the reply of the answer it edits, in queue order, or retired as
-# superseded when that reply already wrote past it or is still in flight, its edit answered either way, a lost
+# superseded, consuming no edit, when that reply already wrote past it or is still in flight, a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; a
 # Stop is kept on the reply it names, adopting a finished answer's reply when nothing in flight held it, even for a Stop
@@ -958,9 +958,9 @@ def _edit_answers(
     edits of its event included, becomes its next write, so a newer edit
     waits for its delivery. One the reply already wrote past, or one beside a
     reply still in flight, is superseded: it is
-    never sent, since what the reply shows now is newer. Either way a
-    completed one consumes the edit it selected, as a regeneration's
-    terminal row does now. The answer it edits becomes a finished reply first
+    never sent, since what the reply shows now is newer. Either way its edit
+    is answered; one that is sent and completed consumes the edit it
+    selected, as a regeneration's terminal row does now. The answer it edits becomes a finished reply first
     when nothing in flight held it; a removed reply keeps the row an ordinary
     delivery.
     """
@@ -1073,8 +1073,9 @@ def _edit_answer(
         ),
         base_sequence=reply.reply_sequence,
     )
-    # Its answer was queued, so its edit is answered, as a terminal row records now.
-    settle = rl.SettleSources(span.span_id, consumes_edit=selected is not None)
+    # Its answer was queued, so its edit is answered, as a terminal row records now; one never sent consumes nothing,
+    # as a superseded regeneration does now.
+    settle = rl.SettleSources(span.span_id, consumes_edit=selected is not None and not superseded)
     if superseded:
         outbox.retire(
             transaction,
