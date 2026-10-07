@@ -12,17 +12,13 @@ from agno.utils.models.claude import format_messages
 from agno.utils.tokens import count_schema_tokens
 from anthropic import BadRequestError
 
+from mindroom.agno_compat_claude import SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE
 from mindroom.agno_compat_vertex_claude_tools import (
     format_tools_for_vertex_claude,
     strip_vertex_claude_tool_strict,
 )
 from mindroom.claude_compat import ClaudeProviderCompat
-from mindroom.claude_prompt_cache import (
-    SERVER_TOOL_USE_BLOCK_TYPE,
-    TOOL_SEARCH_RESULT_BLOCK_TYPE,
-    TOOL_SEARCH_TOOL_TYPE,
-    prepare_claude_request_kwargs,
-)
+from mindroom.claude_prompt_cache import TOOL_SEARCH_TOOL_TYPE, prepare_claude_request_kwargs
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import common_native_endpoint
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize

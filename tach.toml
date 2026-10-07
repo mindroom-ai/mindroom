@@ -7558,11 +7558,23 @@ expose = ["TOOL_SEARCH_ITEMS_KEY", "RESPONSE_OUTPUT_KEY", "record_tool_search_it
 [[modules]]
 path = "mindroom.agno_compat_claude"
 depends_on = ["mindroom.model_defaults"]
-visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache"]
+visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache", "mindroom.vertex_claude_compat"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_claude"]
-expose = ["ClaudeProviderSDKCompat", "request_kwargs_without_replayed_citations"]
+expose = [
+    "BEDROCK_MAX_INLINE_MEDIA_BYTES",
+    "ClaudeProviderSDKCompat",
+    "MAX_INLINE_MEDIA_BYTES",
+    "SERVER_TOOL_USE_BLOCK_TYPE",
+    "TOOL_SEARCH_RESULT_BLOCK_TYPE",
+    "TOOL_SEARCH_TOOL_NAME",
+    "as_dict",
+    "request_kwargs_with_leading_tool_results",
+    "request_kwargs_with_replay_safe_tool_search_results",
+    "request_kwargs_with_supported_inline_media",
+    "request_kwargs_without_replayed_citations",
+]
 
 
 [[modules]]

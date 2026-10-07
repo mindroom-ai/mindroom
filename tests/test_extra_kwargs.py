@@ -26,6 +26,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
 import mindroom.bedrock_claude as bedrock_claude_module
+from mindroom.agno_compat_claude import request_kwargs_with_replay_safe_tool_search_results
 from mindroom.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
 from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
@@ -34,7 +35,6 @@ from mindroom.claude_prompt_cache import (
     _count_cache_markers,
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
-    _request_kwargs_with_replay_safe_tool_search_results,
     aclose_anthropic_async_client,
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
@@ -1440,12 +1440,12 @@ def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"][0] == _TOOL_SEARCH_RESULT_BLOCK
     assert prepared["messages"][0]["content"][1] == {"type": "text", "text": "found it"}
     assert "citations" in request_kwargs["messages"][0]["content"][0]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> None:
@@ -1466,7 +1466,7 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
@@ -1476,7 +1476,7 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
     ]
     assert request_kwargs["messages"][0]["content"][0] == _ORPHAN_TOOL_SEARCH_USE_BLOCK
     assert "citations" in request_kwargs["messages"][0]["content"][3]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
@@ -1502,7 +1502,7 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _SERVER_TOOL_USE_BLOCK,
@@ -1516,7 +1516,7 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
     ]
     assert len(request_kwargs["messages"][0]["content"][1]["content"]["tool_references"]) == 4
     assert "citations" in request_kwargs["messages"][0]["content"][1]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 def test_replay_safe_tool_search_results_empties_result_when_all_references_are_unavailable() -> None:
@@ -1536,7 +1536,7 @@ def test_replay_safe_tool_search_results_empties_result_when_all_references_are_
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
@@ -1550,7 +1550,7 @@ def test_replay_safe_tool_search_results_empties_result_when_all_references_are_
     ]
     assert request_kwargs["messages"][0]["content"][1] == _SERVER_TOOL_USE_BLOCK
     assert request_kwargs["messages"][0]["content"][2] == _DIRTY_TOOL_SEARCH_RESULT_BLOCK
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 def test_replay_safe_tool_search_results_empties_results_without_a_tools_array() -> None:
@@ -1568,7 +1568,7 @@ def test_replay_safe_tool_search_results_empties_results_without_a_tools_array()
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
@@ -1584,7 +1584,7 @@ def test_replay_safe_tool_search_results_empties_results_without_a_tools_array()
         _SERVER_TOOL_USE_BLOCK,
         _TOOL_SEARCH_RESULT_BLOCK,
     ]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 def test_replay_safe_tool_search_results_returns_original_when_references_are_available() -> None:
@@ -1603,7 +1603,7 @@ def test_replay_safe_tool_search_results_returns_original_when_references_are_av
         ],
     }
 
-    assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
+    assert request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
 
 
 def test_replay_safe_tool_search_results_keeps_empty_search_between_signed_thinking() -> None:
@@ -1629,7 +1629,7 @@ def test_replay_safe_tool_search_results_keeps_empty_search_between_signed_think
         ],
     }
 
-    assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
+    assert request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
 
 
 def test_replay_safe_tool_search_results_empties_filtered_search_between_signed_thinking() -> None:
@@ -1654,7 +1654,7 @@ def test_replay_safe_tool_search_results_empties_filtered_search_between_signed_
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     content = prepared["messages"][1]["content"]
     assert [block["type"] for block in content] == [
