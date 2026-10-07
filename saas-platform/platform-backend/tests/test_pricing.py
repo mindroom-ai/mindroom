@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
-from backend.services.provisioner_service import _RESOURCE_PROFILE_HELM_VALUES
 from backend.pricing import (
     PricingConfig,
     get_plan_details,
@@ -16,6 +15,7 @@ from backend.pricing import (
     load_pricing_config,
     load_pricing_config_model,
 )
+from backend.services.provisioner_service import _RESOURCE_PROFILE_HELM_VALUES
 
 
 @pytest.fixture(autouse=True)

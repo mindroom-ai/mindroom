@@ -79,7 +79,7 @@ describe('InstancePage', () => {
     expect(screen.queryByRole('button', { name: 'Choose a plan' })).not.toBeInTheDocument()
   })
 
-  it('sends an account whose plan is not entitled to billing instead of offering a trial', async () => {
+  it('sends an account whose plan is not entitled to billing instead of choosing a plan', async () => {
     ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'paused', can_run_instances: false, stripe_subscription_ended: false }, loading: false })
     ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
 
@@ -87,7 +87,7 @@ describe('InstancePage', () => {
 
     expect(await screen.findByRole('button', { name: 'Open billing' })).toBeInTheDocument()
     expect(screen.getByText(/Add or restore billing to run a hosted instance\./)).toBeInTheDocument()
-    expect(screen.queryByText(/free trial/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Choose a plan' })).not.toBeInTheDocument()
   })
 
   it('offers billing instead of starting a stopped instance whose plan lapsed', async () => {

@@ -166,16 +166,23 @@ describe('InstanceCard', () => {
       expect(screen.queryByRole('link', { name: 'Choose a plan' })).not.toBeInTheDocument()
     })
 
-    it('should send a lapsed plan holder to billing instead of offering a trial', () => {
+    it('should send a lapsed plan holder to billing instead of choosing a plan', () => {
       render(
         <InstanceCard
           instance={null}
-          subscription={{ ...trialSubscription, tier: 'hobby', status: 'cancelled', can_run_instances: false, trial_days_remaining: null }}
+          subscription={{
+            ...trialSubscription,
+            tier: 'hobby',
+            status: 'cancelled',
+            can_run_instances: false,
+            stripe_subscription_ended: true,
+            trial_days_remaining: null,
+          }}
         />
       )
 
       expect(screen.getByRole('link', { name: 'Open billing' })).toHaveAttribute('href', '/dashboard/billing')
-      expect(screen.queryByText(/free trial/i)).not.toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: 'Choose a plan' })).not.toBeInTheDocument()
     })
 
     it('should show trial time remaining for trial users who can provision', () => {
