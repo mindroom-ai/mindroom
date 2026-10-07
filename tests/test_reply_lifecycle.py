@@ -1738,6 +1738,16 @@ def test_sources_settled_without_reply() -> None:
     assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
 
 
+def test_sources_settled_without_reply_leave_a_held_reply_to_its_approval() -> None:
+    """A resume a restart lost still has its approval, whose settlement ends the reply."""
+    reply, span = _turn()
+    reply, span = _ended(replace(reply, event_id="$reply", approval_id="approval-1"), span, SpanOutcome.LOST)
+    held = rl.sources_settled_without_reply(reply, span, now_ns=NOW)
+    assert held.outcome is Outcome.DUPLICATE
+    assert held.reply == reply
+    assert held.effects == ()
+
+
 def _interrupted() -> tuple[Reply, Span]:
     """Return a reply whose span a restart lost while its sources stayed pending."""
     reply, span = _turn()

@@ -1663,8 +1663,11 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
 
 
 def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> Transition:
-    """The span's sources became terminal without an answer; the rule settles them and leaves their turn unanswered."""
-    if reply.terminal:
+    """The span's sources became terminal without an answer; the rule settles them and leaves their turn unanswered.
+
+    A reply an approval holds is its approval's: its settlement ends the reply.
+    """
+    if reply.terminal or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)
     # A selection's first span waits, unended, for its claim to make it current.
     awaiting_claim = not span.ended and reply.current_span_id is None and span.span_id == reply.last_span_id
