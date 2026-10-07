@@ -244,7 +244,7 @@ It applies only to agents whose effective backend is `file`.
 4. When the model answers with the `no_reply_token`, nothing is written.
 5. Results are appended to `memory/YYYY-MM-DD.md`.
 
-Turns that [built-in automations](https://docs.mindroom.chat/scheduling/#built-in-automations) start are not auto-flushed.
+Turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start are not auto-flushed.
 
 ```yaml
 memory:

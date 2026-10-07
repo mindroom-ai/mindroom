@@ -467,7 +467,7 @@
             }
           ],
           "default": null,
-          "description": "Built-in automations for this agent, such as prompt_curation; omitted inherits defaults.automations",
+          "description": "Automations for this agent, built-in such as prompt_curation or from a plugin; omitted inherits defaults.automations",
           "title": "Automations"
         },
         "skill_learning": {
@@ -1412,7 +1412,7 @@
         },
         "automations": {
           "default": [],
-          "description": "Built-in automations, such as prompt_curation, for agents that do not list their own",
+          "description": "Automations, built-in such as prompt_curation or from a plugin, for agents that do not list their own",
           "items": {
             "oneOf": [
               {
