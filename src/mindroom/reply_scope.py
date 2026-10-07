@@ -295,8 +295,8 @@ class ReplyRuntime:
         return await self.store.replies.event_ids_of_spans(room_id, self.spans.live_span_ids())
 
     async def departed(self, room_id: str) -> None:
-        """Cancel the spans this instance runs in a room the bot left; the departure ended their replies."""
-        for span_id in await self.store.replies.spans_in_room(room_id, self.spans.live_span_ids()):
+        """Cancel the spans this instance runs or starts in a room the bot left; the departure ended their replies."""
+        for span_id in await self.store.replies.spans_in_room(room_id, self.spans.claimed_span_ids()):
             self.spans.cancel(span_id, cancel_source=None)
 
     async def deletions_ended(self) -> tuple[str, ...]:

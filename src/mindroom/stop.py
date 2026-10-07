@@ -207,6 +207,10 @@ class SpanRegistry:
         """Return the spans whose task is still running."""
         return frozenset(span_id for span_id, live in self._spans.items() if not live.task.done())
 
+    def claimed_span_ids(self) -> frozenset[str]:
+        """Return the spans whose task runs, or registers once its claim commits."""
+        return self.live_span_ids() | self._expected
+
     def expect(self, span_id: str) -> None:
         """Note a span this instance is claiming, whose task registers once its claim commits."""
         self._expected.add(span_id)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from dataclasses import replace
@@ -796,6 +797,29 @@ class _CancelSpy(SpanRegistry):
         assert cancel_source is None
         self.cancelled.append(span_id)
         return False
+
+
+async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(journal_store: EventJournalStore) -> None:
+    """Leaving the room between a span's claim and its task's registration cancels the task as it registers."""
+    principal = journal_store.principal(PRINCIPAL)
+    _reply, span = await _claimed(principal)
+    runtime = reply_scope.ReplyRuntime(
+        store=principal,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+        clean_up_superseded=lambda _continuation: None,
+    )
+    runtime.spans.expect(span.span_id)
+    await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+
+    await runtime.departed(ROOM)
+    task = asyncio.create_task(asyncio.Event().wait())
+    runtime.spans.register(span.span_id, task)
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_them(
