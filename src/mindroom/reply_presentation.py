@@ -206,7 +206,7 @@ def _folded(presentation: Presentation) -> Presentation:
 
 
 def shown_work(possibly_shown: Presentation) -> Segment | None:
-    """Return what a stopped reply showed of its work, without its notes, as read back from Matrix.
+    """Return the work a stopped reply may have shown, without its notes.
 
     Trailing cancel, interruption, restart, and error notes are dropped, so a
     reply interrupted twice before its continuation showed anything carries
