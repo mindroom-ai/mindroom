@@ -805,14 +805,6 @@
             },
             "title": "Third Party Processors",
             "type": "array"
-          },
-          "usage_metrics": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Usage Metrics",
-            "type": "array"
           }
         },
         "required": [
@@ -821,7 +813,6 @@
           "personal_data",
           "subscriptions",
           "instances",
-          "usage_metrics",
           "activity_history",
           "payments",
           "data_processing_purposes",
@@ -1718,36 +1709,6 @@
           "stripe_subscription_ended"
         ],
         "title": "SubscriptionOut",
-        "type": "object"
-      },
-      "SubscriptionReactivateResponse": {
-        "description": "Subscription reactivation response model.",
-        "properties": {
-          "message": {
-            "title": "Message",
-            "type": "string"
-          },
-          "subscription_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Subscription Id"
-          },
-          "success": {
-            "title": "Success",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success",
-          "message"
-        ],
-        "title": "SubscriptionReactivateResponse",
         "type": "object"
       },
       "SyncResult": {
@@ -3877,46 +3838,6 @@
           }
         },
         "summary": "Cancel Subscription"
-      }
-    },
-    "/my/subscription/reactivate": {
-      "post": {
-        "description": "Reactivate a cancelled subscription (if still in billing period).",
-        "operationId": "reactivate_subscription_my_subscription_reactivate_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SubscriptionReactivateResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Reactivate Subscription"
       }
     },
     "/pricing/config": {

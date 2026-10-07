@@ -335,6 +335,7 @@ If the release exists, uninstall it with `DELETE /admin/instances/<instance_id>/
 Then delete the row with `DELETE FROM instances WHERE instance_id = <instance_id>;` and run the query again until it returns nothing.
 
 Apply migration `009_drop_subscription_limits.sql` only after deploying the backend release that stops writing `max_agents` and `max_messages_per_day`, because older backends fail to create or update subscriptions once those columns are gone.
+Likewise, apply `010_drop_usage_metrics.sql` only after deploying the backend release that stops reading `usage_metrics`, because older backends then fail the GDPR export and mark every nightly cleanup run failed.
 
 ## Multi-Tenant Architecture
 

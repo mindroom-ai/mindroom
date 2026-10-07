@@ -3044,7 +3044,7 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
+        debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
 

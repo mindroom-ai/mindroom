@@ -3038,6 +3038,7 @@ depends_on = []
 visibility = [
     "mindroom.bot",
     "mindroom.coalescing_batch",
+    "mindroom.coalescing_policy",
     "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
     "mindroom.handled_turns",

@@ -174,14 +174,6 @@ class SubscriptionCancelResponse(BaseModel):
     cancelled_at: str | None = None
 
 
-class SubscriptionReactivateResponse(BaseModel):
-    """Subscription reactivation response model."""
-
-    success: bool
-    message: str
-    subscription_id: str | None = None
-
-
 # Pricing Models
 class StripePriceResponse(BaseModel):
     """Stripe price ID response model."""
@@ -247,7 +239,6 @@ class GdprExportResponse(BaseModel):
     personal_data: GdprPersonalData
     subscriptions: list[dict[str, Any]]
     instances: list[dict[str, Any]]
-    usage_metrics: list[dict[str, Any]]
     activity_history: list[dict[str, Any]]
     payments: list[dict[str, Any]]
     data_processing_purposes: list[str]
