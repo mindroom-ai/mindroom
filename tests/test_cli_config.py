@@ -1484,7 +1484,7 @@ class TestConfigInit:
         assert "# sonnet:" in config_text
         assert "#   id: anthropic.claude-sonnet-5-5" in config_text
         assert "# haiku:" in config_text
-        assert "#   id: anthropic.claude-haiku-4-5" in config_text
+        assert "#   id: anthropic.claude-haiku-5-5" in config_text
 
         env_content = (tmp_path / ".env").read_text()
         assert "AWS_REGION=us-east-1" in env_content
