@@ -778,18 +778,17 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self._bot() and any(continuation.state == "waiting" for continuation in self.model.continuations.values())
         ),
     )
-    @rule(approved=st.booleans(), claim_now=st.booleans(), data=st.data())
-    def decide(self, approved: bool, claim_now: bool, data: st.DataObject) -> None:
-        """A human decides, or the card expires; an approval's run usually claims its reply right away."""
+    @rule(claim_now=st.booleans(), data=st.data())
+    def decide(self, claim_now: bool, data: st.DataObject) -> None:
+        """A human decides, or the card expires; the run resumes with the decisions and usually claims its reply at once.
+
+        A denial resumes it too: the run gets the refusal and answers, or pauses again.
+        """
         waiting = [c for c in self.model.continuations.values() if c.state == "waiting"]
         continuation = data.draw(st.sampled_from(waiting))
-        if approved:
-            continuation.state = "ready"
-            if claim_now:
-                self._claim_ready()
-        else:
-            continuation.state = "failing"
-            continuation.disposition = "failed"
+        continuation.state = "ready"
+        if claim_now:
+            self._claim_ready()
 
     @precondition(
         lambda self: (
@@ -1322,8 +1321,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             return True
         waiting = [continuation for continuation in model.continuations.values() if continuation.state == "waiting"]
         for continuation in waiting:
-            continuation.state = "failing"
-            continuation.disposition = "failed"
+            # Every card is decided or expires, which resumes its run.
+            continuation.state = "ready"
         if waiting:
             return True
         live = self._live()
