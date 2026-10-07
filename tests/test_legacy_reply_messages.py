@@ -388,6 +388,11 @@ async def test_an_unacknowledged_answer_becomes_the_reply_its_row_finishes(journ
     assert row is not None
     assert row.reply_id == reply.reply_id
     assert row.reply_sequence == 1
+    # The answer is enqueued, so its source settles and its turn is answered.
+    assert not await principal.is_pending("$source")
+    turn = await journal_store.turn_records(ENTITY).load("$source")
+    assert turn is not None
+    assert turn.completed
 
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     await principal.acknowledge_matrix_delivery(

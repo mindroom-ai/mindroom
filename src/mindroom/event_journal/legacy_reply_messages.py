@@ -114,6 +114,8 @@ class _Adoption:
     claim_span_id: str | None = None
     # The pauses of older continuations of the same reply, which a newer one superseded.
     superseded: tuple[rl.Span, ...] = ()
+    # What the adoption decided in its transaction, as a terminal row's rule does.
+    effects: tuple[rl.Effect, ...] = ()
 
 
 def _classified(transaction: Transaction, principal_id: str) -> bool:
@@ -131,7 +133,8 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans and give its outbox rows reply identity.
 # Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
-# reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources), the state a frozen unacknowledged FINAL implies, a lost
+# reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources), the
+# state a frozen unacknowledged FINAL implies with its sources settled and its turn answered, a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; an
 # unsettled Stop is applied to the reply it names. A coalesced turn is adopted once, under whichever source keyed its
@@ -215,7 +218,12 @@ def _write(transaction: Transaction, principal_id: str, adoption: _Adoption) -> 
     applied = apply(
         transaction,
         principal_id,
-        rl.Transition(outcome=rl.Outcome.APPLIED, reply=adoption.reply, spans=(*adoption.superseded, *adoption.spans)),
+        rl.Transition(
+            outcome=rl.Outcome.APPLIED,
+            reply=adoption.reply,
+            spans=(*adoption.superseded, *adoption.spans),
+            effects=adoption.effects,
+        ),
     )
     for span in adoption.superseded:
         # A superseded continuation holds its sources through its pause, until its cleanup settles them.
@@ -549,7 +557,8 @@ def _reply_of_rows(
             reply_sequence=1,
             **base,  # type: ignore[arg-type]
         )
-        return _Adoption(reply=reply, spans=(span,), row=final)
+        # The answer is enqueued, so its turn is answered, as a terminal row records now.
+        return _Adoption(reply=reply, spans=(span,), row=final, effects=(rl.SettleSources(span.span_id),))
     if initial is None or final is not None or initial.retired:
         # Answered, or retired by a departure or a deleted source: their existing owners finish it.
         return None
