@@ -262,6 +262,24 @@ def test_a_rejected_capped_run_returns_only_for_inputs_no_agenda_has_listed(tmp_
     assert workspace.check() is None
 
 
+def test_an_input_a_failed_run_listed_is_not_seeded_while_the_agent_is_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seeding only skips history no agenda listed, so a failed run's conversation is still reviewed after a quiet week."""
+    workspace = _workspace(tmp_path)
+    workspace.write(EXPORT, "messages: [hello]\n", age=timedelta(days=2))
+    ask = _started(workspace)
+    workspace.dream(ask, report="Ran out of time halfway.\n")
+    monkeypatch.setattr("mindroom.automations.dreaming._SEED_AGE", timedelta(days=1))
+
+    assert workspace.check() is None
+    workspace.write(YESTERDAY, "- Back from a quiet week.\n")
+
+    _started(workspace)
+    assert f"- `{EXPORT}`" in workspace.agenda()
+
+
 def test_changed_and_dead_citations_are_on_the_agenda_under_the_path_memory_uses(tmp_path: Path) -> None:
     """A knowledge alias maps to its workspace target; a dead citation is reviewed once, and a changed source waits for a note."""
     workspace = _Workspace(tmp_path)

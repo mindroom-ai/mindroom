@@ -4298,7 +4298,7 @@ Memory keeps claims that later conversations correct and that their sources stop
 
 A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due; the next run waits for a new conversation or daily note and starts by carrying forward the proposals that were never applied.
 `MEMORY.md` and context files never change; the agent suggests changes to them in its report.
-An input no run has reviewed counts as handled once its content is more than seven days old, so turning on the automation or thread exports starts from recent history and never reconciles the older archive.
+An input no run has listed counts as handled once its content is more than seven days old, so turning on the automation or thread exports starts from recent history and never reconciles the older archive.
 Each run keeps its agenda, report, patch, list of deleted lines, and verdict in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least, so an applied patch can be undone with `git apply -R` from the workspace root.
 
 | Field | Default | Description |

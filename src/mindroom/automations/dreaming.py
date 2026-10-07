@@ -2,10 +2,10 @@
 
 The check lists inputs that changed since a run last handled them: exported conversations, past daily notes, and the
 workspace files memory cites.
-When any is due, the agent edits a staging copy of memory/ in a visible run, code validates the staging, and a second
-run in a thread of its own reviews the proposal against its sources.
+When a conversation or daily note no agenda has listed is due, the agent edits a staging copy of memory/ in a visible
+run, code validates the staging, and a second run in a thread of its own reviews the proposal against its sources.
 Code applies an approved proposal only when memory did not change during the runs, and records progress only after a
-run that applied or needed no change, so every other outcome leaves its inputs due.
+run that applied or needed no change, so every other outcome leaves its inputs due until new evidence starts a run.
 Workspace files are read and written through no-follow descriptor walks, because worker code writes this workspace.
 """
 
@@ -405,8 +405,8 @@ def _collect_inputs(
     return inputs
 
 
-def _unseen_and_old(inputs: Iterable[_Input], reviewed: Mapping[str, _Version], now: datetime) -> dict[str, _Version]:
-    """Return inputs no run has reviewed whose content is older than the seed age, to count as already handled.
+def _unseen_and_old(inputs: Iterable[_Input], state: _State, now: datetime) -> dict[str, _Version]:
+    """Return inputs no agenda has listed whose content is older than the seed age, to count as already handled.
 
     Enabling the automation, or thread exports later, then starts from recent history instead of the whole archive.
     """
@@ -414,7 +414,10 @@ def _unseen_and_old(inputs: Iterable[_Input], reviewed: Mapping[str, _Version], 
     return {
         item.path: item.version
         for item in inputs
-        if item.path not in reviewed and item.version != _MISSING and item.changed_ns < cutoff
+        if item.path not in state.reviewed
+        and item.path not in state.attempted
+        and item.version != _MISSING
+        and item.changed_ns < cutoff
     }
 
 
@@ -479,7 +482,7 @@ def _context_files(config: Config, agent_name: str) -> set[str]:
 
 
 def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Ask | None:
-    """Return the dream prompt when an input changed or a proposal is unapplied, or None.
+    """Return the dream prompt when a conversation or daily note no agenda has listed is due, or None.
 
     Raises ``OSError`` or ``ValueError`` when memory or the state cannot be read safely.
     """
@@ -497,7 +500,7 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
     snapshot = {path: payload for path, payload in tree.files.items() if path not in excluded}
     state = _load_state(runtime_paths, agent_name)
     inputs = _collect_inputs(root, snapshot, tree.versions, today, automation_threads(runtime_paths))
-    if seeded := _unseen_and_old(inputs.values(), state.reviewed, now):
+    if seeded := _unseen_and_old(inputs.values(), state, now):
         state.reviewed.update(seeded)
         _save_state(runtime_paths, agent_name, state)
 
@@ -823,9 +826,9 @@ def _end(
     applied: tuple[str, ...] = (),
     on_loop: Callable[[], None] | None = None,
 ) -> Done:
-    """Record the run's outcome, drop its staging, and return the notice that ends the chain.
+    """Record the agenda as attempted and, after success, the progress; drop the staging and return the closing notice.
 
-    A proposal that reached its review is already pending, so only success needs recording here.
+    A proposal that reached its review is already pending, so only success records progress here.
     """
 
     def record_progress(state: _State) -> None:

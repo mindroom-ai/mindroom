@@ -1,4 +1,4 @@
-"""The automation runner: cron timing, the visible prompt it posts, and the verify step that follows the run."""
+"""The automation runner: cron timing, the prompts it posts, and the steps that follow their runs."""
 
 from __future__ import annotations
 
