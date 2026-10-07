@@ -565,6 +565,139 @@ def test_dispatch_failure_of_a_regeneration_before_its_first_write_keeps_the_old
     assert transition.effects == (SettleSources("span-2"),)
 
 
+def _progress(reply: Reply, span: Span, shown: str = "new partial") -> Reply:
+    """Write a progress edit ahead that Matrix has not acknowledged."""
+    ahead = rl.write_ahead(
+        reply,
+        span,
+        shown=shown,
+        previous=None,
+        active_generation=GEN,
+        durable_write_debt=False,
+        now_ns=NOW,
+    )
+    assert ahead.reply is not None
+    return ahead.reply
+
+
+def _interrupted_turn_regenerating() -> tuple[Reply, Span]:
+    """Return an edit's regeneration of a turn a retry left waiting, so its rollback is unfinished work."""
+    reply, span = _turn()
+    released = rl.release(replace(reply, event_id="$reply", placeholder_only=False), span, now_ns=NOW)
+    assert released.reply is not None
+    regen = rl.claim(
+        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
+        _context(released.reply, _span_after(released, span.span_id)),
+    )
+    assert regen.reply is not None
+    assert regen.claimed is not None
+    assert regen.claimed.rollback is not None
+    assert regen.claimed.rollback.state is ReplyState.ACTIVE
+    return regen.reply, regen.claimed
+
+
+def test_a_stop_after_an_unacknowledged_progress_edit_does_not_restore() -> None:
+    """A progress edit Matrix may already show counts, so the Stop ends the reply cancelled instead of restoring."""
+    reply, span = _regenerating()
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    transition = rl.stopped(_progress(stop.reply, span), span, None, now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.CANCELLED
+    assert transition.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_CANCELLED)
+    assert _span_after(transition, "span-2").outcome is SpanOutcome.CANCELLED
+
+
+def test_a_stop_with_no_span_running_restores_a_regeneration_that_wrote_nothing() -> None:
+    """A regeneration a restart left waiting for its replay still holds the answer it would replace."""
+    reply, span = _regenerating()
+    lost = rl.owner_lost(reply, span, rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True), now_ns=NOW)
+    assert lost.reply is not None
+    waiting = _span_after(lost, "span-2")
+    transition = rl.stop(lost.reply, waiting, StopFacts(receipt_order=8, newer_edit=False, span_live=False), now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.COMPLETED
+    assert transition.reply.presentation == "old"
+    assert transition.reply.owed_write is None
+    assert not transition.reply.unapplied_stop
+    assert transition.effects == (SettleSources("span-2"),)
+
+
+def test_a_stop_never_returns_a_regeneration_to_unfinished_work() -> None:
+    """Restoring a turn that still waits for its retry would run it after the Stop: the reply ends cancelled."""
+    reply, span = _interrupted_turn_regenerating()
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    stopped = rl.stopped(stop.reply, span, None, now_ns=NOW)
+    assert stopped.reply is not None
+    assert stopped.reply.state is ReplyState.CANCELLED
+    assert stopped.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_CANCELLED)
+    lost = rl.owner_lost(reply, span, rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True), now_ns=NOW)
+    assert lost.reply is not None
+    waiting = _span_after(lost, "span-2")
+    no_span = rl.stop(lost.reply, waiting, StopFacts(receipt_order=8, newer_edit=False, span_live=False), now_ns=NOW)
+    assert no_span.reply is not None
+    assert no_span.reply.state is ReplyState.CANCELLED
+
+
+def test_an_edit_superseding_an_unanswered_regeneration_keeps_the_original_rollback() -> None:
+    """The newer regeneration goes back to the answer the first one was replacing, not to its unfinished state."""
+    reply, span = _regenerating()
+    released = rl.release(reply, span, now_ns=NOW)
+    assert released.reply is not None
+    newer = rl.claim(
+        _request("span-3", delivery_id="$edit-2", driving_edit_id="$edit-2"),
+        _context(released.reply, _span_after(released, "span-2")),
+    )
+    assert newer.claimed is not None
+    assert newer.claimed.rollback == span.rollback
+    assert newer.reply is not None
+    failed = rl.dispatch_failed(newer.reply, newer.claimed, error_text="setup failed", now_ns=NOW)
+    assert failed.reply is not None
+    assert failed.reply.state is ReplyState.COMPLETED
+    assert failed.reply.presentation == "old"
+
+
+def test_a_refused_final_restores_only_when_nothing_before_it_was_written() -> None:
+    """Only a FINAL Matrix refused for good is discounted; a progress edit before it may show."""
+
+    def refused_final(reply: Reply, span: Span) -> rl.Transition:
+        final = rl.finish(reply, span, _write(reply, ReplyState.COMPLETED, "new"), now_ns=NOW)
+        assert final.reply is not None
+        assert final.row is not None
+        facts = WriteFacts(
+            WriteStage.FINAL,
+            final.row.sequence,
+            span.span_id,
+            creates_event=False,
+            placeholder_only=False,
+        )
+        return rl.write_failed(
+            final.reply,
+            _span_after(final, span.span_id),
+            rl.FailedWrite(facts, "refused"),
+            now_ns=NOW,
+        )
+
+    reply, span = _regenerating()
+    restored = refused_final(reply, span)
+    assert restored.reply is not None
+    assert restored.reply.state is ReplyState.COMPLETED
+    assert restored.reply.presentation == "old"
+    failed = refused_final(_progress(reply, span), span)
+    assert failed.reply is not None
+    assert failed.reply.state is ReplyState.FAILED
+
+
+def test_deleting_sources_never_restores_unfinished_work() -> None:
+    """The deletion ended the turn an unfinished rollback would go back to, so the reply is removed."""
+    reply, span = _interrupted_turn_regenerating()
+    transition = rl.sources_deleted(reply, span, now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.GONE
+    assert transition.reply.redaction_pending == ("$reply",)
+
+
 def test_stopped_without_a_recorded_stop_is_invalid() -> None:
     """A span cannot report a Stop its reply never recorded."""
     reply, span = _turn()
@@ -647,11 +780,11 @@ def test_an_exit_that_rendered_nothing_still_honors_a_recorded_stop(
 
 
 @pytest.mark.parametrize(
-    ("event_id", "placeholder_only", "expected_state", "redacted"),
+    ("event_id", "placeholder_only", "expected_state", "redacted", "owed"),
     [
-        (None, False, ReplyState.GONE, ()),
-        ("$reply", True, ReplyState.GONE, ("$reply",)),
-        ("$reply", False, ReplyState.CANCELLED, ()),
+        (None, False, ReplyState.GONE, (), None),
+        ("$reply", True, ReplyState.GONE, ("$reply",), None),
+        ("$reply", False, ReplyState.CANCELLED, (), rl.OwedWrite("span-1", rl._NOTE_INTERRUPTED)),
     ],
 )
 def test_suppression_follows_mains_branches(
@@ -659,23 +792,47 @@ def test_suppression_follows_mains_branches(
     placeholder_only: bool,
     expected_state: ReplyState,
     redacted: tuple[str, ...],
+    owed: rl.OwedWrite | None,
 ) -> None:
-    """A suppressed answer redacts a placeholder, sends nothing new, and keeps substantive content."""
+    """A suppressed answer redacts a placeholder and keeps substantive content, ended by a note instead of streaming."""
     reply, span = _turn()
     reply = replace(reply, event_id=event_id, placeholder_only=placeholder_only)
     transition = rl.suppress(reply, span, reason="suppressed", now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is expected_state
     assert transition.reply.redaction_pending == redacted
+    assert transition.reply.owed_write == owed
+
+
+def test_suppressing_after_visible_progress_ends_what_it_showed() -> None:
+    """Streamed progress stays with a terminal note, the cancel note after a Stop; it never stays streaming."""
+    reply, span = _turn()
+    shown = replace(_progress(reply, span), event_id="$reply", placeholder_only=False)
+    suppressed = rl.suppress(shown, span, reason="suppressed", now_ns=NOW)
+    assert suppressed.reply is not None
+    assert suppressed.reply.state is ReplyState.CANCELLED
+    assert suppressed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
+    stop = rl.stop(shown, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    stopped = rl.suppress(stop.reply, span, reason="suppressed", now_ns=NOW)
+    assert stopped.reply is not None
+    assert stopped.reply.state is ReplyState.CANCELLED
+    assert stopped.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_CANCELLED)
+    assert not stopped.reply.unapplied_stop
+    regenerating, regeneration = _regenerating()
+    partial = rl.suppress(_progress(regenerating, regeneration), regeneration, reason="suppressed", now_ns=NOW)
+    assert partial.reply is not None
+    assert partial.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_INTERRUPTED)
 
 
 def test_hook_failure_of_substantive_content_fails_the_reply() -> None:
-    """A before-response hook exception leaves shown content and fails the reply."""
+    """A before-response hook exception leaves shown content and fails the reply with a note."""
     reply, span = _turn()
     reply = replace(reply, event_id="$reply")
     transition = rl.suppress(reply, span, reason="hook_failed", now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.FAILED
 
 
@@ -1586,12 +1743,12 @@ def test_terminal_write_failed_on_a_placeholder() -> None:
     reply, span = _turn()
     on_placeholder = replace(reply, event_id="$reply", placeholder_only=True)
     # However Matrix refused it, as for an answer too large to send, the placeholder says delivery failed.
-    delivery = rl._terminal_write_failed(on_placeholder, span, first_create=False, now_ns=NOW)
+    delivery = rl._terminal_write_failed(on_placeholder, span, first_create=False, sequence=1, now_ns=NOW)
     assert delivery.reply is not None
     assert delivery.reply.state is ReplyState.FAILED
     assert delivery.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
     assert delivery.reply.redaction_pending == ()
-    first_create = rl._terminal_write_failed(reply, span, first_create=True, now_ns=NOW)
+    first_create = rl._terminal_write_failed(reply, span, first_create=True, sequence=1, now_ns=NOW)
     assert first_create.reply is not None
     assert first_create.reply.state is ReplyState.GONE
 
@@ -1669,7 +1826,13 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
     assert final.reply is not None
     assert not final.reply.placeholder_only
     ended = _span_after(final, span.span_id)
-    failed = rl._terminal_write_failed(final.reply, ended, first_create=False, now_ns=NOW)
+    failed = rl._terminal_write_failed(
+        final.reply,
+        ended,
+        first_create=False,
+        sequence=final.reply.reply_sequence,
+        now_ns=NOW,
+    )
     assert failed.reply is not None
     assert failed.reply.owed_write is None
     assert failed.reply.state is ReplyState.FAILED
