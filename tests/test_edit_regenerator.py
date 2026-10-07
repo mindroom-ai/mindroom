@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from itertools import cycle
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 from uuid import uuid4
 
 import nio
@@ -282,6 +282,7 @@ def _harness(
             receipt_order=AsyncMock(return_value=receipt_order),
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
             reply_for_sources=AsyncMock(return_value=None),
+            adopt_historical_answer=AsyncMock(),
         ),
     )
     return _Harness(
@@ -408,6 +409,31 @@ async def test_repeated_locked_preparation_removes_stale_runs_once(tmp_path: Pat
             ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_an_answer_older_than_the_records_is_adopted_before_history_is_pruned(tmp_path: Path) -> None:
+    """Pruning may remove the history run that alone names the answer, so its reply is recorded first, once."""
+    record = _turn_record()
+    harness = _harness(tmp_path, turn_record=record)
+    order = MagicMock()
+    adopt = harness.regenerator.deps.adopt_historical_answer
+    assert isinstance(adopt, AsyncMock)
+    adopt.side_effect = lambda *_args, **_kwargs: order.adopt()
+    harness.turn_store.remove_stale_runs_for_edit.side_effect = lambda **_kwargs: order.prune()
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    adopt.assert_not_awaited()
+    assert await request.prepare_source_turn(request.thread_history) is False
+    assert await request.prepare_source_turn(request.thread_history) is False
+    assert order.mock_calls == [call.adopt(), call.prune()]
+    (event_id,) = adopt.await_args.args
+    assert event_id == request.existing_event_id
+    assert adopt.await_args.kwargs["sources"].logical == record.source_event_ids
+    assert adopt.await_args.kwargs["room_id"] == ROOM_ID
 
 
 @pytest.mark.asyncio
@@ -1443,7 +1469,10 @@ async def test_edit_regenerates_the_answer_its_reply_records_name(tmp_path: Path
     await _handle_edit(harness, event, event_info)
 
     harness.regenerator.deps.reply_for_sources.assert_awaited_once_with(record.source_event_ids)
-    assert harness.generate_response.await_args.args[0].existing_event_id == "$regenerated:example.org"
+    request = harness.generate_response.await_args.args[0]
+    assert request.existing_event_id == "$regenerated:example.org"
+    assert await request.prepare_source_turn(request.thread_history) is False
+    harness.regenerator.deps.adopt_historical_answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio

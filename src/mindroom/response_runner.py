@@ -3361,7 +3361,6 @@ class ResponseRunner:
             show_tool_calls=self._show_tool_calls(),
             driving_edit_id=request.response_envelope.source_event_id if regeneration else None,
             edit_receipt_order=request.sources.edit_receipt_order if regeneration else None,
-            historical_event_id=request.existing_event_id if regeneration else None,
             existing_event_id=request.existing_event_id,
             interactive_span_id=request.interactive_span_id,
             prepared_edit=request.prepared_edit_record,

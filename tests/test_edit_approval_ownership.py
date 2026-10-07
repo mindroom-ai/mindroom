@@ -347,6 +347,8 @@ async def _paused_case(  # noqa: PLR0915
         turn_store=store,
         receipt_order=AsyncMock(return_value=3),
         generate_response=runner.generate_response,
+        reply_for_sources=principal.replies.for_sources,
+        adopt_historical_answer=runner.deps.replies.adopt_historical_answer,
     )
     controller = unwrap_extracted_collaborator(bot._turn_controller)
     controller.deps = replace(controller.deps, edit_regenerator=regenerator)

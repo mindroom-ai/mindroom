@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
@@ -14,7 +14,7 @@ from mindroom.hooks import hook_ingress_policy
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
-from mindroom.reply_lifecycle import ReplyState
+from mindroom.reply_lifecycle import ReplyState, SpanSources
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -50,6 +50,17 @@ def _log_dropped_rebuilding_edit(room_id: str, rebuilds: int) -> None:
         logger.error("Dropping an edit whose regeneration kept asking to rebuild", room_id=room_id, rebuilds=rebuilds)
 
 
+class _AdoptHistoricalAnswer(Protocol):
+    async def __call__(
+        self,
+        event_id: str,
+        *,
+        sources: SpanSources,
+        room_id: str,
+        thread_id: str | None,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class EditRegeneratorDeps:
     """Collaborators needed for edit-triggered regeneration."""
@@ -66,6 +77,8 @@ class EditRegeneratorDeps:
     timestamp_formatter: Callable[[float | None], str | None]
     # The newest reply answering any of these sources, from the reply records.
     reply_for_sources: Callable[[tuple[str, ...]], Awaitable[Reply | None]]
+    # Gives an answer older than the reply records its reply.
+    adopt_historical_answer: _AdoptHistoricalAnswer
 
 
 @dataclass(frozen=True)
@@ -101,14 +114,16 @@ def _answer_to_regenerate(record: TurnRecord, reply: Reply | None) -> tuple[str 
     """
     if reply is not None:
         return (None if reply.state is ReplyState.GONE else reply.event_id), reply.stop_receipt_order
-    # LEGACY_COMPAT: Answers written before reply records, named only by the turn record.
-    # Legacy format: a completed turn record whose response_event_id an earlier release wrote, with no reply record
-    # for its sources.
-    # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record the answer and its
-    # Stop on the reply.
-    # Handling: the edit regenerates that event as a historical answer; a Stop that release kept on the turn record is
-    # not read, as no reply holds it.
+    # LEGACY_COMPAT: AI answers written before reply records, named only by the turn record.
+    # Legacy format: a completed turn record whose response_event_id an earlier release wrote for an AI answer, with no
+    # reply record for its sources; a dispatch failure's notice sent before any reply existed is current input named
+    # the same way.
+    # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record each AI answer and
+    # its Stop on its reply.
+    # Handling: the regenerator adopts that event as a finished reply before it prunes history, and the edit
+    # regenerates that reply; a Stop that release kept on the turn record is not read, as no reply holds it.
     # Coverage: tests/test_edit_response_regeneration.py::test_handle_message_edit_uses_journal_response_event_id_after_restart,
+    # tests/test_edit_regenerator.py::test_an_answer_older_than_the_records_is_adopted_before_history_is_pruned,
     # tests/test_reply_records_turns.py::test_regenerating_an_answer_older_than_the_records_adopts_it.
     return record.response_event_id, None
 
@@ -428,6 +443,18 @@ class EditRegenerator:
             )
             mailbox.rebuild_requested = result is EditPreparation.REBUILD
             if result is False and not stale_runs_removed:
+                if reply is None:
+                    # Pruning may remove the history run that alone names this answer; its reply keeps it.
+                    await self.deps.adopt_historical_answer(
+                        answer_event_id,
+                        sources=SpanSources(
+                            pending=(),
+                            logical=record.source_event_ids,
+                            discovery=record.discovery_event_ids,
+                        ),
+                        room_id=target.room_id,
+                        thread_id=target.resolved_thread_id,
+                    )
                 await self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=record,
                     requester_user_id=requester_id,

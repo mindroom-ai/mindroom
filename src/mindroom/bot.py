@@ -789,6 +789,7 @@ class AgentBot:
                     timezone=self.config.timezone,
                 ),
                 reply_for_sources=self._reply_runtime.store.replies.for_sources,
+                adopt_historical_answer=self._reply_runtime.adopt_historical_answer,
             ),
         )
         self._turn_policy = TurnPolicy(

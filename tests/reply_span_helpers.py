@@ -85,6 +85,13 @@ async def reply_span(
     if runtime is None:
         runtime = _runtime(principal, entity_name=entity_name)
     await runtime.take_ownership()
+    if regenerated_event_id is not None:
+        await runtime.adopt_historical_answer(
+            regenerated_event_id,
+            sources=rl.SpanSources(pending=(), logical=logical_source_event_ids or (source_event_id,)),
+            room_id=room_id,
+            thread_id=thread_id,
+        )
     async with runtime.span_scope() as slot:
         handle = await runtime.claim(
             delivery_id=source_event_id,
@@ -98,7 +105,6 @@ async def reply_span(
             show_tool_calls=show_tool_calls,
             driving_edit_id=None if regenerated_event_id is None else source_event_id,
             edit_receipt_order=edit_receipt_order,
-            historical_event_id=regenerated_event_id,
             existing_event_id=regenerated_event_id,
             prepared_edit=prepared_edit,
         )

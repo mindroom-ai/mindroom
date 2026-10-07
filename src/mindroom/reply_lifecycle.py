@@ -526,8 +526,6 @@ class ClaimRequest:
     approval_id: str | None = None
     # Set when an interactive selection created this span at its acknowledgement.
     interactive_span_id: str | None = None
-    # Set when no reply record exists but the turn records a historical response event.
-    historical_event_id: str | None = None
     # Set for edit regenerations: the encoded turn record of the edit the run answers.
     prepared_edit: str | None = None
 
@@ -680,21 +678,9 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
 
     if reply is None:
         if request.driving_edit_id is not None:
-            # A reply older than the records: the handled-turn ledger named its event.
-            historical = replace(
-                _new_reply(request, state=ReplyState.COMPLETED, event_id=request.historical_event_id),
-                edit_receipt_order=context.edit_receipt_order,
-            )
-            span = _new_span(
-                request,
-                historical,
-                SpanKind.REGENERATION,
-                rollback=_rollback_of(historical),
-            )
-            return claimed(
-                _make_current(_set_state(historical, ReplyState.ACTIVE, request.now_ns), span, request.now_ns),
-                span,
-            )
+            # The regenerator adopts an answer older than the records before it claims.
+            msg = f"Regeneration {request.driving_edit_id} has no reply to regenerate"
+            raise _invalid(msg)
         created = _new_reply(request, state=ReplyState.ACTIVE)
         span = _new_span(request, created, SpanKind.TURN)
         return claimed(_make_current(created, span, request.now_ns), span)
@@ -708,11 +694,11 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
             )
             span = _new_span(request, created, SpanKind.REGENERATION)
             return claimed(_make_current(created, span, request.now_ns), span)
-        # An edit replacing a regeneration that never answered goes back to what that one would have.
-        superseding_attempt = (
-            last is not None and last.kind is SpanKind.REGENERATION and last.outcome in _SOURCES_PENDING_OUTCOMES
-        )
-        rollback = _rollback_after(reply, last) if superseding_attempt else _rollback_of(reply)
+        if last is not None and last.kind is SpanKind.REGENERATION and last.outcome in _SOURCES_PENDING_OUTCOMES:
+            # An edit replacing a regeneration that never answered goes back to what that one would have.
+            rollback = _rollback_after(reply, last)
+        else:
+            rollback = _rollback_of(reply)
         if reply.state is ReplyState.PAUSED:
             if reply.approval_id is None:
                 msg = f"Paused reply {reply.reply_id} has no approval"
@@ -771,6 +757,17 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         return claimed(_make_current(reply, span, request.now_ns), span)
     msg = f"Reply {reply.reply_id}'s last span ended {last.outcome} and cannot be claimed again"
     raise _invalid(msg)
+
+
+def historical_answer(request: ClaimRequest, *, event_id: str) -> Transition:
+    """Adopt an answer older than the reply records, which an edit is about to regenerate.
+
+    It ended long ago: the reply is completed and bound to its event, and its
+    one span ended with it, its sources settled then.
+    """
+    adopted = _new_reply(request, state=ReplyState.COMPLETED, event_id=event_id)
+    span = _end(_new_span(request, adopted, SpanKind.TURN), SpanOutcome.COMPLETED, request.now_ns)
+    return Transition(outcome=Outcome.APPLIED, reply=adopted, spans=(span,))
 
 
 def interactive_acknowledgement(request: ClaimRequest, *, shown: str) -> Transition:

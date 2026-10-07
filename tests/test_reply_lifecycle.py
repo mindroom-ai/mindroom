@@ -211,18 +211,30 @@ def test_regeneration_of_a_gone_reply_creates_a_new_one() -> None:
     assert transition.reply.reply_id == "reply-2"
 
 
-def test_regeneration_without_a_record_adopts_the_historical_reply() -> None:
-    """A reply older than the records is regenerated with an unknown presentation."""
-    transition = rl.claim(
-        _request(delivery_id="$edit", driving_edit_id="$edit", historical_event_id="$answer"),
-        _context(),
+def test_an_answer_older_than_the_records_is_adopted_as_a_finished_reply() -> None:
+    """The adopted reply is completed on its event, and an edit regenerates it like any answer."""
+    adopted = rl.historical_answer(_request(sources=SpanSources(pending=(), logical=("$source",))), event_id="$answer")
+    assert adopted.reply is not None
+    assert adopted.reply.state is ReplyState.COMPLETED
+    assert adopted.reply.event_id == "$answer"
+    assert adopted.reply.current_span_id is None
+    assert adopted.effects == ()
+    (span,) = adopted.spans
+    assert span.outcome is SpanOutcome.COMPLETED
+    assert adopted.reply.last_span_id == span.span_id
+    regeneration = rl.claim(
+        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
+        _context(adopted.reply, span),
     )
-    assert transition.reply is not None
-    assert transition.reply.event_id == "$answer"
-    claimed = transition.claimed
-    assert claimed is not None
-    assert claimed.rollback is not None
-    assert claimed.rollback.state is ReplyState.COMPLETED
+    assert regeneration.claimed is not None
+    assert regeneration.claimed.rollback is not None
+    assert regeneration.claimed.rollback.state is ReplyState.COMPLETED
+
+
+def test_a_regeneration_with_no_reply_is_invalid() -> None:
+    """The regenerator adopts the answer first, so no claim creates a reply to regenerate."""
+    with pytest.raises(rl.InvalidTransitionError):
+        rl.claim(_request(delivery_id="$edit", driving_edit_id="$edit"), _context())
 
 
 def test_regeneration_rerun_keeps_its_rollback() -> None:

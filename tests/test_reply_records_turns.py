@@ -602,8 +602,15 @@ async def test_regeneration_failing_before_its_first_write_is_retried(tmp_path: 
 
 
 async def test_regenerating_an_answer_older_than_the_records_adopts_it(tmp_path: Path) -> None:
-    """An answer written before durable records becomes a reply when an edit first regenerates it."""
+    """An answer written before durable records becomes a finished reply, which the edit then regenerates."""
     bot = await _streaming_bot(tmp_path)
+    target = _target()
+    await bot._reply_runtime.adopt_historical_answer(
+        "$older",
+        sources=rl.SpanSources(pending=(), logical=("$event",)),
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+    )
 
     assert await _answer(bot, _regeneration(answer_event_id="$older"), AsyncMock(return_value="New answer.")) == (
         "$older"
@@ -613,7 +620,10 @@ async def test_regenerating_an_answer_older_than_the_records_adopts_it(tmp_path:
     assert reply is not None
     assert reply.state is rl.ReplyState.COMPLETED
     spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
-    assert [(span.kind, span.outcome) for span in spans] == [(rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED)]
+    assert [(span.kind, span.outcome) for span in spans] == [
+        (rl.SpanKind.TURN, rl.SpanOutcome.COMPLETED),
+        (rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED),
+    ]
     edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
     assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$older"}
     assert edit["m.new_content"]["body"] == "New answer."

@@ -772,6 +772,26 @@ def _span_outcome(applied: AppliedTransition, span_id: str) -> SpanOutcome | Non
     return next(span.outcome for span in applied.transition.spans if span.span_id == span_id)
 
 
+async def test_an_answer_older_than_the_records_is_adopted_once(journal_store: EventJournalStore) -> None:
+    """Adoption binds the answer's event to a finished reply over its turn's sources, and keeps any reply that holds either."""
+    principal = journal_store.principal(PRINCIPAL)
+    await principal.replies.write_generation("gen-1", now_ns=1)
+    request = replace(_request(), sources=SpanSources(pending=(), logical=("$source",)))
+    adopted = await principal.replies.adopt_historical_answer(request, "$answer")
+    assert adopted.state is ReplyState.COMPLETED
+    assert adopted.event_id == "$answer"
+    # A cancellation right after adoption loses nothing: the next edit finds the reply by its sources.
+    assert await principal.replies.for_sources(("$source",)) == adopted
+    again = replace(_request("span-2", reply_id="reply-2"), sources=request.sources)
+    assert await principal.replies.adopt_historical_answer(again, "$answer") == adopted
+    assert await principal.replies.adopt_historical_answer(again, "$other-answer") == adopted
+    elsewhere = replace(
+        _request("span-3", reply_id="reply-3"),
+        sources=SpanSources(pending=(), logical=("$elsewhere",)),
+    )
+    assert await principal.replies.adopt_historical_answer(elsewhere, "$answer") == adopted
+
+
 async def _regeneration_with_selected_edit(
     journal_store: EventJournalStore,
     principal: PrincipalStore,

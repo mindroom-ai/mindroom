@@ -342,7 +342,6 @@ class ReplyRuntime:
         show_tool_calls: bool = True,
         driving_edit_id: str | None = None,
         edit_receipt_order: int | None = None,
-        historical_event_id: str | None = None,
         existing_event_id: str | None = None,
         approval_id: str | None = None,
         interactive_span_id: str | None = None,
@@ -361,7 +360,6 @@ class ReplyRuntime:
             driving_edit_id=driving_edit_id,
             approval_id=approval_id,
             interactive_span_id=interactive_span_id,
-            historical_event_id=historical_event_id,
             prepared_edit=None if prepared_edit is None else encode_prepared_edit(prepared_edit),
         )
         try:
@@ -394,6 +392,27 @@ class ReplyRuntime:
             return ClaimRefused.DEFERRED
         return _handle_for(self, transition.reply, transition.claimed, empty)
 
+    async def adopt_historical_answer(
+        self,
+        event_id: str,
+        *,
+        sources: rl.SpanSources,
+        room_id: str,
+        thread_id: str | None,
+    ) -> None:
+        """Give an answer older than the reply records its reply, before an edit prunes the history naming it.
+
+        Its span is keyed by the answer's event, which no edit driving a later span shares.
+        """
+        request = await self._new_request(
+            delivery_id=event_id,
+            sources=sources,
+            room_id=room_id,
+            thread_id=thread_id,
+            empty=Presentation(),
+        )
+        await self.store.replies.adopt_historical_answer(request, event_id)
+
     async def _claim_request(
         self,
         *,
@@ -408,10 +427,27 @@ class ReplyRuntime:
         A Stop can reach the span as soon as its claim commits, before its
         task registers, so the span registry expects it from here.
         """
-        span_id = _new_id()
-        self.spans.expect(span_id)
+        request = await self._new_request(
+            delivery_id=delivery_id,
+            sources=sources,
+            room_id=room_id,
+            thread_id=thread_id,
+            empty=empty,
+        )
+        self.spans.expect(request.span_id)
+        return request
+
+    async def _new_request(
+        self,
+        *,
+        delivery_id: str,
+        sources: rl.SpanSources,
+        room_id: str,
+        thread_id: str | None,
+        empty: Presentation,
+    ) -> rl.ClaimRequest:
         return rl.ClaimRequest(
-            span_id=span_id,
+            span_id=_new_id(),
             delivery_id=delivery_id,
             sources=sources,
             bot_generation=self.generation,
