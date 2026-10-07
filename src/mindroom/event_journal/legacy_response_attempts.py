@@ -63,6 +63,13 @@ def _required_text(value: object) -> str:
     return value
 
 
+def _required_bool(value: object) -> bool:
+    """Validate a required historical flag; every surviving continuation froze its tool-call visibility."""
+    if not isinstance(value, bool):
+        raise _identity_error()
+    return value
+
+
 def _event_ids(value: object) -> list[str]:
     """Validate literal historical source arrays before the tolerant turn decoder."""
     if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
@@ -96,17 +103,19 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
 # LEGACY_COMPAT: Approvals whose reply a newer edit's answer already replaced.
 # Legacy format: a continuation whose response attempt a newer attempt of the same reply, room, membership, entity, and
 # logical sources superseded with a higher edit receipt order and an acknowledged answer FINAL editing the same event,
-# while its own FINAL holds no answer and no approved resume advanced it to a later pause; v2026.10.201 retired such an
-# approval's failure without a note.
+# while its own FINAL holds no answer and it is failing or no approved resume advanced it to a later pause;
+# v2026.10.201 retired such an approval's failure without a note.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages fence an approval superseded
 # when the edit's regeneration claims its reply.
 # Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows and
 # keeps the approval's pause on it until its cleanup settles the sources it holds.
-# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded.
+# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded,
+# tests/test_legacy_continuation_identity.py::test_an_approval_a_resume_paused_again_keeps_its_reply_beside_a_newer_answer.
 def _replaced(transaction: Transaction, principal_id: str, approval_id: str, driving: str) -> bool:
     """Return whether a newer edit's acknowledged answer replaced the reply this attempt paused.
 
-    An approval a resume advanced paused again, possibly after that answer, so it stands.
+    A waiting approval a resume advanced paused again, possibly after that answer, so it stands; a failing one never
+    resumes, and its failure must not replace the answer.
     """
     row = transaction.fetchone(
         """SELECT 1 AS present FROM response_attempts AS attempt
@@ -121,7 +130,8 @@ def _replaced(transaction: Transaction, principal_id: str, approval_id: str, dri
          AND delivery.room_id = newer.room_id AND delivery.membership_epoch = newer.membership_epoch
          AND delivery.edits_event_id = newer.response_event_id
         JOIN approval_continuations AS paused
-          ON paused.principal_id = attempt.principal_id AND paused.approval_id = ? AND paused.generation = 0
+          ON paused.principal_id = attempt.principal_id AND paused.approval_id = ?
+         AND (paused.generation = 0 OR paused.state = 'failing')
         WHERE attempt.principal_id = ? AND attempt.driving_event_id = ? AND delivery.stage = 'final'
           AND delivery.acknowledged_event_id IS NOT NULL AND delivery.result_json IS NOT NULL
           AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
@@ -272,7 +282,7 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _Lega
         "logical_source_event_ids": tuple(_event_ids(identity.get("logical_source_event_ids"))),
         "discovery_event_ids": tuple(_event_ids(identity.get("discovery_event_ids", []))),
         "edit_receipt_order": cast("int | None", identity.get("edit_receipt_order")),
-        "show_tool_calls": context.get("show_tool_calls", True) is not False,
+        "show_tool_calls": _required_bool(context.get("show_tool_calls")),
         "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
     }
 

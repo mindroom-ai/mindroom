@@ -41,7 +41,7 @@ INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, se
     ('@bot:example.org', '$edit', '!room:example.org', '', 'message', '@user:example.org', 1, '{}', 7, 'pending');
 INSERT INTO approval_continuations (principal_id, approval_id, entity_name, state, context_json, created_at_ns)
 VALUES ('@bot:example.org', 'approval', 'bot', 'waiting',
-    '{"run_id":"run","session_id":"session","entity_kind":"agent","room_id":"!room:example.org","thread_id":"$thread","requester_id":"@user:example.org","response_event_id":"$answer","prepared_edit_record":{"anchor_event_id":"$source","source_event_ids":["$source","$second"],"discovery_event_ids":["$alias"],"completed":false,"timestamp":1,"latest_edit_receipt_order":1,"source_event_revisions":{"$source":[1,"$edit"]},"response_event_id":"$answer","response_owner":"bot","conversation_target":{"room_id":"!room:example.org","session_id":"session","source_thread_id":null,"resolved_thread_id":null,"reply_to_event_id":"$source"}}}', 1);
+    '{"run_id":"run","session_id":"session","entity_kind":"agent","show_tool_calls":true,"room_id":"!room:example.org","thread_id":"$thread","requester_id":"@user:example.org","response_event_id":"$answer","prepared_edit_record":{"anchor_event_id":"$source","source_event_ids":["$source","$second"],"discovery_event_ids":["$alias"],"completed":false,"timestamp":1,"latest_edit_receipt_order":1,"source_event_revisions":{"$source":[1,"$edit"]},"response_event_id":"$answer","response_owner":"bot","conversation_target":{"room_id":"!room:example.org","session_id":"session","source_thread_id":null,"resolved_thread_id":null,"reply_to_event_id":"$source"}}}', 1);
 INSERT INTO approval_continuation_sources VALUES ('@bot:example.org', 'approval', '$edit', 0);
 """
 
@@ -68,7 +68,7 @@ INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, se
     ('@bot:example.org', '$first', '!room:example.org', '', 'message', '@user:example.org', 1, '{}', 7, 'pending');
 INSERT INTO approval_continuations (principal_id, approval_id, entity_name, state, context_json, created_at_ns)
 VALUES ('@bot:example.org', 'approval', 'bot', 'waiting',
-    '{"run_id":"run","session_id":"session","entity_kind":"agent","thread_id":null,"requester_id":"@user:example.org"}', 1);
+    '{"run_id":"run","session_id":"session","entity_kind":"agent","show_tool_calls":true,"thread_id":null,"requester_id":"@user:example.org"}', 1);
 INSERT INTO approval_continuation_sources VALUES ('@bot:example.org', 'approval', '$first', 0);
 INSERT INTO response_attempts VALUES
     ('@bot:example.org', '$first', 'bot', '!room:example.org', 7, '$answer', '["$first","$second"]', 1, NULL);
@@ -278,8 +278,9 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
 ) -> None:
     """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it.
 
-    One that already failed is superseded too, so its failure is never published over the newer answer, and the
-    placeholder row of the turn it paused does not make that turn look in flight.
+    One that already failed is superseded too, even after a resume paused it again, so its failure is never
+    published over the newer answer, and the placeholder row of the turn it paused does not make that turn look in
+    flight.
     """
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(_NEWER_ANSWER)
@@ -287,7 +288,8 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
         legacy_database.execute(_paused_turn_rows())
     if failing:
         legacy_database.execute(
-            "UPDATE approval_continuations SET state = 'failing', failure_reason = 'expired' WHERE approval_id = 'approval'",
+            "UPDATE approval_continuations SET state = 'failing', failure_reason = 'expired', generation = 1 "
+            "WHERE approval_id = 'approval'",
         )
     store = legacy_database.open()
     try:
