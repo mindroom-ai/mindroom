@@ -117,10 +117,10 @@ After a judgment backend approves, the agent replies normally with its own model
 
 | Field | Backend | Default | Description |
 |-------|---------|---------|-------------|
-| `provider` | both | Required | `llm` for a configured model alias, or `typesafe` for System One |
+| `provider` | all | Required | `llm` for a configured model alias, `typesafe` for System One, or `openai_decisions` for the OpenAI Decisions API |
 | `model` | `llm` | Required | Existing alias under `models`, which can be cheaper than the reply model |
-| `threshold` | `typesafe` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
-| `timeout_seconds` | both | `5` for `llm`, `1.5` for `typesafe` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
+| `threshold` | `typesafe`, `openai_decisions` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
+| `timeout_seconds` | all | `5` for `llm`, otherwise `1.5` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
 
 Unknown fields are rejected.
 
@@ -145,13 +145,16 @@ To use System One instead, set `TYPESAFE_API_KEY` in the process environment or 
         timeout_seconds: 1.5
 ```
 
+To use the OpenAI Decisions API with `gpt-6-luna`, set `provider: openai_decisions` instead.
+It uses the same OpenAI API key as OpenAI models, from `OPENAI_API_KEY` or the dashboard, and always calls `api.openai.com`, regardless of any model `base_url`.
+
 The LLM backend uses the alias's normal provider credentials and receives no tools, agent system prompt, or agent memory.
 A model alias whose provider adds native tools that cannot be disabled is refused.
-For participation, a TypeSafe probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
-Both backends get the same question and context, but their judgments can differ.
+For participation, a TypeSafe or OpenAI Decisions probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
+All backends get the same question and context, but their judgments can differ.
 
 At most eight judgments run at once across the process, including [router judgments](router.md#responder-selection-judgments), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
-Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe and OpenAI Decisions, without request text or credentials.
 
 #### Participation Context and Fallback
 
@@ -169,7 +172,7 @@ The setting applies in every room where the agent may reply and has no per-room 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `judgment` | object | Required | LLM model alias or TypeSafe backend; see [Judgment Backends](#judgment-backends) |
+| `judgment` | object | Required | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](#judgment-backends) |
 | `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
 | `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
 
@@ -189,7 +192,7 @@ agents:
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
 It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
 When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
-With TypeSafe, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
+With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
 The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.

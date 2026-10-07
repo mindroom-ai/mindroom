@@ -21,7 +21,8 @@ from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.groq_model import MindRoomGroq
 from mindroom.hooks.enrichment import render_transient_context
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.participation import ParticipationGate
 from mindroom.participation_judgment import create_participation_decider
 from tests.conftest import test_runtime_paths
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _response(probability: object = 0.9, *, model: str = PINNED_MODEL) -> bytes:
+def _response(probability: object = 0.9, *, model: str = _PINNED_MODEL) -> bytes:
     return json.dumps(
         {
             "model": model,
@@ -82,12 +83,12 @@ async def test_typesafe_controls_real_gate_without_model_check(
     """Threshold mistakes or a redundant in-model check change the delivered answer."""
     posted: list[dict[str, Any]] = []
 
-    async def post(_self: SystemOneClient, body: bytes) -> bytes:
+    async def post(_self: JudgmentClient, body: bytes) -> bytes:
         assert _self._api_key == "test-secret"
         posted.append(json.loads(body))
         return _response(score)
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     model = ParticipationModel(ModelResponse(content="Useful answer"))
     gate = _gate(tmp_path, key=" \ttest-secret\n")
     messages = [
@@ -146,7 +147,7 @@ async def test_typesafe_failure_uses_existing_model_check(
     """Provider failures and incomplete text must retain the current participation path."""
     calls: list[bytes] = []
 
-    async def post(_self: SystemOneClient, body: bytes) -> bytes:
+    async def post(_self: JudgmentClient, body: bytes) -> bytes:
         calls.append(body)
         if failure == "timeout":
             await asyncio.Event().wait()
@@ -159,7 +160,7 @@ async def test_typesafe_failure_uses_existing_model_check(
             return _response(model="unexpected-version")
         return _response(0.0)
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     gate = _gate(tmp_path, key="" if failure == "missing_key" else "test-secret", timeout=0.01)
     content = {
         "redacted": "api_key=secret-value",
@@ -191,10 +192,10 @@ async def test_typesafe_failure_uses_existing_model_check(
 async def test_typesafe_cancellation_does_not_fall_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A cancelled turn must not start another provider call or acquire approval."""
 
-    async def post(_self: SystemOneClient, _body: bytes) -> bytes:
+    async def post(_self: JudgmentClient, _body: bytes) -> bytes:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     gate = _gate(tmp_path)
     model = ParticipationModel(ModelResponse(content="Should never be called"))
     with pytest.raises(asyncio.CancelledError), participation_model(model, gate, run_id="primary"):
@@ -211,11 +212,11 @@ async def test_typesafe_drops_prompt_metadata_and_preserves_speaker_identity(
     """Sending raw Matrix metadata would expose stable IDs and display names unnecessarily."""
     posted: list[dict[str, Any]] = []
 
-    async def post(_self: SystemOneClient, body: bytes) -> bytes:
+    async def post(_self: JudgmentClient, body: bytes) -> bytes:
         posted.append(json.loads(body))
         return _response(0.0)
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     gate = _gate(tmp_path)
     model = ParticipationModel(ModelResponse(content="Should not run"))
     messages = [
@@ -248,7 +249,7 @@ async def test_typesafe_gates_groq_native_tools_before_any_provider_call(
     """Compound may run native tools only after approval; failed fallback stays quiet."""
     requests: list[dict[str, Any]] = []
 
-    async def post(_self: SystemOneClient, _body: bytes) -> bytes:
+    async def post(_self: JudgmentClient, _body: bytes) -> bytes:
         return _response(score)
 
     def reply(request: httpx.Request) -> httpx.Response:
@@ -267,7 +268,7 @@ async def test_typesafe_gates_groq_native_tools_before_any_provider_call(
             },
         )
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     gate = _gate(tmp_path)
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as http_client:
         model = MindRoomGroq(

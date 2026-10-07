@@ -60,7 +60,8 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, PreparedHistoryState, ResolvedReplayPlan
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
@@ -2888,12 +2889,12 @@ class TestAutoRouting:
         def env_value(paths: RuntimePaths, key: str, *args: object, **kwargs: object) -> str | None:
             return "synthetic" if key == "TYPESAFE_API_KEY" else original_env_value(paths, key, *args, **kwargs)
 
-        async def post(_self: SystemOneClient, body: bytes) -> bytes:
+        async def post(_self: JudgmentClient, body: bytes) -> bytes:
             payload = json.loads(body)
             posted.append(payload)
             return json.dumps(
                 {
-                    "model": PINNED_MODEL,
+                    "model": _PINNED_MODEL,
                     "answers": {
                         "responder_selection": {
                             "type": "choice",
@@ -2910,7 +2911,7 @@ class TestAutoRouting:
             ).encode()
 
         monkeypatch.setattr(RuntimePaths, "env_value", env_value)
-        monkeypatch.setattr(SystemOneClient, "_post", post)
+        monkeypatch.setattr(JudgmentClient, "_post", post)
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as response_agent:
             response = app_client.post(
                 "/v1/chat/completions",

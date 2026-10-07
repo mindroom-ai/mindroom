@@ -1,4 +1,4 @@
-"""Optional JEV selection over the router's already eligible responders."""
+"""Optional probability-backend selection over the router's already eligible responders."""
 
 from __future__ import annotations
 

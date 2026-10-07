@@ -2472,7 +2472,7 @@ Ad hoc teams take their history and compaction settings from `defaults`; see [Te
 
 The router is a built-in MindRoom account that is always present, cannot be disabled, and joins every room with configured agents or teams.
 It picks which agent or team answers a message that mentions no one, accepts room invitations, and sends welcome messages.
-Configure it under `router:` to choose its routing model, who may invite it into rooms, who may interact with it, and optional System One responder selection.
+Configure it under `router:` to choose its routing model, who may invite it into rooms, who may interact with it, and optional System One or OpenAI Decisions responder selection.
 
 See also [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/), [Access Control](https://docs.mindroom.chat/authorization/), and [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/).
 
@@ -2487,7 +2487,7 @@ router:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model alias used for routing decisions |
-| `judgment` | object or null | `null` | Optional System One responder selection before LLM routing; see [Responder Selection Judgments](#responder-selection-judgments) |
+| `judgment` | object or null | `null` | Optional System One or OpenAI Decisions responder selection before LLM routing; see [Responder Selection Judgments](#responder-selection-judgments) |
 | `access` | object or null | `null` | Who may interact with the router; see [Access Control](https://docs.mindroom.chat/authorization/) |
 | `accept_invites` | bool or list[string] | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID |
 
@@ -2531,8 +2531,8 @@ Mention a specific agent or team to get an answer, or several agents for an ad-h
 
 ## Responder Selection Judgments
 
-Set `router.judgment` to let System One (TypeSafe) choose among the eligible agents and teams before ordinary LLM routing.
-It is off by default, even when `TYPESAFE_API_KEY` is set.
+Set `router.judgment` to let System One (TypeSafe) or the OpenAI Decisions API choose among the eligible agents and teams before ordinary LLM routing.
+It is off by default, even when the backend's API key is set.
 Explicit mentions, thread participation rules, access control, and the single-candidate shortcut work the same way with or without it.
 
 Set `TYPESAFE_API_KEY` in the process environment or the `.env` next to `config.yaml`, then enable it:
@@ -2546,15 +2546,17 @@ router:
     timeout_seconds: 1.5
 ```
 
+For the OpenAI Decisions API, set `provider: openai_decisions`; it uses the OpenAI API key described in [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends).
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | string | Required | Must be `typesafe` |
-| `threshold` | float | `0.8` | From `0` to `1`; both the chosen option's probability and System One's confidence must reach it |
+| `provider` | string | Required | `typesafe` or `openai_decisions` |
+| `threshold` | float | `0.8` | From `0` to `1`; both the chosen option's probability and the backend's confidence must reach it |
 | `timeout_seconds` | float | `1.5` | Positive deadline of at most `30` seconds |
 
 Unknown fields are rejected.
 
-System One receives each candidate's role, tools, delegation targets, and brief instructions, the current message, and the last three visible messages with senders replaced by aliases.
+The backend receives each candidate's role, tools, delegation targets, and brief instructions, the current message, and the last three visible messages with senders replaced by aliases.
 It does not receive system prompts, tool results, attachment contents, or the rest of the conversation.
 It runs only with 2 to 253 candidates and a request of at most 16,000 bytes; messages are never shortened, so long input or input that looks like a secret uses ordinary routing instead.
 
@@ -2565,7 +2567,7 @@ It runs only with 2 to 253 candidates and a request of at most 16,000 bytes; mes
 | `multiple` | Ordinary LLM routing picks one responder; several agents are never launched |
 | Tie, low confidence, abstention, missing key, full judgment limit, timeout, or error | Ordinary LLM routing with `router.model` |
 
-The router's prompt overrides apply only to LLM routing, not to System One.
+The router's prompt overrides apply only to LLM routing, not to the judgment backend.
 Router judgments share the process-wide limit and logging described in [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends), with at most one router judgment at a time.
 
 ## Welcome Messages
@@ -2691,10 +2693,10 @@ After a judgment backend approves, the agent replies normally with its own model
 
 | Field | Backend | Default | Description |
 |-------|---------|---------|-------------|
-| `provider` | both | Required | `llm` for a configured model alias, or `typesafe` for System One |
+| `provider` | all | Required | `llm` for a configured model alias, `typesafe` for System One, or `openai_decisions` for the OpenAI Decisions API |
 | `model` | `llm` | Required | Existing alias under `models`, which can be cheaper than the reply model |
-| `threshold` | `typesafe` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
-| `timeout_seconds` | both | `5` for `llm`, `1.5` for `typesafe` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
+| `threshold` | `typesafe`, `openai_decisions` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
+| `timeout_seconds` | all | `5` for `llm`, otherwise `1.5` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
 
 Unknown fields are rejected.
 
@@ -2719,13 +2721,16 @@ To use System One instead, set `TYPESAFE_API_KEY` in the process environment or 
         timeout_seconds: 1.5
 ```
 
+To use the OpenAI Decisions API with `gpt-6-luna`, set `provider: openai_decisions` instead.
+It uses the same OpenAI API key as OpenAI models, from `OPENAI_API_KEY` or the dashboard, and always calls `api.openai.com`, regardless of any model `base_url`.
+
 The LLM backend uses the alias's normal provider credentials and receives no tools, agent system prompt, or agent memory.
 A model alias whose provider adds native tools that cannot be disabled is refused.
-For participation, a TypeSafe probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
-Both backends get the same question and context, but their judgments can differ.
+For participation, a TypeSafe or OpenAI Decisions probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
+All backends get the same question and context, but their judgments can differ.
 
 At most eight judgments run at once across the process, including [router judgments](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
-Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe and OpenAI Decisions, without request text or credentials.
 
 #### Participation Context and Fallback
 
@@ -2743,7 +2748,7 @@ The setting applies in every room where the agent may reply and has no per-room 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `judgment` | object | Required | LLM model alias or TypeSafe backend; see [Judgment Backends](#judgment-backends) |
+| `judgment` | object | Required | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](#judgment-backends) |
 | `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
 | `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
 
@@ -2763,7 +2768,7 @@ agents:
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
 It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
 When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
-With TypeSafe, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
+With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
 The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.

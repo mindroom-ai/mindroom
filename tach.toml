@@ -7829,7 +7829,15 @@ depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.judgment.client"
-depends_on = ["mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.judgment.state"]
+depends_on = ["mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution"]
+
+[[modules]]
+path = "mindroom.judgment.typesafe"
+depends_on = ["mindroom.judgment.client"]
+
+[[modules]]
+path = "mindroom.judgment.openai_decisions"
+depends_on = ["mindroom.judgment.client", "mindroom.model_defaults"]
 
 [[modules]]
 path = "mindroom.participation_judgment"
@@ -7850,7 +7858,7 @@ depends_on = ["mindroom.model_loading", "mindroom.json_utils", "mindroom.judgmen
 
 [[modules]]
 path = "mindroom.judgment.evaluator"
-depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.logging_config"]
+depends_on = ["mindroom.config.judgment", "mindroom.credentials_sync", "mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.judgment.openai_decisions", "mindroom.judgment.typesafe", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.path_confinement"

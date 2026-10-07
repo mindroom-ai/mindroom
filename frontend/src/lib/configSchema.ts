@@ -82,6 +82,7 @@ const ACRONYMS: Record<string, string> = {
   llm: "LLM",
   mcp: "MCP",
   mindroom: "MindRoom",
+  openai: "OpenAI",
   pkce: "PKCE",
   stt: "STT",
   ttl: "TTL",

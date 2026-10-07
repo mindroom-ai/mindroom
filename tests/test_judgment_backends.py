@@ -18,10 +18,11 @@ from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.groq_model import MindRoomGroq
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.execution import SHARED_CAPACITY
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
+from mindroom.judgment.typesafe import _PINNED_MODEL, SYSTEM_ONE
 from mindroom.provider_tool_policy import provider_tools_disabled
 from tests.conftest import test_runtime_paths
 from tests.gemini_helpers import gemini_client, gemini_decision_response
@@ -62,7 +63,7 @@ async def test_backends_share_rubric_context_and_normalized_decision(
         return httpx.Response(
             200,
             json={
-                "model": PINNED_MODEL,
+                "model": _PINNED_MODEL,
                 "answers": {"simple_task": {"type": "noul", "noul": score}},
                 "usage": {"input_tokens": 20, "output_tokens": 1},
             },
@@ -83,9 +84,9 @@ async def test_backends_share_rubric_context_and_normalized_decision(
         test_runtime_paths(tmp_path),
         owner="llm",
     )
-    typesafe = await SystemOneClient(
+    typesafe = await JudgmentClient(
         api_key="synthetic",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(respond),
     ).judge(request, owner="typesafe", allow_network=True)
 
@@ -154,7 +155,7 @@ async def test_backends_share_capacity_and_cancellation_releases_it(
         raise AssertionError
 
     request = _request()
-    client = SystemOneClient(api_key="synthetic", model=PINNED_MODEL, transport=httpx.MockTransport(respond))
+    client = JudgmentClient(api_key="synthetic", wire=SYSTEM_ONE, transport=httpx.MockTransport(respond))
     task = asyncio.create_task(client.judge(request, owner="shared-owner", allow_network=True))
     await entered.wait()
     judge = ParticipationModel(ModelResponse(content='{"decision": true}'))
@@ -290,9 +291,9 @@ async def test_abandoned_model_load_retains_capacity(
                 await asyncio.wait_for(task, timeout=1)
         else:
             assert (await asyncio.wait_for(task, timeout=1)).failure == "timeout"
-        client = SystemOneClient(
+        client = JudgmentClient(
             api_key="synthetic",
-            model=PINNED_MODEL,
+            wire=SYSTEM_ONE,
             transport=httpx.MockTransport(lambda _: httpx.Response(500)),
         )
         for owner in ("loading", "another-owner"):
