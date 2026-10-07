@@ -262,6 +262,18 @@ def test_a_rejected_capped_run_returns_only_for_inputs_no_agenda_has_listed(tmp_
     assert workspace.check() is None
 
 
+def test_the_note_that_starts_a_run_leads_its_agenda_even_behind_many_dead_citations(tmp_path: Path) -> None:
+    """Unlisted sources follow unlisted conversations and notes, so the cap never leaves out the evidence that started the run."""
+    workspace = _workspace(tmp_path)
+    citations = "".join(f"- Fact {index} (`knowledge/gone/{index}.md`).\n" for index in range(45))
+    workspace.write("memory/cited.md", citations, age=timedelta(days=30))
+    workspace.write(YESTERDAY, "- A new note.\n")
+
+    _started(workspace)
+
+    assert f"- `{YESTERDAY}`" in workspace.agenda()
+
+
 def test_a_run_a_restart_cut_short_waits_for_new_evidence(tmp_path: Path) -> None:
     """The agenda counts as attempted once posted, so a chain the runner lost does not start again on the same inputs."""
     workspace = _workspace(tmp_path)

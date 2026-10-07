@@ -507,10 +507,10 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
     def seen(item: _Input) -> bool:
         return state.attempted.get(item.path) == item.version
 
-    # Inputs no agenda has listed lead, so the evidence that starts a run is always on its agenda.
+    # Conversations and notes no agenda has listed lead, so the evidence that starts a run is always on its agenda.
     due = sorted(
         (item for item in inputs.values() if state.reviewed.get(item.path) != item.version),
-        key=lambda item: (seen(item), _order(item)),
+        key=lambda item: (seen(item), item.kind == "source", _order(item)),
     )
     # Only a conversation or daily note no agenda has listed starts a run; changed sources and unapplied proposals
     # join it, so an idle agent costs nothing and a failed run is not repeated on the same evidence.
