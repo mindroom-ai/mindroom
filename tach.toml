@@ -539,13 +539,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.legacy_reply_messages"
 depends_on = [
-    "mindroom.constants",
     "mindroom.event_journal",
-    "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.room_history_reads",
-    "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
-    "mindroom.streaming",
     "mindroom.tool_system.events",
 ]
 
@@ -3761,7 +3756,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.matrix.room_history_reads",
-    "mindroom.legacy_reply_messages",
     "mindroom.api.openai_request_parsing",
     "mindroom.commands.handler",
     "mindroom.custom_tools.matrix_conversation_operations",
@@ -3820,7 +3814,6 @@ depends_on = [
     "mindroom.timing",
 ]
 visibility = [
-    "mindroom.legacy_reply_messages",
     "mindroom.thread_summary",
     "mindroom.approval_transport",
     "mindroom.commands.config_confirmation",
@@ -4171,9 +4164,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
-    "mindroom.legacy_reply_messages",
     "mindroom.model_catalog_receiver",
-    "mindroom.reply_lifecycle",
     "mindroom.reply_scope",
     "mindroom.knowledge.utils",
     "mindroom.matrix.relation_lookup",
@@ -5946,7 +5937,6 @@ expose = [
     "extract_visible_edit_body",
     "extract_visible_message",
     "fetch_latest_visible_body",
-    "fetch_latest_visible_message",
     "is_visible_room_message",
     "message_preview",
     "room_message_fallback_body",
@@ -6433,7 +6423,6 @@ expose = [
     "render_tool_trace_for_context",
     "serialize_tool_trace",
     "tool_markers_match_trace",
-    "tool_trace_from_content",
 ]
 from = ["mindroom.tool_system.events"]
 
