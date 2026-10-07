@@ -1140,16 +1140,19 @@ def test_approval_settlement_guards() -> None:
     assert superseded.outcome is Outcome.DUPLICATE
     # A finish settles what its pause held whatever the reply does; only a completed run consumes its edit.
     assert other.effects == superseded.effects == (SettleSources("span-1", consumes_edit=False),)
-    finished = rl.approval_settled(
-        reply,
-        None,
-        approval_id="approval-1",
-        paused_span_id="span-1",
-        result="finished",
-        disposition=None,
-        now_ns=NOW,
-    )
-    assert finished.effects == (SettleSources("span-1", consumes_edit=True),)
+    # The span that ran the approved work says whether it answered: completed consumes the edit, failed does not.
+    for outcome, consumed in ((SpanOutcome.COMPLETED, True), (SpanOutcome.FAILED, False)):
+        ran = replace(_span, span_id="span-2", outcome=outcome, ended_at_ns=NOW)
+        finished = rl.approval_settled(
+            reply,
+            ran,
+            approval_id="approval-1",
+            paused_span_id="span-1",
+            result="finished",
+            disposition=None,
+            now_ns=NOW,
+        )
+        assert finished.effects[0] == SettleSources("span-1", consumes_edit=consumed)
     failed = rl.approval_settled(
         reply,
         None,

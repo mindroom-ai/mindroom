@@ -1332,7 +1332,8 @@ def approval_settled(
 ) -> Transition:
     """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
 
-    An answer the run completed consumes the edit a regeneration carries.
+    Only an answer the span that ran the approved work completed consumes the
+    edit a regeneration carries: a resume, or a span approved in place.
     """
     decided = _approval_finish(
         reply,
@@ -1342,7 +1343,8 @@ def approval_settled(
         disposition=disposition,
         now_ns=now_ns,
     )
-    settle = SettleSources(paused_span_id, consumes_edit=result == "finished")
+    answered = result == "finished" and last_span is not None and last_span.outcome is SpanOutcome.COMPLETED
+    settle = SettleSources(paused_span_id, consumes_edit=answered)
     return replace(decided, effects=(settle, *decided.effects))
 
 
