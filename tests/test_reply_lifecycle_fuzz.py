@@ -1370,8 +1370,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 and span.prepared_edit is not None
                 and "$source" not in self.model.deleted
                 and span.span_id not in self.model.departed
+                and self.model.finals.get(span.delivery_id) != "refused"
             ):
-                # S5: a regeneration that completed its answer consumed the edit it selected.
+                # S5: a regeneration that completed its answer consumed the edit it selected. An
+                # answer Matrix refused for good fails the approval it ran for, which commits no edit.
                 assert span.prepared_edit in self.model.consumed, span
 
     def _drain_step(self) -> bool:  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -1469,6 +1471,27 @@ def test_a_refused_answer_after_an_approved_regeneration_ends_with_the_delivery_
     reply = machine.model.reply
     assert reply is not None
     assert reply.state is ReplyState.FAILED
+
+
+def test_a_refused_answer_of_a_regeneration_approved_in_place_commits_no_edit() -> None:
+    """S5 on an in-place approval: the refused answer fails the approval, which leaves the edit uncommitted."""
+    machine = ReplyLifecycleMachine()
+    machine.start_turn()
+    machine.dispatch_failure()
+    machine.flush_owed()
+    machine.acknowledge_row()
+    machine.regenerate()
+    machine.pause(in_place=True)
+    machine.acknowledge_row()
+    machine.pause_shown_and_approved()
+    machine.finish()
+    machine.fail_row(reason="too_large")
+    machine.a_finished_reply_shows_its_end()
+    machine.teardown()
+    reply = machine.model.reply
+    assert reply is not None
+    assert reply.state is ReplyState.FAILED
+    assert not machine.model.consumed
 
 
 @pytest.mark.timeout(300)
