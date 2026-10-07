@@ -52,7 +52,7 @@ Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`
 
 A rule returns one outcome: `applied`, `stale` (the span is no longer current), `duplicate` (already true), `deferred` (earlier writes are unresolved), `recompute` (a Stop, deletion, or departure committed after the caller rendered), or `stopped`.
 A rule that can never apply raises `InvalidTransitionError`; callers treat it as a bug and settle the sources with a dispatch error instead of retrying.
-Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen.
+Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered unless they were deleted, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen.
 
 Callers render a payload from the reply's revision before the transaction; a rule that would choose different content returns `recompute`, writes nothing, and the caller renders again.
 
@@ -111,8 +111,8 @@ The handled-turn retention pass deletes finished replies that owe nothing, with 
 - I7. Every reply write is recorded before it is sent.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place.
 - I-S1. Every reply fact in the ownership table is read from reply records or a cache of them; no other store writes it.
-- I-S2. A reply answers its journal sources only through `SettleSources`, which settles them and marks the turn they index answered in the same transaction, including a finished approval's paused span and a reply its sources' deletion ended.
-  Sources settled without an answer, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
+- I-S2. A reply settles its journal sources only through `SettleSources`, which marks the turn they index answered in the same transaction, including a finished approval's paused span, unless the sources were deleted.
+  Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
 - I-S3. The outbox commits nothing outside transport for a row with `reply_id`.
 - I-S4. A continuation names its reply through its paused span and holds no reply or source fact of its own.
 

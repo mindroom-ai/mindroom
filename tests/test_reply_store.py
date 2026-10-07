@@ -600,10 +600,10 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     assert cancelled.outcome is SpanOutcome.CANCELLED
     assert not await principal.is_pending("$first")
     assert not await principal.is_pending("$second")
-    # Its settlement is every reply settlement: the turn is recorded answered with it.
+    # The deleted sources settle through the reply's settlement, and nothing answered their turn.
     record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$first"))
     assert record is not None
-    assert record.completed
+    assert not record.completed
     assert await principal.replies.ended_by_deletion("$second") == (gone,)
 
 

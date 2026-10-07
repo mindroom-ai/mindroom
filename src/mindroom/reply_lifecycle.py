@@ -248,6 +248,8 @@ class SettleSources:
     span_id: str
     # Whether the span's answer consumes the selected edit its regeneration carries.
     consumes_edit: bool = False
+    # False when the sources were deleted: they settle, and their turn stays unanswered.
+    answered: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1722,11 +1724,11 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     updated = reply
     if current is not None:
         effects.append(CancelSpan(current.span_id))
-        effects.append(SettleSources(current.span_id))
+        effects.append(SettleSources(current.span_id, answered=False))
         spans = (_end(current, SpanOutcome.CANCELLED, now_ns),)
         updated = _clear_current(updated, current.span_id)
     else:
-        effects.append(SettleSources(reply.last_span_id))
+        effects.append(SettleSources(reply.last_span_id, answered=False))
     gone = _with_redactions(
         _set_state(_stop_applied(updated), ReplyState.GONE, now_ns),
         *_visible_event_ids(reply),

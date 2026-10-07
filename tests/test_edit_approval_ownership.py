@@ -520,7 +520,8 @@ class TestEditApprovalOwnership:
             case.bot.client.room_send.side_effect = None
             newer = await case.principal.load_matrix_delivery(delivery_id="$newer-edit", stage=DeliveryStage.FINAL)
             assert newer is not None
-            assert newer.result is not None
+            # The newer answer is frozen as its reply's row, still owed to Matrix.
+            assert newer.reply_id is not None
             assert newer.acknowledged_event_id is None
         sends = case.bot.client.room_send.await_count
         await case.runner.handoff_approval_source("$edit")

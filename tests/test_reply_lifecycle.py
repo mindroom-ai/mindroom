@@ -1264,6 +1264,8 @@ def test_deleting_every_source_cancels_the_running_span() -> None:
     reply = replace(reply, event_id="$reply")
     transition = rl.sources_deleted(reply, span, now_ns=NOW)
     assert CancelSpan(span.span_id) in transition.effects
+    # The deleted sources settle, and nothing answered their turn.
+    assert SettleSources(span.span_id, answered=False) in transition.effects
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.GONE
     assert transition.reply.redaction_pending == ("$reply",)

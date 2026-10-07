@@ -102,8 +102,11 @@ def _run(
     post_commit: list[PostCommitEffect],
 ) -> None:
     match effect:
-        case SettleSources(span_id=span_id, consumes_edit=consumes_edit):
+        case SettleSources(span_id=span_id, consumes_edit=consumes_edit, answered=answered):
             span = _span_for(transaction, principal_id, transition, span_id)
+            if not answered:
+                journal.settle_many(transaction, principal_id, span.sources.pending)
+                return
             reply = transition.reply
             assert reply is not None, "a settlement belongs to a reply's transition"
             completed = turn_records.settle_turn(

@@ -69,6 +69,7 @@ __all__ = [
     "SourceEventRevision",
     "TurnRecord",
     "TurnRecordCodec",
+    "answer_event_id_of_run",
     "canonicalize_turn_record",
     "merge_edit_facts",
     "resolve_turn_record",
