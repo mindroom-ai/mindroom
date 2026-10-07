@@ -159,18 +159,11 @@ async def test_one_turn_never_shows_two_placeholders(
 
 
 def test_delivery_progress_transitions() -> None:
-    """The delivery-progress state machine tracks events and terminal reasons."""
-    progress = _DeliveryProgress(tracked_event_id=None)
-
-    progress.track_event(None)
-    assert progress.tracked_event_id is None
-    progress.track_event("$first")
-    progress.track_event("$second")
-    assert progress.tracked_event_id == "$second"
+    """The delivery-progress state machine tracks delivery start and terminal reasons."""
+    progress = _DeliveryProgress()
 
     progress.note_delivery_started(None)
     assert progress.stage_started is True
-    assert progress.tracked_event_id == "$second"
 
     progress.note_task_cancelled("cancelled_by_user")
     assert progress.cancelled is True

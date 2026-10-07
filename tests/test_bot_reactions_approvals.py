@@ -54,7 +54,7 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest, ResponseRunner, _DeliveryProgress
+from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.room_thread_modes import set_room_thread_mode_override
@@ -1627,7 +1627,6 @@ class TestAgentBot(AgentBotTestBase):
                     paused,
                     request=claimed_request,
                     target=target,
-                    progress=_DeliveryProgress(),
                     execution_identity=identity,
                     entity_kind="agent",
                     history_scope=history_scope,

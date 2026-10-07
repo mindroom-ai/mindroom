@@ -846,7 +846,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     _assert_interrupted_messages(
         persisted_run,
-        response_event_id="$team-terminal",
+        response_event_id="$thinking",
         assistant_body="Team hello\n\n(turn failed before completion)",
     )
 
@@ -932,7 +932,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     _assert_interrupted_messages(
         persisted_run,
-        response_event_id="$team-terminal",
+        response_event_id="$thinking",
         assistant_body=(
             "🤝 **Team Response** (General):\n\nTeam hello\n\n"
             "(turn failed before completion; 1 tool call(s) had finished)\n\n"
@@ -1228,7 +1228,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     assert [message.role for message in persisted_run.messages] == ["user", "assistant"]
     assert persisted_run.messages[0].content == persisted_prompt
     assert persisted_run.metadata is not None
-    assert persisted_run.metadata["matrix_response_event_id"] == "$team-msg"
+    assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
     assert persisted_run.messages[1].content == "Team hello\n\n(turn failed before completion)"
 
 
@@ -1976,7 +1976,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     _assert_interrupted_messages(
         persisted_run,
-        response_event_id="$team-final",
+        response_event_id="$thinking",
         assistant_body="Team partial\n\n(turn failed before completion)",
     )
 

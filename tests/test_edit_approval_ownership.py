@@ -722,7 +722,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         identity=runner._response_identity(request, response_kind="ai"),
         request=request,
     )
-    progress = _DeliveryProgress(tracked_event_id="$waiting")
+    progress = _DeliveryProgress()
     pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
     async def fail_handoff(_paused: PausedAttempt) -> None:
@@ -787,7 +787,6 @@ async def test_failed_pause_without_visible_response_shows_the_approval_failure(
             outcome = await runner._finalize_failed_approval_handoff(
                 target=request.response_envelope.target,
                 request=request,
-                progress=_DeliveryProgress(),
                 failure_reason="failed",
             )
     assert outcome.terminal_status == "error"

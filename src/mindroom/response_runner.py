@@ -355,6 +355,12 @@ def _existing_event(request: ResponseRequest) -> tuple[str | None, bool]:
     return reply.event_id, reply.event_id is not None and (not replaces_answer or reply.placeholder_only)
 
 
+def _reply_event_id() -> str | None:
+    """Return the event the current span's reply shows, if any."""
+    handle = current_span()
+    return None if handle is None else handle.reply.event_id
+
+
 def _existing_event_id(request: ResponseRequest) -> str | None:
     """Return the event this response writes over, from its reply's records once claimed."""
     return _existing_event(request)[0]
@@ -892,26 +898,19 @@ class _EarlyPlaceholderState:
 class _DeliveryProgress:
     """Mutable pre/post-delivery state for one locked response turn."""
 
-    tracked_event_id: str | None = None
     stage_started: bool = False
     failure_reason: str | None = None
     cancelled: bool = False
     delivery_outcome: FinalDeliveryOutcome | None = None
 
-    def note_delivery_started(self, event_id: str | None) -> None:
-        """Mark visible delivery as begun, tracking the event carrying it."""
+    def note_delivery_started(self, _event_id: str | None = None) -> None:
+        """Mark visible delivery as begun; the span's reply names the event carrying it."""
         self.stage_started = True
-        self.track_event(event_id)
 
     def note_task_cancelled(self, failure_reason: str) -> None:
         """Record that the response task was cancelled before delivery settled."""
         self.failure_reason = failure_reason
         self.cancelled = True
-
-    def track_event(self, event_id: str | None) -> None:
-        """Remember the latest Matrix event a terminal note could edit."""
-        if event_id:
-            self.tracked_event_id = event_id
 
     def settle(self, delivery_outcome: FinalDeliveryOutcome) -> None:
         """Record the turn's one canonical terminal delivery outcome."""
@@ -1534,7 +1533,6 @@ class ResponseRunner:
         *,
         request: ResponseRequest,
         target: MessageTarget,
-        progress: _DeliveryProgress,
         execution_identity: ToolExecutionIdentity,
         entity_kind: Literal["agent", "team"],
         history_scope: HistoryScope,
@@ -1598,7 +1596,6 @@ class ResponseRunner:
             if response_event_id is None:
                 msg = "Could not publish the suspended approval response"
                 raise RuntimeError(msg)  # noqa: TRY301
-            progress.track_event(response_event_id)
 
             continuation_state: Literal["waiting", "ready"] = (
                 "ready" if all(call.decision is not None for call in plan.calls) else "waiting"
@@ -1928,7 +1925,6 @@ class ResponseRunner:
                 self._suspend_for_approval,
                 request=request,
                 target=target,
-                progress=progress,
                 execution_identity=execution_identity,
                 entity_kind="agent",
                 history_scope=history_scope,
@@ -1948,7 +1944,7 @@ class ResponseRunner:
         """Run and classify one claimed continuation for either lifecycle entry path."""
         if claimed.cli_call is None:
             return await self._deliver_claimed_approval(claimed, request=request, target=target)
-        progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
+        progress = _DeliveryProgress()
         async with self._cli_approval_handler_scope(
             request=request,
             progress=progress,
@@ -2079,7 +2075,7 @@ class ResponseRunner:
         """Run one claimed pause through the normal stoppable response lifecycle."""
         request = self._approval_response_request(claimed, target=target)
         await self._refresh_mid_turn_context_for_approval(request)
-        progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
+        progress = _DeliveryProgress()
         progress.note_delivery_started(claimed.response_event_id)
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(
@@ -4191,7 +4187,6 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         request: ResponseRequest,
-        progress: _DeliveryProgress,
         failure_reason: str,
     ) -> FinalDeliveryOutcome:
         """Replace an unowned pause with durable failure, even after streaming began."""
@@ -4211,7 +4206,7 @@ class ResponseRunner:
         # settlement writes what it shows.
         return FinalDeliveryOutcome(
             terminal_status="error",
-            event_id=progress.tracked_event_id or _existing_event_id(request),
+            event_id=_existing_event_id(request),
             is_visible_response=False,
             failure_reason=failure_reason,
         )
@@ -4301,7 +4296,6 @@ class ResponseRunner:
                     await self._finalize_failed_approval_handoff(
                         target=target,
                         request=request,
-                        progress=progress,
                         failure_reason=progress.failure_reason,
                     ),
                 )
@@ -4641,7 +4635,7 @@ class ResponseRunner:
         if reason is not None:
             response_identity = self._response_identity(request, response_kind="team")
             lifecycle = self._build_lifecycle(identity=response_identity, request=request)
-            progress = _DeliveryProgress(tracked_event_id=_existing_event_id(request))
+            progress = _DeliveryProgress()
 
             async def deliver_resolution_reason(message_id: str | None) -> None:
                 progress.settle(
@@ -4760,7 +4754,7 @@ class ResponseRunner:
             raise RuntimeError(msg)
         response_run_id = str(uuid4())
         team_run_metadata_content: dict[str, Any] = {}
-        progress = _DeliveryProgress(tracked_event_id=_existing_event_id(request))
+        progress = _DeliveryProgress()
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = await self._active_response_event_ids(request.room_id)
         # Team entries refine entity_label to the materialized team label and
@@ -4811,7 +4805,7 @@ class ResponseRunner:
                 session_id=session_id,
                 execution_identity=tool_dispatch.execution_identity,
                 run_id=response_run_id,
-                response_event_id=progress.tracked_event_id,
+                response_event_id=_reply_event_id(),
             )
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
@@ -4823,7 +4817,6 @@ class ResponseRunner:
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
             delivery_request = delivery_request_base
             if message_id is not None:
-                progress.track_event(message_id)
                 team_turn_recorder.set_response_event_id(message_id)
             compaction_lifecycle = self._build_compaction_lifecycle(
                 target=delivery_target,
@@ -4835,7 +4828,6 @@ class ResponseRunner:
                 team_turn_recorder.set_run_id(current_run_id)
 
             def _note_visible_response_event_id(response_event_id: str) -> None:
-                progress.track_event(response_event_id)
                 team_turn_recorder.set_response_event_id(response_event_id)
 
             if use_streaming and (_existing_event_id(delivery_request) is None or _shows_placeholder(delivery_request)):
@@ -4844,7 +4836,6 @@ class ResponseRunner:
                     delivery_request,
                     response_run_id=response_run_id,
                 ):
-                    event_id: str | None = None
 
                     def build_response_stream() -> AsyncIterator[StreamInputChunk]:
                         return team_response_stream(
@@ -4912,8 +4903,6 @@ class ResponseRunner:
                                 ),
                             ),
                         )
-                        event_id = transport_outcome.last_physical_stream_event_id
-                        progress.track_event(event_id)
                     except asyncio.CancelledError:
                         if current_task_is_process_shutdown():
                             raise
@@ -4924,7 +4913,7 @@ class ResponseRunner:
                             execution_identity=tool_dispatch.execution_identity,
                             run_id=response_run_id,
                             is_team=True,
-                            response_event_id=progress.tracked_event_id,
+                            response_event_id=_reply_event_id(),
                         )
                         raise
                     finally:
@@ -5000,7 +4989,7 @@ class ResponseRunner:
                                     execution_identity=tool_dispatch.execution_identity,
                                     run_id=response_run_id,
                                     is_team=True,
-                                    response_event_id=progress.tracked_event_id,
+                                    response_event_id=_reply_event_id(),
                                 )
                                 raise
                     finally:
@@ -5049,7 +5038,7 @@ class ResponseRunner:
                         execution_identity=tool_dispatch.execution_identity,
                         run_id=response_run_id,
                         is_team=True,
-                        response_event_id=progress.tracked_event_id,
+                        response_event_id=_reply_event_id(),
                     )
                     raise
                 self._note_final_delivery_timing(request, delivery)
@@ -5068,7 +5057,6 @@ class ResponseRunner:
                 )
             else:
                 self.deps.logger.exception("Error in team streaming response", error=str(error.error))
-            progress.track_event(error.event_id)
             if self._record_stream_delivery_error(
                 recorder=team_turn_recorder,
                 accumulated_text=error.accumulated_text,
@@ -5082,7 +5070,7 @@ class ResponseRunner:
                     execution_identity=tool_dispatch.execution_identity,
                     run_id=response_run_id,
                     is_team=True,
-                    response_event_id=progress.tracked_event_id,
+                    response_event_id=_reply_event_id(),
                 )
             return await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
@@ -5141,7 +5129,6 @@ class ResponseRunner:
                 paused,
                 request=request,
                 target=delivery_target,
-                progress=progress,
                 execution_identity=tool_dispatch.execution_identity,
                 entity_kind="team",
                 history_scope=session_scope,
@@ -5990,7 +5977,7 @@ class ResponseRunner:
         generation: _ResponseGenerationOutcome | None = None
         attempt_run_ids: list[str] = []
         response_run_id = str(uuid4())
-        progress = _DeliveryProgress(tracked_event_id=_existing_event_id(request))
+        progress = _DeliveryProgress()
         response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
             identity=response_identity,
@@ -6018,9 +6005,8 @@ class ResponseRunner:
             create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
         )
 
-        async def generate(message_id: str | None) -> None:
+        async def generate(_message_id: str | None) -> None:
             nonlocal generation
-            progress.track_event(message_id)
             delivery_request = normalized_request
             if use_streaming:
                 generation = await self._process_and_respond_streaming(
@@ -6108,7 +6094,6 @@ class ResponseRunner:
                     paused,
                     request=request,
                     target=resolved_target,
-                    progress=progress,
                     execution_identity=execution_identity,
                     entity_kind="agent",
                     history_scope=history_scope,

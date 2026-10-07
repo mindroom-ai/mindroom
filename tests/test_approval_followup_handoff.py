@@ -22,7 +22,6 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
 )
-from mindroom.response_runner import _DeliveryProgress, _EarlyPlaceholderState
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
@@ -37,7 +36,7 @@ if TYPE_CHECKING:
     from mindroom.approval_response import _ApprovalPausePlan
     from mindroom.bot import AgentBot
     from mindroom.message_target import MessageTarget
-    from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.response_runner import ResponseRequest, ResponseRunner, _EarlyPlaceholderState
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -262,7 +261,6 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             replace(_pause("call-1"), continuation_count=2),
             request=claimed_request,
             target=resolved_target,
-            progress=_DeliveryProgress(),
             execution_identity=runner.deps.tool_runtime.build_execution_identity(
                 target=resolved_target,
                 user_id=request.user_id,

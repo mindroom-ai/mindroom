@@ -10,7 +10,6 @@ import pytest
 from agno.models.response import ToolExecution
 
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
-from mindroom.response_runner import _DeliveryProgress
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -101,7 +100,6 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
                 paused,
                 request=request,
                 target=request.response_envelope.target,
-                progress=_DeliveryProgress(),
                 execution_identity=identity,
                 entity_kind="agent",
                 history_scope=runner.deps.state_writer.history_scope(),
