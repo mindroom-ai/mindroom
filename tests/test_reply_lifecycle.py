@@ -723,6 +723,7 @@ def test_a_failed_approval_ends_a_resume_an_older_instance_left_current() -> Non
         resume.reply,
         orphan,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="cancelled_by_user",
         now_ns=NOW,
@@ -846,6 +847,7 @@ def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
         stop.reply,
         None,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="cancelled_by_user",
         now_ns=NOW,
@@ -882,6 +884,7 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
         stopped.reply,
         ended,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="cancelled_by_user",
         now_ns=NOW,
@@ -924,6 +927,7 @@ def test_a_regeneration_claimed_before_the_stopped_wait_settles_owns_its_sources
         regeneration.reply,
         regeneration.claimed,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="cancelled_by_user",
         now_ns=NOW,
@@ -1035,6 +1039,7 @@ def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> No
         stop.reply,
         ended,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="failed",
         now_ns=NOW,
@@ -1113,23 +1118,43 @@ def test_permanently_failed_pause_row_fences_the_approval() -> None:
 def test_approval_settlement_guards() -> None:
     """Approval events from another approval are stale; superseded failures never touch the reply."""
     reply, _span, _transition = _paused()
-    assert (
-        rl.approval_settled(reply, None, approval_id="other", result="failed", disposition="failed", now_ns=NOW).outcome
-        is Outcome.STALE
+    other = rl.approval_settled(
+        reply,
+        None,
+        approval_id="other",
+        paused_span_id="span-1",
+        result="failed",
+        disposition="failed",
+        now_ns=NOW,
     )
+    assert other.outcome is Outcome.STALE
     superseded = rl.approval_settled(
         reply,
         None,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="superseded",
         now_ns=NOW,
     )
     assert superseded.outcome is Outcome.DUPLICATE
+    # A finish settles what its pause held whatever the reply does; only a completed run consumes its edit.
+    assert other.effects == superseded.effects == (SettleSources("span-1", consumes_edit=False),)
+    finished = rl.approval_settled(
+        reply,
+        None,
+        approval_id="approval-1",
+        paused_span_id="span-1",
+        result="finished",
+        disposition=None,
+        now_ns=NOW,
+    )
+    assert finished.effects == (SettleSources("span-1", consumes_edit=True),)
     failed = rl.approval_settled(
         reply,
         None,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="failed",
         now_ns=NOW,
@@ -1823,6 +1848,7 @@ def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
         stopped_before,
         None,
         approval_id="approval-1",
+        paused_span_id="span-1",
         result="failed",
         disposition="failed",
         now_ns=NOW,

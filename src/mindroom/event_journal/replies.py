@@ -205,10 +205,11 @@ def approval_finished(
     principal_id: str,
     continuation: approval_continuations.ApprovalContinuation,
 ) -> AppliedTransition | None:
-    """Apply a finished continuation to the reply it paused."""
+    """Apply a finished continuation to the reply it paused, settling the sources its pause held."""
     reply = lock_paused_reply(transaction, principal_id, continuation)
     if reply is None:
         return None
+    assert continuation.span_id is not None, "a continuation with a reply names the span that paused it"
     failed = continuation.state == "failing"
     reason = continuation.failure_reason
     disposition: rl.FailureDisposition | None = None
@@ -227,6 +228,7 @@ def approval_finished(
             reply,
             reply_spans.load(transaction, principal_id, reply.last_span_id),
             approval_id=continuation.approval_id,
+            paused_span_id=continuation.span_id,
             result="failed" if failed else "finished",
             disposition=disposition,
             now_ns=time.time_ns(),

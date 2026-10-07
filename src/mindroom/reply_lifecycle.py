@@ -1318,7 +1318,33 @@ def resumed_in_place(reply: Reply, span: Span, *, approval_id: str, now_ns: int)
 _ApprovalResult = Literal["failed", "finished"]
 
 
-def approval_settled(  # noqa: PLR0911
+def approval_settled(
+    reply: Reply,
+    last_span: Span | None,
+    *,
+    approval_id: str,
+    paused_span_id: str,
+    result: _ApprovalResult,
+    disposition: FailureDisposition | None,
+    now_ns: int,
+) -> Transition:
+    """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
+
+    An answer the run completed consumes the edit a regeneration carries.
+    """
+    decided = _approval_finish(
+        reply,
+        last_span,
+        approval_id=approval_id,
+        result=result,
+        disposition=disposition,
+        now_ns=now_ns,
+    )
+    settle = SettleSources(paused_span_id, consumes_edit=result == "finished")
+    return replace(decided, effects=(settle, *decided.effects))
+
+
+def _approval_finish(  # noqa: PLR0911
     reply: Reply,
     last_span: Span | None,
     *,
@@ -1327,7 +1353,7 @@ def approval_settled(  # noqa: PLR0911
     disposition: FailureDisposition | None,
     now_ns: int,
 ) -> Transition:
-    """Apply a continuation's finish."""
+    """Apply a continuation's finish to the reply it paused."""
     resumed = last_span is not None and last_span.kind is SpanKind.APPROVAL_RESUME and last_span.ended
     owns = reply.approval_id == approval_id or (
         resumed and last_span is not None and last_span.approval_id == approval_id

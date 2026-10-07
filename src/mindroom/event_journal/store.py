@@ -1976,21 +1976,27 @@ def _settled_approval(
     principal_id: str,
     continuation: ApprovalContinuation,
 ) -> tuple[PostCommitEffect, ...]:
-    """Settle a finished continuation's sources through the reply settlement path, then end its reply."""
+    """Apply a finished continuation to the reply it paused, whose rule settles the sources the pause held."""
+    applied = replies.approval_finished(transaction, principal_id, continuation)
+    if applied is not None:
+        return applied.post_commit
+    # LEGACY_COMPAT: Finishing an adopted continuation that reply classification never named a span for.
+    # Legacy format: an approval_continuations row with no span_id, whose identity the schema upgrade copied into its
+    # context; it stays so when its entity never starts again, such as an entity removed from the configuration.
+    # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages settle a continuation's
+    # sources through its paused span's SettleSources.
+    # Handling: its adopted pending and logical sources settle and its turn is answered, consuming its adopted
+    # selected edit unless it failed, as the paused span's settlement would.
+    # Coverage: tests/test_legacy_continuation_identity.py::test_an_unclassified_continuation_settles_its_adopted_sources.
     completed = turn_records.settle_turn(
         transaction,
         principal_id,
         continuation.entity_name,
         pending=continuation.source_event_ids,
         logical=continuation.sources.logical_source_event_ids,
-        # An answer the run completed consumes the edit a regeneration carries.
         prepared_edit=None if continuation.state == "failing" else continuation.prepared_edit_record,
     )
-    applied = replies.approval_finished(transaction, principal_id, continuation)
-    effects: list[PostCommitEffect] = [] if completed is None else [replies.TurnCompleted(completed)]
-    if applied is not None:
-        effects.extend(applied.post_commit)
-    return tuple(effects)
+    return () if completed is None else (replies.TurnCompleted(completed),)
 
 
 class _ReplyRowRefusedError(Exception):

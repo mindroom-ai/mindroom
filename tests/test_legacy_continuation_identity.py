@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.event_journal import legacy_response_attempts, postgres_backend, sqlite_backend
+from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from tests.test_journal_upgrade_boundary import _LegacyDatabase
 from tests.test_journal_upgrade_boundary import legacy_database as _legacy_database
 
@@ -207,3 +208,22 @@ def test_an_unprovable_identity_rolls_back_the_upgrade(legacy_database: _LegacyD
     )
     assert legacy_database.query(columns) == []
     assert legacy_database.query("SELECT state FROM journal_events WHERE event_id = '$edit'") == [("pending",)]
+
+
+@pytest.mark.asyncio
+async def test_an_unclassified_continuation_settles_its_adopted_sources(legacy_database: _LegacyDatabase) -> None:
+    """A continuation whose entity never classified its reply settles the sources its adopted identity names."""
+    legacy_database.execute(_ATTEMPT_OWNER)
+    legacy_database.execute(
+        f"UPDATE approval_continuations SET state = 'failing', failure_reason = '{SUPERSEDED_FAILURE_REASON}' "  # noqa: S608
+        "WHERE approval_id = 'approval'",
+    )
+    store = legacy_database.open()
+    try:
+        principal = store.principal("@bot:example.org")
+        assert await principal.is_pending("$first")
+        assert await principal.finish_approval_continuation("approval") is not None
+        assert await principal.approval_continuation("approval") is None
+        assert not await principal.is_pending("$first")
+    finally:
+        await store.close()

@@ -51,6 +51,7 @@ _SETTLING_OUTCOMES = frozenset(
 @dataclass
 class _Approval:
     approval_id: str
+    paused_span_id: str
     state: str  # waiting, claimed, failing
     disposition: rl.FailureDisposition | None = None
 
@@ -251,6 +252,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self.model.reply,  # type: ignore[arg-type]
                 None,
                 approval_id=self.model.approval.approval_id,
+                paused_span_id=self.model.approval.paused_span_id,
                 result="failed",
                 disposition="superseded",
                 now_ns=self._now(),
@@ -524,6 +526,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self.model.reply,  # type: ignore[arg-type]
                 ended,
                 approval_id=self.model.approval.approval_id,
+                paused_span_id=self.model.approval.paused_span_id,
                 result="finished",
                 disposition=None,
                 now_ns=self._now(),
@@ -560,7 +563,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             assert reply.unapplied_stop
             return
         self._apply(transition)
-        self.model.approval = _Approval(approval_id, "waiting")
+        self.model.approval = _Approval(approval_id, span.span_id, "waiting")
 
     @precondition(
         lambda self: (
@@ -604,6 +607,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 reply,
                 self._last(),
                 approval_id=approval.approval_id,
+                paused_span_id=approval.paused_span_id,
                 result="failed",
                 disposition=approval.disposition,
                 now_ns=self._now(),
