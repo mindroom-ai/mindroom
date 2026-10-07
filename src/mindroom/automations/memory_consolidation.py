@@ -71,7 +71,15 @@ _MAX_FILE_REMOVED_FRACTION = 0.5
 _MIN_FILE_REMOVED_ALLOWANCE = 2
 _DONE_LINE = "DREAM: DONE"
 # The verdict and its notes or reason, after an em dash, en dash, or hyphen.
-_VERDICT = re.compile(r"VERDICT:\s*(APPROVE[- ]WITH[- ]NOTES|APPROVE|REJECT)\b\s*(?:[\u2014\u2013-]+\s*)?(.*)")
+# Exactly one of the three verdict forms; anything else, such as "APPROVE-WITH-CHANGES" or "APPROVE once fixed", is
+# unparseable and so a rejection. Notes and reasons follow an em dash, en dash, or hyphen.
+_VERDICT = re.compile(
+    r"VERDICT:\s*(?:"
+    r"(?P<approve>APPROVE)\.?"
+    r"|(?P<notes>APPROVE[- ]WITH[- ]NOTES)(?:\s*[\u2014\u2013-]+\s*(?P<detail>.*))?"
+    r"|(?P<reject>REJECT)(?:\s*[\u2014\u2013-]+\s*(?P<reason>.*))?"
+    r")",
+)
 _MISSING = "missing"
 
 # An input's version: its modification time and size, or missing for a cited file that no longer exists.
@@ -281,10 +289,10 @@ def _version(root: Path, path: str) -> _Version | None:
     try:
         with open_directory_within_root(root, parent) as parent_fd:
             status = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError:
         return _MISSING
     except OSError:
-        # A link on the way is not a file memory can cite.
+        # A link or a file on the way is not a path memory can cite.
         return None
     return (status.st_mtime_ns, status.st_size) if stat.S_ISREG(status.st_mode) else None
 
@@ -321,10 +329,8 @@ def _canonical_citation(cited: str, aliases: Mapping[str, str]) -> str | None:
         return None
     if parts[0] == _EXPORTS_DIR:
         return cited if len(parts) > 1 else None
-    if len(parts) < 3:
-        return None
-    if parts[1] not in aliases:
-        # A base no longer assigned to the agent loses its link, so the cited file is gone from the workspace.
+    if len(parts) == 2 or parts[1] not in aliases:
+        # A file directly under knowledge/, or one in a base no longer assigned to the agent, whose link is gone.
         return cited
     return "/".join([aliases[parts[1]], *parts[2:]])
 
@@ -731,7 +737,8 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
     if timed_out:
         verdict, detail = "REJECT", "the review did not finish within an hour"
     elif match := _VERDICT.fullmatch(_last_line(_read_optional(run.root, f"{run.run_dir}/verdict.md"))):
-        verdict, detail = match.group(1).replace(" ", "-"), match.group(2).strip()
+        verdict = "APPROVE" if match["approve"] else "APPROVE-WITH-NOTES" if match["notes"] else "REJECT"
+        detail = (match["detail"] or match["reason"] or "").strip().rstrip(".")
     else:
         verdict, detail = "REJECT", "the review wrote no verdict line"
     if verdict == "REJECT":

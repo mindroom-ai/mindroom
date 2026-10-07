@@ -306,6 +306,19 @@ def test_a_citation_with_spaces_in_backticks_tracks_the_whole_path(tmp_path: Pat
     assert "- `knowledge/docs/Meeting Notes.md`, cited by `memory/meetings.md`" in workspace.agenda()
 
 
+def test_a_file_directly_under_knowledge_is_tracked(tmp_path: Path) -> None:
+    """A note saved straight into knowledge/ is a source like any other."""
+    workspace = _Workspace(tmp_path)
+    workspace.write("knowledge/notes.md", "Decision log.\n", age=timedelta(days=30))
+    workspace.write("memory/topic.md", "- Decided in `knowledge/notes.md`.\n", age=timedelta(days=30))
+
+    assert workspace.check() is None
+    workspace.write("knowledge/notes.md", "Decision log, revised.\n")
+
+    assert workspace.check() is not None
+    assert "- `knowledge/notes.md`, cited by `memory/topic.md`" in workspace.agenda()
+
+
 def test_a_citation_through_an_unassigned_knowledge_base_is_dead(tmp_path: Path) -> None:
     """A base removed from the agent loses its knowledge/ link, so claims citing it are reviewed as dead citations."""
     workspace = _workspace(tmp_path)
@@ -633,6 +646,7 @@ def test_a_daily_note_the_run_edited_is_not_due_again(tmp_path: Path) -> None:
     ("verdict", "notes"),
     [
         ("- VERDICT: APPROVE", None),
+        ("VERDICT: APPROVE.", None),
         ("**VERDICT:** APPROVE", None),
         ("> VERDICT: APPROVE WITH NOTES - count the moved lines", "count the moved lines"),
     ],
@@ -698,10 +712,16 @@ def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("verdict", "timed_out", "reason"),
     [
-        ("VERDICT: REJECT — the move drops a measured result", False, "the move drops a measured result"),
+        ("VERDICT: REJECT — the move drops a measured result.", False, "the move drops a measured result"),
         (None, False, "the review wrote no verdict line"),
         ("Looks fine to me.", False, "the review wrote no verdict line"),
         ("VERDICT: APPROVE", True, "the review did not finish within an hour"),
+        (
+            "VERDICT: APPROVE-WITH-CHANGES - remove the unsupported claim first",
+            False,
+            "the review wrote no verdict line",
+        ),
+        ("VERDICT: APPROVE only after correcting the date", False, "the review wrote no verdict line"),
     ],
 )
 def test_anything_but_an_approval_applies_nothing_and_carries_the_proposal(
