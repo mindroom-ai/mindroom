@@ -534,6 +534,10 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
         pass
     for path, payload in snapshot.items():
         write_file_within_root(root, f"{run.run_dir}/staging/{path}", payload)
+    # The agenda counts as attempted once it is posted, so a run a restart cut short also waits for new evidence.
+    state.attempted = {path: version for path, version in state.attempted.items() if path in run.inputs}
+    state.attempted.update((item.path, item.version) for item in run.due)
+    _save_state(runtime_paths, agent_name, state)
     logger.info("Dreaming starts a run", agent=agent_name, run=run.run_id, inputs=len(run.due))
     return Ask(
         config.render_prompt(
@@ -826,9 +830,10 @@ def _end(
     applied: tuple[str, ...] = (),
     on_loop: Callable[[], None] | None = None,
 ) -> Done:
-    """Record the agenda as attempted and, after success, the progress; drop the staging and return the closing notice.
+    """Record the run's outcome, drop its staging, and return the notice that ends the chain.
 
-    A proposal that reached its review is already pending, so only success records progress here.
+    The check already recorded the agenda as attempted, and a proposal that reached its review is already pending, so
+    only success needs recording here.
     """
 
     def record_progress(state: _State) -> None:
@@ -844,14 +849,8 @@ def _end(
         state.latest_run = None
         state.notes = notes
 
-    def record_end(state: _State) -> None:
-        attempted = {path: version for path, version in state.attempted.items() if path in run.inputs}
-        attempted.update((item.path, item.version) for item in run.due)
-        state.attempted = attempted
-        if outcome in {"applied", "unchanged"}:
-            record_progress(state)
-
-    _update_state(run.runtime_paths, run.agent_name, record_end)
+    if outcome in {"applied", "unchanged"}:
+        _update_state(run.runtime_paths, run.agent_name, record_progress)
     try:
         with open_directory_within_root(run.root, run.run_dir) as run_fd:
             shutil.rmtree("staging", dir_fd=run_fd)

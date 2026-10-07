@@ -262,6 +262,18 @@ def test_a_rejected_capped_run_returns_only_for_inputs_no_agenda_has_listed(tmp_
     assert workspace.check() is None
 
 
+def test_a_run_a_restart_cut_short_waits_for_new_evidence(tmp_path: Path) -> None:
+    """The agenda counts as attempted once posted, so a chain the runner lost does not start again on the same inputs."""
+    workspace = _workspace(tmp_path)
+    workspace.write(EXPORT, "messages: [hello]\n")
+    _started(workspace)
+
+    assert workspace.check() is None
+    workspace.write(YESTERDAY, "- A new note.\n")
+    _started(workspace)
+    assert f"- `{EXPORT}`" in workspace.agenda()
+
+
 def test_an_input_a_failed_run_listed_is_not_seeded_while_the_agent_is_idle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
