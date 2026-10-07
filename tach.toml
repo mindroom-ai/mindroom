@@ -2793,7 +2793,6 @@ depends_on = [
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
     "mindroom.response_sources",
-    "mindroom.response_terminal",
     "mindroom.response_turn",
     "mindroom.streaming",
     "mindroom.teams",
@@ -2863,11 +2862,6 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.streaming",
 ]
-visibility = ["mindroom.response_runner"]
-
-[[modules]]
-path = "mindroom.response_terminal"
-depends_on = ["mindroom.final_delivery"]
 visibility = ["mindroom.response_runner"]
 
 [[modules]]

@@ -121,11 +121,6 @@ from mindroom.response_shutdown_diagnostics import (
     response_shutdown_phase,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.response_terminal import (
-    PendingVisibleResponse,
-    TerminalFailureStatus,
-    build_terminal_stream_transport_outcome,
-)
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_shutdown import (
@@ -368,6 +363,43 @@ def _existing_event_id(request: ResponseRequest) -> str | None:
 def _shows_placeholder(request: ResponseRequest) -> bool:
     """Return whether the event this response writes over is a placeholder rather than an answer."""
     return _existing_event(request)[1]
+
+
+def _failed_stream_transport(*, failure_reason: str) -> StreamTransportOutcome:
+    """Describe what the current span's reply shows after its stream failed outside the streamer.
+
+    The streamer's own transport state is gone, so the reply's records say
+    what reached the room: this span's answer, only the placeholder, or
+    nothing of this span's own.
+    """
+    handle = current_span()
+    reply = None if handle is None else handle.reply
+    if handle is None or reply is None or reply.event_id is None:
+        return StreamTransportOutcome(
+            last_physical_stream_event_id=None,
+            terminal_status="error",
+            rendered_body=None,
+            visible_body_state="none",
+            failure_reason=failure_reason,
+        )
+    shown = decode_presentation(reply.possibly_shown or reply.presentation)
+    answer = current_answer(shown, handle.span_id)
+    if answer is not None and answer.text:
+        return StreamTransportOutcome(
+            last_physical_stream_event_id=reply.event_id,
+            terminal_status="error",
+            rendered_body=render_body(shown)[0],
+            visible_body_state="visible_body",
+            failure_reason=failure_reason,
+        )
+    placeholder_only = reply.placeholder_only and _resumed_reply() is None
+    return StreamTransportOutcome(
+        last_physical_stream_event_id=reply.event_id,
+        terminal_status="error",
+        rendered_body=shown.placeholder if placeholder_only else None,
+        visible_body_state="placeholder_only" if placeholder_only else "none",
+        failure_reason=failure_reason,
+    )
 
 
 def _replaceable_placeholder(request: ResponseRequest) -> bool:
@@ -4141,7 +4173,7 @@ class ResponseRunner:
         self,
         progress: _DeliveryProgress,
         *,
-        terminal_status: TerminalFailureStatus,
+        terminal_status: Literal["cancelled", "error"],
         failure_reason: str,
     ) -> None:
         """Settle a turn that ended before a delivery outcome; its span's exit decides the reply."""
@@ -5753,17 +5785,7 @@ class ResponseRunner:
                 await self.deps.delivery_gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
                         target=runtime.resolved_target,
-                        stream_transport_outcome=build_terminal_stream_transport_outcome(
-                            PendingVisibleResponse(
-                                tracked_event_id=existing_event_id,
-                                run_message_id=None,
-                                existing_event_id=existing_event_id,
-                                existing_event_is_placeholder=replaceable_placeholder,
-                            ),
-                            terminal_status="error",
-                            failure_reason=str(error),
-                            placeholder_body=PROGRESS_PLACEHOLDER,
-                        ),
+                        stream_transport_outcome=_failed_stream_transport(failure_reason=str(error)),
                         initial_delivery_kind="edited" if existing_event_id else "sent",
                         identity=response_identity,
                         tool_trace=list(tool_trace) if runtime.show_tool_calls else None,

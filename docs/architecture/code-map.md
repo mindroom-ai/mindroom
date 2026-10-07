@@ -81,7 +81,6 @@ Matrix sync callback
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
-| `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |

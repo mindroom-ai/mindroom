@@ -147,6 +147,34 @@ async def test_streamed_answer_completes_its_reply(tmp_path: Path) -> None:
     assert _sent_bodies(bot)[-1] == "Hello there, friend."
 
 
+async def test_a_streamed_answer_that_fails_after_showing_content_reports_it(tmp_path: Path) -> None:
+    """A failure after the stream showed its answer reports that answer as the visible response, not a placeholder."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        for chunk in ("Hello", " there", ", friend."):
+            yield chunk
+            await asyncio.sleep(0.01)
+
+    with (
+        patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+        patch(
+            "mindroom.response_lifecycle.ResponseLifecycle.emit_session_started",
+            new=AsyncMock(side_effect=RuntimeError("session hook failed")),
+        ),
+    ):
+        event_id = await runner.generate_response(_plain_request(_target()))
+
+    reply = await _reply(bot)
+    assert event_id == reply.event_id is not None
+    assert "Hello there, friend." in render_body(decode_presentation(reply.presentation))[0]
+
+
 async def test_blocking_answer_completes_its_reply(tmp_path: Path) -> None:
     """A non-streamed answer is the reply's terminal row."""
     bot = await _streaming_bot(tmp_path)
