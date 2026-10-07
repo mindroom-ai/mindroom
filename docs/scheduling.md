@@ -336,7 +336,7 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 
 `dreaming` keeps the agent's `memory/` files current: each night it reconciles them with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
 
-1. It runs only when a [thread export](thread-exports.md) or a daily note from before today is new or changed since its last run, so an agent nobody talked to costs nothing.
+1. It runs only when a [thread export](thread-exports.md) or a daily note from before today is new or changed since its last run, so a night without new threaded messages in the agent's rooms and without new daily notes costs nothing.
 2. The agent proposes changes in a copy of `memory/`: it updates facts that later evidence corrects, marks superseded lines instead of deleting them, files new durable facts such as decisions, preferences, and stable settings in topic files with their source and date, records conflicting sources with both versions, and removes duplicates.
    It also rechecks `knowledge/` and `thread_exports/` files that memory cites and that changed or disappeared.
    It leaves transient tasks in the daily notes and never removes or doubts a fact only because newer notes do not mention it.
@@ -345,7 +345,7 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 
 MindRoom never changes `MEMORY.md`, context files, or today's daily note; the agent suggests changes to them in its report.
 A proposal that deletes a large part of memory goes back to the agent once for a re-check, and is dropped if it still does.
-When the review rejects a proposal, a run does not finish, or memory changed during the run, nothing is applied; the next run after new messages retries the same inputs and starts from any proposal that reached review and its reviewer's notes.
+When the review rejects a proposal, a run does not finish, or memory changed during the run, nothing is applied; the next run, once a new thread export or daily note arrives, retries the same inputs and starts from any proposal that reached review and its reviewer's notes.
 A run handles at most 40 inputs; the rest wait for later runs.
 Turning the automation or thread exports on starts from conversations and notes of the last seven days instead of reviewing the older archive.
 Each run keeps its agenda and report, and a run that reached review also its patch and verdict, in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least; undo an applied run with `git apply -R .mindroom/dreaming/runs/<run>/proposal.patch` from the workspace root.

@@ -217,7 +217,7 @@ Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not 
 
 In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](knowledge.md#storage)).
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
-Writes through the `memory` tool and auto-flush refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
+Writes through the `memory` tool, auto-flush, and an applied [dreaming](scheduling.md#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 ```yaml
