@@ -992,11 +992,13 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
 
 
 def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, sequence: int, now_ns: int) -> Transition:
-    """A span's terminal row failed for good after the span ended; its outcome stays."""
+    """A span's terminal row failed for good after the span ended; its outcome stays.
+
+    A later span claims the reply only after this row resolved, unless an
+    earlier release queued both: the later write then decides the reply.
+    """
     if span.span_id != reply.last_span_id:
-        # A later span claimed the reply only after this row resolved, so this cannot be its row.
-        msg = f"Terminal row of span {span.span_id} failed after span {reply.last_span_id} claimed the reply"
-        raise _invalid(msg)
+        return _unchanged(Outcome.DUPLICATE, reply)
     if first_create:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.GONE, now_ns))
     if reply.placeholder_only:

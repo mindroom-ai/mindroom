@@ -139,7 +139,8 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # approvals a newer edit's answer replaced keep theirs on that answer's reply, finished unless its rows are in flight,
 # and their cleanup runs), the
 # state a frozen unacknowledged FINAL implies with its sources settled and its turn answered, each owed regeneration
-# FINAL keyed by its edit as the next write of the reply of the answer it edits, in queue order, a lost
+# FINAL keyed by its edit as the next write of the reply of the answer it edits, in queue order, or retired as
+# superseded when that reply already wrote past it or is still in flight, its edit answered either way, a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; a
 # Stop is kept on the reply it names, adopting a finished answer's reply when nothing in flight held it, even for a Stop
@@ -950,13 +951,16 @@ def _edit_answers(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
-    """Make each regeneration answer an earlier release queued the next write of the reply of the answer it edits.
+    """Give each regeneration answer an earlier release queued to the reply of the answer it edits.
 
-    Such a row is keyed by its edit, which indexes no turn. In the order they
-    were queued, so a newer edit waits for their delivery; a completed one
-    consumes the edit it selected, as a regeneration's terminal row does now.
-    The answer it edits becomes a finished reply first when nothing in flight
-    held it; a reply still in flight or removed keeps the row an ordinary
+    Such a row is keyed by its edit, which indexes no turn. Taken in the order
+    they were queued, one newer than everything the reply wrote becomes its
+    next write, so a newer edit waits for its delivery. One the reply already
+    wrote past, or one beside a reply still in flight, is superseded: it is
+    never sent, since what the reply shows now is newer. Either way a
+    completed one consumes the edit it selected, as a regeneration's
+    terminal row does now. The answer it edits becomes a finished reply first
+    when nothing in flight held it; a removed reply keeps the row an ordinary
     delivery.
     """
     applied: list[AppliedTransition] = []
@@ -976,12 +980,33 @@ def _edit_answers(
                 presentations,
                 now_ns,
             )
-        if found is None or not found.terminal or found.state is rl.ReplyState.GONE:
+        if found is None or found.state is rl.ReplyState.GONE:
             continue
         reply = reply_messages.lock(transaction, principal_id, found.reply_id)
         assert reply is not None
-        applied.append(_edit_answer(transaction, principal_id, reply, row, selected, presentations, now_ns))
+        superseded = not reply.terminal or row.created_at_ns < _latest_write_ns(transaction, principal_id, reply)
+        applied.append(
+            _edit_answer(transaction, principal_id, reply, row, selected, presentations, now_ns, superseded=superseded),
+        )
     return tuple(applied)
+
+
+def _latest_write_ns(transaction: Transaction, principal_id: str, reply: rl.Reply) -> int:
+    """Return when the reply's newest write was queued: a row it owns, or the pause of an approval naming it."""
+    row = transaction.fetchone(
+        """
+        SELECT MAX(created_at_ns) AS latest FROM (
+            SELECT created_at_ns FROM matrix_delivery_outbox WHERE principal_id = ? AND reply_id = ?
+            UNION ALL
+            SELECT continuation.created_at_ns FROM approval_continuations AS continuation
+            JOIN reply_spans AS paused
+              ON paused.principal_id = continuation.principal_id AND paused.span_id = continuation.span_id
+            WHERE continuation.principal_id = ? AND paused.reply_id = ?
+        ) AS writes
+        """,
+        (principal_id, reply.reply_id, principal_id, reply.reply_id),
+    )
+    return 0 if row is None or row["latest"] is None else int(row["latest"])
 
 
 def _edit_answer_rows(transaction: Transaction, principal_id: str, entity_name: str) -> tuple[MatrixDelivery, ...]:
@@ -1015,8 +1040,10 @@ def _edit_answer(
     selected: TurnRecord | None,
     presentations: LegacyPresentations,
     now_ns: int,
+    *,
+    superseded: bool,
 ) -> AppliedTransition:
-    """Record one queued regeneration answer as the reply's next write, on a regeneration span of its edit."""
+    """Record one queued regeneration answer on a regeneration span of its edit: the reply's next write, or superseded."""
     last = reply_spans.load(transaction, principal_id, reply.last_span_id)
     assert last is not None
     state = _final_state(row)
@@ -1031,13 +1058,30 @@ def _edit_answer(
                 logical=last.sources.logical if selected is None else selected.source_event_ids,
                 discovery=last.sources.discovery if selected is None else selected.discovery_event_ids,
             ),
-            # Claimed after the spans of the answer it edits.
-            now_ns=now_ns + sequence,
-            outcome=_OUTCOME_BY_STATE[state],
+            # Claimed before the writes that superseded it, or after those it follows.
+            now_ns=now_ns - 1 if superseded else now_ns + sequence,
+            outcome=rl.SpanOutcome.SUPERSEDED if superseded else _OUTCOME_BY_STATE[state],
             prepared_edit=None if selected is None else turn_records.encode_prepared_edit(selected),
         ),
         base_sequence=reply.reply_sequence,
     )
+    # Its answer was queued, so its edit is answered, as a terminal row records now.
+    settle = rl.SettleSources(span.span_id, consumes_edit=selected is not None)
+    if superseded:
+        outbox.retire(
+            transaction,
+            principal_id,
+            delivery_id=row.delivery_id,
+            stage=row.stage,
+            room_id=row.room_id,
+            membership_epoch=row.membership_epoch,
+        )
+        touched = replace(reply, updated_at_ns=now_ns)
+        return apply(
+            transaction,
+            principal_id,
+            rl.Transition(outcome=rl.Outcome.APPLIED, reply=touched, spans=(span,), effects=(settle,)),
+        )
     shown = presentations.answered(row, span.span_id)
     edit = journal.load(transaction, principal_id, row.delivery_id)
     updated = replace(
@@ -1056,13 +1100,7 @@ def _edit_answer(
     applied = apply(
         transaction,
         principal_id,
-        rl.Transition(
-            outcome=rl.Outcome.APPLIED,
-            reply=updated,
-            spans=(span,),
-            # Its answer is enqueued, so its edit is answered, as a terminal row records now.
-            effects=(rl.SettleSources(span.span_id, consumes_edit=selected is not None),),
-        ),
+        rl.Transition(outcome=rl.Outcome.APPLIED, reply=updated, spans=(span,), effects=(settle,)),
     )
     _own_row(transaction, principal_id, row, updated, sequence=sequence, placeholder_only=False)
     return applied

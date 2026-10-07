@@ -785,6 +785,104 @@ async def test_edit_answers_still_in_flight_are_written_by_their_reply(
     assert waiting.transition.outcome is rl.Outcome.DEFERRED
 
 
+def _newer_edit_claim(membership_epoch: int) -> rl.ClaimRequest:
+    return rl.ClaimRequest(
+        span_id="span-newer",
+        delivery_id="$newer",
+        sources=rl.SpanSources(pending=("$newer",), logical=("$source",)),
+        bot_generation="gen-new",
+        now_ns=NOW,
+        new_reply_id="reply-newer",
+        entity_name=ENTITY,
+        room_id=ROOM,
+        thread_id=None,
+        membership_epoch=membership_epoch,
+        empty_presentation=encode_presentation(Presentation()),
+        driving_edit_id="$newer",
+    )
+
+
+async def test_an_earlier_queued_edit_answer_refused_for_good_leaves_the_later_one_deciding(
+    journal_store: EventJournalStore,
+) -> None:
+    """Matrix refusing the older of two queued answers resolves it; the newer one is delivered, then edits run."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.settle_many(("$source",))
+    await _turn(journal_store, "$source", completed=True, response_event_id="$reply")
+    for edit, status in (("$edit-0", "error"), ("$edit-1", "completed")):
+        await admit(principal, edit)
+        await _row(principal, edit, DeliveryStage.FINAL, f"Answer to {edit}.", status=status, edits="$reply")
+    await _adopt(principal)
+
+    assert await principal.claim_matrix_delivery(delivery_id="$edit-0", stage=DeliveryStage.FINAL)
+    await principal.record_permanent_matrix_delivery_failure(
+        delivery_id="$edit-0",
+        stage=DeliveryStage.FINAL,
+        reason="M_TOO_LARGE",
+    )
+    assert await principal.claim_matrix_delivery(delivery_id="$edit-1", stage=DeliveryStage.FINAL)
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$edit-1",
+        stage=DeliveryStage.FINAL,
+        event_id="$edit-1-sent",
+        delivered_projections=(),
+    )
+
+    reply = await principal.replies.for_event("$reply")
+    assert reply is not None
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.confirmed_seq == reply.reply_sequence == 2
+    await admit(principal, "$newer")
+    applied = await principal.replies.claim(
+        _newer_edit_claim(await principal.membership_epoch(ROOM)),
+        ClaimLookup(existing_event_id="$reply", edit_receipt_order=99),
+    )
+    assert applied.transition.outcome is rl.Outcome.APPLIED
+
+
+@pytest.mark.parametrize("approval", ["answered", "waiting"])
+async def test_an_edit_answer_queued_before_an_approval_of_the_same_reply_is_superseded(
+    journal_store: EventJournalStore,
+    approval: str,
+) -> None:
+    """A newer edit's approval wrote past the older answer, so that answer is never sent over it.
+
+    The approval either froze its answer, still owed, or waits for its
+    decision; the older edit is still answered.
+    """
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await admit(principal, "$edit-old")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    await _row(principal, "$edit-old", DeliveryStage.FINAL, "Stale answer.", status="error", edits="$reply")
+    if approval == "answered":
+        await _main_continuation(principal, _continuation("claimed"))
+        await _row(principal, "$source", DeliveryStage.FINAL, "Approved answer.", status="completed", edits="$reply")
+    else:
+        await _main_continuation(principal, _continuation("waiting"))
+
+    await _adopt(principal)
+    reply = await principal.replies.for_event("$reply")
+    assert reply is not None
+    stale = await principal.load_matrix_delivery(delivery_id="$edit-old", stage=DeliveryStage.FINAL)
+    assert stale is not None
+    assert stale.retired
+    assert stale.reply_id is None
+    assert not await principal.is_pending("$edit-old")
+    spans = await _spans(principal, reply)
+    assert spans[0] == (rl.SpanKind.REGENERATION, rl.SpanOutcome.SUPERSEDED)
+    if approval == "answered":
+        assert reply.state is rl.ReplyState.COMPLETED
+        assert _text(reply.presentation) == "Approved answer."
+        approved = await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+        assert approved is not None
+        assert (approved.reply_id, approved.reply_sequence) == (reply.reply_id, 1)
+    else:
+        assert reply.state is rl.ReplyState.PAUSED
+        assert reply.approval_id == "approval-1"
+
+
 async def test_a_claimed_team_resume_keeps_its_document_instead_of_a_read(journal_store: EventJournalStore) -> None:
     """A team's resume restores the document its continuation kept, which a read of rendered text would lose."""
     principal = journal_store.principal(PRINCIPAL)
