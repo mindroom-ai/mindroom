@@ -75,6 +75,7 @@ At angle 0 the near cell matches the navy frame and the far cell is the glowing 
 
 - **Lock-in** starts low and off to the side, where the parts are visibly apart.
   A dolly zoom lengthens the lens toward orthographic while the camera swings into the logo's view, and the lights and HDRI turn with the camera.
+  When the camera arrives and the M forms, a flash bursts from the center: the core and filaments flare, the legs brighten, and a ring of light races outward.
 - **Ignition** lights a spark at the center, traces the inner cube's edges, grows the struts outward, fills in the light, and finally wakes the glow in the legs.
 - **Hyperspin** turns the tesseract once in 4D; the gold inner cube grows through the frame while the outer cell shrinks inward, and the loop is seamless.
 

@@ -31,6 +31,7 @@ import build_scene as logo  # noqa: E402
 
 FRAMES = 120  # Four seconds at 30 fps.
 LOCK_IN_HOLD = 30  # Frames held on the finished logo after the camera locks in.
+LOCK_FRAME = FRAMES - LOCK_IN_HOLD  # The camera arrives, the M forms, and a flash bursts from the center.
 EFFECTS = ("still", "lock-in", "ignition", "hyperspin")
 HDRI = "studio_small_09"  # CC0 studio lighting from Poly Haven, used for reflections.
 HDRI_URL = f"https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/{HDRI}_2k.hdr"
@@ -468,6 +469,50 @@ def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
     return rig
 
 
+def flash_ring(collection: bpy.types.Collection, camera: bpy.types.Object) -> bpy.types.Object:
+    """A ring of light facing the camera at the cube's center; the lock-in expands it as the M forms."""
+    material, tree = node_material("flash-ring")
+    nodes, links = tree.nodes, tree.links
+    coords = nodes.new("ShaderNodeTexCoord")
+    radius = nodes.new("ShaderNodeVectorMath")
+    radius.operation = "LENGTH"
+    links.new(coords.outputs["Object"], radius.inputs[0])
+    # A soft inner edge and a crisp outer edge, like a shockwave.
+    inner = nodes.new("ShaderNodeMapRange")
+    inner.interpolation_type = "SMOOTHSTEP"
+    inner.inputs["From Min"].default_value = 0.88
+    inner.inputs["From Max"].default_value = 0.97
+    links.new(radius.outputs["Value"], inner.inputs["Value"])
+    outer = nodes.new("ShaderNodeMapRange")
+    outer.interpolation_type = "SMOOTHSTEP"
+    outer.inputs["From Min"].default_value = 0.97
+    outer.inputs["From Max"].default_value = 1.0
+    outer.inputs["To Min"].default_value = 1.0
+    outer.inputs["To Max"].default_value = 0.0
+    links.new(radius.outputs["Value"], outer.inputs["Value"])
+    band = nodes.new("ShaderNodeMath")
+    band.operation = "MULTIPLY"
+    links.new(inner.outputs["Result"], band.inputs[0])
+    links.new(outer.outputs["Result"], band.inputs[1])
+    glow = nodes.new("ShaderNodeEmission")
+    glow.name = "flash-glow"
+    glow.inputs["Color"].default_value = logo.srgb("#fff1d6")
+    clear = nodes.new("ShaderNodeBsdfTransparent")
+    mix = nodes.new("ShaderNodeMixShader")
+    links.new(band.outputs["Value"], mix.inputs["Fac"])
+    links.new(clear.outputs["BSDF"], mix.inputs[1])
+    links.new(glow.outputs["Emission"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], output(tree).inputs["Surface"])
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=1.0)
+    ring = logo.mesh_object("flash-ring", bm, material, collection)
+    ring.visible_shadow = False
+    ring.hide_render = True
+    facing = ring.constraints.new("COPY_ROTATION")  # The camera looks down its -Z; the plane faces back up it.
+    facing.target = camera
+    return ring
+
+
 def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
     """Build the model and stage it, in clear crystal or frosted ice."""
     logo.HOLLOW = False
@@ -490,6 +535,7 @@ def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
     camera.location = hero.location.copy()
     camera.rotation_euler = hero.rotation_euler.copy()
     scene.camera = rig["camera"] = camera
+    rig["flash"] = flash_ring(collection, camera)
     return rig
 
 
@@ -503,11 +549,11 @@ def ease(s: float) -> float:
 
 
 def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
-    """Glide from a low, wide, off-axis view into the logo's single viewpoint."""
+    """Glide from a low, wide, off-axis view into the logo's single viewpoint, then flash as the M forms."""
     camera = rig["camera"]
     camera.data.type = "PERSP"
     camera.data.sensor_width = 36.0
-    s = ease((frame - 1) / (FRAMES - LOCK_IN_HOLD - 1))
+    s = ease((frame - 1) / (LOCK_FRAME - 1))
     azimuth = math.radians(45.0 + 80.0 * (1 - s))
     elevation = 0.17 + (logo.PHI - 0.17) * s
     camera.data.lens = 45.0 * (1 - s) + 400.0 * s  # A dolly zoom toward orthographic; the framing holds.
@@ -525,6 +571,22 @@ def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
     turn = azimuth - math.radians(45.0)
     rig["mount"].rotation_euler = (0.0, 0.0, turn)
     world["hdri-turn"].inputs["Rotation"].default_value = (0.0, 0.0, turn)
+    # The moment the M forms, a flash bursts from the center: the core and filaments flare,
+    # the legs brighten, and a ring of light races outward, all fading within about a second.
+    since = frame - LOCK_FRAME
+    burst = min(max(since, 0) / 2, 1.0) * math.exp(-max(since - 2, 0) / 6)
+    rig["core"].data.energy = 700.0 * (1 + 6 * burst)
+    materials = bpy.data.materials
+    materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * (1 + 4 * burst)
+    for family, strength in FILAMENT.items():
+        glow = materials[f"filament-{family}"].node_tree.nodes["Emission"]
+        glow.inputs["Strength"].default_value = strength * (1 + 3 * burst)
+    materials["leg-glow"].node_tree.nodes["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * (1 + 2 * burst)
+    wave = max(1 - since / 14, 0.0) ** 2 if since >= 0 else 0.0  # The ring is gone well before the hold ends.
+    rig["flash"].hide_render = wave == 0.0
+    rig["flash"].location = logo.CUBE_CENTER + 0.9 * view  # In front of the cube, so its beams never hide it.
+    rig["flash"].scale = (0.3 + 0.22 * max(since, 0),) * 3
+    materials["flash-ring"].node_tree.nodes["flash-glow"].inputs["Strength"].default_value = 16.0 * wave
 
 
 def ignition(rig: dict[str, bpy.types.Object], frame: int) -> None:
