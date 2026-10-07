@@ -95,7 +95,6 @@ class _Model:
     generation: int = 1
     counter: int = 0
     receipt_order: int = 0
-    last_edit_order: int = 0
     edits: int = 0
     reply: Reply | None = None
     spans: dict[str, Span] = field(default_factory=dict)
@@ -108,6 +107,8 @@ class _Model:
     continuations: dict[str, _Continuation] = field(default_factory=dict)
     # Edits whose claim waited for the reply to be free.
     deferred: list[str] = field(default_factory=list)
+    # Each edit's receipt order, which its claims carry however late they run.
+    edit_orders: dict[str, int] = field(default_factory=dict)
     removed: bool = False
     # Logical sources the user deleted: no settlement answers their turn.
     deleted: set[str] = field(default_factory=set)
@@ -310,7 +311,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             interactive_span=None,
             durable_write_debt=reply is not None and self._unresolved_rows(),
             active_generation=self.generation,
-            edit_receipt_order=self.model.last_edit_order if edit else None,
+            edit_receipt_order=None if edit is None else self.model.edit_orders[edit],
         )
         transition = rl.claim(request, context)
         if transition.outcome is Outcome.DEFERRED and edit is not None and edit not in self.model.deferred:
@@ -398,9 +399,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     def regenerate(self) -> None:
         """An edit regenerates the reply, whatever approval holds it."""
         self.model.receipt_order += 1
-        self.model.last_edit_order = self.model.receipt_order
         self.model.edits += 1
-        self._claim(edit=f"$edit-{self.model.edits}")
+        edit = f"$edit-{self.model.edits}"
+        self.model.edit_orders[edit] = self.model.receipt_order
+        self._claim(edit=edit)
 
     @precondition(lambda self: self._bot() and bool(self.model.deferred))
     @rule()
@@ -994,7 +996,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self._current() or self._last(),
             StopFacts(
                 receipt_order=receipt,
-                newer_edit=self.model.last_edit_order > receipt,
+                # As the store decides it: the edit the reply's regeneration answers outranks an older Stop.
+                newer_edit=(reply.edit_receipt_order or 0) > receipt,
                 span_live=live is not None,
             ),
             now_ns=self._now(),
@@ -1084,6 +1087,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         transition = self._apply(
             rl.replay_superseded(reply, last, durable_write_debt=self._unresolved_rows(), now_ns=self._now()),
         )
+        assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
         if transition.outcome is rl.Outcome.DUPLICATE and self._held_by() is None:
             # A reply that already ended leaves the sources to the caller, which settles them as ignored.
             self._settle(last.span_id)
