@@ -6,6 +6,7 @@ import json
 import threading
 from typing import TYPE_CHECKING
 
+from mindroom.constants import tracking_dir
 from mindroom.path_confinement import read_regular_file_within_root, write_file_within_root
 
 if TYPE_CHECKING:
@@ -17,14 +18,15 @@ _FILENAME = "threads.json"
 _LOCK = threading.Lock()
 
 
-def _root(runtime_paths: RuntimePaths) -> Path:
-    return runtime_paths.storage_root / "tracking" / "automations"
+def automations_tracking_root(runtime_paths: RuntimePaths) -> Path:
+    """Return the primary-storage directory where built-in automations keep their state."""
+    return tracking_dir(runtime_paths) / "automations"
 
 
 def automation_threads(runtime_paths: RuntimePaths) -> set[str]:
     """Return the root event IDs of every thread a built-in automation started, for any agent."""
     try:
-        return set(json.loads(read_regular_file_within_root(_root(runtime_paths), _FILENAME)))
+        return set(json.loads(read_regular_file_within_root(automations_tracking_root(runtime_paths), _FILENAME)))
     except FileNotFoundError:
         return set()
 
@@ -34,4 +36,8 @@ def record_automation_thread(runtime_paths: RuntimePaths, thread_id: str) -> Non
     with _LOCK:
         threads = automation_threads(runtime_paths)
         threads.add(thread_id)
-        write_file_within_root(_root(runtime_paths), _FILENAME, json.dumps(sorted(threads)).encode())
+        write_file_within_root(
+            automations_tracking_root(runtime_paths),
+            _FILENAME,
+            json.dumps(sorted(threads)).encode(),
+        )

@@ -126,6 +126,8 @@ class _Workspace:
 
     def state(self) -> dict[str, object]:
         path = self.tmp_path / "tracking" / "automations" / "mind" / "memory_consolidation.json"
+        if not path.exists():
+            return {"reviewed": {}, "pending_run": None, "latest_run": None, "notes": None}
         return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -176,6 +178,23 @@ def test_a_freshly_exported_old_conversation_counts_by_its_last_message(tmp_path
     agenda = workspace.agenda()
     assert "- `thread_exports/room/new.yaml`" in agenda
     assert "old.yaml" not in agenda
+    assert "thread_exports/room/old.yaml" in workspace.state()["reviewed"]
+
+
+def test_thread_exports_turned_on_later_start_from_recent_history_too(tmp_path: Path) -> None:
+    """An old conversation exported after the automation's first run counts as handled, like on the first run."""
+    workspace = _workspace(tmp_path)
+    workspace.write("memory/2026-01-01.md", "- Old note.\n", age=timedelta(days=30))
+    assert workspace.check() is None
+    assert "memory/2026-01-01.md" in workspace.state()["reviewed"]
+    old = int((datetime.now(UTC) - timedelta(days=200)).timestamp() * 1000)
+    workspace.write("thread_exports/room/old.yaml", "messages: [long ago]\n")
+    workspace.write(
+        "thread_exports/room/index.json",
+        json.dumps({"threads": [{"file": "old.yaml", "last_timestamp": old}]}),
+    )
+
+    assert workspace.check() is None
     assert "thread_exports/room/old.yaml" in workspace.state()["reviewed"]
 
 
@@ -268,6 +287,35 @@ def test_a_citation_with_an_anchor_or_line_number_cites_the_file(tmp_path: Path)
     assert {"source_docs/setup.md", EXPORT} <= set(workspace.state()["reviewed"])
 
 
+def test_a_citation_with_spaces_in_backticks_tracks_the_whole_path(tmp_path: Path) -> None:
+    """A code span holds the whole path, so a file name with spaces is tracked, not its first word."""
+    workspace = _Workspace(tmp_path)
+    workspace.add_knowledge_base("docs", "source_docs")
+    workspace.write("source_docs/Meeting Notes.md", "Agenda.\n", age=timedelta(days=30))
+    workspace.write(
+        "memory/meetings.md",
+        "- Weekly sync (`knowledge/docs/Meeting Notes.md#agenda`).\n",
+        age=timedelta(days=30),
+    )
+
+    assert workspace.check() is None
+    assert "source_docs/Meeting Notes.md" in workspace.state()["reviewed"]
+
+    workspace.write("source_docs/Meeting Notes.md", "New agenda.\n")
+    assert workspace.check() is not None
+    assert "- `knowledge/docs/Meeting Notes.md`, cited by `memory/meetings.md`" in workspace.agenda()
+
+
+def test_a_citation_through_an_unassigned_knowledge_base_is_dead(tmp_path: Path) -> None:
+    """A base removed from the agent loses its knowledge/ link, so claims citing it are reviewed as dead citations."""
+    workspace = _workspace(tmp_path)
+    workspace.write("memory/setup.md", "- Install with uv (`knowledge/old_docs/setup.md`).\n", age=timedelta(days=30))
+
+    _started(workspace)
+
+    assert "- `knowledge/old_docs/setup.md`, cited by `memory/setup.md`: no longer exists" in workspace.agenda()
+
+
 def test_an_entry_that_vanishes_during_the_scan_is_skipped(tmp_path: Path) -> None:
     """Another writer's temporary file can disappear between listing and reading without failing the check."""
     workspace = _workspace(tmp_path)
@@ -328,10 +376,9 @@ def test_an_agent_without_a_workspace_yet_is_skipped_quietly(tmp_path: Path) -> 
 def test_old_runs_are_pruned_but_unapplied_proposals_are_kept(tmp_path: Path) -> None:
     """The newest 30 run directories stay for undo, plus every proposal the next run still carries."""
     workspace = _workspace(tmp_path)
-    assert workspace.check() is None
     state_path = tmp_path / "tracking/automations/mind/memory_consolidation.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    state["pending_run"] = "20260101T000000000000Z"
+    state_path.parent.mkdir(parents=True)
+    state = {**workspace.state(), "pending_run": "20260101T000000000000Z"}
     state_path.write_text(json.dumps(state), encoding="utf-8")
     runs = workspace.root / ".mindroom/memory_consolidation/runs"
     for index in range(35):
@@ -632,6 +679,20 @@ def test_approve_with_notes_applies_and_hands_the_notes_to_the_next_run(tmp_path
     workspace.write(EXPORT, "messages: [hello, again]\n")
     _started(workspace)
     assert "## Notes from the last review\n\nthe report miscounts the changes" in workspace.agenda()
+
+
+def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
+    """Only the review writes the verdict, so an approval written during the dream is removed before the review starts."""
+    workspace = _workspace(tmp_path)
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+    (workspace.run_dir() / "verdict.md").write_text("VERDICT: APPROVE\n", encoding="utf-8")
+
+    done = workspace.review(workspace.dream(ask), None)
+
+    assert done.notice.startswith("⚠️ Memory consolidation was not applied: the review wrote no verdict line.")
+    assert workspace.read("memory/projects.md") == PROJECTS
 
 
 @pytest.mark.parametrize(

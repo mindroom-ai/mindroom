@@ -17,8 +17,8 @@ import os
 import re
 import shutil
 import stat
-import threading
 from bisect import bisect_left
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -27,11 +27,10 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
-from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.automations.steps import Ask, Done
-from mindroom.automations.threads import automation_threads
+from mindroom.automations.threads import automation_threads, automations_tracking_root
 from mindroom.logging_config import get_logger
-from mindroom.memory import refresh_agent_memory_search
+from mindroom.memory import refresh_agent_memory_search, write_scope_markdown_file
 from mindroom.path_confinement import (
     open_directory_within_root,
     read_regular_file_within_root,
@@ -52,8 +51,10 @@ _MEMORY_DIR = "memory"
 _EXPORTS_DIR = "thread_exports"
 _KNOWLEDGE_DIR = "knowledge"
 _DAILY_NOTE = re.compile(r"memory/(\d{4}-\d{2}-\d{2})\.md")
-# A workspace path memory cites, such as `knowledge/docs/setup.md` or `thread_exports/<room>/<thread>.yaml`, without
-# a trailing anchor, line number, or punctuation.
+# A workspace path memory cites, such as `knowledge/docs/Meeting Notes.md` or thread_exports/<room>/<thread>.yaml: the
+# whole of a code span that starts with one, or a bare path up to whitespace or markup; either without a trailing
+# anchor, line number, or punctuation.
+_CODE_SPAN_CITATION = re.compile(r"`((?:knowledge|thread_exports)/[^`\n]+)`")
 _CITATION = re.compile(r"(?<![\w./-])((?:knowledge|thread_exports)/[^\s`'\"<>()\[\]{}|*#]+)")
 _CITATION_SUFFIX = re.compile(r"(?::\d+(?:[-:]\d+)*)?[.,;:!?]*$")
 _MAX_INPUTS = 40
@@ -147,7 +148,7 @@ class _Proposal:
 
 
 def _state_root(runtime_paths: RuntimePaths, agent_name: str) -> Path:
-    return runtime_paths.storage_root / "tracking" / "automations" / agent_name
+    return automations_tracking_root(runtime_paths) / agent_name
 
 
 def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State | None:
@@ -168,15 +169,11 @@ def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State | None:
     )
 
 
-# A run's steps and the next check never overlap for one agent, but agents share this module.
-_STATE_LOCK = threading.Lock()
-
-
 def _update_state(runtime_paths: RuntimePaths, agent_name: str, change: Callable[[_State], None]) -> None:
-    with _STATE_LOCK:
-        state = _load_state(runtime_paths, agent_name) or _State()
-        change(state)
-        _save_state(runtime_paths, agent_name, state)
+    # An agent's checks and steps never overlap, so nothing else writes its state meanwhile.
+    state = _load_state(runtime_paths, agent_name) or _State()
+    change(state)
+    _save_state(runtime_paths, agent_name, state)
 
 
 def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> None:
@@ -324,8 +321,11 @@ def _canonical_citation(cited: str, aliases: Mapping[str, str]) -> str | None:
         return None
     if parts[0] == _EXPORTS_DIR:
         return cited if len(parts) > 1 else None
-    if len(parts) < 3 or parts[1] not in aliases:
+    if len(parts) < 3:
         return None
+    if parts[1] not in aliases:
+        # A base no longer assigned to the agent loses its link, so the cited file is gone from the workspace.
+        return cited
     return "/".join([aliases[parts[1]], *parts[2:]])
 
 
@@ -333,8 +333,11 @@ def _citations(snapshot: Mapping[str, bytes]) -> dict[str, list[str]]:
     """Return each cited workspace path, as memory spells it, with the memory files that cite it."""
     cited: dict[str, set[str]] = {}
     for path, payload in snapshot.items():
-        for match in _CITATION.finditer(payload.decode()):
-            cited.setdefault(_CITATION_SUFFIX.sub("", match.group(1)), set()).add(path)
+        text = payload.decode()
+        spans = [match.group(1).partition("#")[0].strip() for match in _CODE_SPAN_CITATION.finditer(text)]
+        bare = [match.group(1) for match in _CITATION.finditer(_CODE_SPAN_CITATION.sub(" ", text))]
+        for spelled in spans + bare:
+            cited.setdefault(_CITATION_SUFFIX.sub("", spelled), set()).add(path)
     return {spelled: sorted(paths) for spelled, paths in cited.items()}
 
 
@@ -391,10 +394,17 @@ def _collect_inputs(
     return inputs
 
 
-def _seeded(inputs: Iterable[_Input], now: datetime) -> dict[str, _Version]:
-    """Treat every existing input whose content is older than the seed age as already handled."""
+def _unseen_and_old(inputs: Iterable[_Input], reviewed: Mapping[str, _Version], now: datetime) -> dict[str, _Version]:
+    """Return inputs no run has reviewed whose content is older than the seed age, to count as already handled.
+
+    Enabling the automation, or thread exports later, then starts from recent history instead of the whole archive.
+    """
     cutoff = (now - _SEED_AGE).timestamp() * 1e9
-    return {item.path: item.version for item in inputs if item.version != _MISSING and item.changed_ns < cutoff}
+    return {
+        item.path: item.version
+        for item in inputs
+        if item.path not in reviewed and item.version != _MISSING and item.changed_ns < cutoff
+    }
 
 
 def _order(item: _Input) -> tuple[int, int, str]:
@@ -470,13 +480,11 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
     context_files = {PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files}
     excluded = frozenset({f"{_MEMORY_DIR}/{today}.md", *context_files, *tree.rejected})
     snapshot = {path: payload for path, payload in tree.files.items() if path not in excluded}
-    state = _load_state(runtime_paths, agent_name)
-    first_run = state is None
-    state = state or _State()
+    state = _load_state(runtime_paths, agent_name) or _State()
     inputs = _collect_inputs(root, snapshot, tree.versions, today, automation_threads(runtime_paths))
-    if first_run:
-        state.reviewed = _seeded(inputs.values(), now)
-        _update_state(runtime_paths, agent_name, lambda saved: saved.reviewed.update(state.reviewed))
+    if seeded := _unseen_and_old(inputs.values(), state.reviewed, now):
+        state.reviewed.update(seeded)
+        _update_state(runtime_paths, agent_name, lambda saved: saved.reviewed.update(seeded))
     due = sorted((item for item in inputs.values() if state.reviewed.get(item.path) != item.version), key=_order)
     carried = tuple(dict.fromkeys(run_id for run_id in (state.pending_run, state.latest_run) if run_id is not None))
     if not due and not carried:
@@ -665,6 +673,8 @@ def _after_dream(
         return _end_without_change(run, thread_id)
     write_file_within_root(run.root, f"{run.run_dir}/proposal.patch", _patch(run, proposal).encode())
     write_file_within_root(run.root, f"{run.run_dir}/deleted.txt", _deletion_report(deletions).encode())
+    # Only the review may write a verdict, so a file the dream left there never counts as one.
+    _remove(run.root, f"{run.run_dir}/verdict.md")
     # Pending from now on, so a restart before the review finishes still carries the proposal forward.
     _update_state(run.runtime_paths, run.agent_name, partial(_keep_pending, run=run))
     return Ask(
@@ -706,7 +716,12 @@ def _end_without_change(run: _Run, thread_id: str) -> Done:
 
 
 def _unchanged_since_fire(run: _Run) -> bool:
-    """Return whether every in-scope memory path and its bytes still match the snapshot."""
+    """Return whether every in-scope memory path and its bytes still match the snapshot.
+
+    This is batch conflict rejection, not a transaction: a memory write landing between this check and the writes
+    that follow it is not detected. MindRoom's memory writers, including the memory tool's own updates, share no lock,
+    so closing that window would mean serializing all of them; the automation accepts it.
+    """
     current = _read_memory_tree(run.root, "")
     return {path: payload for path, payload in current.files.items() if path not in run.excluded} == dict(run.snapshot)
 
@@ -725,7 +740,6 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
             "rejected",
             f"⚠️ Memory consolidation was not applied: {detail or 'the review rejected it'}. "
             "The next run carries the proposal forward.",
-            carry=True,
         )
     if not _unchanged_since_fire(run):
         return _end(
@@ -733,14 +747,11 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
             "conflict",
             "⚠️ Memory changed during the run, so the approved proposal was not applied. "
             "The next run carries it forward.",
-            carry=True,
         )
     for path, payload in proposal.changed.items():
-        _publish(run.root, path, payload)
+        write_scope_markdown_file(run.root, Path(path), payload)
     for path in proposal.deleted:
-        parent, name = path.rsplit("/", 1)
-        with open_directory_within_root(run.root, parent) as parent_fd:
-            os.unlink(name, dir_fd=parent_fd)
+        _remove(run.root, path)
     notes = detail if verdict == "APPROVE-WITH-NOTES" and detail else None
     summary = (
         f"✅ Memory consolidation applied the reviewed proposal "
@@ -758,11 +769,11 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
     )
 
 
-def _publish(root: Path, path: str, payload: bytes) -> None:
-    """Replace one memory file atomically, keeping its permissions like the memory tool does."""
+def _remove(root: Path, path: str) -> None:
+    """Delete one workspace file without following a link, if it exists."""
     parent, name = path.rsplit("/", 1)
-    with open_directory_within_root(root, parent, create=True) as parent_fd:
-        atomic_write_bytes_at(parent_fd, name, payload, file_mode=existing_file_mode(parent_fd, name))
+    with open_directory_within_root(root, parent) as parent_fd, suppress(FileNotFoundError):
+        os.unlink(name, dir_fd=parent_fd)
 
 
 def _keep_pending(state: _State, run: _Run) -> None:
@@ -780,12 +791,11 @@ def _end(
     resolve: tuple[str, ...] = (),
     notes: str | None = None,
     applied: tuple[str, ...] = (),
-    carry: bool = False,
     on_loop: Callable[[], None] | None = None,
 ) -> Done:
     """Record the run's outcome, drop its staging, and return the notice that ends the chain.
 
-    ``carry`` keeps an unapplied proposal for the next run, unless an older one is still unresolved.
+    A proposal that reached its review is already pending, so only success needs recording here.
     """
 
     def record(state: _State) -> None:
@@ -801,8 +811,6 @@ def _end(
             state.pending_run = None
             state.latest_run = None
             state.notes = notes
-        elif carry:
-            _keep_pending(state, run)
 
     _update_state(run.runtime_paths, run.agent_name, record)
     try:

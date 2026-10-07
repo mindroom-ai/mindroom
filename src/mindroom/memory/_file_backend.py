@@ -345,8 +345,8 @@ def _require_rewritable(memory_file: _ScopeMemoryFile) -> None:
         raise ValueError(msg)
 
 
-def _write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
-    """Publish one memory file descriptor-relative, never through a planted entry."""
+def write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
+    """Publish one memory file descriptor-relative, never through a planted entry, keeping its permissions."""
     with (
         open_directory_within_root(scope_path) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
@@ -787,7 +787,7 @@ def _replace_scope_memory_entry(
 
     _require_rewritable(memory_file)
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    _write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
+    write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
     return True
 
 
@@ -813,7 +813,7 @@ def _replace_scope_path_memory_entry(
             f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
         )
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    _write_scope_markdown_file(
+    write_scope_markdown_file(
         scope_path,
         Path(path_memory_line.memory_file.relative_path),
         _memory_lines_payload(lines),
