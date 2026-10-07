@@ -3768,6 +3768,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.routing",
     "mindroom.thread_export.selection",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -5175,6 +5176,7 @@ visibility = ["mindroom.turn_controller"]
 [[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
+    "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.response_admission",
     "mindroom.command_turn_executor",

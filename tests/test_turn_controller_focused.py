@@ -5576,3 +5576,36 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
     finally:
         idle.set()
         await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_before_the_turn_starts_changes_what_it_answers(config: Config, tmp_path: Path) -> None:
+    """A message edited while it still waits to be answered is answered as edited, without a regeneration."""
+    harness = _build_harness(config, tmp_path)
+    regenerator = _NoEditRegeneration()
+    harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)
+    room = _room_with_members(config, "general")
+    original = _text_event("what is 2+2?", thread_id=_THREAD_ROOT)
+    edit = _text_event("* what is 3+3?", event_id="$edit:localhost", origin_server_ts=1_000_001)
+    edit.source["content"]["m.new_content"] = {"body": "what is 3+3?", "msgtype": "m.text"}
+    edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": original.event_id}
+    key = CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER))
+
+    # The message waits out a debounce in its queue, as an agent's participation delay holds it.
+    with patch.object(harness.controller, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        await harness.controller.handle_text_event(room, original)
+
+        async def queued() -> None:
+            while not harness.gate.queued_pending_events(key):  # noqa: ASYNC110
+                await asyncio.sleep(0.001)
+
+        await asyncio.wait_for(queued(), timeout=5)
+        outcome = await harness.controller.handle_text_event(room, edit)
+        await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    assert regenerator.edit_event_ids == []
+    (request,) = harness.runner.requests
+    assert "what is 3+3?" in request.prompt
+    assert "2+2" not in request.prompt

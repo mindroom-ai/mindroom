@@ -2279,3 +2279,51 @@ async def test_later_adaptive_text_cannot_delay_an_immediate_prefix(
         await gate.drain_all()
 
     assert batches == ([event_ids] if backlog else [immediate_ids, event_ids[len(immediate_ids) :]])
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_a_queued_message_changes_what_its_turn_answers() -> None:
+    """An edit that arrives before the message's turn starts replaces the text the turn answers."""
+    dispatched: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        dispatched.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+    original = _text_event("$queued:localhost", "what is 2+2?", 1_000_000)
+    original.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$root:localhost"}
+    await _admit_ready(gate, key, _pending(original))
+    edited = {"msgtype": "m.text", "body": "what is 3+3?"}
+
+    assert not gate.apply_pending_edit(
+        room_id="!room:localhost",
+        source_event_id="$queued:localhost",
+        sender="@someone-else:localhost",
+        body="what is 3+3?",
+        new_content=edited,
+    )
+    assert gate.apply_pending_edit(
+        room_id="!room:localhost",
+        source_event_id="$queued:localhost",
+        sender="@user:localhost",
+        body="what is 3+3?",
+        new_content=edited,
+    )
+    await gate.drain_all()
+
+    (batch,) = dispatched
+    assert batch.event.body == "what is 3+3?"
+    assert batch.handled_turn.source_event_prompts == {"$queued:localhost": "what is 3+3?"}
+    assert batch.event.source["content"]["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$root:localhost"}
+    assert not gate.apply_pending_edit(
+        room_id="!room:localhost",
+        source_event_id="$queued:localhost",
+        sender="@user:localhost",
+        body="too late",
+        new_content={"msgtype": "m.text", "body": "too late"},
+    )

@@ -70,6 +70,7 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.ingress_lanes import IngressRetryError, ReceiptLaneKey
 from mindroom.logging_config import bound_log_context
+from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.conversation_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
@@ -852,12 +853,40 @@ class TurnController:
                 room.room_id,
             ):
                 return None
+            if await self._edit_queued_message(room, prechecked_event.event, event_info):
+                return None
             return await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
                 event_info,
                 prechecked_event.requester_user_id,
             )
+
+    async def _edit_queued_message(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFormatted,
+        event_info: EventInfo,
+    ) -> bool:
+        """Give a message still waiting for its turn the text its sender edited it to; return whether one did."""
+        original_event_id = event_info.original_event_id
+        if original_event_id is None or not self.deps.coalescing_gate.has_pending_source_event(original_event_id):
+            return False
+        body, content = await extract_visible_edit_body(
+            event.source,
+            self._client(),
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
+        if body is None or content is None:
+            return False
+        return self.deps.coalescing_gate.apply_pending_edit(
+            room_id=room.room_id,
+            source_event_id=original_event_id,
+            sender=event.sender,
+            body=body,
+            new_content=content,
+        )
 
     def _log_unplaceable_event(self, room: nio.MatrixRoom, event: DispatchEvent | MatrixMediaEvent) -> None:
         """Record an event left unanswered because its relation target cannot be read.

@@ -8,7 +8,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import islice
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .cancellation import request_task_cancel
 from .coalescing_batch import (
@@ -50,7 +50,7 @@ from .runtime_shutdown import (
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from .ingress_lanes import LaneDelivery
 
@@ -254,6 +254,39 @@ class CoalescingGate:
     def has_pending_source_event(self, source_event_id: str) -> bool:
         """Return whether a lane or coalescing gate still owns one exact source."""
         return self._lanes.has_pending_source_event(source_event_id) or self._gate_owns_source_event(source_event_id)
+
+    def apply_pending_edit(
+        self,
+        *,
+        room_id: str,
+        source_event_id: str,
+        sender: str,
+        body: str,
+        new_content: Mapping[str, Any],
+    ) -> bool:
+        """Give a text message still waiting in a queue the text its sender edited it to; return whether one did.
+
+        A message a flush already claimed answers the text it had then.
+        """
+        for gate in self._gates.values():
+            for queued in gate.queue:
+                pending_event = queued.pending_event
+                event = pending_event.event
+                if (
+                    queued.source_event_id != source_event_id
+                    or pending_event.room.room_id != room_id
+                    or event.sender != sender
+                    or event.raw_event is not None
+                ):
+                    continue
+                content = dict(new_content)
+                # The edit's new content carries no relation; the message stays where it was posted.
+                relation = event.source.get("content", {}).get("m.relates_to")
+                if relation is not None:
+                    content["m.relates_to"] = relation
+                pending_event.event = replace(event, body=body, source={**event.source, "content": content})
+                return True
+        return False
 
     def queued_pending_events(self, key: CoalescingKey) -> tuple[PendingEvent, ...]:
         """Return the unclaimed events still queued under one coalescing key."""
