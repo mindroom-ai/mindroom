@@ -187,7 +187,7 @@ export function classifySchemaNode(
     }));
     return node;
   }
-  // Pydantic emits oneOf only for discriminated unions, tagged by a const.
+  // Pydantic emits oneOf only for discriminated unions, tagged by a const; one variant may leave the tag free.
   if (resolved.oneOf != null) {
     const discriminator = resolved.discriminator!.propertyName;
     node.kind = "union";

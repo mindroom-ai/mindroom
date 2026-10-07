@@ -86,7 +86,7 @@ _PER_FIRE_THREAD_ROOT_SOURCE_KINDS: frozenset[str] = frozenset(
         SCHEDULED_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-        # Built-in automations start each prompt in a thread of its own, even for an agent in room mode.
+        # Automations start each prompt in a thread of its own, even for an agent in room mode.
         HOOK_DISPATCH_SOURCE_KIND,
     },
 )

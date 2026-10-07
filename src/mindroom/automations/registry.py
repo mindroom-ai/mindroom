@@ -6,7 +6,11 @@ import inspect
 import re
 from dataclasses import dataclass, field
 from functools import cache
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
+
+from mindroom.config.automations import BUILTIN_AUTOMATION_NAMES
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -18,7 +22,7 @@ if TYPE_CHECKING:
 
     type CheckFn = Callable[[AutomationContext], Ask | None]
 
-_BUILTIN_AUTOMATION_NAMES = frozenset({"prompt_curation", "dreaming"})
+_logger = get_logger(__name__)
 _NAME = re.compile(r"[a-z][a-z0-9_]*")
 _METADATA_ATTR = "__mindroom_automation__"
 
@@ -75,19 +79,18 @@ class _AutomationPlugin(Protocol):
 
 @dataclass(frozen=True)
 class AutomationDefinition:
-    """One registered automation: its check, its needs, and the plugin it came from."""
+    """One registered automation: its check, its needs, and the settings of the plugin it came from."""
 
     name: str
     check: CheckFn
     requires_file_memory: bool
-    plugin_name: str | None = None
     settings: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _definition(check: CheckFn, plugin_name: str | None, settings: Mapping[str, Any]) -> AutomationDefinition:
+def _definition(check: CheckFn, settings: Mapping[str, Any]) -> AutomationDefinition:
     metadata = _metadata(check)
     assert metadata is not None
-    return AutomationDefinition(metadata.name, check, metadata.requires_file_memory, plugin_name, dict(settings))
+    return AutomationDefinition(metadata.name, check, metadata.requires_file_memory, MappingProxyType(dict(settings)))
 
 
 @cache
@@ -96,7 +99,7 @@ def _builtin_definitions() -> dict[str, AutomationDefinition]:
     from mindroom.automations.dreaming import check_dreaming  # noqa: PLC0415
     from mindroom.automations.prompt_curation import check_curation  # noqa: PLC0415
 
-    definitions = [_definition(check, None, {}) for check in (check_curation, check_dreaming)]
+    definitions = [_definition(check, {}) for check in (check_curation, check_dreaming)]
     return {definition.name: definition for definition in definitions}
 
 
@@ -109,7 +112,7 @@ class AutomationCatalog:
 
     def get(self, name: str) -> AutomationDefinition | None:
         """Return the definition for ``name``, or None when nothing provides it."""
-        if name in _BUILTIN_AUTOMATION_NAMES:
+        if name in BUILTIN_AUTOMATION_NAMES:
             return _builtin_definitions()[name]
         return self.plugin_definitions.get(name)
 
@@ -123,10 +126,15 @@ def compile_automations(plugins: Iterable[_AutomationPlugin]) -> AutomationCatal
             name = _automation_name(check)
             if name is None:
                 continue
-            if name in _BUILTIN_AUTOMATION_NAMES or name in definitions:
+            if name in BUILTIN_AUTOMATION_NAMES or name in definitions:
+                _logger.warning(
+                    "Automation name already registered; this one is ignored",
+                    automation=name,
+                    plugin=plugin.name,
+                )
                 collisions.add(name)
                 continue
-            definitions[name] = _definition(check, plugin.name, plugin.entry_config.settings)
+            definitions[name] = _definition(check, plugin.entry_config.settings)
     return AutomationCatalog(definitions, tuple(sorted(collisions)))
 
 

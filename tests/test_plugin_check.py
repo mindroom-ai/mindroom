@@ -203,7 +203,8 @@ def test_plugins_check_cli_reports_compatibility(tmp_path: Path) -> None:
     assert "Plugin is compatible: compat-demo" in result.stdout
     assert "compat_demo_tool" in result.stdout
     assert "compat-demo-hook" in result.stdout
-    assert "Skills: skills" in result.stdout
+    assert "Skills:      skills" in result.stdout
+    assert "Automations: none" in result.stdout
 
 
 def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> None:

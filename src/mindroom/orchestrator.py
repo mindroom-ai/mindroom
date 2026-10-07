@@ -577,7 +577,7 @@ class _MultiAgentOrchestrator:
 
     @property
     def automations(self) -> AutomationRunner:
-        """Return the orchestrator-owned runner of built-in automations."""
+        """Return the orchestrator-owned runner of automations."""
         return self._automations
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:

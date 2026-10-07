@@ -86,7 +86,7 @@ class ResolvedEntityView:
 
     @property
     def automations(self) -> list[Automation]:
-        """Built-in automations this agent runs."""
+        """Automations this agent runs."""
         return self._config._agent_automations(self._agent_name())
 
     @property

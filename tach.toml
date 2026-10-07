@@ -7990,6 +7990,7 @@ path = "mindroom.config.automations"
 depends_on = ["mindroom.config.validation"]
 visibility = [
     "mindroom.automations.prompt_curation",
+    "mindroom.automations.registry",
     "mindroom.automations.runner",
     "mindroom.config.agent",
     "mindroom.config.main",
@@ -8015,7 +8016,12 @@ visibility = [
 
 [[modules]]
 path = "mindroom.automations.registry"
-depends_on = ["mindroom.automations.dreaming", "mindroom.automations.prompt_curation"]
+depends_on = [
+    "mindroom.automations.dreaming",
+    "mindroom.automations.prompt_curation",
+    "mindroom.config.automations",
+    "mindroom.logging_config",
+]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"

@@ -76,7 +76,6 @@ def test_plugin_automations_compile_with_their_plugin_settings() -> None:
 
     definition = catalog.get("weekly_digest")
     assert definition is not None
-    assert definition.plugin_name == "a"
     assert definition.settings == {"key": "value"}
     assert catalog.collisions == ("dreaming", "weekly_digest")
 
@@ -88,7 +87,6 @@ def test_built_ins_resolve_without_any_plugin() -> None:
     for name in ("prompt_curation", "dreaming"):
         definition = catalog.get(name)
         assert definition is not None
-        assert definition.plugin_name is None
         assert definition.requires_file_memory
     assert catalog.get("weekly_digest") is None
 

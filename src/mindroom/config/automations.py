@@ -110,7 +110,8 @@ class DreamingAutomation(_ScheduledAutomation):
     cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
 
 
-_BUILTIN_NAMES = ("prompt_curation", "dreaming")
+# Reserved for the built-ins, so every entry matches one kind of automation.
+BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming")
 
 
 class PluginAutomation(_ScheduledAutomation):
@@ -122,7 +123,7 @@ class PluginAutomation(_ScheduledAutomation):
     name: str = Field(
         pattern=r"^[a-z][a-z0-9_]*$",
         description="Name of an automation a loaded plugin provides",
-        json_schema_extra={"not": {"enum": list(_BUILTIN_NAMES)}},
+        json_schema_extra={"not": {"enum": list(BUILTIN_AUTOMATION_NAMES)}},
     )
     cron: str = Field(description="When to check, in the configured timezone")
     options: dict[str, Any] = Field(default_factory=dict, description="Settings the plugin's automation reads")
@@ -131,7 +132,7 @@ class PluginAutomation(_ScheduledAutomation):
     @classmethod
     def reject_builtin_name(cls, value: str) -> str:
         """Keep built-in names for the built-ins, so every entry matches one kind of automation."""
-        if value in _BUILTIN_NAMES:
+        if value in BUILTIN_AUTOMATION_NAMES:
             msg = f"{value!r} is a built-in automation"
             raise ValueError(msg)
         return value
@@ -140,9 +141,9 @@ class PluginAutomation(_ScheduledAutomation):
 def _automation_kind(value: object) -> str:
     """Pick the entry's model: a built-in name selects that built-in, any other name a plugin automation."""
     if isinstance(value, PromptCurationAutomation | DreamingAutomation | PluginAutomation):
-        return value.name if value.name in _BUILTIN_NAMES else "plugin"
+        return value.name if value.name in BUILTIN_AUTOMATION_NAMES else "plugin"
     name = cast("Mapping[str, object]", value).get("name") if isinstance(value, Mapping) else None
-    return name if isinstance(name, str) and name in _BUILTIN_NAMES else "plugin"
+    return name if isinstance(name, str) and name in BUILTIN_AUTOMATION_NAMES else "plugin"
 
 
 Automation = Annotated[

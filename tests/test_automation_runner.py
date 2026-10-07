@@ -577,6 +577,11 @@ async def test_a_plugin_automation_runs_its_chain_through_the_runner(tmp_path: P
     @automation("weekly_digest")
     def check(ctx: AutomationContext) -> Ask | None:
         seen.append((dict(ctx.options), dict(ctx.settings)))
+        # The check gets read-only views, so it cannot change the config or the plugin's settings.
+        with pytest.raises(TypeError):
+            ctx.options["target"] = "elsewhere.md"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            ctx.settings["api"] = "y"  # type: ignore[index]
         return Ask(
             "Write the digest",
             new_thread=True,

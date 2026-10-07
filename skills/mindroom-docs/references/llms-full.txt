@@ -14664,6 +14664,7 @@ Operators enable it per agent under [`automations:`](https://docs.mindroom.chat/
 `hooks.py`:
 
 ```python
+from datetime import UTC, datetime
 from functools import partial
 
 from mindroom.automations import Ask, AutomationContext, Done, automation
@@ -14675,14 +14676,19 @@ def check(ctx: AutomationContext) -> Ask | None:
     if ctx.workspace is None or not ctx.workspace.is_dir():
         return None
     target = ctx.options.get("target", "digest.md")
-    return Ask(f"Summarize this week's threads into `{target}`.", new_thread=True, then=partial(after_run, ctx, target))
+    # A stamp only this run asks for tells its result apart from last week's file.
+    stamp = f"Digest {datetime.now(UTC):%Y-%m-%d %H:%M}"
+    prompt = f"Summarize this week's threads into `{target}`, and end the file with the line `{stamp}`."
+    return Ask(prompt, new_thread=True, then=partial(after_run, ctx, target, stamp))
 
 
-def after_run(ctx: AutomationContext, target: str, config, thread_id: str, timed_out: bool) -> Done:
+def after_run(ctx: AutomationContext, target: str, stamp: str, config, thread_id: str, timed_out: bool) -> Done:
     # The run ending says nothing about success: check the result before claiming it.
     try:
-        read_regular_file_within_root(ctx.workspace, target)
+        written = read_regular_file_within_root(ctx.workspace, target).decode()
     except (OSError, ValueError):
+        written = ""
+    if stamp not in written:
         return Done(f"⚠️ The digest run ended without writing `{target}`.")
     return Done(f"Digest written to `{target}`.", resolve=(thread_id,))
 ```
@@ -14701,7 +14707,7 @@ agents:
 
 ### The check and its steps
 
-- `@automation(name, requires_file_memory=False)` marks a synchronous check; the name is lowercase letters, digits, and `_`, must not be `prompt_curation` or `dreaming`, and must be unique across loaded plugins.
+- `@automation(name, requires_file_memory=False)` marks a synchronous check; the name starts with a lowercase letter and continues with lowercase letters, digits, and `_`, must not be `prompt_curation` or `dreaming`, and must be unique across loaded plugins, or the later registration is ignored with a warning.
   Set `requires_file_memory=True` when the automation maintains file memory, so it never runs for an agent without the file backend.
 - The check returns `None` when there is nothing to do, which posts nothing and calls no model, or an `Ask(text, new_thread=..., then=...)` that the agent answers.
 - `then(config, thread_id, timed_out)` runs after that answer and returns the next `Ask` or a `Done(notice, resolve=..., on_loop=...)` that posts `notice` in the thread, marks the listed threads resolved, and runs `on_loop` on the event loop.
@@ -14717,9 +14723,9 @@ agents:
 | `config` | The config when the automation fired; steps receive the current one |
 | `runtime_paths` | Storage and config paths of this MindRoom runtime |
 | `entry` | The agent's entry for this automation |
-| `options` | The entry's `options`, set per agent |
-| `settings` | The plugin's `settings`, set once per plugin |
-| `workspace` | The agent's file-memory root, which may not exist yet |
+| `options` | The entry's `options`, set per agent, read-only |
+| `settings` | The plugin's `settings`, set once per plugin, read-only |
+| `workspace` | The agent's workspace root, which may not exist yet, or `None` for an agent without a workspace |
 | `state_dir` | The agent's automation state directory in MindRoom storage, outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees
@@ -15153,7 +15159,7 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     origin: TurnOrigin,
-    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages
+    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages, "automation/<name>" for automation prompts and notices
     dispatch_policy_source_kind: str | None,
 )
 # Derived properties: room_id (from target), requester_id, sender_id, source_kind (from origin).

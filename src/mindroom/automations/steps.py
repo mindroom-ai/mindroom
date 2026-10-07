@@ -21,8 +21,10 @@ class AutomationContext:
     ``config`` is the config at fire time; later steps receive the current one.
     ``entry`` is the agent's entry for this automation, ``options`` its ``options`` (empty for a built-in), and
     ``settings`` the plugin's own ``settings`` (empty for a built-in).
-    ``workspace`` is the agent's file-memory root, which may not exist yet, and ``state_dir`` is the agent's
-    automation state directory in primary storage, outside the workspace, created when something first writes there.
+    ``options`` and ``settings`` are read-only.
+    ``workspace`` is the agent's workspace root, which may not exist yet, or None for an agent without one, and
+    ``state_dir`` is the agent's automation state directory in primary storage, outside the workspace, created when
+    something first writes there.
     """
 
     agent_name: str

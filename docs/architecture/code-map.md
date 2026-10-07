@@ -163,7 +163,7 @@ Matrix sync callback
 | `automations/threads.py` | The record of threads automations started, under `tracking/automations/`, so none is read back as a conversation |
 | `automations/prompt_curation.py` | The `prompt_curation` automation: size check over always-loaded files, the bounded prompt, and the verify that asks for a re-check |
 | `automations/dreaming.py` | The `dreaming` automation: changed-input agenda, per-run staging of `memory/`, proposal validation, the fresh-thread review, and batch-conflict apply with progress under `tracking/automations/` |
-| `config/automations.py` | Built-in automation settings and validation |
+| `config/automations.py` | Automation entries (built-in and plugin) and their validation |
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |

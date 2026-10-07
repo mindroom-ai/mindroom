@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -101,9 +102,9 @@ def _check(
         config=config,
         runtime_paths=runtime_paths,
         entry=automation,
-        options=automation.options if isinstance(automation, PluginAutomation) else {},
+        options=MappingProxyType(dict(automation.options) if isinstance(automation, PluginAutomation) else {}),
         settings=definition.settings,
-        workspace=runtime.file_memory_root,
+        workspace=runtime.workspace.root if runtime.workspace is not None else None,
         state_dir=automations_tracking_root(runtime_paths) / agent_name,
     )
     return definition.check(context)
