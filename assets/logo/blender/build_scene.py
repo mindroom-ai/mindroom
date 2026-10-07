@@ -75,11 +75,10 @@ CUBE_BEAM = lift(382.5, 403.0, x=1.0).y  # Cube pane corner "a" on the left face
 CUBE_CENTER = Vector((0.5, 0.5, H / 2))
 
 # Sliding a rigid part along the hero camera's line of sight leaves the SVG view unchanged.
-# The drawing alone puts the towers a full unit behind the cube with floating feet; sliding the
-# towers forward keeps the M together from other angles, and the feet rise until they carry them.
+# The drawing alone puts the towers a full unit behind the cube; sliding each tower forward with
+# its foot keeps the M together from other angles, and the tower still hovers above its foot as drawn.
 TOWARD_CAMERA = Vector((math.cos(PHI) / math.sqrt(2), math.cos(PHI) / math.sqrt(2), math.sin(PHI)))
 TOWER_SLIDE = 0.9
-FOOT_CLEARANCE = 0.003  # Keeps coincident glass faces apart.
 HOLLOW = True  # The SVG draws hollow glass rooms; a solid-crystal look can turn this off.
 GLASS_BEVEL = (0.012, 3)  # Width and segments of the rounded glass edges.
 
@@ -146,14 +145,9 @@ def bridge_slide(position: Vector) -> float:
     return TOWER_SLIDE * min(max(position.y / TOWER_Y[1], 0.0), 1.0)
 
 
-def foot_slide() -> float:
-    """How far a foot slides to stand just below its tower."""
-    return TOWER_SLIDE + (TOWER_BOTTOM - FOOT_Z[1] - FOOT_CLEARANCE) / math.sin(PHI)
-
-
 def floor_z() -> float:
     """Height of the feet's undersides after sliding."""
-    return FOOT_Z[0] + foot_slide() * math.sin(PHI)
+    return FOOT_Z[0] + TOWER_SLIDE * math.sin(PHI)
 
 
 def swap_xy(bm: bmesh.types.BMesh) -> None:
@@ -254,8 +248,7 @@ def build_wing(
     add_box(bm, (x0, y0, FOOT_Z[0]), (x1, y1, FOOT_Z[1]))
     if HOLLOW:
         add_box(bm, (x0 + t, y0 + t, FOOT_Z[0] + t), (x1 - t, y1 - t, FOOT_Z[1] - t), inward=True)
-    distance = foot_slide()
-    slide(bm, lambda _position: distance)
+    slide(bm, lambda _position: TOWER_SLIDE)
     if mirror:
         swap_xy(bm)
     foot = mesh_object(f"{name}-foot", bm, materials["glass"], collection)

@@ -330,16 +330,13 @@ def build_tesseract(collection: bpy.types.Collection) -> None:
 
 
 def leg_boxes() -> list[tuple[Vector, Vector]]:
-    """Lowest and highest corners of the towers and feet, after the slides and the mirroring."""
+    """Lowest and highest corners of the towers and feet, after the slide and the mirroring."""
     x0, x1 = logo.WING_X
     y0, y1 = logo.TOWER_Y
-    parts = [
-        (Vector((x0, y0, logo.TOWER_BOTTOM)), Vector((x1, y1, logo.H)), logo.TOWER_SLIDE),
-        (Vector((x0, y0, logo.FOOT_Z[0])), Vector((x1, y1, logo.FOOT_Z[1])), logo.foot_slide()),
-    ]
+    shift = logo.TOWER_SLIDE * logo.TOWARD_CAMERA
     boxes = []
-    for low, high, slide in parts:
-        lo, hi = low + slide * logo.TOWARD_CAMERA, high + slide * logo.TOWARD_CAMERA
+    for bottom, top in ((logo.TOWER_BOTTOM, logo.H), logo.FOOT_Z):
+        lo, hi = Vector((x0, y0, bottom)) + shift, Vector((x1, y1, top)) + shift
         boxes.append((lo, hi))
         boxes.append((Vector((lo.y, lo.x, lo.z)), Vector((hi.y, hi.x, hi.z))))  # The mirrored wing.
     return boxes

@@ -95,14 +95,14 @@ The right wing mirrors the left across the vertical plane through the cube's fro
 
 ## Keeping the M together in 3D
 
-Taken literally, the drawing places both towers a full unit behind the cube, with each lower block floating below its tower.
-The M then exists only from the logo's angle: elsewhere the parts drift apart and the blocks look unsupported.
+Taken literally, the drawing places both towers a full unit behind the cube, with each lower block hovering below its tower.
+The M then exists only from the logo's angle: elsewhere the parts drift apart.
 
 An orthographic camera cannot see movement along its line of sight, so any rigid part can slide toward or away from it without changing the SVG view.
 `TOWER_SLIDE` moves each tower 0.9 units toward the camera, which raises it and brings it close behind the cube.
 Its bridge shears from that offset back to zero at the cube, so the flat bridges become the diagonal arms of the M.
-Each lower block slides a little further, until it stands just below its tower.
-It sits slightly forward of the tower, and that ledge is exactly the strip the SVG paints as the block's cap.
+Each lower block slides with its tower, so the tower keeps hovering just above it, as drawn.
+The strip the SVG paints as the block's cap is the block's top, seen through that gap.
 
 The hero render is unchanged by these slides, while front and three-quarter views keep the letter's legs, arms, and center together.
 The back of the model still does not read as an M, so the animation sways instead of turning fully.
