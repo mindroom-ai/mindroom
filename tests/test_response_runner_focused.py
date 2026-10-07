@@ -93,6 +93,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
     approval_arguments_digest,
 )
+from mindroom.event_journal.replies import ReplyStore
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
@@ -2035,6 +2036,83 @@ async def test_frozen_approval_final_without_reply_records_restores_its_body(
     assert frozen is not None
     restored = await runner._approval_outcome_from_delivery(frozen)
     assert (restored.final_visible_body, restored.event_id) == ("Approved answer", "$waiting")
+    assert restored.terminal_status == "completed"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status"),
+    [
+        (rl.SpanOutcome.COMPLETED, "completed"),
+        (rl.SpanOutcome.CANCELLED, "cancelled"),
+        (rl.SpanOutcome.FAILED, "error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_frozen_approval_final_reports_how_its_span_ended(
+    tmp_path: Path,
+    outcome: rl.SpanOutcome,
+    status: str,
+) -> None:
+    """A FINAL its resume wrote as a failure or cancellation is recovered as one, never as a completed answer."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "* note", "m.new_content": {"body": "note"}},
+        edits_event_id="$waiting",
+    )
+    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$final",
+        delivered_projections=(),
+    )
+    frozen = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert frozen is not None
+    with patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=outcome))):
+        restored = await runner._approval_outcome_from_delivery(replace(frozen, span_id="span-resume"))
+    assert restored.terminal_status == status
+
+
+@pytest.mark.asyncio
+async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: Path) -> None:
+    """A crash between a resume's failure and its fence leaves nothing for a replay to continue: the approval fails."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    claimed = ApprovalContinuation(
+        approval_id="approval-resume-failed",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="claimed",
+        claim_span_id="span-resume",
+    )
+    settle_failure = AsyncMock(return_value=True)
+    release_to_replay = AsyncMock(return_value=True)
+    with (
+        patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=rl.SpanOutcome.FAILED))),
+        patch.object(runner._approval_responses, "settle_failure", settle_failure),
+        patch.object(runner._approval_responses, "release_to_replay", release_to_replay),
+    ):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+    assert event_id == "$waiting"
+    settle_failure.assert_awaited_once()
+    release_to_replay.assert_not_awaited()
 
 
 def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:

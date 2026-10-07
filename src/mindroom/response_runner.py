@@ -239,6 +239,8 @@ type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
+# A resume span that ended this way wrote its own ending; only a restart's or a release's hands work back.
+_UNANSWERED_RESUME_OUTCOMES = frozenset({rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED, rl.SpanOutcome.SUPPRESSED})
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "Your reply to the current message was interrupted by a restart before it finished. The user still sees what "
     "it had shown, which is below, and your reply continues it in the same message after a restart note. Continue "
@@ -278,6 +280,19 @@ async def _cancel_pending_responses(
         if window_expired or shutdown_intent.stop_reason != "shutdown":
             break
     return pending
+
+
+def _terminal_status_of_span(span: rl.Span | None) -> Literal["completed", "cancelled", "error"]:
+    """Return the status a frozen approval FINAL reports, from the span that wrote it."""
+    # LEGACY_COMPAT: Approval answers frozen before reply records, reported as completed.
+    # Legacy format: an acknowledged FINAL row without span_id from an approval resume.
+    # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record the outcome of the
+    # span that wrote each FINAL.
+    # Handling: such a row reports completed, as it did.
+    # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
+    if span is None or span.outcome is rl.SpanOutcome.COMPLETED:
+        return "completed"
+    return "cancelled" if span.outcome is rl.SpanOutcome.CANCELLED else "error"
 
 
 def _merge_response_extra_content(
@@ -2197,8 +2212,10 @@ class ResponseRunner:
                 body = visible.get("body")
         if not isinstance(body, str):
             body = "Tool approval continuation completed"
+        span = None if delivery.span_id is None else await self.deps.replies.store.replies.span(delivery.span_id)
         return FinalDeliveryOutcome(
-            terminal_status="completed",
+            # A frozen FINAL may be the failure or cancellation its span ended with.
+            terminal_status=_terminal_status_of_span(span),
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=body,
@@ -2237,16 +2254,26 @@ class ResponseRunner:
         Before a FINAL the reply is still the unfinished stream of one turn, so
         the replayed turn adopts it like any reply a restart left streaming. A
         hand-back that cannot finish yet, such as cards that did not expire, is
-        retried by the next recovery pass. A deleted reply, or a FINAL already
-        owed, settles the continuation as a failure instead.
+        retried by the next recovery pass. A deleted reply, a resume that
+        already failed before its failure was fenced, or a FINAL already owed
+        settles the continuation as a failure instead.
         """
         initial = await self.deps.approval_store.load_matrix_delivery(
             delivery_id=continuation.source_event_ids[0],
             stage=DeliveryStage.INITIAL,
         )
-        if (initial is not None and initial.retired) or await self._approval_responses.final_delivery(
-            continuation,
-        ) is not None:
+        claim_span = (
+            None
+            if continuation.claim_span_id is None
+            else await self.deps.replies.store.replies.span(continuation.claim_span_id)
+        )
+        # A resume that already ended without its answer has nothing for a replay to continue.
+        resume_ended = claim_span is not None and claim_span.outcome in _UNANSWERED_RESUME_OUTCOMES
+        if (
+            (initial is not None and initial.retired)
+            or resume_ended
+            or await self._approval_responses.final_delivery(continuation) is not None
+        ):
             settled = await self._approval_responses.settle_failure(continuation, reason)
             return continuation.response_event_id if settled else None
         await self._approval_responses.release_to_replay(continuation, reason)

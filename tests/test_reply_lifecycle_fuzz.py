@@ -267,6 +267,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 paused_span_id=self.model.approval.paused_span_id,
                 result="failed",
                 disposition="superseded",
+                answers_turn=True,
                 now_ns=self._now(),
             )
             assert settled.outcome in {Outcome.DUPLICATE, Outcome.STALE}
@@ -542,6 +543,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 paused_span_id=self.model.approval.paused_span_id,
                 result="finished",
                 disposition=None,
+                answers_turn=True,
                 now_ns=self._now(),
             )
             self._apply(finished)
@@ -623,6 +625,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 paused_span_id=approval.paused_span_id,
                 result="failed",
                 disposition=approval.disposition,
+                answers_turn=True,
                 now_ns=self._now(),
             ),
         )

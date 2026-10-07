@@ -1333,12 +1333,15 @@ def approval_settled(
     paused_span_id: str,
     result: _ApprovalResult,
     disposition: FailureDisposition | None,
+    answers_turn: bool,
     now_ns: int,
 ) -> Transition:
     """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
 
-    Only an answer the span that ran the approved work completed consumes the
-    edit a regeneration carries: a resume, or a span approved in place.
+    The turn stays unanswered when its sources were deleted or no owner is
+    left to answer it (``answers_turn``). Only an answer the span that ran the
+    approved work completed consumes the edit a regeneration carries: a
+    resume, or a span approved in place.
     """
     decided = _approval_finish(
         reply,
@@ -1348,8 +1351,8 @@ def approval_settled(
         disposition=disposition,
         now_ns=now_ns,
     )
-    answered = result == "finished" and last_span is not None and last_span.outcome is SpanOutcome.COMPLETED
-    settle = SettleSources(paused_span_id, consumes_edit=answered)
+    completed = result == "finished" and last_span is not None and last_span.outcome is SpanOutcome.COMPLETED
+    settle = SettleSources(paused_span_id, consumes_edit=answers_turn and completed, answered=answers_turn)
     return replace(decided, effects=(settle, *decided.effects))
 
 
@@ -1867,16 +1870,21 @@ def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pend
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed))
 
 
-def removed_entity(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
-    """End a reply whose entity left the configuration, without writing to Matrix."""
+def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
+    """End a reply whose entity left the configuration, without writing to Matrix.
+
+    ``span`` is the reply's current span, or its last one when none runs. Its
+    sources settle unanswered, unless an approval holds them: its own
+    settlement does.
+    """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     spans: tuple[Span, ...] = ()
     updated = reply
-    if current is not None and not current.ended:
-        spans = (_end(current, SpanOutcome.LOST, now_ns),)
-        updated = _clear_current(updated, current.span_id)
-    # No bot remains to write or redact anything for this entity.
+    if span.span_id == reply.current_span_id and not span.ended:
+        spans = (_end(span, SpanOutcome.LOST, now_ns),)
+        updated = _clear_current(updated, span.span_id)
+    # No bot remains to answer, write, or redact anything for this entity.
     return Transition(
         outcome=Outcome.APPLIED,
         reply=_set_state(
@@ -1888,6 +1896,7 @@ def removed_entity(reply: Reply, current: Span | None, *, now_ns: int) -> Transi
             stop_button_event_id=None,
         ),
         spans=spans,
+        effects=_settle_sources(reply, span, answered=False),
     )
 
 

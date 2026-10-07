@@ -1726,7 +1726,7 @@ class PrincipalStore:
                 return False
             # The owner that could settle the reply is gone; the notice is what the room sees.
             # No live ledger of that owner learns it; its next start loads it.
-            _settled_approval(transaction, self._principal_id, discarded)
+            _settled_approval(transaction, self._principal_id, discarded, owner_available=False)
             approval_continuations.delete(transaction, self._principal_id, approval_id=approval_id)
             return True
 
@@ -1969,7 +1969,7 @@ def _finish_approval_continuation(
     if finishing is None:
         return None
     # The reply learns the finish while the run still holds it; the run goes after.
-    post_commit = _settled_approval(transaction, principal_id, finishing)
+    post_commit = _settled_approval(transaction, principal_id, finishing, owner_available=True)
     approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
     return FinishedApproval(post_commit=post_commit)
 
@@ -1978,9 +1978,11 @@ def _settled_approval(
     transaction: Transaction,
     principal_id: str,
     continuation: ApprovalContinuation,
+    *,
+    owner_available: bool,
 ) -> tuple[PostCommitEffect, ...]:
     """Apply a finished continuation to the reply it paused, whose rule settles the sources the pause held."""
-    applied = replies.approval_finished(transaction, principal_id, continuation)
+    applied = replies.approval_finished(transaction, principal_id, continuation, owner_available=owner_available)
     if applied is not None:
         return applied.post_commit
     # LEGACY_COMPAT: Finishing an adopted continuation that reply classification never named a span for.
@@ -1989,8 +1991,12 @@ def _settled_approval(
     # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages settle a continuation's
     # sources through its paused span's SettleSources.
     # Handling: its adopted pending and logical sources settle and its turn is answered, consuming its adopted
-    # selected edit unless it failed, as the paused span's settlement would.
+    # selected edit unless it failed, as the paused span's settlement would; a discarded one leaves its turn
+    # unanswered.
     # Coverage: tests/test_legacy_continuation_identity.py::test_an_unclassified_continuation_settles_its_adopted_sources.
+    if not owner_available:
+        journal.settle_many(transaction, principal_id, continuation.source_event_ids)
+        return ()
     completed = turn_records.settle_turn(
         transaction,
         principal_id,

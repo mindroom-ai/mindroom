@@ -251,6 +251,25 @@ async def test_applying_a_terminal_transition_settles_the_span_sources(journal_s
     assert span.outcome is SpanOutcome.COMPLETED
 
 
+async def _pending_turn(journal_store: EventJournalStore, *source_ids: str) -> None:
+    pending = TurnRecord.create(list(source_ids), completed=False)
+    await journal_store.backend.write(
+        lambda tx: turn_records.write_record(
+            tx,
+            "agent",
+            index_event_ids=pending.indexed_event_ids,
+            anchor_event_id=pending.anchor_event_id,
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
+        ),
+    )
+
+
+async def _answered(journal_store: EventJournalStore, source_id: str) -> bool:
+    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", source_id))
+    assert record is not None
+    return record.completed
+
+
 async def test_settling_a_spans_sources_records_its_turn_answered(journal_store: EventJournalStore) -> None:
     """The reply rule that settles a turn's sources is what records the turn answered, in the same transaction."""
     principal = journal_store.principal(PRINCIPAL)
@@ -1140,6 +1159,30 @@ async def test_an_edit_held_back_by_a_settling_approval_is_retried_when_it_finis
     assert retried == [("$edit",)]
 
 
+async def test_an_approval_whose_sources_were_deleted_leaves_its_turn_unanswered(
+    journal_store: EventJournalStore,
+) -> None:
+    """The approval still settles the deleted sources it holds, but nothing answered them."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    await _pending_turn(journal_store, "$source-1", "$source-2")
+    paused = await paused_for_approval(alice, journal_tests.TestApprovalContinuations.continuation(state="waiting"))
+    assert paused is not None
+    await _delete(alice, "$source-1")
+    await _delete(alice, "$source-2")
+    held = await alice.replies.for_sources(("$source-1",))
+    assert held is not None
+    assert held.state is ReplyState.PAUSED
+    failing = await alice.request_approval_failure("approval-1", "cancelled", expected_state="waiting")
+    assert failing is not None
+    finished = await journal_store.backend.write(
+        lambda tx: replies.approval_finished(tx, "agent@alice", failing, owner_available=True),
+    )
+    assert finished is not None
+    assert not await alice.is_pending("$source-1")
+    assert not await _answered(journal_store, "$source-1")
+
+
 async def test_retention_keeps_a_reply_a_continuation_still_names(journal_store: EventJournalStore) -> None:
     """A finished reply whose continuation waits for its cleanup is not forgotten, so that continuation still reads."""
     alice = journal_store.principal("agent@alice")
@@ -1485,6 +1528,7 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
 async def test_a_removed_entitys_open_replies_end_without_writing(journal_store: EventJournalStore) -> None:
     """The removed entity's running reply fails with its span lost, owing nothing; other entities are untouched."""
     principal = journal_store.principal(PRINCIPAL)
+    await _pending_turn(journal_store, "$source")
     await _claimed(principal)
     other = journal_store.principal("other@alice")
     others = rl.claim(
@@ -1515,6 +1559,9 @@ async def test_a_removed_entitys_open_replies_end_without_writing(journal_store:
     assert untouched is not None
     assert untouched.state is ReplyState.ACTIVE
     assert await journal_store.end_entity_replies(lambda name: name == "agent", now_ns=60) == 0
+    # No bot answers the source any more; it settles unanswered instead of waiting for a replay forever.
+    assert not await principal.is_pending("$source")
+    assert not await _answered(journal_store, "$source")
 
 
 async def test_lock_and_state_queries(journal_store: EventJournalStore) -> None:

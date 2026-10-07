@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import reply_lifecycle as rl
 from mindroom.bot import AgentBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig
@@ -3756,3 +3757,16 @@ async def test_a_whole_reply_write_sends_its_trace_only_when_tool_calls_show(sho
     assert body.startswith("Earlier work\n\n")
     assert body.endswith("Waiting for approval")
     assert trace == ([lookup] if show_tool_calls else None)
+
+
+@pytest.mark.asyncio
+async def test_superseding_the_replay_of_an_ended_reply_leaves_its_sources_to_the_caller(
+    tmp_path: Path,
+    alice: PrincipalStore,
+) -> None:
+    """A reply that ended without settling its sources, as a departure does, holds nothing for the replay to end."""
+    gateway = _gateway(tmp_path, alice)
+    async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+        await gateway.end_reply_span(handle, lambda reply, span: rl.departed(reply, span, now_ns=1))
+    assert await alice.is_pending("$cause")
+    assert await gateway.supersede_replay(("$cause",)) is None

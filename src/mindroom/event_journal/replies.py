@@ -25,6 +25,7 @@ from mindroom.reply_lifecycle import (
 )
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
+from .projection import is_tombstoned
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -253,12 +254,20 @@ def approval_finished(
     transaction: Transaction,
     principal_id: str,
     continuation: approval_continuations.ApprovalContinuation,
+    *,
+    owner_available: bool,
 ) -> AppliedTransition | None:
-    """Apply a finished continuation to the reply it paused, settling the sources its pause held."""
+    """Apply a finished continuation to the reply it paused, settling the sources its pause held.
+
+    Its turn stays unanswered when no owner is left to answer it or the user deleted every source it answers.
+    """
     reply = lock_paused_reply(transaction, principal_id, continuation)
     if reply is None:
         return None
     assert continuation.span_id is not None, "a continuation with a reply names the span that paused it"
+    paused = reply_spans.load(transaction, principal_id, continuation.span_id)
+    assert paused is not None, "a continuation's paused span exists while it does"
+    deleted = all(is_tombstoned(transaction, principal_id, reply.room_id, source) for source in paused.sources.logical)
     failed = continuation.state == "failing"
     reason = continuation.failure_reason
     disposition: rl.FailureDisposition | None = None
@@ -280,6 +289,7 @@ def approval_finished(
             paused_span_id=continuation.span_id,
             result="failed" if failed else "finished",
             disposition=disposition,
+            answers_turn=owner_available and not deleted,
             now_ns=time.time_ns(),
         ),
     )
@@ -506,12 +516,9 @@ def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *,
             continue
         reply = reply_messages.lock(transaction, principal_id, found.reply_id)
         assert reply is not None
-        current = (
-            None
-            if reply.current_span_id is None
-            else reply_spans.load(transaction, principal_id, reply.current_span_id)
-        )
-        if apply(transaction, principal_id, rl.removed_entity(reply, current, now_ns=now_ns)).transition.applied:
+        span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
+        assert span is not None, "a reply's last span exists"
+        if apply(transaction, principal_id, rl.removed_entity(reply, span, now_ns=now_ns)).transition.applied:
             ended += 1
     return ended
 

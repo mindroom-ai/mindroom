@@ -900,6 +900,7 @@ def test_a_failed_approval_ends_a_resume_an_older_instance_left_current() -> Non
         paused_span_id="span-1",
         result="failed",
         disposition="cancelled_by_user",
+        answers_turn=True,
         now_ns=NOW,
     )
     assert settled.reply is not None
@@ -1020,6 +1021,7 @@ def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
         paused_span_id="span-1",
         result="failed",
         disposition="cancelled_by_user",
+        answers_turn=True,
         now_ns=NOW,
     )
     assert settled.reply is not None
@@ -1057,6 +1059,7 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
         paused_span_id="span-1",
         result="failed",
         disposition="cancelled_by_user",
+        answers_turn=True,
         now_ns=NOW,
     )
     assert settled.reply is not None
@@ -1227,6 +1230,7 @@ def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> No
         paused_span_id="span-1",
         result="failed",
         disposition="failed",
+        answers_turn=True,
         now_ns=NOW,
     )
     # The note already ended the reply, so the finish only settles the sources.
@@ -1310,6 +1314,7 @@ def test_approval_settlement_guards() -> None:
         paused_span_id="span-1",
         result="failed",
         disposition="failed",
+        answers_turn=True,
         now_ns=NOW,
     )
     assert other.outcome is Outcome.STALE
@@ -1320,6 +1325,7 @@ def test_approval_settlement_guards() -> None:
         paused_span_id="span-1",
         result="failed",
         disposition="superseded",
+        answers_turn=True,
         now_ns=NOW,
     )
     assert superseded.outcome is Outcome.DUPLICATE
@@ -1335,6 +1341,7 @@ def test_approval_settlement_guards() -> None:
             paused_span_id="span-1",
             result="finished",
             disposition=None,
+            answers_turn=True,
             now_ns=NOW,
         )
         assert finished.effects[0] == SettleSources("span-1", consumes_edit=consumed)
@@ -1345,6 +1352,7 @@ def test_approval_settlement_guards() -> None:
         paused_span_id="span-1",
         result="failed",
         disposition="failed",
+        answers_turn=True,
         now_ns=NOW,
     )
     assert failed.reply is not None
@@ -1776,13 +1784,46 @@ def test_dispatch_failure_fails_the_reply_and_owes_its_error() -> None:
 
 
 def test_removed_entity_fails_without_writing() -> None:
-    """An entity removed from the configuration leaves its messages as they are."""
+    """An entity removed from the configuration leaves its messages as they are, and its turn unanswered."""
     reply, span = _turn()
     transition = rl.removed_entity(reply, span, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
     assert transition.reply.owed_write is None
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.LOST
+    assert transition.effects == (SettleSources(span.span_id, answered=False),)
+    # A retry's sources wait on the last span; they settle the same way.
+    released = rl.release(reply, span, now_ns=NOW)
+    assert released.reply is not None
+    waiting = rl.removed_entity(released.reply, _span_after(released, span.span_id), now_ns=NOW)
+    assert waiting.effects == (SettleSources(span.span_id, answered=False),)
+
+
+def test_removed_entity_leaves_an_approvals_sources_to_it() -> None:
+    """The approval holding the reply settles the sources its pause holds."""
+    reply, span, transition = _paused()
+    transition = rl.removed_entity(reply, _span_after(transition, span.span_id), now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.FAILED
+    assert transition.effects == ()
+
+
+def test_an_approval_settles_its_turn_unanswered_when_nothing_answers_it() -> None:
+    """Deleted sources or a discarded owner settle the paused span's sources without answering their turn."""
+    reply, span, transition = _paused()
+    paused = _span_after(transition, span.span_id)
+    for answers_turn in (True, False):
+        settled = rl.approval_settled(
+            reply,
+            paused,
+            approval_id="approval-1",
+            paused_span_id=span.span_id,
+            result="failed",
+            disposition="failed",
+            answers_turn=answers_turn,
+            now_ns=NOW,
+        )
+        assert settled.effects[0] == SettleSources(span.span_id, answered=answers_turn)
 
 
 def test_span_outcome_is_written_once() -> None:
@@ -2059,6 +2100,7 @@ def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
         paused_span_id="span-1",
         result="failed",
         disposition="failed",
+        answers_turn=True,
         now_ns=NOW,
     )
     assert failed.reply is not None

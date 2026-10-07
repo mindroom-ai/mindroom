@@ -63,6 +63,7 @@ from mindroom.event_journal import (
     reads,
     replacement_target,
     sqlite_backend,
+    turn_records,
 )
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -8135,8 +8136,18 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """Permanent-unavailability cleanup requires its durable terminal notice."""
+        """Permanent-unavailability cleanup requires its durable terminal notice, and answers nothing."""
         await self.admit_sources(alice)
+        pending = TurnRecord.create(["$source-1", "$source-2"], completed=False)
+        await journal_store.backend.write(
+            lambda tx: turn_records.write_record(
+                tx,
+                "agent",
+                index_event_ids=pending.indexed_event_ids,
+                anchor_event_id=pending.anchor_event_id,
+                record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
+            ),
+        )
         await paused_for_approval(alice, self.continuation(state="waiting"))
 
         owners = await journal_store.approval_continuations()
@@ -8191,6 +8202,9 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
+        record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source-1"))
+        assert record is not None
+        assert not record.completed
 
     async def test_unavailable_cleanup_and_router_departure_share_membership_first_lock_order(
         self,

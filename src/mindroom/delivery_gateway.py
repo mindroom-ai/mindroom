@@ -1451,11 +1451,12 @@ class DeliveryGateway:
     async def supersede_replay(self, source_event_ids: tuple[str, ...]) -> bool | None:
         """Settle a superseded replay's sources with the reply they left.
 
-        Returns ``None`` when no reply has those sources, and ``False`` when
-        the reply still owes Matrix a write, which only its replay resolves.
+        Returns ``None`` when no reply has those sources or it already ended
+        without them, and ``False`` when the reply still owes Matrix a write,
+        which only its replay resolves.
         """
         applied = await self.deps.outbox.replies.supersede_replay(source_event_ids, now_ns=time.time_ns())
-        if applied is None:
+        if applied is None or applied.transition.outcome is ReplyOutcome.DUPLICATE:
             return None
         if applied.transition.outcome is ReplyOutcome.DEFERRED:
             return False
