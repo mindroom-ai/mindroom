@@ -207,9 +207,11 @@ class CliApprovalWaits:
             and current.cli_call is not None
             and (current.state != "claimed" or current.runtime_generation == self.runtime_generation)
         ):
-            if await self.responses.final_delivery(current) is not None:
+            final = await self.responses.final_delivery(current)
+            if final is not None and not final.permanently_failed:
                 await self.responses.finish_approval(current.approval_id)
             elif not current_task_is_process_shutdown():
+                # No answer reached the room, including one Matrix refused for good: the approval fails.
                 await self.responses.request_failure(
                     current,
                     progress.failure_reason or "CLI approval response ended before final delivery.",

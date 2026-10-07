@@ -37,6 +37,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
+from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
@@ -1015,3 +1016,40 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             await recover()
         assert effects == []
         response.assert_not_awaited()
+
+
+@pytest.mark.parametrize("permanently_failed", [False, True])
+@pytest.mark.asyncio
+async def test_a_cli_wait_fails_an_approval_whose_final_matrix_refused(*, permanently_failed: bool) -> None:
+    """A FINAL Matrix refused for good is no answer: the wait fails the approval instead of finishing it."""
+    continuation = SimpleNamespace(
+        approval_id="approval-1",
+        state="claimed",
+        runtime_generation="runtime-a",
+        cli_call={"kind": "agent_cli"},
+        room_id="!room",
+        source_event_ids=("$source",),
+    )
+    responses = SimpleNamespace(
+        final_delivery=AsyncMock(return_value=SimpleNamespace(permanently_failed=permanently_failed)),
+        finish_approval=AsyncMock(return_value=True),
+        request_failure=AsyncMock(return_value=None),
+    )
+    waits = CliApprovalWaits(
+        store=SimpleNamespace(approval_continuation_for_source=AsyncMock(return_value=continuation)),  # type: ignore[arg-type]
+        responses=responses,  # type: ignore[arg-type]
+        runtime_generation="runtime-a",
+        retry_sources=lambda _room_id, _sources: None,
+        claim=AsyncMock(),
+        advance=AsyncMock(),
+    )
+    progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
+
+    await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
+
+    if permanently_failed:
+        responses.finish_approval.assert_not_awaited()
+        responses.request_failure.assert_awaited_once()
+    else:
+        responses.finish_approval.assert_awaited_once_with("approval-1")
+        responses.request_failure.assert_not_awaited()
