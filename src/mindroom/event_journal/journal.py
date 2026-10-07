@@ -26,7 +26,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approval_continuations, approvals, membership_hooks, reply_messages
+from . import approval_continuations, approvals, membership_hooks, replies, reply_messages
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -877,21 +877,15 @@ def end_replies_of_deleted_source(
     room_id: str,
     event_id: str,
 ) -> None:
-    """End the replies whose current work lost every logical source to this tombstone, settling their sources.
-
-    The bot cancels their running spans and redacts what they showed after the
-    tombstone commits.
-    """
-    settle = reply_messages.delete_sources(
+    """End the replies whose current work lost every logical source to this tombstone, settling their sources."""
+    replies.end_replies_of_deleted_source(
         transaction,
         principal_id,
-        room_id,
-        event_id,
+        room_id=room_id,
+        event_id=event_id,
         deleted=lambda source: is_tombstoned(transaction, principal_id, room_id, source),
         now_ns=time.time_ns(),
     )
-    if settle:
-        settle_many(transaction, principal_id, settle)
 
 
 def _settle_tombstoned_turn_source(

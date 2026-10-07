@@ -200,6 +200,33 @@ def lock_paused_reply(
     return None if span is None else reply_messages.lock(transaction, principal_id, span.reply_id)
 
 
+def end_replies_of_deleted_source(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    event_id: str,
+    deleted: Callable[[str], bool],
+    now_ns: int,
+) -> None:
+    """End the replies whose current work lost every logical source to this deletion, settling their sources.
+
+    A paused reply, an approval resume, and an answer already written are
+    kept. The bot cancels the spans it runs and redacts what they showed after
+    the deletion commits, and the turn ledger loads the turns this answered.
+    """
+    for reply_id in reply_messages.naming_logical_source(transaction, principal_id, event_id):
+        reply = reply_messages.lock(transaction, principal_id, reply_id)
+        if reply is None or reply.terminal or reply.room_id != room_id:
+            continue
+        span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
+        if span is None or event_id not in span.sources.logical or not all(map(deleted, span.sources.logical)):
+            continue
+        transition = rl.sources_deleted(reply, span, now_ns=now_ns)
+        if transition.applied:
+            apply(transaction, principal_id, transition)
+
+
 def approval_finished(
     transaction: Transaction,
     principal_id: str,

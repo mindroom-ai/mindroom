@@ -283,6 +283,20 @@ async def test_settling_a_spans_sources_records_its_turn_answered(journal_store:
     assert record.response_event_id is None
     assert [effect.record for effect in applied.post_commit if isinstance(effect, replies.TurnCompleted)] == [record]
 
+    # A ledger write derived before the settlement arrives late; the turn stays answered.
+    await journal_store.backend.write(
+        lambda tx: turn_records.write_record(
+            tx,
+            "agent",
+            index_event_ids=pending.indexed_event_ids,
+            anchor_event_id="$source",
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
+        ),
+    )
+    late = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
+    assert late is not None
+    assert late.completed
+
 
 async def test_post_commit_effects_are_returned(journal_store: EventJournalStore) -> None:
     """Cancellation of a live span is left for after the commit."""
@@ -551,6 +565,16 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$first")
     await admit(principal, "$second")
+    pending = TurnRecord.create(["$first", "$second"], completed=False)
+    await journal_store.backend.write(
+        lambda tx: turn_records.write_record(
+            tx,
+            "agent",
+            index_event_ids=pending.indexed_event_ids,
+            anchor_event_id=pending.anchor_event_id,
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
+        ),
+    )
     await principal.replies.write_generation("gen-1", now_ns=1)
     request = replace(
         _request(source="$first"),
@@ -576,6 +600,10 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     assert cancelled.outcome is SpanOutcome.CANCELLED
     assert not await principal.is_pending("$first")
     assert not await principal.is_pending("$second")
+    # Its settlement is every reply settlement: the turn is recorded answered with it.
+    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$first"))
+    assert record is not None
+    assert record.completed
     assert await principal.replies.ended_by_deletion("$second") == (gone,)
 
 

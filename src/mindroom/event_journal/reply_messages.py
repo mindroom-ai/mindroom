@@ -14,15 +14,12 @@ from mindroom.reply_lifecycle import (
     OwedWrite,
     Reply,
     ReplyState,
-    SettleSources,
     departed,
-    sources_deleted,
 )
 
 from . import reply_spans
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
 
     from mindroom.reply_lifecycle import Span, Transition
 
@@ -202,49 +199,17 @@ def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, no
         persist(transaction, principal_id, departed(reply, current, now_ns=now_ns))
 
 
-def delete_sources(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    deleted_event_id: str,
-    *,
-    deleted: Callable[[str], bool],
-    now_ns: int,
-) -> tuple[str, ...]:
-    """End the replies whose current work lost every logical source; return the journal sources to settle.
-
-    A running span is cancelled by the bot after this commits; a paused
-    reply, an approval resume, and an answer already written are kept.
-    """
+def naming_logical_source(transaction: Transaction, principal_id: str, event_id: str) -> tuple[str, ...]:
+    """Return the replies one of whose spans answers this logical source."""
     rows = transaction.fetchall(
         """
         SELECT DISTINCT span.reply_id FROM reply_span_sources AS source
         JOIN reply_spans AS span ON span.principal_id = source.principal_id AND span.span_id = source.span_id
         WHERE source.principal_id = ? AND source.role = 'logical' AND source.event_id = ?
         """,
-        (principal_id, deleted_event_id),
+        (principal_id, event_id),
     )
-    settle: list[str] = []
-    for row in rows:
-        reply = lock(transaction, principal_id, str(row["reply_id"]))
-        if reply is None or reply.terminal or reply.room_id != room_id:
-            continue
-        span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
-        if span is None or deleted_event_id not in span.sources.logical:
-            continue
-        if not all(deleted(event_id) for event_id in span.sources.logical):
-            continue
-        transition = sources_deleted(reply, span, now_ns=now_ns)
-        if not transition.applied:
-            continue
-        persist(transaction, principal_id, transition)
-        ended = {changed.span_id: changed for changed in transition.spans}
-        for effect in transition.effects:
-            if isinstance(effect, SettleSources):
-                settled = ended.get(effect.span_id) or reply_spans.load(transaction, principal_id, effect.span_id)
-                if settled is not None:
-                    settle.extend(settled.sources.pending)
-    return tuple(dict.fromkeys(settle))
+    return tuple(str(row["reply_id"]) for row in rows)
 
 
 def waiting_to_replay(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> tuple[str, ...]:
