@@ -114,8 +114,11 @@ class _Model:
     deleted: set[str] = field(default_factory=set)
     # Edits a completed answer consumed, as the turn ledger commits them.
     consumed: set[str] = field(default_factory=set)
-    # Spans whose sources a departure settled unanswered, before anything consumed their edit.
-    departed: set[str] = field(default_factory=set)
+    # Spans whose sources settled unanswered before anything consumed their edit: by a departure, or by an
+    # approval that finished with no owner left to answer it.
+    unanswered: set[str] = field(default_factory=set)
+    # The approval whose pause each paused span's continuation was created by.
+    paused_by: dict[str, str] = field(default_factory=dict)
     # The bot left the room, which drops everything owed to it.
     left: bool = False
     # What each write of a reply, by sequence, may show: one that ends the reply, work in progress, or refused.
@@ -814,6 +817,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 span.delivery_id,
                 waiting_span_id=span.span_id,
             )
+            self.model.paused_by[span.span_id] = approval_id
         self._apply(transition)
 
     @precondition(
@@ -965,6 +969,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         )
         if not answers_turn:
             assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
+            if not self._is_settled(continuation.paused_span_id):
+                self.model.unanswered.add(continuation.paused_span_id)
         del self.model.continuations[continuation.approval_id]
         self._derive_hold()
         if retry:
@@ -1089,7 +1095,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         # The departure settles every pending turn event of the room, unanswered.
         for span_id in self.model.spans:
             if not self._is_settled(span_id):
-                self.model.departed.add(span_id)
+                self.model.unanswered.add(span_id)
             self._settle(span_id)
         self._derive_hold()
         self.model.deferred.clear()
@@ -1360,20 +1366,25 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert reply.owed_write is None, reply
         assert not reply.redaction_pending, reply
         assert reply.terminal, (reply, self._last())
+        resumed = {
+            span.approval_id
+            for span in self.model.spans.values()
+            if span.kind is SpanKind.APPROVAL_RESUME and span.outcome is SpanOutcome.COMPLETED
+        }
         for span in self.model.spans.values():
             if span.outcome in rl._SOURCES_PENDING_OUTCOMES:
                 continue
             assert self._is_settled(span.span_id), span
+            answered = span.outcome is SpanOutcome.COMPLETED or self.model.paused_by.get(span.span_id) in resumed
             if (
                 span.kind is SpanKind.REGENERATION
-                and span.outcome is SpanOutcome.COMPLETED
+                and answered
                 and span.prepared_edit is not None
                 and "$source" not in self.model.deleted
-                and span.span_id not in self.model.departed
-                and self.model.finals.get(span.delivery_id) != "refused"
+                and span.span_id not in self.model.unanswered
             ):
-                # S5: a regeneration that completed its answer consumed the edit it selected. An
-                # answer Matrix refused for good fails the approval it ran for, which commits no edit.
+                # S5: a regeneration whose answer it or its approval's resume completed consumed the edit it
+                # selected, whatever Matrix then did with that answer.
                 assert span.prepared_edit in self.model.consumed, span
 
     def _drain_step(self) -> bool:  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -1471,10 +1482,12 @@ def test_a_refused_answer_after_an_approved_regeneration_ends_with_the_delivery_
     reply = machine.model.reply
     assert reply is not None
     assert reply.state is ReplyState.FAILED
+    # The resume completed its answer, so the regeneration's edit is committed though Matrix refused it.
+    assert machine.model.consumed == {"$edit-1"}
 
 
-def test_a_refused_answer_of_a_regeneration_approved_in_place_commits_no_edit() -> None:
-    """S5 on an in-place approval: the refused answer fails the approval, which leaves the edit uncommitted."""
+def test_a_refused_answer_of_a_regeneration_approved_in_place_still_commits_its_edit() -> None:
+    """S5 on an in-place approval: the refused answer fails the approval but commits the edit, as a queued answer does."""
     machine = ReplyLifecycleMachine()
     machine.start_turn()
     machine.dispatch_failure()
@@ -1491,7 +1504,7 @@ def test_a_refused_answer_of_a_regeneration_approved_in_place_commits_no_edit() 
     reply = machine.model.reply
     assert reply is not None
     assert reply.state is ReplyState.FAILED
-    assert not machine.model.consumed
+    assert machine.model.consumed == {"$edit-1"}
 
 
 @pytest.mark.timeout(300)

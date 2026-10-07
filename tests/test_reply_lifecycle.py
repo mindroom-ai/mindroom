@@ -252,6 +252,25 @@ def test_regeneration_rerun_keeps_its_rollback() -> None:
     assert rerun.claimed.rollback == regen.claimed.rollback
 
 
+@pytest.mark.parametrize("state", [ReplyState.GONE, ReplyState.COMPLETED, ReplyState.CANCELLED])
+def test_a_retried_regeneration_whose_reply_ended_meanwhile_runs_nothing(state: ReplyState) -> None:
+    """A deletion, departure, or Stop that ended the reply between the retry's source gate and its claim wins."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    reply = replace(reply, state=ReplyState.COMPLETED)
+    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regen.reply is not None
+    assert regen.claimed is not None
+    released, last = _ended(regen.reply, regen.claimed, SpanOutcome.RELEASED)
+    ended = replace(released, state=state)
+
+    retry = rl.claim(_request("span-3", delivery_id="$edit", driving_edit_id="$edit"), _context(ended, last))
+
+    assert retry.outcome is Outcome.DUPLICATE
+    assert retry.claimed is None
+    assert retry.reply == ended
+
+
 @pytest.mark.parametrize(
     ("outcome", "state"),
     [
@@ -531,6 +550,27 @@ def test_stopped_regeneration_before_its_first_acknowledged_write_restores_silen
     assert transition.reply.state is ReplyState.COMPLETED
     assert transition.reply.presentation == "old"
     assert transition.row is None
+    assert _span_after(transition, "span-2").outcome is SpanOutcome.RESTORED
+
+
+def test_a_regeneration_that_showed_nothing_over_a_paused_answer_fails_it_with_the_interrupted_note() -> None:
+    """Consent is never restored: the paused answer comes back failed, owing the interrupted note."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.PAUSED)
+    reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1", presentation="paused", event_id="$reply")
+    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert regen.claimed is not None
+    assert regen.claimed.rollback is not None
+    assert regen.claimed.rollback.state is ReplyState.PAUSED
+    # The supersession ended the hold; the store reads the reply free of it.
+    regenerating = replace(regen.reply, approval_id=None)
+
+    transition = rl.dispatch_failed(regenerating, regen.claimed, error_text="setup failed", now_ns=NOW)
+
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.FAILED
+    assert transition.reply.presentation == "paused"
+    assert transition.reply.owed_write == rl.OwedWrite("span-2", "interrupted")
     assert _span_after(transition, "span-2").outcome is SpanOutcome.RESTORED
 
 
@@ -1480,19 +1520,28 @@ def test_approval_settlement_guards() -> None:
     # A finish settles what its pause held whatever the reply does; only a completed run consumes its edit.
     assert other.effects == superseded.effects == (SettleSources("span-1", consumes_edit=False),)
     # The span that ran the approved work says whether it answered: completed consumes the edit, failed does not.
-    for outcome, consumed in ((SpanOutcome.COMPLETED, True), (SpanOutcome.FAILED, False)):
-        ran = replace(_span, span_id="span-2", outcome=outcome, ended_at_ns=NOW)
-        finished = rl.approval_settled(
+    # A completed answer Matrix refused for good fails the approval but still consumes it, as a queued answer does.
+    resume = replace(_span, span_id="span-2", kind=SpanKind.APPROVAL_RESUME, approval_id="approval-1")
+    in_place = replace(_span, span_id="span-1")
+    other = replace(_span, span_id="span-3")
+    for ran, outcome, result, consumed in (
+        (resume, SpanOutcome.COMPLETED, "finished", True),
+        (resume, SpanOutcome.FAILED, "finished", False),
+        (resume, SpanOutcome.COMPLETED, "failed", True),
+        (in_place, SpanOutcome.COMPLETED, "failed", True),
+        (other, SpanOutcome.COMPLETED, "finished", False),
+    ):
+        settled = rl.approval_settled(
             reply,
-            ran,
+            replace(ran, outcome=outcome, ended_at_ns=NOW),
             approval_id="approval-1",
             paused_span_id="span-1",
-            result="finished",
-            disposition=None,
+            result=result,
+            disposition=None if result == "finished" else "failed",
             answers_turn=True,
             now_ns=NOW,
         )
-        assert finished.effects[0] == SettleSources("span-1", consumes_edit=consumed)
+        assert settled.effects[0] == SettleSources("span-1", consumes_edit=consumed), (ran.span_id, outcome, result)
     failed = rl.approval_settled(
         reply,
         None,
@@ -1998,6 +2047,30 @@ def test_a_restart_leaves_a_span_approved_in_place_to_its_approval() -> None:
     assert restarted.reply.unapplied_stop
     assert restarted.effects == ()
     assert _span_after(restarted, span.span_id).outcome is SpanOutcome.LOST
+
+
+def test_releasing_an_approval_whose_in_place_span_a_restart_ended_leaves_the_reply_to_the_replay() -> None:
+    """No span runs for it any more: the reply stays active with its sources pending, and the replay answers."""
+    reply, span, _transition = _paused(in_place=True)
+    approved = rl.resumed_in_place(reply, span, approval_id="approval-1", now_ns=NOW)
+    assert approved.reply is not None
+    restarted = rl.owner_lost(
+        approved.reply,
+        span,
+        rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True),
+        now_ns=NOW,
+    )
+    assert restarted.reply is not None
+    assert _span_after(restarted, span.span_id).outcome is SpanOutcome.LOST
+
+    released = rl.approval_released(restarted.reply, None, now_ns=NOW)
+
+    assert released.outcome is Outcome.APPLIED
+    assert released.reply is not None
+    assert released.reply.state is ReplyState.ACTIVE
+    assert released.reply.current_span_id is None
+    assert released.spans == ()
+    assert released.effects == ()
 
 
 def test_releasing_an_approval_a_stop_covers_ends_the_reply_instead_of_replaying() -> None:

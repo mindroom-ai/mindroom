@@ -744,9 +744,10 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         # A retry of the edit the last span already answered, as a sync
         # restart retries a regeneration that finished: nothing runs again.
         return _unchanged(Outcome.DUPLICATE, reply)
-    if reply.terminal and request.driving_edit_id is None:
-        # A Stop that does not wait for the conversation lock ended the reply
-        # between the source gate and this claim: nothing runs for it.
+    if reply.terminal:
+        # A Stop, deletion, or departure that does not wait for the conversation
+        # lock ended the reply between the source gate and this claim, or this
+        # retry's: nothing runs for it, and that ending owns its sources.
         return _unchanged(Outcome.DUPLICATE, reply)
     if reply.state is not ReplyState.ACTIVE or reply.current_span_id is not None or last is None or not last.ended:
         msg = f"Reply {reply.reply_id} in state {reply.state} cannot be claimed again"
@@ -1350,7 +1351,8 @@ def approval_settled(
     The turn stays unanswered when no owner is left to answer it
     (``answers_turn``); the store also leaves a deleted turn unanswered. Only an answer the span that ran the
     approved work completed consumes the edit a regeneration carries: a
-    resume, or a span approved in place.
+    resume, or a span approved in place. It consumes it even when Matrix then
+    refused that answer, as a regeneration's queued answer does.
     """
     decided = _approval_finish(
         reply,
@@ -1360,7 +1362,14 @@ def approval_settled(
         disposition=disposition,
         now_ns=now_ns,
     )
-    completed = result == "finished" and last_span is not None and last_span.outcome is SpanOutcome.COMPLETED
+    completed = (
+        last_span is not None
+        and last_span.outcome is SpanOutcome.COMPLETED
+        and (
+            last_span.span_id == paused_span_id
+            or (last_span.kind is SpanKind.APPROVAL_RESUME and last_span.approval_id == approval_id)
+        )
+    )
     settle = SettleSources(paused_span_id, consumes_edit=answers_turn and completed, answered=answers_turn)
     return replace(decided, effects=(settle, *decided.effects))
 
@@ -1386,11 +1395,7 @@ def _approval_finish(
         return _unchanged(Outcome.DUPLICATE, reply)
     if result == "failed":
         return _approval_failed(reply, last_span, approval_id=approval_id, disposition=disposition, now_ns=now_ns)
-    if reply.state is ReplyState.ACTIVE and resumed and last_span is not None:
-        state = _state_for_span_outcome(last_span.outcome)
-        if state is None:
-            return _unchanged(Outcome.STALE, reply)
-        return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, state, now_ns))
+    # A finished run's acknowledged answer already ended the reply.
     return _unchanged(Outcome.STALE, reply)
 
 
@@ -1486,16 +1491,6 @@ def span_left_behind(reply: Reply, span: Span, *, active_generation: str | None,
         reply=_touch(_clear_current(reply, span.span_id), now_ns),
         spans=(_end(span, SpanOutcome.LOST, now_ns),),
     )
-
-
-def _state_for_span_outcome(outcome: SpanOutcome | None) -> ReplyState | None:
-    if outcome is SpanOutcome.COMPLETED:
-        return ReplyState.COMPLETED
-    if outcome is SpanOutcome.CANCELLED:
-        return ReplyState.CANCELLED
-    if outcome in {SpanOutcome.FAILED, SpanOutcome.SUPPRESSED}:
-        return ReplyState.FAILED
-    return None
 
 
 def approval_released(reply: Reply, span: Span | None, *, now_ns: int) -> Transition:
