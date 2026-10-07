@@ -131,6 +131,8 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         turn_store=store,
         receipt_order=AsyncMock(return_value=1),
         generate_response=runner.generate_response,
+        reply_for_sources=principal.replies.for_sources,
+        adopt_historical_answer=runner.deps.replies.adopt_historical_answer,
     )
     effects_started = asyncio.Event()
     never_finish = asyncio.Event()

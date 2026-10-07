@@ -17,7 +17,7 @@ from mindroom.matrix.client_delivery import (
     MatrixSendOutcome,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import ReplyState, SpanOutcome
+from mindroom.reply_lifecycle import ReplyState, SpanOutcome, SpanSources
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
 from mindroom.turn_record import TurnRecord
 from tests.ai_user_id_helpers import (
@@ -251,6 +251,13 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
         },
     )
 
+    # The edit regenerator adopts the prior answer before it regenerates it.
+    await bot._reply_runtime.adopt_historical_answer(
+        "$prior_answer",
+        sources=SpanSources(pending=(), logical=("$event",)),
+        room_id=regen_request.room_id,
+        thread_id=regen_request.thread_id,
+    )
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
         patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
