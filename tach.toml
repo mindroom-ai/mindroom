@@ -8045,7 +8045,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.memory",
     "mindroom.path_confinement",
-    "mindroom.runtime_resolution",
 ]
 visibility = ["mindroom.automations.registry"]
 

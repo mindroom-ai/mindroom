@@ -826,7 +826,7 @@ agents:
 - `then(config, thread_id, timed_out)` runs after that answer and returns the next `Ask` or a `Done(notice, resolve=..., on_loop=...)` that posts `notice` in the thread, marks the listed threads resolved, and runs `on_loop` on the event loop.
   Bind anything a step needs from the check with `functools.partial`.
 - `timed_out` is true when no answer ended within an hour of the prompt being posted; `False` only means the answer ended, which includes a failed run, so check the result before reporting success.
-- A new-thread `Ask` gets its own thread and session, even for an agent with `thread_mode: room`, and an `Ask` with `new_thread=False` follows up in the current thread.
+- The check's `Ask` and every later `Ask` with `new_thread=True` get their own thread and session, even for an agent with `thread_mode: room`; a later `Ask` with `new_thread=False` follows up in the current thread.
 
 `AutomationContext` fields:
 
