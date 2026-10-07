@@ -6753,6 +6753,60 @@ def test_strict_ledger_read_rejects_incomplete_record(tmp_path: Path) -> None:
         live_fuzz.read_ledger_records(ledger_path, strict=True)
 
 
+def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) -> None:
+    """An AI turn's answer, and the edits it consumed, come from the reply records that own them."""
+    ledger_path = tmp_path / "event_journal.db"
+    _write_ledger(
+        ledger_path,
+        {
+            "$root": TurnRecord.create(
+                source_event_ids=("$root",),
+                completed=True,
+                source_event_revisions={"$root": (200, "$b")},
+                revision_replay={
+                    "$a": RevisionReplay("$root", 100, redacted=True),
+                    "$b": RevisionReplay("$root", 200),
+                    "$c": RevisionReplay("$root", 300),
+                },
+            ),
+            "$unanswered": TurnRecord.create(source_event_ids=("$unanswered",), completed=True),
+        },
+    )
+    regeneration = json.dumps({"source_event_revisions": {"$root": [100, "$a"]}})
+    with closing(sqlite3.connect(ledger_path)) as database:
+        database.executemany(
+            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
+            "state, last_span_id, presentation_json, revision, placeholder_only, reply_sequence, created_at_ns, "
+            "updated_at_ns) VALUES ('p', ?, 'general', '!room', 0, ?, ?, ?, '{}', 1, ?, 1, 1, 1)",
+            [("answer", "$reply", "completed", "regenerated", False), ("stopped", "$stopped", "gone", "early", True)],
+        )
+        database.executemany(
+            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
+            "base_sequence, outcome, claimed_at_ns, prepared_edit_json) VALUES ('p', ?, ?, ?, ?, 'g', 0, ?, ?, ?)",
+            [
+                ("turn", "answer", "turn", "$root", "completed", 1, None),
+                ("regenerated", "answer", "regeneration", "$a", "completed", 2, regeneration),
+                ("early", "stopped", "turn", "$unanswered", "cancelled", 3, None),
+            ],
+        )
+        database.executemany(
+            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+            "VALUES ('p', ?, ?, 'logical', 0)",
+            [("turn", "$root"), ("regenerated", "$root"), ("early", "$unanswered")],
+        )
+        database.commit()
+
+    records = live_fuzz.read_ledger_records(ledger_path, strict=True)
+
+    assert records["$root"].response_event_id == "$reply"
+    assert {edit: revision.response_event_id for edit, revision in records["$root"].revision_replay.items()} == {
+        "$a": "$reply",
+        "$b": "$reply",
+        "$c": None,
+    }
+    assert records["$unanswered"].response_event_id is None
+
+
 @pytest.mark.asyncio
 async def test_final_audit_reuses_one_ledger_snapshot(
     tmp_path: Path,

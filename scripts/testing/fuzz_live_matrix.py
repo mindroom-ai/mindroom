@@ -4517,8 +4517,9 @@ def read_ledger_records(
 ) -> dict[str, TurnRecord]:
     """Read every terminal handled-turn record keyed by its source event.
 
-    A completed record with a visible ``response_event_id`` proves that source
-    was answered. Completed no-response records retain their own terminal
+    A completed record whose sources a visible reply answered proves that
+    source was answered, and the oracle reads that reply's event as the
+    record's ``response_event_id``. Completed no-response records retain their own terminal
     meaning; deliberate replay supersession requires separate journal proof.
     Missing, malformed, or non-terminal records
     are omitted during live polling, so the oracle can wait for a terminal
@@ -4557,11 +4558,13 @@ def _load_ledger_rows(
     try:
         if database is None:
             with closing(sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)) as connection:
+                connection.execute("BEGIN")
                 return _load_ledger_rows(ledger_path, strict=strict, database=connection)
         rows = database.execute(
             "SELECT index_event_id, anchor_event_id, record_json FROM turn_records WHERE agent_name = ?",
             (AGENT_NAME,),
         ).fetchall()
+        answers, regenerated = _reply_answers(database)
         records: dict[str, object] = {}
         for index_event_id, anchor_event_id, record_json in rows:
             raw = json.loads(record_json)
@@ -4573,12 +4576,64 @@ def _load_ledger_rows(
             ):
                 _invalid_ledger(ledger_path, f"record {index_event_id!r} has invalid projection", strict=strict)
                 continue
+            answer = next((answers[event_id] for event_id in record.source_event_ids if event_id in answers), None)
+            if record.completed and record.response_event_id is None and answer is not None:
+                _attribute_reply_answer(raw, record, answer, regenerated.get(answer, frozenset()))
             records[index_event_id] = raw
     except (sqlite3.Error, json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         _invalid_ledger(ledger_path, str(exc), strict=strict)
         return None
     else:
         return records
+
+
+def _reply_answers(database: sqlite3.Connection) -> tuple[dict[str, str], dict[str, frozenset[str]]]:
+    """Read which agent reply answered each source, and the edits its regenerations answered.
+
+    Reply records own AI answers and the turn ledger keeps only that the turn
+    was answered, so the oracle reads the answering event from the reply
+    whose spans name the source, and an answered edit from the selected edit
+    a completed regeneration of that reply carried.
+    """
+    rows = database.execute(
+        "SELECT source.event_id, reply.event_id FROM reply_span_sources AS source "
+        "JOIN reply_spans AS span ON span.principal_id = source.principal_id AND span.span_id = source.span_id "
+        "JOIN reply_messages AS reply ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id "
+        "WHERE reply.entity_name = ? AND source.role = 'logical' "
+        "AND reply.event_id IS NOT NULL AND NOT reply.placeholder_only "
+        "ORDER BY span.claimed_at_ns",
+        (AGENT_NAME,),
+    ).fetchall()
+    regenerated: dict[str, set[str]] = defaultdict(set)
+    for answer, prepared_edit_json in database.execute(
+        "SELECT reply.event_id, span.prepared_edit_json FROM reply_spans AS span "
+        "JOIN reply_messages AS reply ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id "
+        "WHERE reply.entity_name = ? AND reply.event_id IS NOT NULL AND span.kind = 'regeneration' "
+        "AND span.outcome = 'completed' AND span.prepared_edit_json IS NOT NULL",
+        (AGENT_NAME,),
+    ).fetchall():
+        selected = json.loads(prepared_edit_json).get("source_event_revisions") or {}
+        regenerated[answer].update(revision[1] for revision in selected.values())
+    return dict(rows), {answer: frozenset(edits) for answer, edits in regenerated.items()}
+
+
+def _attribute_reply_answer(
+    raw: dict[str, Any],
+    record: TurnRecord,
+    answer: str,
+    regenerated: frozenset[str],
+) -> None:
+    """Attribute a completed turn, and each revision its answer consumed, to the answering reply.
+
+    The answer consumed the revisions the turn selected for it, plus every edit
+    a completed regeneration of the reply answered, which a later deletion can
+    remove from the selection.
+    """
+    raw["response_event_id"] = answer
+    consumed = {revision_id for _, revision_id in (record.source_event_revisions or {}).values()} | regenerated
+    for revision_id, revision in (raw.get("revision_replay") or {}).items():
+        if revision_id in consumed and isinstance(revision, dict) and revision.get("response_event_id") is None:
+            revision["response_event_id"] = answer
 
 
 def _decode_ledger_rows(
@@ -9792,6 +9847,19 @@ def _ledger_evidence_snapshot(ledger_path: Path, *, principal_id: object = None)
                     "acknowledged_event_id, edit_target_pending, attempted, retired, permanent_failure_reason, "
                     "payload_json, result_json FROM matrix_delivery_outbox WHERE principal_id = ? "
                     "ORDER BY created_at_ns, delivery_id, stage",
+                    (principal_id,),
+                ).fetchall()
+            ]
+            snapshot["reply_spans"] = [
+                dict(row)
+                for row in database.execute(
+                    "SELECT span.span_id, span.reply_id, span.kind, span.delivery_id, span.outcome, "
+                    "span.prepared_edit_json, reply.event_id, reply.state, reply.placeholder_only, "
+                    "(SELECT json_group_array(json_array(source.role, source.event_id)) FROM reply_span_sources AS source "
+                    "WHERE source.principal_id = span.principal_id AND source.span_id = span.span_id) AS sources "
+                    "FROM reply_spans AS span JOIN reply_messages AS reply "
+                    "ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id "
+                    "WHERE span.principal_id = ? ORDER BY span.claimed_at_ns",
                     (principal_id,),
                 ).fetchall()
             ]
