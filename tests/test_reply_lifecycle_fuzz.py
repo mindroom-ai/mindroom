@@ -1066,6 +1066,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and not self.model.reply.unapplied_stop
             and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
             and not self._is_settled(self.model.reply.last_span_id)
+            # The dispatcher hands a continuation's sources to the approval runtime instead.
+            and self._held_by() is None
         ),
     )
     @rule()

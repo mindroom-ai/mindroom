@@ -560,6 +560,32 @@ async def test_a_stop_is_read_before_the_ledger_rewrites_its_turn(journal_store:
     assert reply.stop_receipt_order == 5
 
 
+async def test_a_bot_that_only_takes_the_replies_over_runs_what_adoption_left(journal_store: EventJournalStore) -> None:
+    """A recovery-only bot adopts without starting; taking the replies over records the owed answer's turn."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    await _row(principal, "$source", DeliveryStage.FINAL, "Done.", status="completed", edits="$reply")
+    complete_turn = AsyncMock()
+    runtime = ReplyRuntime(
+        store=principal,
+        entity_name=ENTITY,
+        generation="gen-new",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=complete_turn,
+        clean_up_superseded=lambda _continuation: None,
+    )
+
+    adopted = await runtime.adopt_legacy()
+    complete_turn.assert_not_awaited()
+    await runtime.take_ownership(adopted)
+
+    (record,) = complete_turn.await_args.args
+    assert record.source_event_ids == ("$source",)
+    assert record.completed
+
+
 async def test_command_turns_and_finished_answers_get_no_reply(journal_store: EventJournalStore) -> None:
     """Only agent and team turns with work left are adopted, and only at the first start."""
     principal = journal_store.principal(PRINCIPAL)
