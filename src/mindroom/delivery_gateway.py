@@ -156,7 +156,7 @@ if TYPE_CHECKING:
     )
     from mindroom.hooks import MessageEnvelope
     from mindroom.response_sources import ResponseSources
-    from mindroom.streaming import ProgressPublisher, StreamInputChunk, UnfinishedStreamedReply
+    from mindroom.streaming import ProgressPublisher, StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
@@ -600,8 +600,6 @@ class StreamingDeliveryRequest:
     identity: ResponseIdentity
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
-    # What a stopped attempt at ``existing_event_id`` showed; the stream continues below it.
-    resumed: UnfinishedStreamedReply | None = None
     show_tool_calls: bool = False
     extra_content: dict[str, Any] | None = None
     tool_trace_collector: list[ToolTraceEntry] | None = None
@@ -683,9 +681,6 @@ class FinalizeStreamedResponseRequest:
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
     consumes_edit: bool = False
-    # What a stopped attempt at ``existing_event_id`` showed, for a continuation
-    # that may end before streaming anything below it.
-    resumed: UnfinishedStreamedReply | None = None
 
 
 @dataclass(frozen=True)
@@ -2296,7 +2291,8 @@ class DeliveryGateway:
             interactive_creator_agent=self.deps.agent_name,
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
-            resumed=request.resumed,
+            # What a stopped attempt at the reply showed; the stream continues below it.
+            resumed=handle.resumed,
             **reply_hooks,
         )
 
@@ -2740,12 +2736,15 @@ class DeliveryGateway:
             visible_stream_event_id = stream_outcome.visible_event_id
             streamed_text = stream_outcome.visible_body_text
             final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
+            resumed = current_span()
             if (
-                request.resumed is not None
+                resumed is not None
+                and resumed.resumed is not None
                 and request.existing_event_id is not None
                 and stream_outcome.terminal_status in {"cancelled", "error"}
                 and stream_outcome.visible_body_state == "none"
             ):
+                # A continuation of a stopped attempt that ended before streaming anything below it.
                 handle = self._live_span()
                 if handle is not None:
                     return await self._end_resumed_reply_span(request, handle)

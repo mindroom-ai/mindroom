@@ -337,12 +337,18 @@ def _interruption_note_landed(handle: SpanHandle | None) -> bool:
     return handle is not None and handle.span.outcome in {rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED}
 
 
+def _resumed_reply() -> UnfinishedStreamedReply | None:
+    """Return what the stopped attempt at the current span's reply showed, which this attempt streams below."""
+    handle = current_span()
+    return None if handle is None else handle.resumed
+
+
 def _replaceable_placeholder(request: ResponseRequest) -> bool:
     """Return whether the adopted event holds only a placeholder that terminal handling may replace or redact.
 
     A resumed reply shows its stopped attempt's work, which no failure may remove.
     """
-    return request.existing_event_is_placeholder and request.resumed_reply is None
+    return request.existing_event_is_placeholder and _resumed_reply() is None
 
 
 def _split_delivery_tool_trace(
@@ -543,8 +549,6 @@ class ResponseRequest:
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
     existing_event_is_placeholder: bool = False
-    # What the stopped attempt at the adopted reply showed; this attempt streams below it.
-    resumed_reply: UnfinishedStreamedReply | None = None
     # The span an interactive selection's acknowledgement created, which this answer adopts.
     interactive_span_id: str | None = None
     user_id: str | None = None
@@ -3290,7 +3294,6 @@ class ResponseRunner:
             existing_event_id=reply.event_id,
             # A regeneration replaces an answer, not a placeholder, unless the reply shows only one.
             existing_event_is_placeholder=reply.event_id is not None and (not regeneration or reply.placeholder_only),
-            resumed_reply=handle.resumed,
         )
 
     async def _claim_reply(
@@ -3957,7 +3960,7 @@ class ResponseRunner:
         )
         account = render_enrichment_block([EnrichmentItem(key="interrupted_attempt", text=instruction)])
         model_prompt = request.model_prompt if request.model_prompt is not None else request.prompt
-        return replace(request, model_prompt=f"{model_prompt.rstrip()}\n\n{account}", resumed_reply=unfinished)
+        return replace(request, model_prompt=f"{model_prompt.rstrip()}\n\n{account}")
 
     async def _prepare_locked_source(
         self,
@@ -4642,7 +4645,7 @@ class ResponseRunner:
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
         # A resumed reply is a stream, and a blocking answer would replace what it already showed.
-        use_streaming = request.resumed_reply is not None or (
+        use_streaming = _resumed_reply() is not None or (
             not _is_silent_schedule_response(request)
             and await should_use_streaming(
                 self._client(),
@@ -4856,7 +4859,6 @@ class ResponseRunner:
                                 existing_event_id=delivery_request.existing_event_id,
                                 adopt_existing_placeholder=bool(delivery_request.existing_event_id)
                                 and delivery_request.existing_event_is_placeholder,
-                                resumed=delivery_request.resumed_reply,
                                 show_tool_calls=show_tool_calls,
                                 # The live collector dict: the turn driver fills it
                                 # at terminal settle, before the stream's final
@@ -5036,7 +5038,7 @@ class ResponseRunner:
                 recorder=team_turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
-                resumed=request.resumed_reply,
+                resumed=_resumed_reply(),
             ):
                 await self._persist_interrupted_recorder_off_loop(
                     recorder=team_turn_recorder,
@@ -5414,7 +5416,6 @@ class ResponseRunner:
                         existing_event_id=request.existing_event_id,
                         adopt_existing_placeholder=bool(request.existing_event_id)
                         and request.existing_event_is_placeholder,
-                        resumed=request.resumed_reply,
                         show_tool_calls=runtime.show_tool_calls,
                         extra_content=response_extra_content,
                         tool_trace_collector=tool_trace,
@@ -5696,7 +5697,7 @@ class ResponseRunner:
                 recorder=turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
-                resumed=request.resumed_reply,
+                resumed=_resumed_reply(),
             ):
                 await self._persist_interrupted_recorder_off_loop(
                     recorder=turn_recorder,
@@ -5767,7 +5768,6 @@ class ResponseRunner:
                         ),
                         existing_event_id=request.existing_event_id,
                         existing_event_is_placeholder=_replaceable_placeholder(request),
-                        resumed=request.resumed_reply,
                     ),
                 ),
             )
@@ -5950,7 +5950,7 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         # A resumed reply is a stream, and a blocking answer would replace what it already showed.
-        use_streaming = request.resumed_reply is not None or (
+        use_streaming = _resumed_reply() is not None or (
             not _is_silent_schedule_response(request)
             and await should_use_streaming(
                 self._client(),
