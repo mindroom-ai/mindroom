@@ -290,7 +290,7 @@ agents:
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to a prompt is final, or after an hour without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
-- An automation does not start again until its previous run has ended.
+- An agent's automations never overlap: none starts while another of that agent's runs has not ended, and a held one starts when it ends.
 - A check that cannot read what it checks posts a warning in the room.
 - A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 

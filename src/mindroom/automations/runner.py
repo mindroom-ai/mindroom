@@ -4,7 +4,7 @@ At a due time the automation's check runs off the event loop; when it returns a 
 room as a hook-dispatched message, like a todo poke, so the agent answers it with a normal visible run.
 When that run's response is final, or after an hour without one, the prompt's continuation runs off the loop and
 returns the next prompt or the notice that ends the chain.
-An automation does not fire again until its chain ends.
+An agent's automations do not fire while one of its chains is active.
 The runner persists only the threads it starts, so their exports are not read back as conversations; the cron cadence
 is the cooldown, and a restart only skips the occurrence it missed.
 """
@@ -95,7 +95,8 @@ class AutomationRunner:
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
     # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
     _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
-    # Automations from their check until their chain ends.
+    # Agents with an automation between its check and the end of its chain; one agent's built-ins never overlap,
+    # because each one's run can change the memory files the other measures or applies to.
     _active: set[str] = field(default_factory=set, init=False)
     _pending: dict[str, _PendingRun] = field(default_factory=dict, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -133,9 +134,9 @@ class AutomationRunner:
                 scheduled, due = self._next_due.get(key, (("", ""), now))
                 if scheduled != schedule:
                     self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
-                elif due <= now and key not in self._active:
+                elif due <= now and agent_name not in self._active:
                     self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
-                    self._active.add(key)
+                    self._active.add(agent_name)
                     create_background_task(
                         self._fire(config, agent_name, automation, key, now),
                         name=f"automation:{key}",
@@ -150,9 +151,9 @@ class AutomationRunner:
     def _continue(self, pending: _PendingRun, *, timed_out: bool) -> None:
         create_background_task(self._advance(pending, timed_out), name=f"automation_step:{pending.chain.key}")
 
-    def _release(self, key: str) -> None:
-        self._active.discard(key)
-        # The automation is free again, so a run held while its chain was active may be due now.
+    def _release(self, agent_name: str) -> None:
+        self._active.discard(agent_name)
+        # The agent is free again, so an automation held while a chain was active may be due now.
         self._wake.set()
 
     async def _run(self) -> None:
@@ -200,7 +201,7 @@ class AutomationRunner:
                 posted = await self._post(config, bot, chain, None, step, now)
         finally:
             if not posted:
-                self._release(key)
+                self._release(agent_name)
 
     async def _advance(self, pending: _PendingRun, timed_out: bool) -> None:
         """Run the continuation of a prompt whose run ended, then post its next prompt or its notice."""
@@ -228,7 +229,7 @@ class AutomationRunner:
             posted = await self._post(config, bot, chain, pending.thread_id, step, datetime.now(UTC))
         finally:
             if not posted:
-                self._release(chain.key)
+                self._release(chain.agent_name)
 
     async def _notify(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` without mentioning the agent, so it starts no run."""

@@ -324,13 +324,13 @@ async def test_the_automation_is_free_once_its_chain_ends(tmp_path: Path) -> Non
     _config, _paths, runner, _bot = _setup(tmp_path)
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
-    assert "mind:prompt_curation" in runner._active
+    assert "mind" in runner._active
 
     runner.response_finished(["$event1"])
-    assert "mind:prompt_curation" in runner._active
+    assert "mind" in runner._active
     assert await wait_for_background_tasks(5)
 
-    assert "mind:prompt_curation" not in runner._active
+    assert "mind" not in runner._active
 
 
 @pytest.mark.asyncio
@@ -380,7 +380,7 @@ async def test_a_check_that_cannot_read_its_files_posts_a_visible_notice(tmp_pat
     assert notice["body"] == "⚠️ The prompt_curation automation could not run: MEMORY.md is not valid UTF-8"
     assert notice["thread_id"] is None
     assert notice["trigger_dispatch"] is False
-    assert "mind:prompt_curation" not in runner._active
+    assert "mind" not in runner._active
 
 
 @pytest.mark.asyncio
@@ -406,7 +406,7 @@ async def test_a_step_that_fails_posts_a_notice_in_its_thread_and_ends_the_chain
         ("@mind Do the work", None),
         ("⚠️ The prompt_curation automation could not finish: memory/ is a link", "$event1"),
     ]
-    assert "mind:prompt_curation" not in runner._active
+    assert "mind" not in runner._active
 
 
 @pytest.mark.asyncio
@@ -486,4 +486,33 @@ async def test_memory_consolidation_runs_its_dream_and_review_through_the_runner
     assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
     threads = json.loads((tmp_path / "tracking/automations/threads.json").read_text(encoding="utf-8"))
     assert threads == ["$event1", "$event2"]
-    assert "mind:memory_consolidation" not in runner._active
+    assert "mind" not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
+    """A curation due during a consolidation chain waits for it, since each changes what the other measures."""
+    config, paths, runner, bot = _setup(tmp_path)
+    config.agents["mind"].automations = [
+        MemoryConsolidationAutomation(cron="0 4 * * *"),
+        PromptCurationAutomation(trigger_tokens=1_000),
+    ]
+    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    assert root is not None
+    (root / "thread_exports" / "room").mkdir(parents=True)
+    (root / "thread_exports" / "room" / "thread.yaml").write_text("messages: [hello]\n", encoding="utf-8")
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    (dream,) = bot.sent
+    assert dream["body"].startswith("@mind 🌙 Memory consolidation")
+
+    (run_dir,) = (root / ".mindroom/memory_consolidation/runs").iterdir()
+    (run_dir / "report.md").write_text("Nothing to change.\nDREAM: DONE\n", encoding="utf-8")
+    with patch.object(runner_module, "set_thread_tag", new=AsyncMock()):
+        runner.response_finished(["$event1"])
+        assert await wait_for_background_tasks(5)
+    await _tick(runner, DAY_LATER + timedelta(minutes=1))
+
+    assert bot.sent[1]["body"].startswith("Memory consolidation changed nothing")
+    assert bot.sent[2]["body"].startswith("@mind 🧹 Prompt maintenance")

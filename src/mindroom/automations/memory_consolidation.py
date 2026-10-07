@@ -70,9 +70,8 @@ _MIN_REMOVED_ALLOWANCE = 10
 _MAX_FILE_REMOVED_FRACTION = 0.5
 _MIN_FILE_REMOVED_ALLOWANCE = 2
 _DONE_LINE = "DREAM: DONE"
-# The verdict and its notes or reason, after an em dash, en dash, or hyphen.
-# Exactly one of the three verdict forms; anything else, such as "APPROVE-WITH-CHANGES" or "APPROVE once fixed", is
-# unparseable and so a rejection. Notes and reasons follow an em dash, en dash, or hyphen.
+# Exactly one of the three verdict forms, with notes or a reason after an em dash, en dash, or hyphen; anything else,
+# such as "APPROVE-WITH-CHANGES" or "APPROVE once fixed", is a rejection.
 _VERDICT = re.compile(
     r"VERDICT:\s*(?:"
     r"(?P<approve>APPROVE)\.?"
@@ -159,13 +158,13 @@ def _state_root(runtime_paths: RuntimePaths, agent_name: str) -> Path:
     return automations_tracking_root(runtime_paths) / agent_name
 
 
-def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State | None:
+def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State:
     try:
         payload = json.loads(
             read_regular_file_within_root(_state_root(runtime_paths, agent_name), "memory_consolidation.json"),
         )
     except FileNotFoundError:
-        return None
+        return _State()
     return _State(
         reviewed={
             path: version if version == _MISSING else (version[0], version[1])
@@ -179,7 +178,7 @@ def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State | None:
 
 def _update_state(runtime_paths: RuntimePaths, agent_name: str, change: Callable[[_State], None]) -> None:
     # An agent's checks and steps never overlap, so nothing else writes its state meanwhile.
-    state = _load_state(runtime_paths, agent_name) or _State()
+    state = _load_state(runtime_paths, agent_name)
     change(state)
     _save_state(runtime_paths, agent_name, state)
 
@@ -486,11 +485,11 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
     context_files = {PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files}
     excluded = frozenset({f"{_MEMORY_DIR}/{today}.md", *context_files, *tree.rejected})
     snapshot = {path: payload for path, payload in tree.files.items() if path not in excluded}
-    state = _load_state(runtime_paths, agent_name) or _State()
+    state = _load_state(runtime_paths, agent_name)
     inputs = _collect_inputs(root, snapshot, tree.versions, today, automation_threads(runtime_paths))
     if seeded := _unseen_and_old(inputs.values(), state.reviewed, now):
         state.reviewed.update(seeded)
-        _update_state(runtime_paths, agent_name, lambda saved: saved.reviewed.update(seeded))
+        _save_state(runtime_paths, agent_name, state)
     due = sorted((item for item in inputs.values() if state.reviewed.get(item.path) != item.version), key=_order)
     carried = tuple(dict.fromkeys(run_id for run_id in (state.pending_run, state.latest_run) if run_id is not None))
     if not due and not carried:
@@ -740,7 +739,7 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         verdict = "APPROVE" if match["approve"] else "APPROVE-WITH-NOTES" if match["notes"] else "REJECT"
         detail = (match["detail"] or match["reason"] or "").strip().rstrip(".")
     else:
-        verdict, detail = "REJECT", "the review wrote no verdict line"
+        verdict, detail = "REJECT", "the review did not end with one of the three verdict lines"
     if verdict == "REJECT":
         return _end(
             run,

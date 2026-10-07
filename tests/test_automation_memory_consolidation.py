@@ -705,7 +705,9 @@ def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
 
     done = workspace.review(workspace.dream(ask), None)
 
-    assert done.notice.startswith("⚠️ Memory consolidation was not applied: the review wrote no verdict line.")
+    assert done.notice.startswith(
+        "⚠️ Memory consolidation was not applied: the review did not end with one of the three verdict lines.",
+    )
     assert workspace.read("memory/projects.md") == PROJECTS
 
 
@@ -713,15 +715,19 @@ def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
     ("verdict", "timed_out", "reason"),
     [
         ("VERDICT: REJECT — the move drops a measured result.", False, "the move drops a measured result"),
-        (None, False, "the review wrote no verdict line"),
-        ("Looks fine to me.", False, "the review wrote no verdict line"),
+        (None, False, "the review did not end with one of the three verdict lines"),
+        ("Looks fine to me.", False, "the review did not end with one of the three verdict lines"),
         ("VERDICT: APPROVE", True, "the review did not finish within an hour"),
         (
             "VERDICT: APPROVE-WITH-CHANGES - remove the unsupported claim first",
             False,
-            "the review wrote no verdict line",
+            "the review did not end with one of the three verdict lines",
         ),
-        ("VERDICT: APPROVE only after correcting the date", False, "the review wrote no verdict line"),
+        (
+            "VERDICT: APPROVE only after correcting the date",
+            False,
+            "the review did not end with one of the three verdict lines",
+        ),
     ],
 )
 def test_anything_but_an_approval_applies_nothing_and_carries_the_proposal(
