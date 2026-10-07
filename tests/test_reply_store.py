@@ -298,6 +298,46 @@ async def test_settling_a_spans_sources_records_its_turn_answered(journal_store:
     assert late.completed
 
 
+async def test_a_late_ledger_write_keeps_the_edit_a_regeneration_answered(journal_store: EventJournalStore) -> None:
+    """A cached write derived before a regeneration answered cannot put the older prompt and revision back."""
+
+    async def write(record: TurnRecord) -> None:
+        assert record.anchor_event_id is not None
+        anchor = record.anchor_event_id
+        await journal_store.backend.write(
+            lambda tx: turn_records.write_record(
+                tx,
+                "agent",
+                index_event_ids=record.indexed_event_ids,
+                anchor_event_id=anchor,
+                record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
+            ),
+        )
+
+    answered = TurnRecord.create(
+        ["$source"],
+        completed=True,
+        source_event_prompts={"$source": "edited"},
+        source_event_revisions={"$source": (20, "$edit")},
+        timestamp=1.0,
+    )
+    await write(answered)
+    # Derived from the turn as the first answer left it, and stamped later.
+    stale = TurnRecord.create(
+        ["$source"],
+        completed=True,
+        source_event_prompts={"$source": "original"},
+        timestamp=2.0,
+    )
+    await write(stale)
+
+    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
+    assert record is not None
+    assert record.completed
+    assert record.source_event_revisions == {"$source": (20, "$edit")}
+    assert record.source_event_prompts == {"$source": "edited"}
+
+
 async def test_post_commit_effects_are_returned(journal_store: EventJournalStore) -> None:
     """Cancellation of a live span is left for after the commit."""
     principal = journal_store.principal(PRINCIPAL)

@@ -104,7 +104,7 @@ def write_record(
     anchor_event_id: str,
     record_json: str,
 ) -> str | None:
-    """Keep already-committed delivery proof when a cached ledger write arrives late."""
+    """Keep an answered turn's committed facts, such as a regeneration's edit, when a cached write arrives late."""
     candidate = TurnRecordCodec._from_ledger_record(index_event_ids[0], json.loads(record_json))
     assert candidate is not None, "Corrupt turn record"
     assert candidate.anchor_event_id == anchor_event_id, "Mismatched turn anchor"
@@ -113,12 +113,7 @@ def write_record(
     if candidate is None:
         return None
     current = next((records[event_id] for event_id in candidate.source_event_ids if event_id in records), None)
-    if (
-        current is not None
-        and current.completed
-        and current.response_event_id
-        and same_turn_identity(current, candidate)
-    ):
+    if current is not None and current.completed and same_turn_identity(current, candidate):
         candidate = merge_committed_response(candidate, current)
         if candidate is None:
             return None
