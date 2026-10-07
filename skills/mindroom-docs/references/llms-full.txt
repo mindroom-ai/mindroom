@@ -1557,7 +1557,7 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
-| `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway | _(none)_ |
+| `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway | `false` |
 | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
 | `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining CPU and memory requests and limits for the `small`, `standard`, and `large` profiles | Built-in profiles |
@@ -7157,7 +7157,8 @@ Workers call MindRoom at `MINDROOM_AGENT_CLI_PRIMARY_URL`, a plain `http(s)://ho
 Otherwise MindRoom uses its own API address; with Docker workers and the default API bind on every interface, workers reach it through `host.docker.internal`.
 Kubernetes workers and shared static runners need `MINDROOM_AGENT_CLI_PRIMARY_URL` unless the API listens on a specific non-loopback address.
 An API that listens only on loopback cannot be reached from workers, and a host firewall may drop connections from Docker networks; a `mindroom-agent` call that cannot connect names the address it tried.
-With the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
+The gateway-only listener from `MINDROOM_SCRIPT_GATEWAY_PORT` also serves the CLI routes, so pointing `MINDROOM_AGENT_CLI_PRIMARY_URL` at it keeps workers off the general API port; the runtime chart's `scriptGateway.enabled` sets this up.
+Otherwise, with the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
 
 The shell receives a grant scoped to its own active response, not provider or administrator credentials, and provider credentials stay where the tools already run.
 The grant cannot select another agent, requester, or conversation, and it stops working when the response ends.
@@ -7360,7 +7361,7 @@ export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gatew
 Kubernetes scripts stay disabled until the gateway runs on a listener that exposes nothing else, because workers that can reach the general API listener get more authority than the script gateway grants.
 Until then, `start_script` fails with `Kubernetes background scripts require a gateway-only listener; use Docker or explicit unsafe-local mode until that boundary is configured.`
 
-- `MINDROOM_SCRIPT_GATEWAY_PORT` makes the primary serve a second listener that answers only `/api/script-gateway` routes.
+- `MINDROOM_SCRIPT_GATEWAY_PORT` makes the primary serve a second listener that answers only `/api/script-gateway` and the capability-authenticated [`/api/agent-cli`](https://docs.mindroom.chat/tools/agent-cli/#shell-in-a-worker) routes.
 - `MINDROOM_SCRIPT_GATEWAY_URL` must name that listener explicitly; `MINDROOM_PUBLIC_URL` is not used on Kubernetes.
 - `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` attests that workers cannot reach other primary API routes through that listener.
   The flag does not create network isolation, and the main API port is unchanged, so network policy must still keep workers off it.

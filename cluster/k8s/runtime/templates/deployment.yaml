@@ -348,6 +348,9 @@ spec:
             # Backed by the required worker egress NetworkPolicy, which opens only the gateway port on this pod.
             - name: MINDROOM_SCRIPT_GATEWAY_ISOLATED
               value: "true"
+            # Minimal-mode worker shells call the Agent CLI routes on the same gateway-only listener.
+            - name: MINDROOM_AGENT_CLI_PRIMARY_URL
+              value: {{ printf "http://%s:%v" (include "mindroom-runtime.scriptGatewayHost" .) .Values.scriptGateway.port | quote }}
             {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME

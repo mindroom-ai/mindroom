@@ -1,4 +1,4 @@
-"""Gateway-only listener that isolated background-script workers reach instead of the primary API."""
+"""Gateway-only listener that isolated workers reach instead of the primary API."""
 
 from __future__ import annotations
 
@@ -6,13 +6,14 @@ import asyncio
 import re
 import socket
 from contextlib import closing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import httpx
 import pytest
 from fastapi.routing import APIRoute
 
+from mindroom.agent_cli.session import CliAuthenticationError
 from mindroom.api import main as api_main
 from mindroom.api.script_gateway import serve_script_gateway_listener
 from mindroom.constants import RuntimePaths
@@ -22,7 +23,11 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
+    from mindroom.agent_cli.protocol import AgentCliOperation
+    from mindroom.agent_cli.session import TurnToolRegistry
+
 _GATEWAY_PREFIX = "/api/script-gateway"
+_AGENT_CLI_PREFIX = "/api/agent-cli"
 
 
 class _ReceiptBroker:
@@ -44,6 +49,23 @@ class _ReceiptBroker:
         )
 
 
+class _CliOwner:
+    """Response owner double that echoes each authenticated operation."""
+
+    async def operation(self, operation: AgentCliOperation, *, window: str | None) -> dict[str, object]:
+        return {"operation": operation.operation, "window": window}
+
+
+class _CliRegistry:
+    """Registry double that resolves only one grant."""
+
+    def resolve(self, authorization: str | None, *, now_ns: int) -> _CliOwner:
+        assert now_ns > 0
+        if authorization != "Bearer grant":
+            raise CliAuthenticationError
+        return _CliOwner()
+
+
 def _assert_port_released(port: int) -> None:
     """Binding the port again succeeds only when no listener still holds it."""
     socket.create_server(("127.0.0.1", port)).close()
@@ -60,20 +82,30 @@ def _runtime_paths(tmp_path: Path, process_env: dict[str, str]) -> RuntimePaths:
     )
 
 
-def _listener(tmp_path: Path, broker: _ReceiptBroker | None = None) -> tuple[int, AbstractAsyncContextManager[None]]:
+def _listener(
+    tmp_path: Path,
+    broker: _ReceiptBroker | None = None,
+    agent_cli_registry: _CliRegistry | None = None,
+) -> tuple[int, AbstractAsyncContextManager[None]]:
     """Return a free port and the gateway listener context configured to serve it."""
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
     runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
-    return port, serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=broker, log_level="INFO")
+    return port, serve_script_gateway_listener(
+        runtime_paths,
+        host="127.0.0.1",
+        broker=broker,
+        log_level="INFO",
+        agent_cli_registry=cast("TurnToolRegistry", agent_cli_registry),
+    )
 
 
 def _primary_api_requests() -> list[tuple[str, str]]:
-    """Return one concrete request for every primary API route outside the gateway."""
+    """Return one concrete request for every primary API route outside the worker-facing routes."""
     requests = []
     for route in api_main.app.routes:
-        if not isinstance(route, APIRoute) or route.path.startswith(_GATEWAY_PREFIX):
+        if not isinstance(route, APIRoute) or route.path.startswith((_GATEWAY_PREFIX, _AGENT_CLI_PREFIX)):
             continue
         path = re.sub(r"\{[^}]+\}", "x", route.path)
         requests.extend((method, path) for method in sorted(route.methods))
@@ -81,9 +113,9 @@ def _primary_api_requests() -> list[tuple[str, str]]:
 
 
 @pytest.mark.asyncio
-async def test_listener_serves_only_script_gateway_routes(tmp_path: Path) -> None:
-    """The listener answers gateway calls with the bound broker and nothing from the primary API."""
-    port, listener = _listener(tmp_path, _ReceiptBroker())
+async def test_listener_serves_only_worker_capability_routes(tmp_path: Path) -> None:
+    """The listener answers gateway and Agent CLI calls with their bound owners and nothing from the primary API."""
+    port, listener = _listener(tmp_path, _ReceiptBroker(), _CliRegistry())
     primary_requests = _primary_api_requests()
     assert ("GET", "/api/health") in primary_requests
 
@@ -94,6 +126,16 @@ async def test_listener_serves_only_script_gateway_routes(tmp_path: Path) -> Non
         )
         assert receipt.status_code == 200
         assert receipt.json()["result"] == 3
+
+        cli_operation = {"operation": "tools.list"}
+        listing = await client.post(
+            f"{_AGENT_CLI_PREFIX}/operations",
+            headers={"Authorization": "Bearer grant"},
+            json=cli_operation,
+        )
+        assert (listing.status_code, listing.json()) == (200, {"operation": "tools.list", "window": None})
+        unauthorized = await client.post(f"{_AGENT_CLI_PREFIX}/operations", json=cli_operation)
+        assert unauthorized.status_code == 401
 
         for method, path in [
             *primary_requests,

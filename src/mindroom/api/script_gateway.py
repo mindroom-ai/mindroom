@@ -11,6 +11,8 @@ import uvicorn
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from mindroom.api.agent_cli import bind_agent_cli_registry
+from mindroom.api.agent_cli import router as agent_cli_router
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
@@ -32,6 +34,7 @@ from mindroom.script_runs.store import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
+    from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.constants import RuntimePaths
 
 __all__ = [
@@ -254,11 +257,13 @@ async def serve_script_gateway_listener(
     host: str,
     broker: _ScriptGatewayBroker | None,
     log_level: str,
+    agent_cli_registry: TurnToolRegistry | None = None,
 ) -> AsyncIterator[None]:
-    """Serve only the script gateway routes on `MINDROOM_SCRIPT_GATEWAY_PORT` while the primary API runs.
+    """Serve only worker-facing capability routes on `MINDROOM_SCRIPT_GATEWAY_PORT` while the primary API runs.
 
-    The listener's app contains nothing but this router, so a network path that
-    reaches only this port cannot reach any other primary API route.
+    The listener's app contains nothing but the script gateway and Agent CLI
+    routers, both authenticated by short-lived capabilities, so a network path
+    that reaches only this port cannot reach any other primary API route.
     """
     port = _listener_port(runtime_paths)
     if port is None:
@@ -266,7 +271,9 @@ async def serve_script_gateway_listener(
         return
     gateway_app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     gateway_app.include_router(router)
+    gateway_app.include_router(agent_cli_router)
     bind_script_tool_broker(gateway_app, broker)
+    bind_agent_cli_registry(gateway_app, agent_cli_registry)
     server = _GatewayListenerServer(
         uvicorn.Config(
             gateway_app,
