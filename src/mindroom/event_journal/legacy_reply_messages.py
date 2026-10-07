@@ -180,9 +180,7 @@ def classify(
     for delivery_id in _unowned_row_delivery_ids(transaction, principal_id):
         if delivery_id in adopted:
             continue
-        found = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
-        if found is None:
-            found = _regeneration_answer(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
+        found = _row_reply(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
         if found is None or found.reply.event_id in adopted_events:
             continue
         adopted.add(delivery_id)
@@ -612,6 +610,21 @@ def _turn_sources(transaction: Transaction, principal_id: str, record: TurnRecor
         logical=record.source_event_ids,
         discovery=record.discovery_event_ids,
     )
+
+
+def _row_reply(
+    transaction: Transaction,
+    principal_id: str,
+    delivery_id: str,
+    entity_name: str,
+    presentations: LegacyPresentations,
+    now_ns: int,
+) -> _Adoption | None:
+    """The reply an unowned row implies: its turn's, or that of a regeneration answer keyed by its edit."""
+    found = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
+    if found is not None:
+        return found
+    return _regeneration_answer(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
 
 
 def _reply_of_rows(
