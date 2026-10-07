@@ -809,6 +809,21 @@ def test_memory_that_changed_during_the_run_blocks_the_whole_proposal(tmp_path: 
     assert workspace.state()["pending_run"] is not None
 
 
+def test_a_file_that_became_a_context_file_during_the_run_is_not_written(tmp_path: Path) -> None:
+    """A config reload that adds a proposed file to context_files blocks the apply, like any memory change."""
+    workspace = _workspace(tmp_path)
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+    review = workspace.dream(ask)
+    workspace.config.agents["mind"].context_files = ["memory/projects.md"]
+
+    done = workspace.review(review, "VERDICT: APPROVE")
+
+    assert done.notice.startswith("⚠️ Memory changed during the run")
+    assert workspace.read("memory/projects.md") == PROJECTS
+
+
 def test_a_linked_memory_directory_fails_the_check_loudly(tmp_path: Path) -> None:
     """A memory/ replaced by a link is refused instead of followed."""
     workspace = _Workspace(tmp_path)

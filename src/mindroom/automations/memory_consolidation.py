@@ -468,6 +468,10 @@ def _agenda(run: _Run, state: _State, waiting: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _context_files(config: Config, agent_name: str) -> set[str]:
+    return {PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files}
+
+
 def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Ask | None:
     """Return the dream prompt when an input changed or a proposal is unapplied, or None.
 
@@ -482,7 +486,7 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
     now = datetime.now(UTC)
     today = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
     tree = _read_memory_tree(root, "")
-    context_files = {PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files}
+    context_files = _context_files(config, agent_name)
     excluded = frozenset({f"{_MEMORY_DIR}/{today}.md", *context_files, *tree.rejected})
     snapshot = {path: payload for path, payload in tree.files.items() if path not in excluded}
     state = _load_state(runtime_paths, agent_name)
@@ -747,7 +751,11 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
             f"⚠️ Memory consolidation was not applied: {detail or 'the review rejected it'}. "
             "The next run carries the proposal forward.",
         )
-    if not _unchanged_since_fire(run):
+    # A config reload during the run can make a proposed file a context file, which the automation never writes.
+    if not _unchanged_since_fire(run) or {*proposal.changed, *proposal.deleted} & _context_files(
+        config,
+        run.agent_name,
+    ):
         return _end(
             run,
             "conflict",
@@ -804,21 +812,21 @@ def _end(
     A proposal that reached its review is already pending, so only success needs recording here.
     """
 
-    def record(state: _State) -> None:
-        if outcome in {"applied", "unchanged"}:
-            reviewed = {path: version for path, version in state.reviewed.items() if path in run.inputs}
-            for item in run.due:
-                reviewed[item.path] = item.version
-            # A daily note this run edited is handled at its new version, so the edit does not make it due again.
-            for path in applied:
-                if path in reviewed and (version := _version(run.root, path)) is not None:
-                    reviewed[path] = version
-            state.reviewed = reviewed
-            state.pending_run = None
-            state.latest_run = None
-            state.notes = notes
+    def record_progress(state: _State) -> None:
+        reviewed = {path: version for path, version in state.reviewed.items() if path in run.inputs}
+        for item in run.due:
+            reviewed[item.path] = item.version
+        # A daily note this run edited is handled at its new version, so the edit does not make it due again.
+        for path in applied:
+            if path in reviewed and (version := _version(run.root, path)) is not None:
+                reviewed[path] = version
+        state.reviewed = reviewed
+        state.pending_run = None
+        state.latest_run = None
+        state.notes = notes
 
-    _update_state(run.runtime_paths, run.agent_name, record)
+    if outcome in {"applied", "unchanged"}:
+        _update_state(run.runtime_paths, run.agent_name, record_progress)
     try:
         with open_directory_within_root(run.root, run.run_dir) as run_fd:
             shutil.rmtree("staging", dir_fd=run_fd)

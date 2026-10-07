@@ -10191,7 +10191,7 @@ def test_a_built_in_automation_turn_is_not_queued_for_memory(hook_source: str | 
     runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "file"
 
     with patch("mindroom.response_runner.mark_auto_flush_dirty_session") as mark_dirty:
-        runner._memory_persistence(
+        queue = runner._memory_persistence(
             agent_name="mind",
             session_id="session",
             execution_identity=MagicMock(),
@@ -10199,6 +10199,9 @@ def test_a_built_in_automation_turn_is_not_queued_for_memory(hook_source: str | 
             thread_history=(),
             user_id=None,
             hook_source=hook_source,
-        )()
+        )
+        if queue is not None:
+            queue()
 
+    assert (queue is not None) is flushed
     assert mark_dirty.called is flushed

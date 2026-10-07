@@ -2222,11 +2222,11 @@ class ResponseRunner:
         thread_history: Sequence[ResolvedVisibleMessage],
         user_id: str | None,
         hook_source: str | None,
-    ) -> Callable[[], None]:
-        """Build the shared completed-agent memory handoff."""
+    ) -> Callable[[], None] | None:
+        """Build the shared completed-agent memory handoff, or None for a turn that is not memory."""
         if hook_source in AUTOMATION_NAMES:
             # A built-in automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
-            return lambda: None
+            return None
 
         def queue() -> None:
             mark_auto_flush_dirty_session(
