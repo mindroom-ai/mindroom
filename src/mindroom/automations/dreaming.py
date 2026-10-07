@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
@@ -91,6 +91,8 @@ class _State:
     """Progress kept in primary storage: what was handled and which proposals are still unapplied."""
 
     reviewed: dict[str, _Version] = field(default_factory=dict)
+    # The versions the last run had on its agenda, so a run that applied nothing is not repeated on the same evidence.
+    attempted: dict[str, _Version] = field(default_factory=dict)
     # The oldest unapplied proposal, whose changes a rejected successor may have dropped, and the newest, whose review
     # explains the latest failure; both lead the next agenda until a run applies or needs no change.
     pending_run: str | None = None
@@ -166,14 +168,16 @@ def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State:
     except FileNotFoundError:
         return _State()
     return _State(
-        reviewed={
-            path: version if version == _MISSING else (version[0], version[1])
-            for path, version in payload["reviewed"].items()
-        },
+        reviewed=_versions(payload["reviewed"]),
+        attempted=_versions(payload["attempted"]),
         pending_run=payload["pending_run"],
         latest_run=payload["latest_run"],
         notes=payload["notes"],
     )
+
+
+def _versions(payload: dict[str, Any]) -> dict[str, _Version]:
+    return {path: version if version == _MISSING else (version[0], version[1]) for path, version in payload.items()}
 
 
 def _update_state(runtime_paths: RuntimePaths, agent_name: str, change: Callable[[_State], None]) -> None:
@@ -186,6 +190,7 @@ def _update_state(runtime_paths: RuntimePaths, agent_name: str, change: Callable
 def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> None:
     payload = {
         "reviewed": state.reviewed,
+        "attempted": state.attempted,
         "pending_run": state.pending_run,
         "latest_run": state.latest_run,
         "notes": state.notes,
@@ -495,9 +500,11 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
         state.reviewed.update(seeded)
         _save_state(runtime_paths, agent_name, state)
     due = sorted((item for item in inputs.values() if state.reviewed.get(item.path) != item.version), key=_order)
-    carried = tuple(dict.fromkeys(run_id for run_id in (state.pending_run, state.latest_run) if run_id is not None))
-    if not due and not carried:
+    # Only a conversation or daily note the last run did not see starts a run; changed sources and unapplied
+    # proposals join it, so an idle agent costs nothing and a failed run is not repeated on the same evidence.
+    if not any(item.kind != "source" and state.attempted.get(item.path) != item.version for item in due):
         return None
+    carried = tuple(dict.fromkeys(run_id for run_id in (state.pending_run, state.latest_run) if run_id is not None))
     run = _Run(
         agent_name=agent_name,
         runtime_paths=runtime_paths,
@@ -825,8 +832,12 @@ def _end(
         state.latest_run = None
         state.notes = notes
 
-    if outcome in {"applied", "unchanged"}:
-        _update_state(run.runtime_paths, run.agent_name, record_progress)
+    def record_end(state: _State) -> None:
+        state.attempted = {item.path: item.version for item in run.due}
+        if outcome in {"applied", "unchanged"}:
+            record_progress(state)
+
+    _update_state(run.runtime_paths, run.agent_name, record_end)
     try:
         with open_directory_within_root(run.root, run.run_dir) as run_fd:
             shutil.rmtree("staging", dir_fd=run_fd)

@@ -336,14 +336,14 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 Memory keeps claims that later conversations correct and that their sources stop supporting.
 `dreaming` reconciles the agent's `memory/` files nightly with what changed since its last run, through a proposal that a second run reviews before MindRoom applies it.
 
-1. The check lists inputs that changed since a run last handled them: [thread exports](thread-exports.md) in the workspace, daily notes from before today, and the `knowledge/` and `thread_exports/` paths that `memory/` files cite, including cited files that no longer exist; when nothing changed and no proposal is waiting to be applied, it posts nothing.
+1. The check lists inputs that changed since a run last handled them: [thread exports](thread-exports.md) in the workspace, daily notes from before today, and the `knowledge/` and `thread_exports/` paths that `memory/` files cite, including cited files that no longer exist; it starts a run only when a conversation or daily note changed since the last run, so an agent nobody talked to costs nothing, and changed cited sources join the next run that starts.
 2. The agent works through an agenda of at most 40 inputs, oldest first, in a copy of `memory/`: it reconciles memory with the new evidence, records whether each changed source still supports the claims that cite it, and removes duplicates, giving each fact a source path and date and recording conflicting sources with both versions.
    It keeps durable facts such as decisions, preferences, and stable settings, leaves transient tasks in the daily notes, and never removes or doubts a fact only because newer notes do not mention it.
 3. MindRoom checks the copy and asks the agent once to re-check when anything but Markdown under `memory/` changed, when today's daily note or a file in `context_files` changed, or when more than the larger of 10 lines and 8% of memory, or more than half of one file, was deleted without the lines surviving, whole or with text appended, anywhere else.
 4. A second run, in a thread of its own, reviews the proposed patch against the cited sources and ends its verdict with `APPROVE`, `APPROVE-WITH-NOTES` (applied, with notes for the next run), or `REJECT`.
 5. MindRoom applies an approved patch when none of the files the run could change changed since it started, refreshes semantic memory search, and marks both threads resolved.
 
-A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due, and the next run starts by carrying forward the proposals that were never applied.
+A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due; the next run waits for a new conversation or daily note and starts by carrying forward the proposals that were never applied.
 `MEMORY.md` and context files never change; the agent suggests changes to them in its report.
 An input no run has reviewed counts as handled once its content is more than seven days old, so turning on the automation or thread exports starts from recent history and never reconciles the older archive.
 Each run keeps its agenda, report, patch, list of deleted lines, and verdict in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least, so an applied patch can be undone with `git apply -R` from the workspace root.

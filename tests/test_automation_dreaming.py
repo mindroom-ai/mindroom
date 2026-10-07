@@ -127,7 +127,7 @@ class _Workspace:
     def state(self) -> dict[str, object]:
         path = self.tmp_path / "tracking" / "automations" / "mind" / "dreaming.json"
         if not path.exists():
-            return {"reviewed": {}, "pending_run": None, "latest_run": None, "notes": None}
+            return {"reviewed": {}, "attempted": {}, "pending_run": None, "latest_run": None, "notes": None}
         return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -245,10 +245,11 @@ def test_the_cap_leaves_the_rest_due_for_the_next_run(tmp_path: Path) -> None:
 
 
 def test_changed_and_dead_citations_are_on_the_agenda_under_the_path_memory_uses(tmp_path: Path) -> None:
-    """A knowledge alias maps to its workspace target; a dead citation is reviewed once, not every night."""
+    """A knowledge alias maps to its workspace target; a dead citation is reviewed once, and a changed source waits for a note."""
     workspace = _Workspace(tmp_path)
     workspace.add_knowledge_base("docs", "source_docs")
     workspace.write("source_docs/setup.md", "Install with uv.\n")
+    workspace.write(YESTERDAY, "- Checked the setup docs.\n")
     workspace.write(
         "memory/setup.md",
         "- Install with uv (source: `knowledge/docs/setup.md`).\n- Old plan (source: thread_exports/gone/x.yaml).\n",
@@ -268,7 +269,10 @@ def test_changed_and_dead_citations_are_on_the_agenda_under_the_path_memory_uses
     assert "source_docs/setup.md" in workspace.state()["reviewed"]
     assert workspace.check() is None
     workspace.write("source_docs/setup.md", "Install with uv sync.\n")
+    assert workspace.check() is None
+    workspace.write(EXPORT, "messages: [hello]\n")
     assert workspace.check() is not None
+    assert "- `knowledge/docs/setup.md`, cited by `memory/setup.md`" in workspace.agenda()
 
 
 def test_a_citation_with_an_anchor_or_line_number_cites_the_file(tmp_path: Path) -> None:
@@ -302,6 +306,7 @@ def test_a_citation_with_spaces_in_backticks_tracks_the_whole_path(tmp_path: Pat
     assert "source_docs/Meeting Notes.md" in workspace.state()["reviewed"]
 
     workspace.write("source_docs/Meeting Notes.md", "New agenda.\n")
+    workspace.write(YESTERDAY, "- Weekly sync moved.\n")
     assert workspace.check() is not None
     assert "- `knowledge/docs/Meeting Notes.md`, cited by `memory/meetings.md`" in workspace.agenda()
 
@@ -314,6 +319,7 @@ def test_a_file_directly_under_knowledge_is_tracked(tmp_path: Path) -> None:
 
     assert workspace.check() is None
     workspace.write("knowledge/notes.md", "Decision log, revised.\n")
+    workspace.write(YESTERDAY, "- Revised the decision log.\n")
 
     assert workspace.check() is not None
     assert "- `knowledge/notes.md`, cited by `memory/topic.md`" in workspace.agenda()
@@ -323,6 +329,7 @@ def test_a_citation_through_an_unassigned_knowledge_base_is_dead(tmp_path: Path)
     """A base removed from the agent loses its knowledge/ link, so claims citing it are reviewed as dead citations."""
     workspace = _workspace(tmp_path)
     workspace.write("memory/setup.md", "- Install with uv (`knowledge/old_docs/setup.md`).\n", age=timedelta(days=30))
+    workspace.write(YESTERDAY, "- Removed the old docs base.\n")
 
     _started(workspace)
 
@@ -396,8 +403,9 @@ def test_old_runs_are_pruned_but_unapplied_proposals_are_kept(tmp_path: Path) ->
     runs = workspace.root / ".mindroom/dreaming/runs"
     for index in range(35):
         (runs / f"20260101T0000{index:02}000000Z" / "staging").mkdir(parents=True)
+    workspace.write(EXPORT, "messages: [hello]\n")
 
-    workspace.check()
+    _started(workspace)
 
     names = sorted(path.name for path in runs.iterdir())
     # The pending run, the newest 30 older ones, and the run that just started.
@@ -418,7 +426,7 @@ def test_an_unfinished_dream_is_incomplete_and_keeps_its_inputs_due(
     report: str,
     timed_out: bool,
 ) -> None:
-    """Without the completion line, or after the fallback, nothing is reviewed and nothing is acknowledged."""
+    """Without the completion line, or after the fallback, nothing is acknowledged, and new evidence brings the inputs back."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
@@ -431,7 +439,10 @@ def test_an_unfinished_dream_is_incomplete_and_keeps_its_inputs_due(
     assert done.notice.startswith("⚠️ Dreaming stopped:")
     assert not (workspace.run_dir() / "staging").exists()
     assert EXPORT not in workspace.state()["reviewed"]
-    assert workspace.check() is not None
+    assert workspace.check() is None
+    workspace.write(YESTERDAY, "- Another note.\n")
+    _started(workspace)
+    assert f"- `{EXPORT}`" in workspace.agenda()
 
 
 def test_moves_dedupes_and_annotations_are_kept_lines(tmp_path: Path) -> None:
@@ -738,7 +749,7 @@ def test_anything_but_an_approval_applies_nothing_and_carries_the_proposal(
     timed_out: bool,
     reason: str,
 ) -> None:
-    """A rejection, a missing or unparseable verdict, or a review past the fallback fails closed."""
+    """A rejection, a missing or unparseable verdict, or a review past the fallback fails closed and waits for new evidence."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
@@ -752,16 +763,18 @@ def test_anything_but_an_approval_applies_nothing_and_carries_the_proposal(
     assert workspace.read("memory/projects.md") == PROJECTS
     assert workspace.state()["pending_run"] == first_run
     assert EXPORT not in workspace.state()["reviewed"]
+    assert workspace.check() is None
 
 
 def test_an_unresolved_proposal_stays_pending_across_rejected_successors_until_one_applies(tmp_path: Path) -> None:
-    """Job 0 names the oldest and the newest unapplied proposals, even with no new input, until a later run applies."""
+    """Job 0 names the oldest and the newest unapplied proposals in every later run until one applies."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
     first_run = workspace.run_dir().name
     workspace.stage("memory/projects.md", PROJECTS + "- First attempt.\n")
     workspace.review(workspace.dream(ask), "VERDICT: REJECT — wrong source")
+    workspace.write(YESTERDAY, "- First note.\n")
 
     ask = _started(workspace)
     second_run = workspace.run_dir().name
@@ -769,6 +782,7 @@ def test_an_unresolved_proposal_stays_pending_across_rejected_successors_until_o
     workspace.stage("memory/projects.md", PROJECTS + "- Second attempt.\n")
     workspace.review(workspace.dream(ask), "VERDICT: REJECT — still wrong")
     assert (workspace.state()["pending_run"], workspace.state()["latest_run"]) == (first_run, second_run)
+    workspace.write(YESTERDAY, "- First note, then a second.\n")
 
     ask = _started(workspace)
     agenda = workspace.agenda()
