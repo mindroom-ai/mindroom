@@ -324,7 +324,7 @@ class TestAgentBot(AgentBotTestBase):
             return True
 
         with (
-            patch.object(bot, "_open_approval_recovery_client", new=AsyncMock()) as open_client,
+            patch.object(bot, "_open_approval_recovery_client", new=AsyncMock(return_value=())) as open_client,
             patch.object(
                 bot._response_runner,
                 "recover_approval_final",

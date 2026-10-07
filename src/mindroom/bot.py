@@ -177,6 +177,7 @@ if TYPE_CHECKING:
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, ApprovalContinuation, IngestionRecordAdmission
     from mindroom.event_journal.models import ResponseRecoveryState
+    from mindroom.event_journal.replies import AppliedTransition
     from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
@@ -1944,28 +1945,31 @@ class AgentBot:
             await self._close_owned_matrix_after_start_failure()
             raise
 
-    async def _open_approval_recovery_client(self) -> None:
-        """Open only the original Matrix sender needed to recover a frozen FINAL."""
+    async def _open_approval_recovery_client(self) -> tuple[AppliedTransition, ...]:
+        """Open only the original Matrix sender needed to recover a frozen FINAL; return what reply adoption left."""
         if self.client is not None:
-            return
+            return ()
         client = await self._open_owned_matrix_client()
         self._sending_device_id = client.device_id or None
         try:
             self._runtime_view.mark_runtime_started()
+            # As at start, earlier-release replies are adopted before loading the ledger rewrites their turn records.
+            adopted = await self._reply_runtime.adopt_legacy()
             await self._turn_store.warm()
         except BaseException:
             self._sending_device_id = None
             await self._close_owned_matrix_after_start_failure()
             raise
+        return adopted
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""
         opened_recovery_client = self.client is None
         try:
             if opened_recovery_client:
-                await self._open_approval_recovery_client()
+                adopted = await self._open_approval_recovery_client()
                 # A recovery-only bot is its own instance for the replies it finishes.
-                await self._reply_runtime.take_ownership()
+                await self._reply_runtime.take_ownership(adopted)
             return await self._response_runner.recover_approval_final(approval_id)
         finally:
             if opened_recovery_client:

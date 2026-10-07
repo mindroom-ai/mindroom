@@ -228,7 +228,7 @@ class ReplyRuntime:
         return True
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
-        """Hand an interrupted run's sources back to replay with its reply; return whether it was released."""
+        """Release an interrupted run's approval as ``rl.approval_released`` decides; return whether it was released."""
         released = await self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)
         if released is None:
             return False
@@ -316,9 +316,14 @@ class ReplyRuntime:
         while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
             pass
 
-    async def take_ownership(self) -> None:
-        """Make this bot instance the owner of its principal's replies, before it writes any of them."""
+    async def take_ownership(self, adopted: tuple[AppliedTransition, ...] = ()) -> None:
+        """Make this bot instance the owner of its principal's replies, before it writes any of them.
+
+        Then it runs what an earlier :meth:`adopt_legacy` left to run.
+        """
         await self.store.replies.write_generation(self.generation, now_ns=self.clock())
+        for applied in adopted:
+            await self.run_effects(applied.post_commit)
 
     async def adopt_legacy(self) -> tuple[AppliedTransition, ...]:
         """Give the replies an earlier release left in flight records, once per principal; return what to run after.
