@@ -311,6 +311,10 @@
 {{- if not .Values.apiAuth.key -}}
 {{- fail "apiAuth.key is required when apiAuth.existingSecret is set" -}}
 {{- end -}}
+{{- $generatedApiKeySecretName := printf "%s-api-key" (include "mindroom-runtime.fullname" .) -}}
+{{- if eq .Values.apiAuth.existingSecret $generatedApiKeySecretName -}}
+{{- fail (printf "apiAuth.existingSecret must name a Secret the chart does not manage, not %s, which the chart stops rendering when apiAuth.existingSecret is set" $generatedApiKeySecretName) -}}
+{{- end -}}
 {{- range include "mindroom-runtime.envList" (list $ .Values.env.extra "env.extra") | fromJsonArray -}}
 {{- if eq (default "" .name) "MINDROOM_API_KEY" -}}
 {{- fail "apiAuth.existingSecret and env.extra both set MINDROOM_API_KEY; remove one of them" -}}

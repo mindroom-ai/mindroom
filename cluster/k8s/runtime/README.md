@@ -904,7 +904,9 @@ workers:
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
 - Worker tool code can reach the primary API, on `localhost` from the `static_runner` sidecar or over the pod network from dedicated Kubernetes workers, so the chart gives the primary a generated `MINDROOM_API_KEY` from the `<fullname>-api-key` Secret for either backend, and the dashboard and API then require it.
-  GitOps and `helm template` workflows should set `apiAuth.existingSecret` and `apiAuth.key` to read the key from an existing Secret instead, because the generated key changes on every offline render.
+  GitOps and `helm template` workflows should set `apiAuth.existingSecret` (and `apiAuth.key` if the Secret's key is not `MINDROOM_API_KEY`) to read the key from an existing Secret instead, because the generated key changes on every offline render.
+  Point it at a Secret the chart does not manage; the chart rejects `<fullname>-api-key`, which it stops rendering once the option is set.
+  To keep the current key, copy it from `<fullname>-api-key` into that Secret before switching.
   A `MINDROOM_API_KEY` from `env.extra` or `env.envFrom` also takes precedence over the generated key, but the chart then still renders the unused generated Secret.
   `apiAuth.allowUnauthenticatedPrimary: true` removes the key and is unsafe unless other primary API authentication is configured.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime receives the Secret-backed key.

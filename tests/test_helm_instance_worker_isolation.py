@@ -4086,6 +4086,10 @@ def test_runtime_chart_existing_api_key_secret_replaces_generated_key(backend: s
         ),
         (("apiAuth.key=",), "apiAuth.key is required when apiAuth.existingSecret is set"),
         (
+            ("apiAuth.existingSecret=mindroom-runtime-api-key",),
+            "apiAuth.existingSecret must name a Secret the chart does not manage, not mindroom-runtime-api-key",
+        ),
+        (
             ("env.extra[0].name=MINDROOM_API_KEY", "env.extra[0].value=duplicate"),
             "apiAuth.existingSecret and env.extra both set MINDROOM_API_KEY; remove one of them",
         ),
