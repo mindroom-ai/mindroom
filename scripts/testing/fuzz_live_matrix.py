@@ -6251,8 +6251,15 @@ class FinalStateAuditor:
             )
         if record.redacts is not None:
             problems.extend(FinalStateAuditor._redaction_event_problems(record, event, content))
+        relation = (record.content or {}).get("m.relates_to")
+        replaced_event_id = (
+            relation.get("event_id") if isinstance(relation, dict) and relation.get("rel_type") == "m.replace" else None
+        )
         if record.event_id in redaction_ids:
             problems.extend(FinalStateAuditor._redaction_problems(record, event, content, redaction_ids))
+        elif replaced_event_id in redaction_ids and not content:
+            # A homeserver that redacts a message's edits along with it leaves this edit an empty shell.
+            pass
         elif record.redacts is None and record.content is not None and content != dict(record.content):
             problems.append(
                 f"{record.event_type} {record.event_id} content diverged from sent payload: "

@@ -5519,6 +5519,21 @@ async def test_final_state_auditor_enforces_redaction_and_reaction_semantics() -
 
         with pytest.raises(AssertionError, match="missing from /messages"):
             auditor._assert_sent_events_canonical({}, records, set())
+
+        # A homeserver may redact an edit along with the message it edits, and only then.
+        edit_content = {
+            "body": "* edited",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "edited", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$gone"},
+        }
+        edit = _SentRecord("$edit", "!room:example", "m.room.message", content=edit_content)
+        edit_shell = {"event_id": "$edit", "type": "m.room.message", "content": {}, "_audit_room_id": "!room:example"}
+        auditor._assert_sent_events_canonical({**events, "$edit": edit_shell}, [*records, edit], {"$gone"})
+        kept_edit = {**edit_shell, "content": dict(edit_content)}
+        auditor._assert_sent_events_canonical({**events, "$edit": kept_edit}, [*records, edit], {"$gone"})
+        with pytest.raises(AssertionError, match="content diverged"):
+            auditor._assert_sent_events_canonical({**events, "$edit": edit_shell}, [*records, edit], set())
     finally:
         await client.close()
 
