@@ -1760,6 +1760,7 @@
       "discriminator": {
         "mapping": {
           "llm": "#/$defs/LLMJudgmentConfig",
+          "openai_decisions": "#/$defs/OpenAIDecisionsJudgmentConfig",
           "typesafe": "#/$defs/TypeSafeJudgmentConfig"
         },
         "propertyName": "provider"
@@ -1770,6 +1771,9 @@
         },
         {
           "$ref": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        {
+          "$ref": "#/$defs/OpenAIDecisionsJudgmentConfig"
         }
       ]
     },
@@ -2770,7 +2774,7 @@
       "properties": {
         "judgment": {
           "$ref": "#/$defs/JudgmentConfig",
-          "description": "LLM model alias or TypeSafe backend that makes the decision"
+          "description": "LLM model alias, TypeSafe, or OpenAI Decisions backend that makes the decision"
         },
         "instructions": {
           "default": "",
@@ -2959,6 +2963,39 @@
         "id"
       ],
       "title": "ModelConfig",
+      "type": "object"
+    },
+    "OpenAIDecisionsJudgmentConfig": {
+      "additionalProperties": false,
+      "description": "Use OpenAI Decisions API probabilities.",
+      "properties": {
+        "threshold": {
+          "default": 0.8,
+          "description": "Minimum probability required to accept an answer",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "openai_decisions",
+          "description": "Judge with the OpenAI Decisions API; uses the OpenAI API key",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "OpenAIDecisionsJudgmentConfig",
       "type": "object"
     },
     "ParticipationConfig": {
@@ -3178,6 +3215,23 @@
       ],
       "title": "PluginEntryConfig",
       "type": "object"
+    },
+    "ProbabilityJudgmentConfig": {
+      "discriminator": {
+        "mapping": {
+          "openai_decisions": "#/$defs/OpenAIDecisionsJudgmentConfig",
+          "typesafe": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        "propertyName": "provider"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        {
+          "$ref": "#/$defs/OpenAIDecisionsJudgmentConfig"
+        }
+      ]
     },
     "PromptCurationAutomation": {
       "additionalProperties": false,
@@ -3508,14 +3562,14 @@
         "judgment": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TypeSafeJudgmentConfig"
+              "$ref": "#/$defs/ProbabilityJudgmentConfig"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Optional JEV responder selection before the LLM router"
+          "description": "Optional System One or OpenAI Decisions responder selection before the LLM router"
         },
         "accept_invites": {
           "anyOf": [
@@ -3964,17 +4018,11 @@
     },
     "TypeSafeJudgmentConfig": {
       "additionalProperties": false,
-      "description": "Use System One probabilities with a task-specific acceptance threshold.",
+      "description": "Use System One probabilities.",
       "properties": {
-        "provider": {
-          "const": "typesafe",
-          "description": "Judge with System One; requires TYPESAFE_API_KEY",
-          "title": "Provider",
-          "type": "string"
-        },
         "threshold": {
           "default": 0.8,
-          "description": "Minimum System One probability required to accept an answer",
+          "description": "Minimum probability required to accept an answer",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Threshold",
@@ -3987,6 +4035,12 @@
           "maximum": 30.0,
           "title": "Timeout Seconds",
           "type": "number"
+        },
+        "provider": {
+          "const": "typesafe",
+          "description": "Judge with System One; requires TYPESAFE_API_KEY",
+          "title": "Provider",
+          "type": "string"
         }
       },
       "required": [

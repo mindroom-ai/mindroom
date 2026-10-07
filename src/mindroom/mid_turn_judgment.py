@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.config.judgment import TypeSafeJudgmentConfig
+from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.judgment.evaluator import create_judgment_evaluator
@@ -52,7 +52,7 @@ def create_mid_turn_gate(
     )
     if evaluate is None:
         return None
-    threshold = settings.judgment.threshold if isinstance(settings.judgment, TypeSafeJudgmentConfig) else None
+    threshold = None if isinstance(settings.judgment, LLMJudgmentConfig) else settings.judgment.threshold
 
     async def may_finish(request: JudgmentRequest) -> bool:
         result = await evaluate(request)

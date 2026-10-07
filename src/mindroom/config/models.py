@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
-from mindroom.config.judgment import TypeSafeJudgmentConfig  # noqa: TC001
+from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
@@ -789,9 +789,9 @@ class RouterConfig(BaseModel):
         description="Model to use for routing decisions",
         json_schema_extra=dashboard_hint(reference="model"),
     )
-    judgment: TypeSafeJudgmentConfig | None = Field(
+    judgment: ProbabilityJudgmentConfig | None = Field(
         default=None,
-        description="Optional JEV responder selection before the LLM router",
+        description="Optional System One or OpenAI Decisions responder selection before the LLM router",
     )
     accept_invites: InviteAcceptancePolicy = Field(
         default=True,

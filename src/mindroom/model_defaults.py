@@ -43,6 +43,7 @@ __all__ = (
     "OLLAMA_QWEN",
     "OPENAI_AVATAR_IMAGE",
     "OPENAI_AVATAR_PROMPT",
+    "OPENAI_DECISIONS_MODEL",
     "OPENAI_EMBEDDING_DIMENSIONS",
     "OPENAI_EMBEDDING_LARGE",
     "OPENAI_EMBEDDING_SMALL",
@@ -137,6 +138,8 @@ KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
 OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
+# The Decisions API serves only this model, so it does not follow the Luna default.
+OPENAI_DECISIONS_MODEL = "gpt-6-luna"
 # Chat Completions sampling controls each model rejects: GPT-6 Astra always rejects
 # both, GPT-6.1 Sol and GPT-6 Luna reject both at their default (non-`none`) reasoning effort,
 # and GPT-5.6 Terra and Luna reject top_p.
