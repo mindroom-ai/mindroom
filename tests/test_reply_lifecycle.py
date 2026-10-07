@@ -653,6 +653,42 @@ def _interrupted_turn_regenerating() -> tuple[Reply, Span]:
     return regen.reply, regen.claimed
 
 
+def test_abandoning_a_regeneration_of_unfinished_work_leaves_its_turn_for_the_retry() -> None:
+    """The reply waits again for the retry it was waiting for, which answers the turn; the edit settles unanswered."""
+    reply, span = _interrupted_turn_regenerating()
+    transition = rl.dispatch_failed(reply, span, error_text="history failed", now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.ACTIVE
+    assert transition.reply.last_span_id == "span-1"
+    assert transition.effects == (SettleSources("span-2", answered=False),)
+
+
+def test_a_refused_answer_over_unfinished_work_fails_instead_of_restoring_it() -> None:
+    """Its sources settled answered when the row was queued, so the retry the rollback waited for can never run."""
+    reply, span = _interrupted_turn_regenerating()
+    finished = rl.finish(reply, span, _write(reply, ReplyState.COMPLETED), now_ns=NOW)
+    assert finished.reply is not None
+    assert finished.row is not None
+    refused = rl.write_failed(
+        finished.reply,
+        _span_after(finished, "span-2"),
+        rl.FailedWrite(
+            rl.WriteFacts(
+                stage=WriteStage.FINAL,
+                sequence=finished.row.sequence,
+                span_id="span-2",
+                creates_event=False,
+                placeholder_only=False,
+            ),
+            reason="too_large",
+        ),
+        now_ns=NOW,
+    )
+    assert refused.reply is not None
+    assert refused.reply.state is ReplyState.FAILED
+    assert refused.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_DELIVERY_FAILED)
+
+
 def test_a_stop_after_an_unacknowledged_progress_edit_does_not_restore() -> None:
     """A progress edit Matrix may already show counts, so the Stop ends the reply cancelled instead of restoring."""
     reply, span = _regenerating()

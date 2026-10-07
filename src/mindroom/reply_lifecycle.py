@@ -488,9 +488,19 @@ def _restore(reply: Reply, span: Span, now_ns: int) -> Reply:
 
 
 def _restored(reply: Reply, span: Span, now_ns: int, *effects: Effect) -> Transition:
-    """Abandon a regeneration that showed nothing: the answer it was replacing stands."""
+    """Abandon a regeneration that showed nothing: the answer it was replacing stands.
+
+    When that is unfinished work the reply waits to retry, the retry answers
+    the turn, so the abandoned regeneration's sources settle unanswered.
+    """
     spans = () if span.ended else (_end(span, SpanOutcome.RESTORED, now_ns),)
-    return Transition(outcome=Outcome.APPLIED, reply=_restore(reply, span, now_ns), spans=spans, effects=effects)
+    restored = _restore(reply, span, now_ns)
+    if restored.state is ReplyState.ACTIVE:
+        effects = tuple(
+            replace(effect, answered=False, consumes_edit=False) if isinstance(effect, SettleSources) else effect
+            for effect in effects
+        )
+    return Transition(outcome=Outcome.APPLIED, reply=restored, spans=spans, effects=effects)
 
 
 # ---------------------------------------------------------------------------
@@ -976,11 +986,12 @@ def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, sequ
         raise _invalid(msg)
     if first_create:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.GONE, now_ns))
-    # A refused cancelled row was the Stop's: it restores only a finished answer.
+    # Its sources settled answered when the row was queued, so no retry of unfinished work can follow:
+    # it restores only a finished answer.
     if not reply.placeholder_only and _keeps_earlier_answer(
         reply,
         span,
-        finished_only=span.outcome is SpanOutcome.CANCELLED,
+        finished_only=True,
         before_sequence=sequence,
     ):
         return _restored(reply, span, now_ns)

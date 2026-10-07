@@ -119,6 +119,8 @@ class _Model:
     unanswered: set[str] = field(default_factory=set)
     # The approval whose pause each paused span's continuation was created by.
     paused_by: dict[str, str] = field(default_factory=dict)
+    # The turn ledger recorded the turn answered, which suppresses a later replay of its original source.
+    turn_answered: bool = False
     # The bot left the room, which drops everything owed to it.
     left: bool = False
     # What each write of a reply, by sequence, may show: one that ends the reply, work in progress, or refused.
@@ -272,6 +274,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                     assert reply is not None
                     assert self.model.spans[reply.last_span_id].outcome is SpanOutcome.COMPLETED, reply
                     self.model.consumed.add(settled.prepared_edit)
+                if answered:
+                    self.model.turn_answered = True
                 self._settle(span_id)
             case CancelSpan(span_id=span_id):
                 self.model.cancel_requested.add(span_id)
@@ -1232,10 +1236,26 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.settled = set()
         self.model.finals = {}
         self.model.deferred.clear()
-        # The next turn is a new message.
+        # The next turn is a new message, which the ledger has not answered.
         self.model.deleted.clear()
+        self.model.turn_answered = False
 
     # --- invariants ---------------------------------------------------------
+
+    @invariant()
+    def a_turn_waiting_for_its_replay_is_unanswered(self) -> None:
+        """I16: a reply that waits to replay its original source has not answered that turn, or the replay never runs."""
+        reply = self.model.reply
+        if reply is None or reply.state is not ReplyState.ACTIVE or reply.current_span_id is not None:
+            return
+        last = self._last()
+        assert last is not None
+        if (
+            last.outcome in rl._SOURCES_PENDING_OUTCOMES
+            and "$source" in last.sources.pending
+            and not self._is_settled(last.span_id)
+        ):
+            assert not self.model.turn_answered, (reply, last)
 
     @invariant()
     def one_current_span(self) -> None:
@@ -1509,6 +1529,23 @@ def test_a_refused_answer_of_a_regeneration_approved_in_place_still_commits_its_
     assert reply is not None
     assert reply.state is ReplyState.FAILED
     assert machine.model.consumed == {"$edit-1"}
+
+
+def test_an_abandoned_regeneration_of_unfinished_work_leaves_its_turn_for_the_retry() -> None:
+    """I16 on a regeneration that failed before writing over a partial reply a retry waits to finish."""
+    machine = ReplyLifecycleMachine()
+    machine.start_turn()
+    machine.enqueue_initial(placeholder=False)
+    machine.acknowledge_row()
+    machine.release(superseded=False)
+    machine.regenerate()
+    machine.dispatch_failure()
+    machine.a_turn_waiting_for_its_replay_is_unanswered()
+    reply = machine.model.reply
+    assert reply is not None
+    assert reply.state is ReplyState.ACTIVE
+    assert not machine.model.turn_answered
+    machine.teardown()
 
 
 @pytest.mark.timeout(300)
