@@ -351,7 +351,8 @@ def claim(
         active_generation=active_generation,
         edit_receipt_order=lookup.edit_receipt_order,
     )
-    if reply is None:
+    if reply is None or request.driving_edit_id is not None:
+        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
         admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
         if admitted is not None:
             request = replace(request, membership_epoch=admitted[1])

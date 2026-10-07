@@ -1274,6 +1274,19 @@ def test_deleting_every_source_cancels_the_running_span() -> None:
     assert transition.reply.redaction_pending == ("$reply",)
 
 
+def test_a_regeneration_moves_the_reply_to_the_membership_its_edit_was_admitted_in() -> None:
+    """After the bot left and rejoined, the regeneration's rows belong to the membership the edit arrived in."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    reply = replace(reply, state=ReplyState.COMPLETED, event_id="$reply")
+    regeneration = rl.claim(
+        _request("span-2", delivery_id="$edit", driving_edit_id="$edit", membership_epoch=2),
+        _context(reply, span),
+    )
+    assert regeneration.reply is not None
+    assert regeneration.reply.membership_epoch == 2
+
+
 def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> None:
     """Before the regeneration wrote anything, the answer the edit was replacing stands; afterwards the reply goes."""
     reply, span = _turn()

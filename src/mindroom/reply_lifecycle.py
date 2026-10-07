@@ -499,12 +499,13 @@ class ClaimRequest:
     sources: SpanSources
     bot_generation: str
     now_ns: int
+    # The membership the claim's delivery was admitted in, which a new or regenerated reply writes in.
+    membership_epoch: int
     # Used only when the claim creates a reply.
     new_reply_id: str
     entity_name: str
     room_id: str
     thread_id: str | None
-    membership_epoch: int
     empty_presentation: str
     # Set for edit regenerations: the edit event that drives this run.
     driving_edit_id: str | None = None
@@ -692,6 +693,8 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         next_reply = replace(
             reply,
             edit_receipt_order=max(reply.edit_receipt_order or 0, context.edit_receipt_order or 0) or None,
+            # Its rows belong to the membership its edit arrived in, which a leave and rejoin moved on.
+            membership_epoch=request.membership_epoch,
         )
         if (
             context.edit_receipt_order is not None
