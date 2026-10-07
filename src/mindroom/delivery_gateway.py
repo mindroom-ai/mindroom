@@ -58,6 +58,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
+from mindroom.legacy_delivery_payloads import legacy_prepared_edit
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -1028,22 +1029,9 @@ class DeliveryGateway:
         """
         if delivery.reply_id is not None:
             return None
-        # LEGACY_COMPAT: Regeneration answers queued before reply records, carrying their selected edit.
-        # Legacy format: a FINAL row with no reply_id whose result_json holds the regeneration's prepared_edit_record;
-        # an edit's answer row is keyed by the edit event, so reply classification leaves it unowned.
-        # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages keep the selected edit
-        # on the regeneration span and commit it when the answer settles its sources.
-        # Handling: the acknowledgement commits that edit with the answer, as the earlier release did.
-        # Coverage: tests/test_edit_delivery_settlement.py::test_an_edit_answer_an_earlier_release_queued_consumes_its_edit_when_delivered.
-        prepared = (delivery.result or {}).get("prepared_edit_record")
-        if prepared is not None:
-            assert isinstance(prepared, dict), "Corrupt prepared edit record"
-            prepared = cast("dict[str, object]", prepared)
-            sources = prepared.get("source_event_ids")
-            assert isinstance(sources, list), "Corrupt prepared edit sources"
-            assert sources, "Empty prepared edit sources"
-            assert isinstance(sources[0], str), "Corrupt prepared edit source"
-            record = TurnRecordCodec._from_ledger_record(sources[0], prepared)
+        legacy_edit = legacy_prepared_edit(delivery.result)
+        if legacy_edit is not None:
+            record = TurnRecordCodec._from_ledger_record(*legacy_edit)
             assert record is not None, "Corrupt prepared edit record"
             record = canonicalize_turn_record(record, response_event_id=event_id, completed=True)
         else:

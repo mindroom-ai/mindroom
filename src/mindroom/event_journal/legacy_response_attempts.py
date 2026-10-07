@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 from mindroom.handled_turns import TurnRecordCodec
 
+from . import journal, turn_records
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -286,3 +288,33 @@ def _prepared_edit(raw: object) -> TurnRecord | None:
         return None
     stored = cast("dict[str, object]", raw)
     return TurnRecordCodec._from_ledger_record(str(stored.get("anchor_event_id")), stored)
+
+
+# LEGACY_COMPAT: Finishing an adopted continuation that reply classification never named a span for.
+# Legacy format: an approval_continuations row with no span_id, whose identity the schema upgrade copied into its
+# context; it stays so when its entity never starts again, such as an entity removed from the configuration.
+# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages settle a continuation's
+# sources through its paused span's SettleSources.
+# Handling: its adopted pending and logical sources settle and its turn is answered, consuming its adopted
+# selected edit unless it failed, as the paused span's settlement would; a discarded one leaves its turn
+# unanswered.
+# Coverage: tests/test_legacy_continuation_identity.py::test_an_unclassified_continuation_settles_its_adopted_sources.
+def settle_unclassified(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+    *,
+    answered: bool,
+) -> TurnRecord | None:
+    """Settle the sources an unclassified continuation adopted; return the turn it answered, if any."""
+    if not answered:
+        journal.settle_many(transaction, principal_id, continuation.source_event_ids)
+        return None
+    return turn_records.settle_turn(
+        transaction,
+        principal_id,
+        continuation.entity_name,
+        pending=continuation.source_event_ids,
+        logical=continuation.sources.logical_source_event_ids,
+        prepared_edit=None if continuation.state == "failing" else continuation.prepared_edit_record,
+    )
