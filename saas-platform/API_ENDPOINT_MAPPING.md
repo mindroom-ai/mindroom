@@ -16,7 +16,7 @@ Ordinary browser requests go directly to the configured platform API through `sr
 The frontend also makes server-side authentication checks in `src/lib/auth/admin.ts` and `src/app/auth/callback/route.ts`.
 An operation without a platform frontend caller can still serve an external integration or an API client.
 
-## Health, Accounts, Subscriptions, and Usage
+## Health, Accounts, and Subscriptions
 
 | Method | Path | Backend module | Frontend caller or purpose |
 | --- | --- | --- | --- |
@@ -27,7 +27,6 @@ An operation without a platform frontend caller can still serve an external inte
 | GET | `/my/subscription` | `subscriptions.py` | `src/hooks/useSubscription.ts`: subscription details |
 | POST | `/my/subscription/cancel` | `subscriptions.py` | No current frontend caller; cancel a subscription |
 | POST | `/my/subscription/reactivate` | `subscriptions.py` | No current frontend caller; reactivate a subscription |
-| GET | `/my/usage` | `usage.py` | `src/hooks/useUsage.ts`: usage metrics with a days parameter |
 
 ## Customer Instances
 
@@ -45,6 +44,7 @@ An operation without a platform frontend caller can still serve an external inte
 | --- | --- | --- | --- |
 | GET | `/admin/stats` | `admin.py` | `src/app/admin/page.tsx`: platform statistics |
 | GET | `/admin/metrics/dashboard` | `admin.py` | `src/app/admin/page.tsx`: dashboard metrics |
+| GET | `/admin/instance-lifecycle` | `admin.py` | `src/app/admin/lifecycle/page.tsx`: instance lifecycle overview |
 | POST | `/admin/instances/{instance_id}/start` | `admin.py` | `src/components/admin/InstanceActions.tsx`: start |
 | POST | `/admin/instances/{instance_id}/stop` | `admin.py` | `src/components/admin/InstanceActions.tsx`: stop |
 | POST | `/admin/instances/{instance_id}/restart` | `admin.py` | `src/components/admin/InstanceActions.tsx`: restart |

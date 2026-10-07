@@ -6,6 +6,25 @@ import userEvent from '@testing-library/user-event'
 import { InstanceCard } from '../InstanceCard'
 import { provisionInstance } from '@/lib/api'
 import type { Instance } from '@/hooks/useInstance'
+import type { Subscription } from '@/hooks/useSubscription'
+
+const activeSubscription: Subscription = {
+  id: 'sub-active',
+  account_id: 'acc-123',
+  tier: 'hobby',
+  status: 'active',
+  stripe_subscription_id: null,
+  stripe_customer_id: null,
+  current_period_start: null,
+  current_period_end: null,
+  trial_ends_at: null,
+  cancelled_at: null,
+  can_run_instances: true,
+  stripe_subscription_ended: true,
+  trial_days_remaining: null,
+  created_at: '2026-10-01T00:00:00Z',
+  updated_at: '2026-10-01T00:00:00Z',
+}
 
 // Mock the API
 jest.mock('@/lib/api', () => ({
@@ -28,7 +47,7 @@ describe('InstanceCard - Simplified Tests', () => {
 
   describe('When no instance exists', () => {
     it('should display provision button and message', () => {
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
 
       expect(screen.getByText(/No instance provisioned yet/)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /Provision Instance/i })).toBeInTheDocument()
@@ -38,7 +57,7 @@ describe('InstanceCard - Simplified Tests', () => {
       mockProvisionInstance.mockResolvedValue({ instance_id: 1 })
       const user = userEvent.setup()
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await user.click(button)
@@ -54,7 +73,7 @@ describe('InstanceCard - Simplified Tests', () => {
       )
       const user = userEvent.setup()
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await user.click(button)
@@ -114,7 +133,7 @@ describe('InstanceCard - Simplified Tests', () => {
           <InstanceCard instance={{ ...mockInstance, status }} />
         )
         expect(screen.getByText(expectedText)).toBeInTheDocument()
-        rerender(<InstanceCard instance={null} />)
+        rerender(<InstanceCard instance={null} subscription={activeSubscription} />)
       })
     })
 
@@ -169,7 +188,7 @@ describe('InstanceCard - Simplified Tests', () => {
       const noTierInstance = { ...mockInstance, tier: null }
       render(<InstanceCard instance={noTierInstance} />)
 
-      expect(screen.getByText('Free')).toBeInTheDocument()
+      expect(screen.getByText('No plan')).toBeInTheDocument()
     })
   })
 

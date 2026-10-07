@@ -6,6 +6,7 @@ from typing import Annotated, Any
 import anyio
 from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
+from backend.entitlements import ENDED_STRIPE_STATUSES
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
 from backend.services import provisioner_service
@@ -20,18 +21,20 @@ router = APIRouter()
 class _CustomerSubscriptions:
     """What checkout needs from a Stripe customer's subscription history."""
 
-    running_subscription_id: str | None  # An active or trialing subscription, managed through the portal instead
+    unended_subscription_id: str | None
     had_trial: bool
 
 
 def _subscription_history(customer_id: str) -> _CustomerSubscriptions:
-    running_subscription_id = None
+    unended_subscription_id = None
     had_trial = False
     for sub in stripe.Subscription.list(customer=customer_id, status="all", limit=100).auto_paging_iter():
         had_trial = had_trial or sub.trial_start is not None
-        if running_subscription_id is None and sub.status in ["active", "trialing"]:
-            running_subscription_id = sub.id
-    return _CustomerSubscriptions(running_subscription_id, had_trial)
+        # A past_due, unpaid, paused, or incomplete subscription can still be paid or resumed, so checkout
+        # would start a second one; only canceled and incomplete_expired subscriptions are over.
+        if unended_subscription_id is None and sub.status not in ENDED_STRIPE_STATUSES:
+            unended_subscription_id = sub.id
+    return _CustomerSubscriptions(unended_subscription_id, had_trial)
 
 
 class CheckoutRequest(BaseModel):
@@ -67,14 +70,14 @@ async def create_checkout_session(
         customer_id = customer.id
         sb.table("accounts").update({"stripe_customer_id": customer_id}).eq("id", user["account_id"]).execute()
 
-    # Check if customer already has an active subscription, and whether any past one had a trial
+    # Check if customer already has a subscription Stripe has not ended, and whether any past one had a trial
     history = await anyio.to_thread.run_sync(_subscription_history, customer_id)
-    if history.running_subscription_id is not None:
+    if history.unended_subscription_id is not None:
         # Customer already has a subscription - they should use the portal to manage it
         logger.warning(
-            "Customer %s already has an active subscription %s, redirecting to portal",
+            "Customer %s already has an unended subscription %s, redirecting to portal",
             customer_id,
-            history.running_subscription_id,
+            history.unended_subscription_id,
         )
         # Create a portal session instead
         portal_session = stripe.billing_portal.Session.create(

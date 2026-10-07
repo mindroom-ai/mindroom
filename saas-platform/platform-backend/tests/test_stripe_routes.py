@@ -242,6 +242,49 @@ class TestStripeRoutesEndpoints:
         params = mock_stripe.checkout.Session.create.call_args.kwargs
         assert ("trial_period_days" in params["subscription_data"]) is expects_trial
 
+    @pytest.mark.parametrize(
+        ("status", "opens_portal"),
+        [
+            ("active", True),
+            ("trialing", True),
+            ("past_due", True),
+            ("unpaid", True),
+            ("paused", True),
+            ("incomplete", True),
+            ("canceled", False),
+            ("incomplete_expired", False),
+        ],
+    )
+    def test_checkout_sends_a_customer_with_an_unended_subscription_to_the_portal(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        status: str,
+        opens_portal: bool,
+    ):
+        """A subscription Stripe can still bill or resume must be fixed in the portal, not duplicated by a new checkout."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"stripe_customer_id": "cus_test_123"}
+        )
+        mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
+            Mock(id="sub_existing", status=status, trial_start=None)
+        ]
+        mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
+        mock_stripe.checkout.Session.create.return_value = Mock(url="https://checkout.stripe.com/pay/cs_test_123")
+
+        with patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"):
+            response = client.post("/stripe/checkout", json={"tier": "hobby", "billing_cycle": "monthly"})
+
+        assert response.status_code == 200
+        if opens_portal:
+            mock_stripe.checkout.Session.create.assert_not_called()
+            assert response.json()["url"] == "https://billing.stripe.com/session/x"
+        else:
+            mock_stripe.billing_portal.Session.create.assert_not_called()
+            assert response.json()["url"] == "https://checkout.stripe.com/pay/cs_test_123"
+
     def test_checkout_stripe_error(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):

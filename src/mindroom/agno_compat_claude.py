@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from mindroom.claude_wire_blocks import (
+    SERVER_TOOL_USE_BLOCK_TYPE,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_NAME,
+    as_dict,
+)
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 
 if TYPE_CHECKING:
@@ -105,7 +111,7 @@ def request_kwargs_without_replayed_citations(request_kwargs: dict[str, Any]) ->
         return request_kwargs
     prepared_messages: list[Any] | None = None
     for message_index, message in enumerate(messages):
-        message_dict = _as_dict(message)
+        message_dict = as_dict(message)
         if message_dict is None or message_dict.get("role") != "assistant":
             continue
         content = message_dict.get("content")
@@ -157,7 +163,7 @@ def request_kwargs_with_leading_tool_results(request_kwargs: dict[str, Any]) -> 
         return request_kwargs
     prepared_messages: list[Any] | None = None
     for message_index, message in enumerate(messages):
-        message_dict = _as_dict(message)
+        message_dict = as_dict(message)
         if message_dict is None or message_dict.get("role") != "user":
             continue
         content = message_dict.get("content")
@@ -215,7 +221,7 @@ def request_kwargs_with_supported_inline_media(
     prepared_messages: list[Any] | None = None
     inline_bytes = 0
     for message_index, message in enumerate(messages):
-        message_dict = _as_dict(message)
+        message_dict = as_dict(message)
         if message_dict is None or message_dict.get("role") != "user":
             continue
         content = message_dict.get("content")
@@ -259,8 +265,8 @@ def _inline_media_note(
     max_inline_bytes: int,
 ) -> tuple[dict[str, str] | None, int]:
     """Return a note replacing one base64 media block, or the request's new inline byte total."""
-    block_dict = _as_dict(block)
-    source = _as_dict(block_dict.get("source")) if block_dict is not None else None
+    block_dict = as_dict(block)
+    source = as_dict(block_dict.get("source")) if block_dict is not None else None
     if block_dict is None or source is None or source.get("type") != "base64":
         return None, inline_bytes
     kind = block_dict.get("type")
@@ -282,16 +288,116 @@ def _inline_media_note(
 
 
 def _is_tool_result_block(block: object) -> bool:
-    block_dict = _as_dict(block)
+    block_dict = as_dict(block)
     return block_dict is not None and block_dict.get("type") == "tool_result"
 
 
-def _as_dict(value: object) -> dict[str, Any] | None:
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
-
-
 def _cited_text_block(block: object) -> dict[str, Any] | None:
-    block_dict = _as_dict(block)
+    block_dict = as_dict(block)
     if block_dict is None or block_dict.get("type") != "text" or "citations" not in block_dict:
         return None
     return block_dict
+
+
+# The request schema for replayed tool-search results accepts only these keys
+# (ToolSearchToolResultBlockParam); response blocks additionally carry
+# citations/parsed_output/text, which the API rejects as extra inputs.
+_TOOL_SEARCH_RESULT_INPUT_KEYS = frozenset({"type", "tool_use_id", "content", "cache_control"})
+
+
+def _tool_search_result_ids(content: list[Any]) -> set[str]:
+    """Return tool-use IDs paired with search results in one message."""
+    result_ids: set[str] = set()
+    for block in content:
+        block_dict = as_dict(block)
+        if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
+            continue
+        tool_use_id = block_dict.get("tool_use_id")
+        if isinstance(tool_use_id, str):
+            result_ids.add(tool_use_id)
+    return result_ids
+
+
+def _replay_safe_message_content(content: list[Any]) -> tuple[list[Any], bool]:
+    """Strip response-only fields from replayed search results and drop search uses left without one."""
+    prepared_content: list[Any] = []
+    changed = False
+    for block in content:
+        block_dict = as_dict(block)
+        if (
+            block_dict is not None
+            and block_dict.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE
+            and not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
+        ):
+            prepared_content.append(
+                {key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS},
+            )
+            changed = True
+        else:
+            prepared_content.append(block)
+
+    paired_result_ids = _tool_search_result_ids(prepared_content)
+    sanitized_content: list[Any] = []
+    for block in prepared_content:
+        block_dict = as_dict(block)
+        block_id = block_dict.get("id") if block_dict is not None else None
+        if (
+            block_dict is not None
+            and block_dict.get("type") == SERVER_TOOL_USE_BLOCK_TYPE
+            and block_dict.get("name") == TOOL_SEARCH_TOOL_NAME
+            and (not isinstance(block_id, str) or block_id not in paired_result_ids)
+        ):
+            changed = True
+            continue
+        sanitized_content.append(block)
+    return sanitized_content, changed
+
+
+# AGNO_COMPAT: Claude history replays tool-search response blocks the request schema rejects.
+# Reason: Agno 3.0.9 stores captured server-tool blocks with `model_dump()` and replays them verbatim, so a
+# `tool_search_tool_result` keeps response-only fields (`citations`, `parsed_output`, `text`), and a search
+# `server_tool_use` without its result is replayed too; either makes every later request fail with a 400.
+# Upstream issue: https://github.com/agno-agi/agno/issues/8687, open; the same verbatim replay for
+# code-execution citations, not tool-search blocks or unpaired search uses. Agno PR #6879 added the replay.
+# Upstream PR: https://github.com/agno-agi/agno/pull/8686, open and partial; strips citations only from
+# code-execution result blocks.
+# Remove when: The pinned Agno replays tool-search blocks in request shape and drops unpaired search uses.
+# Coverage: tests/test_extra_kwargs.py::test_replay_safe_tool_search_results_strips_response_only_fields;
+# tests/test_extra_kwargs.py::test_replay_safe_tool_search_results_drops_only_orphaned_search_uses.
+def request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Repair replayed tool-search blocks before sending assistant history.
+
+    Agno replays captured server-tool blocks verbatim in assistant history,
+    and the SDK response block carries fields (``citations``, ``parsed_output``,
+    ``text``) that the request schema rejects with a 400 ("Extra inputs are
+    not permitted"). Once such a block is persisted, every later turn of that
+    conversation replays it, so the thread stays broken until the block is
+    sanitized here. Keys used for history identity (``type``, ``tool_use_id``)
+    are preserved.
+
+    Anthropic can also return a ``server_tool_use`` without its matching
+    ``tool_search_tool_result`` when native search and client tools are called
+    together. Replaying that orphan produces another 400. Valid pairs and other
+    server-tool types remain intact. The input structure is never mutated.
+    """
+    messages = request_kwargs.get("messages")
+    if not isinstance(messages, list):
+        return request_kwargs
+    sanitized_messages = list(messages)
+    changed = False
+    for message_index, message in enumerate(sanitized_messages):
+        message_dict = as_dict(message)
+        content = message_dict.get("content") if message_dict is not None else None
+        if message_dict is None or not isinstance(content, list):
+            continue
+        sanitized_content, content_changed = _replay_safe_message_content(content)
+        if content_changed:
+            sanitized_message = dict(message_dict)
+            sanitized_message["content"] = sanitized_content
+            sanitized_messages[message_index] = sanitized_message
+            changed = True
+    if not changed:
+        return request_kwargs
+    prepared_kwargs = dict(request_kwargs)
+    prepared_kwargs["messages"] = sanitized_messages
+    return prepared_kwargs

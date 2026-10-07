@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, NotRequired, TypedDict
 
 from backend.entitlements import db_subscription_status
-from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
+from backend.pricing import get_stripe_price_match
 
 
 class PermanentEventError(ValueError):
@@ -56,8 +56,6 @@ class _SubscriptionFields(TypedDict):
     stripe_price_id: str | None
     tier: str
     status: str
-    max_agents: int
-    max_messages_per_day: int
     trial_ends_at: str | None
     updated_at: str
     current_period_start: NotRequired[str]
@@ -72,15 +70,12 @@ def subscription_fields(sb: Any, subscription: dict) -> _SubscriptionFields:
     price_data = item["price"] if item else {}
     tier = _get_tier_from_price(price_data)
     _get_billing_cycle_from_price(price_data)
-    limits = get_plan_limits_from_metadata(tier)
 
     subscription_data: _SubscriptionFields = {
         "stripe_subscription_id": subscription["id"],
         "stripe_price_id": price_data.get("id"),
         "tier": tier,
         "status": subscription_status(sb, subscription["status"], subscription["id"]),
-        "max_agents": limits.get("max_agents", 1),
-        "max_messages_per_day": limits.get("max_messages_per_day", 100),
         "trial_ends_at": maybe_timestamp_to_iso(subscription.get("trial_end")),
         "updated_at": datetime.now(UTC).isoformat(),
     }

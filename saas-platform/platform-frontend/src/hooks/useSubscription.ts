@@ -17,10 +17,8 @@ export interface Subscription {
   current_period_end: string | null
   trial_ends_at: string | null
   cancelled_at: string | null
-  max_agents: number
-  max_messages_per_day: number
-  max_storage_gb: number
   can_run_instances: boolean
+  stripe_subscription_ended: boolean
   trial_days_remaining: number | null
   created_at: string
   updated_at: string

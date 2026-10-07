@@ -78,8 +78,6 @@ export type Database = {
           current_period_start: string | null
           current_period_end: string | null
           cancelled_at: string | null
-          max_agents: number
-          max_messages_per_day: number
           created_at: string
           updated_at: string
         }
@@ -95,8 +93,6 @@ export type Database = {
           current_period_start?: string | null
           current_period_end?: string | null
           cancelled_at?: string | null
-          max_agents?: number
-          max_messages_per_day?: number
           created_at?: string
           updated_at?: string
         }
@@ -112,8 +108,6 @@ export type Database = {
           current_period_start?: string | null
           current_period_end?: string | null
           cancelled_at?: string | null
-          max_agents?: number
-          max_messages_per_day?: number
           created_at?: string
           updated_at?: string
         }

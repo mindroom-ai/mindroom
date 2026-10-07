@@ -3883,6 +3883,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
                         session_id=event.session_id,
                         run_id=event.run_id or attempt_run_id,
+                        metadata_content=_interrupted_metadata(RunStatus.paused, event.run_id, event.session_id),
                     ),
                 )
                 return

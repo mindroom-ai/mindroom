@@ -5662,7 +5662,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
+expose = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
 from = ["mindroom.model_loading"]
 
 [[interfaces]]
@@ -6144,12 +6144,15 @@ expose = [
     "PluginValidationError",
     "_MODULE_IMPORT_CACHE",
     "_ModuleCacheEntry",
+    "_PLUGIN_CACHE",
     "_PluginBase",
     "_collect_plugin_bases",
     "_install_plugin_package_chain",
     "_log_skipped_plugin_entry",
     "_module_name",
+    "_prepare_module",
     "_reject_duplicate_plugin_manifest_names",
+    "_resolve_plugin_root",
     "_restore_plugin_package_chain",
     "_snapshot_plugin_package_chain",
 ]
@@ -7558,13 +7561,25 @@ expose = ["TOOL_SEARCH_ITEMS_KEY", "RESPONSE_OUTPUT_KEY", "record_tool_search_it
 
 
 [[modules]]
+path = "mindroom.claude_wire_blocks"
+depends_on = []
+
+[[modules]]
 path = "mindroom.agno_compat_claude"
-depends_on = ["mindroom.model_defaults"]
+depends_on = ["mindroom.claude_wire_blocks", "mindroom.model_defaults"]
 visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_claude"]
-expose = ["ClaudeProviderSDKCompat", "request_kwargs_without_replayed_citations"]
+expose = [
+    "BEDROCK_MAX_INLINE_MEDIA_BYTES",
+    "ClaudeProviderSDKCompat",
+    "MAX_INLINE_MEDIA_BYTES",
+    "request_kwargs_with_leading_tool_results",
+    "request_kwargs_with_replay_safe_tool_search_results",
+    "request_kwargs_with_supported_inline_media",
+    "request_kwargs_without_replayed_citations",
+]
 
 
 [[modules]]

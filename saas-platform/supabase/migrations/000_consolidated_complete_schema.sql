@@ -81,10 +81,6 @@ CREATE TABLE subscriptions (
     tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'byok', 'hobby', 'pro', 'enterprise')),
     status TEXT NOT NULL DEFAULT 'trialing' CHECK (status IN ('trialing', 'active', 'cancelled', 'past_due', 'paused', 'incomplete', 'incomplete_expired', 'unpaid')),
 
-    -- Limits based on tier
-    max_agents INTEGER DEFAULT 1,
-    max_messages_per_day INTEGER DEFAULT 100,
-
     -- Billing periods
     trial_ends_at TIMESTAMPTZ,
     current_period_start TIMESTAMPTZ,

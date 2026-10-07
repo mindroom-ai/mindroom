@@ -6,18 +6,22 @@ from datetime import UTC, datetime
 from math import ceil
 from typing import Any
 
-from backend.pricing import get_plan_limits_from_metadata
 from fastapi import HTTPException
 
 PAID_TIERS = frozenset({"byok", "hobby", "pro", "enterprise"})
 # past_due keeps service running while Stripe retries the payment; Stripe then moves the
 # subscription to canceled or unpaid, which stops the instance.
 SERVICE_STATUSES = frozenset({"active", "past_due"})
+# Stripe subscriptions in these states no longer bill and cannot be cancelled again.
+ENDED_STRIPE_STATUSES = frozenset({"canceled", "incomplete_expired"})
 
 
 def db_subscription_status(stripe_status: str) -> str:
     """Map a Stripe subscription status to the stored status; the database spells it `cancelled`."""
     return "cancelled" if stripe_status == "canceled" else stripe_status
+
+
+_ENDED_DB_STATUSES = frozenset(db_subscription_status(status) for status in ENDED_STRIPE_STATUSES)
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
@@ -82,14 +86,18 @@ def trial_days_remaining(subscription: dict[str, Any], *, now: datetime | None =
     return ceil(seconds_remaining / 86_400)
 
 
-def decorate_subscription_for_response(
-    subscription: dict[str, Any], *, plan_limits: dict[str, int] | None = None
-) -> dict[str, Any]:
+def is_stripe_subscription_ended(subscription: dict[str, Any]) -> bool:
+    """Return whether no Stripe subscription remains that Stripe can bill or resume, so checkout starts a new one.
+
+    A past_due, unpaid, paused, or incomplete subscription is fixed in the Stripe portal instead.
+    """
+    return not subscription.get("stripe_subscription_id") or subscription.get("status") in _ENDED_DB_STATUSES
+
+
+def decorate_subscription_for_response(subscription: dict[str, Any]) -> dict[str, Any]:
     """Add computed fields required by subscription API response models."""
-    tier = str(subscription.get("tier") or "free")
-    limits = plan_limits or get_plan_limits_from_metadata(tier)
-    subscription["max_storage_gb"] = limits["max_storage_gb"]
     subscription["can_run_instances"] = is_subscription_service_active(subscription)
+    subscription["stripe_subscription_ended"] = is_stripe_subscription_ended(subscription)
     subscription["trial_days_remaining"] = trial_days_remaining(subscription)
     return subscription
 
@@ -99,10 +107,10 @@ def _entitlement_failure_detail(subscription: dict[str, Any], action: str) -> st
     status = str(subscription.get("status") or "unknown")
 
     if tier == "free":
-        return f"Upgrade to a paid plan or start a trial before you {action} a hosted MindRoom instance."
+        return f"Choose a plan before you {action} a hosted MindRoom instance."
 
     if status == "trialing":
-        return "Your MindRoom trial has expired. Add billing or choose a paid plan to continue using the instance."
+        return "Your MindRoom trial has expired. Add billing or choose a plan to continue using the instance."
 
     if status == "unpaid":
         return "Payment failed. Update billing before you run the MindRoom instance."
