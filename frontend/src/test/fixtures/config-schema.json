@@ -1500,7 +1500,7 @@
     },
     "DreamingAutomation": {
       "additionalProperties": false,
-      "description": "Nightly reconciliation of memory/ with new conversations, daily notes, and the sources memory cites.",
+      "description": "Nightly reconciliation of memory/ with new conversations and daily notes.",
       "properties": {
         "cron": {
           "default": "15 3 * * *",

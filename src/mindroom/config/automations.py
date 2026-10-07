@@ -88,7 +88,7 @@ class PromptCurationAutomation(_ScheduledAutomation):
 
 
 class DreamingAutomation(_ScheduledAutomation):
-    """Nightly reconciliation of memory/ with new conversations, daily notes, and the sources memory cites."""
+    """Nightly reconciliation of memory/ with new conversations and daily notes."""
 
     name: Literal["dreaming"] = Field(
         default="dreaming",
