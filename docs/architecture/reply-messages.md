@@ -15,7 +15,7 @@ This page is for contributors: it names the records, the rules that change them,
 | `reply_scope.py` | `ReplyRuntime` (one per bot instance) and `SpanHandle`: claims, span exits, write-ahead, owed writes, and the span slot child tasks share. |
 | `event_journal/reply_messages.py`, `event_journal/reply_spans.py` | Persistence of replies and spans. |
 | `event_journal/replies.py` | `ReplyStore`: each rule applied inside one database transaction, with its in-transaction effects. |
-| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies an earlier release left in flight, and the post-sync reads of what they showed. |
+| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies an earlier release left paused for approval, and the presentations of what they showed. |
 | `stop.py` | `SpanRegistry`: the task and Agno run of each span this instance executes. |
 | `delivery_gateway.py` | Rendering and sending reply rows, owed notes, Stop buttons, and redactions. |
 
@@ -67,7 +67,7 @@ A claim runs under the conversation lock after the turn's first source gate and 
 - An edit the last span already answered (a sync restart's retry): `duplicate`, nothing runs.
 - An edit received before the reply's recorded Stop: `duplicate`, nothing runs, and the edit prunes no history, which it does only once its claim succeeds.
 - A last span ended `released`, `lost`, or `superseded`: a `replay`, or the same regeneration re-run.
-- Unresolved durable writes, an owed note, a pending legacy read, or for an edit an approval that holds the reply while or after a span runs for it: `deferred`; the resolution, or that approval's finish or release, retries the sources.
+- Unresolved durable writes, an owed note, or for an edit an approval that holds the reply while or after a span runs for it: `deferred`; the resolution, or that approval's finish or release, retries the sources.
 
 ## Writes
 
@@ -109,7 +109,7 @@ Otherwise the exit's terminal row, an owed note, or an owed redaction brings Mat
 
 ## Lifetime
 
-Each bot instance writes a fresh generation for its principal at start, then adopts replies an earlier release left once, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
+Each bot instance writes a fresh generation for its principal at start, then adopts the replies an earlier release left paused for approval once, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
 A membership departure ends the room's replies `gone` inside the departure fence and cancels their spans afterwards.
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.

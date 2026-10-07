@@ -8,6 +8,12 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to durable reply records
+
+Upgrade while no agent is replying.
+Stop the previous backend once in-progress replies have finished; replies waiting for a tool approval keep their approval cards across the upgrade and continue once approved.
+A reply that was still streaming, being delivered, or resuming after an approval when the previous backend stopped may not finish cleanly, so resend that request if needed.
+
 ## Upgrading to Nio 1.0
 
 Existing deployments upgrade automatically during normal startup.

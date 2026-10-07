@@ -67,8 +67,8 @@ Matrix sync callback
 | `reply_presentation.py` | Reply presentation model, its JSON codec, and rendering into a body, trace, and terminal wire status |
 | `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
-| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies an earlier release left in flight, and the post-sync reads of what they showed |
-| `event_journal/legacy_response_attempts.py` | One-time upgrade of released approval continuations: their reply identity, held sources, and claim move into their context until reply classification names their paused span |
+| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies an earlier release left paused for approval, and the presentations of what they showed |
+| `event_journal/legacy_response_attempts.py` | One-time upgrade of released approval continuations: their reply identity and held sources move into their context until reply classification names their paused span |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
