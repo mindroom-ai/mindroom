@@ -1510,6 +1510,16 @@ def approval_released(reply: Reply, span: Span | None, *, now_ns: int) -> Transi
     """A continuation released to replay ends the span running for it, if any, keeping sources pending."""
     if reply.terminal or (span is None and reply.approval_id is None) or (span is not None and span.ended):
         return _unchanged(Outcome.DUPLICATE, reply)
+    if reply.unapplied_stop:
+        # A Stop the run never saw outranks the replay: the reply ends cancelled and the sources settle.
+        updated = reply if span is None else _clear_current(reply, span.span_id)
+        owed = OwedWrite(reply.last_span_id, _NOTE_CANCELLED)
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed),
+            spans=() if span is None else (_end(span, SpanOutcome.CANCELLED, now_ns),),
+            effects=(SettleSources(reply.last_span_id),),
+        )
     if span is None:
         # A span approved in place that a restart already ended: the replay answers without the approval.
         return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns))
@@ -1828,23 +1838,31 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
         last = _end(last, SpanOutcome.LOST, now_ns)
         spans.append(last)
         updated = _clear_current(updated, last.span_id)
+    if reply.approval_id is not None:
+        # A span approved in place ran for its approval: approval recovery
+        # settles the reply, its sources, and any Stop that fenced it.
+        return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=tuple(spans))
     if reply.unapplied_stop:
         return _stop_left_unapplied(reply, updated, last, tuple(spans), now_ns)
     if facts.sources_pending:
         # Replay claims it; the lost span marks where the claim continues.
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=tuple(spans))
+    return _ended_by_restart(reply, updated, last, tuple(spans), now_ns)
+
+
+def _ended_by_restart(reply: Reply, updated: Reply, last: Span, ended: tuple[Span, ...], now_ns: int) -> Transition:
+    """End a reply whose sources settled while no instance ran its span."""
     if _keeps_earlier_answer(reply, last):
-        return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, last, now_ns), spans=tuple(spans))
+        return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, last, now_ns), spans=ended)
     if reply.event_id is None and reply.possibly_shown_seq is None:
         # It never wrote anything: a restart note would be a message of its own.
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=_set_state(updated, ReplyState.GONE, now_ns),
-            spans=tuple(spans),
-        )
+        return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.GONE, now_ns), spans=ended)
     owed = OwedWrite(last.span_id, _NOTE_RESTART)
-    updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
-    return Transition(outcome=Outcome.APPLIED, reply=updated, spans=tuple(spans))
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed),
+        spans=ended,
+    )
 
 
 # LEGACY_COMPAT: Applying what an earlier-release reply's event showed, read once its room synced.
@@ -1913,8 +1931,8 @@ def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     """End a reply whose entity left the configuration, without writing to Matrix.
 
     ``span`` is the reply's current span, or its last one when none runs. Its
-    sources settle unanswered, unless an approval holds them: its own
-    settlement does.
+    sources settle unanswered, unless an approval holds the reply: its
+    settlement ends the reply and settles them.
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
@@ -1923,6 +1941,9 @@ def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     if span.span_id == reply.current_span_id and not span.ended:
         spans = (_end(span, SpanOutcome.LOST, now_ns),)
         updated = _clear_current(updated, span.span_id)
+    if reply.approval_id is not None:
+        # Its approval ends it: discarded while the entity stays gone, or settled by an owner that comes back.
+        return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=spans)
     # No bot remains to answer, write, or redact anything for this entity.
     return Transition(
         outcome=Outcome.APPLIED,

@@ -1918,13 +1918,67 @@ def test_removed_entity_fails_without_writing() -> None:
     assert waiting.effects == (SettleSources(span.span_id, answered=False),)
 
 
-def test_removed_entity_leaves_an_approvals_sources_to_it() -> None:
-    """The approval holding the reply settles the sources its pause holds."""
+def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
+    """The discard ends it without writes; an owner that comes back settles it with its note instead."""
     reply, span, transition = _paused()
-    transition = rl.removed_entity(reply, _span_after(transition, span.span_id), now_ns=NOW)
-    assert transition.reply is not None
-    assert transition.reply.state is ReplyState.FAILED
-    assert transition.effects == ()
+    removed = rl.removed_entity(reply, _span_after(transition, span.span_id), now_ns=NOW)
+    assert removed.reply is not None
+    assert removed.reply.state is ReplyState.PAUSED
+    assert removed.effects == ()
+    discarded = rl.approval_settled(
+        removed.reply,
+        _span_after(transition, span.span_id),
+        approval_id="approval-1",
+        paused_span_id=span.span_id,
+        result="failed",
+        disposition="failed",
+        answers_turn=False,
+        now_ns=NOW,
+    )
+    assert discarded.reply is not None
+    assert discarded.reply.state is ReplyState.FAILED
+    assert discarded.effects == (SettleSources(span.span_id, answered=False),)
+
+
+def test_a_restart_leaves_a_span_approved_in_place_to_its_approval() -> None:
+    """A Stop fenced the approval and the process died: approval recovery, not the restart, settles the reply."""
+    reply, span, _transition = _paused(in_place=True)
+    approved = rl.resumed_in_place(reply, span, approval_id="approval-1", now_ns=NOW)
+    assert approved.reply is not None
+    stop = rl.stop(approved.reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    restarted = rl.owner_lost(
+        stop.reply,
+        span,
+        rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True),
+        now_ns=NOW,
+    )
+    assert restarted.reply is not None
+    assert restarted.reply.state is ReplyState.ACTIVE
+    assert restarted.reply.unapplied_stop
+    assert restarted.effects == ()
+    assert _span_after(restarted, span.span_id).outcome is SpanOutcome.LOST
+
+
+def test_releasing_an_approval_a_stop_covers_ends_the_reply_instead_of_replaying() -> None:
+    """The Stop reached the reply after a shutdown interrupted its resume: the replay would run what the user stopped."""
+    reply, span, _transition = _paused()
+    resume = rl.claim(_request("resume", delivery_id="$source", approval_id="approval-1"), _context(reply, span))
+    assert resume.reply is not None
+    assert resume.claimed is not None
+    stop = rl.stop(
+        resume.reply,
+        resume.claimed,
+        StopFacts(receipt_order=8, newer_edit=False, span_live=False),
+        now_ns=NOW,
+    )
+    assert stop.reply is not None
+    released = rl.approval_released(stop.reply, resume.claimed, now_ns=NOW)
+    assert released.reply is not None
+    assert released.reply.state is ReplyState.CANCELLED
+    assert released.reply.owed_write == rl.OwedWrite("resume", rl._NOTE_CANCELLED)
+    assert released.effects == (SettleSources("resume"),)
+    assert _span_after(released, "resume").outcome is SpanOutcome.CANCELLED
 
 
 def test_an_approval_settles_its_turn_unanswered_when_nothing_answers_it() -> None:
