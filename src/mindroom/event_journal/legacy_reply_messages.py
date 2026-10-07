@@ -176,17 +176,15 @@ def classify(
     for delivery_id in _unowned_row_delivery_ids(transaction, principal_id):
         if delivery_id in adopted:
             continue
-        adoption = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
-        if adoption is None or adoption.reply.event_id in adopted_events:
+        found = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
+        if found is None or found.reply.event_id in adopted_events:
             continue
-        if adoption.reply.event_id in replaced:
-            # The newer edit's answer is still in flight: its reply keeps the approvals it superseded.
-            superseded = replaced.pop(adoption.reply.event_id)
-            pauses = _superseded_pauses(adoption.reply.reply_id, superseded, now_ns)
-            adoption = _with_replaced_approvals(adoption, superseded, pauses)
-        adoptions.append(adoption)
         adopted.add(delivery_id)
-        adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
+        adopted_sources.update(source for span in found.spans for source in span.sources.logical)
+        adoption = _rows_beside_replaced(found, replaced, now_ns)
+        if adoption is None:
+            continue
+        adoptions.append(adoption)
         if adoption.reply.event_id is not None:
             adopted_events.add(adoption.reply.event_id)
     for event_id, superseded in replaced.items():
@@ -311,6 +309,29 @@ def _with_replaced_approvals(
         adoption,
         superseded=pauses,
         effects=(*adoption.effects, *(rl.WakeApproval(older.approval_id) for older in superseded)),
+    )
+
+
+def _rows_beside_replaced(
+    adoption: _Adoption,
+    replaced: dict[str, tuple[ApprovalContinuation, ...]],
+    now_ns: int,
+) -> _Adoption | None:
+    """Return the rows' reply, or nothing for rows of a turn whose reply a newer edit's answer replaced.
+
+    That answer, adopted by ``_replaced_reply``, stands. When its own FINAL is
+    still in flight, its reply keeps the approvals it superseded instead.
+    """
+    event_id = adoption.reply.event_id
+    if event_id not in replaced:
+        return adoption
+    if adoption.row is None or adoption.row.stage is not DeliveryStage.FINAL:
+        return None
+    superseded = replaced.pop(event_id)
+    return _with_replaced_approvals(
+        adoption,
+        superseded,
+        _superseded_pauses(adoption.reply.reply_id, superseded, now_ns),
     )
 
 
@@ -480,7 +501,6 @@ def _paused_reply(
         presentation=shown,
         now_ns=now_ns,
         event_id=continuation.response_event_id,
-        approval_id=continuation.approval_id,
         # A resumed approval may have streamed past its pause, which only Matrix
         # shows. A team's resume restores its stored document instead, which a
         # read of rendered text would lose.
@@ -515,7 +535,6 @@ def _paused_reply(
             possibly_shown=shown,
             possibly_shown_seq=1 if owed else None,
             reply_sequence=1 if owed else 0,
-            approval_id=None,
             legacy_pending=None,
         )
         return _Adoption(

@@ -1,5 +1,6 @@
 """Released continuations keep the reply identity they answer across the upgrade that names their span."""
 
+import json
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
@@ -10,8 +11,12 @@ import pytest
 from mindroom.event_journal import EventJournalStore, legacy_response_attempts, postgres_backend, sqlite_backend
 from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from mindroom.event_journal.approvals import StoredApprovalCard
+from mindroom.handled_turns import TurnRecordCodec
+from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
+from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, WakeApproval
+from mindroom.turn_record import TurnRecord
 from tests.legacy_reply_helpers import store_main_continuation
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_journal_upgrade_boundary import _LegacyDatabase
@@ -257,19 +262,48 @@ INSERT INTO matrix_delivery_outbox (
 """
 
 
+def _paused_turn_rows() -> str:
+    """Return the placeholder row and turn record v2026.10.199 kept for the turn the approval paused."""
+    record = TurnRecord.create(
+        ["$first", "$second"],
+        requester_id="@user:example.org",
+        response_event_id="$answer",
+        response_owner="bot",
+        conversation_target=MessageTarget.resolve("!room:example.org", None, "$first", room_mode=True),
+        history_scope=HistoryScope(kind="agent", scope_id="bot"),
+    )
+    stored = json.dumps(TurnRecordCodec._to_ledger_record(record)).replace("'", "''")
+    turns = ",\n".join(
+        f"('bot', '{event_id}', '{record.anchor_event_id}', '{stored}')" for event_id in record.indexed_event_ids
+    )
+    return f"""
+INSERT INTO turn_records VALUES {turns};
+INSERT INTO matrix_delivery_outbox (
+    principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
+    payload_json, attempted, acknowledged_event_id, created_at_ns
+) VALUES ('@bot:example.org', '$first', 'initial', 'm.room.message', '!room:example.org', 7, '', 'first-transaction',
+    '{{"body":"Thinking...","io.mindroom.stream_status":"pending"}}', 1, '$answer', 1);
+"""  # noqa: S608
+
+
+@pytest.mark.parametrize("with_turn_rows", [False, True])
 @pytest.mark.parametrize("failing", [False, True])
 @pytest.mark.asyncio
 async def test_an_approval_a_newer_answer_replaced_is_superseded(
     legacy_database: _LegacyDatabase,
     *,
     failing: bool,
+    with_turn_rows: bool,
 ) -> None:
     """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it.
 
-    One that already failed is superseded too, so its failure is never published over the newer answer.
+    One that already failed is superseded too, so its failure is never published over the newer answer, and the
+    placeholder row of the turn it paused does not make that turn look in flight.
     """
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(_NEWER_ANSWER)
+    if with_turn_rows:
+        legacy_database.execute(_paused_turn_rows())
     if failing:
         legacy_database.execute(
             "UPDATE approval_continuations SET state = 'failing', failure_reason = 'expired' WHERE approval_id = 'approval'",
