@@ -223,7 +223,13 @@ def _read_memory_tree(root: Path, base: str) -> _Tree:
         except FileNotFoundError:
             return _Tree({}, {}, ())
         for path in sorted(found):
-            payload = _read_markdown(base_fd, path)
+            try:
+                payload = _read_markdown(base_fd, path)
+            except FileNotFoundError:
+                # Deleted since the walk listed it.
+                continue
+            except ValueError:
+                payload = None
             if payload is None:
                 rejected.append(path)
                 continue
