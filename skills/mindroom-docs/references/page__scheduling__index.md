@@ -336,7 +336,7 @@ Memory keeps claims that later conversations correct and that their sources stop
 2. The agent works through an agenda of at most 40 inputs, oldest first, in a copy of `memory/`: it reconciles memory with the new evidence, records whether each changed source still supports the claims that cite it, and removes duplicates, giving each fact a source path and date and recording conflicting sources with both versions.
 3. MindRoom checks the copy and asks the agent once to re-check when anything but Markdown under `memory/` changed, when today's daily note or a file in `context_files` changed, or when more than the larger of 10 lines and 8% of memory, or more than half of one file, was deleted without the lines appearing anywhere else.
 4. A second run, in a thread of its own, reviews the proposed patch against the cited sources and ends its verdict with `APPROVE`, `APPROVE-WITH-NOTES` (applied, with notes for the next run), or `REJECT`.
-5. MindRoom applies an approved patch when no memory file changed since the run started, refreshes semantic memory search, and marks both threads resolved.
+5. MindRoom applies an approved patch when none of the files the run could change changed since it started, refreshes semantic memory search, and marks both threads resolved.
 
 A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due, and the next run starts by carrying forward a proposal that was never applied.
 `MEMORY.md` and context files never change; the agent suggests changes to them in its report.

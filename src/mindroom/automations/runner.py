@@ -44,13 +44,20 @@ _MAX_SLEEP_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
-class _PendingRun:
-    """A posted prompt whose run has not ended yet."""
+class _Chain:
+    """One automation's run of prompts for one agent, from its check until its last step."""
 
     key: str
     agent_name: str
     settings: Automation
     room_id: str
+
+
+@dataclass(frozen=True)
+class _PendingRun:
+    """A posted prompt whose run has not ended yet."""
+
+    chain: _Chain
     thread_id: str
     ask: Ask
     deadline: datetime
@@ -74,7 +81,7 @@ def _check(config: Config, runtime_paths: RuntimePaths, agent_name: str, automat
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
     if isinstance(automation, PromptCurationAutomation):
         return check_curation(config, runtime_paths, agent_name, automation)
-    return check_consolidation(config, runtime_paths, agent_name, automation)
+    return check_consolidation(config, runtime_paths, agent_name)
 
 
 @dataclass
@@ -139,7 +146,7 @@ class AutomationRunner:
                 self._continue(pending, timed_out=True)
 
     def _continue(self, pending: _PendingRun, *, timed_out: bool) -> None:
-        create_background_task(self._advance(pending, timed_out), name=f"automation_step:{pending.key}")
+        create_background_task(self._advance(pending, timed_out), name=f"automation_step:{pending.chain.key}")
 
     def _release(self, key: str) -> None:
         self._active.discard(key)
@@ -180,142 +187,119 @@ class AutomationRunner:
             if bot is None:
                 logger.warning("Automation agent is not running", agent=agent_name, automation=automation.name)
                 return
+            chain = _Chain(key, agent_name, automation, room_id)
             try:
                 step = await asyncio.to_thread(_check, config, self.runtime_paths, agent_name, automation)
             except (OSError, ValueError) as exc:
                 logger.warning("Automation check failed", agent=agent_name, automation=automation.name, error=str(exc))
-                await bot._hook_send_message(
-                    room_id,
-                    f"⚠️ The {automation.name} automation could not run: {exc}",
-                    None,
-                    automation.name,
-                )
+                await self._notify(bot, chain, None, f"⚠️ The {automation.name} automation could not run: {exc}")
                 return
             if step is not None:
-                posted = await self._post(config, bot, key, agent_name, automation, room_id, None, step, now)
+                posted = await self._post(config, bot, chain, None, step, now)
         finally:
             if not posted:
                 self._release(key)
 
     async def _advance(self, pending: _PendingRun, timed_out: bool) -> None:
         """Run the continuation of a prompt whose run ended, then post its next prompt or its notice."""
+        chain = pending.chain
         posted = False
         try:
             config = self.config_provider()
-            bot = self.bot_provider(pending.agent_name)
+            bot = self.bot_provider(chain.agent_name)
             if pending.ask.then is None or config is None or bot is None:
                 return
-            name = pending.settings.name
+            name = chain.settings.name
             try:
                 step = await asyncio.to_thread(pending.ask.then, config, pending.thread_id, timed_out)
             except (OSError, ValueError) as exc:
-                logger.warning("Automation step failed", agent=pending.agent_name, automation=name, error=str(exc))
-                await bot._hook_send_message(
-                    pending.room_id,
-                    f"⚠️ The {name} automation could not finish: {exc}",
-                    pending.thread_id,
-                    name,
-                )
+                logger.warning("Automation step failed", agent=chain.agent_name, automation=name, error=str(exc))
+                await self._notify(bot, chain, pending.thread_id, f"⚠️ The {name} automation could not finish: {exc}")
                 return
             if isinstance(step, Done):
                 if step.on_loop is not None:
                     step.on_loop()
-                if step.notice is not None:
-                    await bot._hook_send_message(pending.room_id, step.notice, pending.thread_id, name)
+                await self._notify(bot, chain, pending.thread_id, step.notice)
                 for thread_id in step.resolve:
-                    await self._resolve_thread(bot, pending, thread_id)
+                    await self._resolve_thread(bot, chain, thread_id)
                 return
-            posted = await self._post(
-                config,
-                bot,
-                pending.key,
-                pending.agent_name,
-                pending.settings,
-                pending.room_id,
-                pending.thread_id,
-                step,
-                datetime.now(UTC),
-            )
+            posted = await self._post(config, bot, chain, pending.thread_id, step, datetime.now(UTC))
         finally:
             if not posted:
-                self._release(pending.key)
+                self._release(chain.key)
+
+    async def _notify(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str | None, text: str) -> None:
+        """Post ``text`` without mentioning the agent, so it starts no run."""
+        await bot._hook_send_message(chain.room_id, text, thread_id, chain.settings.name)
 
     async def _post(
         self,
         config: Config,
         bot: AgentBot | TeamBot,
-        key: str,
-        agent_name: str,
-        settings: Automation,
-        room_id: str,
+        chain: _Chain,
         thread_id: str | None,
         ask: Ask,
         now: datetime,
     ) -> bool:
         """Post ``ask`` and wait for its run; return whether it was posted."""
         target_thread = None if ask.new_thread else thread_id
-        event_id = await self._post_mention(config, bot, agent_name, settings, room_id, ask, target_thread)
+        event_id = await self._post_mention(config, bot, chain, ask.text, target_thread)
         if event_id is None:
             return False
-        self._pending[event_id] = _PendingRun(
-            key=key,
-            agent_name=agent_name,
-            settings=settings,
-            room_id=room_id,
-            thread_id=event_id if target_thread is None else target_thread,
-            ask=ask,
-            deadline=now + _RUN_FALLBACK,
-        )
+        thread = event_id if target_thread is None else target_thread
+        self._pending[event_id] = _PendingRun(chain, thread, ask, now + _RUN_FALLBACK)
         self._wake.set()
         if ask.on_posted is not None:
             try:
                 await asyncio.to_thread(ask.on_posted, event_id)
             except (OSError, ValueError) as exc:
-                logger.warning("Automation could not record its prompt", agent=agent_name, error=str(exc))
-        logger.info("Automation prompt posted", agent=agent_name, automation=settings.name, new_thread=ask.new_thread)
+                logger.warning("Automation could not record its prompt", agent=chain.agent_name, error=str(exc))
+        logger.info(
+            "Automation prompt posted",
+            agent=chain.agent_name,
+            automation=chain.settings.name,
+            new_thread=ask.new_thread,
+        )
         return True
 
-    async def _resolve_thread(self, bot: AgentBot | TeamBot, pending: _PendingRun, thread_id: str) -> None:
+    async def _resolve_thread(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str) -> None:
         """Mark a finished chain's thread as resolved."""
         if bot.client is None:
             return
         try:
             await set_thread_tag(
                 bot.client,
-                pending.room_id,
+                chain.room_id,
                 thread_id,
                 RESOLVED_THREAD_TAG,
                 set_by=bot.client.user_id,
             )
         except ThreadTagsError as exc:
-            logger.warning("Automation could not resolve its thread", agent=pending.agent_name, error=str(exc))
+            logger.warning("Automation could not resolve its thread", agent=chain.agent_name, error=str(exc))
 
     async def _post_mention(
         self,
         config: Config,
         bot: AgentBot | TeamBot,
-        agent_name: str,
-        settings: Automation,
-        room_id: str,
-        ask: Ask,
+        chain: _Chain,
+        text: str,
         thread_id: str | None,
     ) -> str | None:
         """Post the prompt mentioning the agent so it answers with a normal run, and return the event ID."""
-        extra_content: dict[str, str | bool] = {}
+        # The prompt owns its thread, or answers in its chain's thread, and the session that goes with it, even for an
+        # agent in room thread mode.
+        extra_content: dict[str, str | bool] = {PER_FIRE_THREAD_ROOT_KEY: True}
         # Like a todo poke without a human requester, the message runs as MindRoom's internal user.
         if (original_sender := mindroom_user_id(config, self.runtime_paths)) is not None:
             extra_content[ORIGINAL_SENDER_KEY] = original_sender
-        if settings.model is not None:
-            extra_content[SCHEDULED_MODEL_KEY] = settings.model
-        # The prompt owns its thread, or answers in its chain's thread, and the session that goes with it, even for an
-        # agent in room thread mode.
-        extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
+        if chain.settings.model is not None:
+            extra_content[SCHEDULED_MODEL_KEY] = chain.settings.model
         return await bot._hook_send_message(
-            room_id,
+            chain.room_id,
             # Only a mentioned agent answers a message in a room with other responders.
-            f"@{agent_name} {ask.text}",
+            f"@{chain.agent_name} {text}",
             thread_id,
-            settings.name,
-            extra_content or None,
+            chain.settings.name,
+            extra_content,
             trigger_dispatch=True,
         )

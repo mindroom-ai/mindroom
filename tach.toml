@@ -7994,6 +7994,7 @@ visibility = ["mindroom.automations.runner"]
 [[modules]]
 path = "mindroom.automations.memory_consolidation"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.logging_config",

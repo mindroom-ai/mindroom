@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import stat
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
+from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.automations.steps import Ask, Done
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
@@ -40,7 +42,6 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from mindroom.config.automations import MemoryConsolidationAutomation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -50,8 +51,10 @@ _RUNS_DIR = ".mindroom/memory_consolidation/runs"
 _MEMORY_DIR = "memory"
 _EXPORTS_DIR = "thread_exports"
 _DAILY_NOTE = re.compile(r"memory/(\d{4}-\d{2}-\d{2})\.md")
-# A workspace path memory cites, such as `knowledge/docs/setup.md` or `thread_exports/<room>/<thread>.yaml`.
-_CITATION = re.compile(r"(?<![\w./-])((?:knowledge|thread_exports)/[^\s`'\"<>()\[\]{}|*]+)")
+# A workspace path memory cites, such as `knowledge/docs/setup.md` or `thread_exports/<room>/<thread>.yaml`, without
+# a trailing anchor, line number, or punctuation.
+_CITATION = re.compile(r"(?<![\w./-])((?:knowledge|thread_exports)/[^\s`'\"<>()\[\]{}|*#]+)")
+_CITATION_SUFFIX = re.compile(r"(?::\d+(?:[-:]\d+)*)?[.,;:!?]*$")
 _MAX_INPUTS = 40
 # Enabling the automation starts from recent history instead of the whole archive.
 _SEED_AGE = timedelta(days=7)
@@ -64,7 +67,7 @@ _MAX_FILE_REMOVED_FRACTION = 0.5
 _MIN_FILE_REMOVED_ALLOWANCE = 2
 _DONE_LINE = "DREAM: DONE"
 # The verdict and its notes or reason, after an em dash, en dash, or hyphen.
-_VERDICT = re.compile(r"VERDICT:\s*(APPROVE-WITH-NOTES|APPROVE|REJECT)\b\s*(?:[\u2014\u2013-]+\s*)?(.*)")
+_VERDICT = re.compile(r"VERDICT:\s*(APPROVE[- ]WITH[- ]NOTES|APPROVE|REJECT)\b\s*(?:[\u2014\u2013-]+\s*)?(.*)")
 _MISSING = "missing"
 
 # An input's version: its modification time and size, or missing for a cited file that no longer exists.
@@ -157,6 +160,17 @@ def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State | None:
     )
 
 
+# The review's prompt is recorded while its run may already be ending, so every state change holds this lock.
+_STATE_LOCK = threading.Lock()
+
+
+def _update_state(runtime_paths: RuntimePaths, agent_name: str, change: Callable[[_State], None]) -> None:
+    with _STATE_LOCK:
+        state = _load_state(runtime_paths, agent_name) or _State()
+        change(state)
+        _save_state(runtime_paths, agent_name, state)
+
+
 def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> None:
     payload = {
         "reviewed": state.reviewed,
@@ -173,19 +187,27 @@ def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> 
 
 def _record_thread(runtime_paths: RuntimePaths, agent_name: str, thread_id: str) -> None:
     """Remember a thread this automation started, so its export is never read back as a conversation."""
-    state = _load_state(runtime_paths, agent_name) or _State()
-    state.own_threads.add(thread_id)
-    _save_state(runtime_paths, agent_name, state)
+    _update_state(runtime_paths, agent_name, lambda state: state.own_threads.add(thread_id))
 
 
 def _walk(directory_fd: int, prefix: str, found: dict[str, os.stat_result], rejected: list[str]) -> None:
-    """Collect regular files below a pinned directory, recording every link or special entry instead of following it."""
+    """Collect regular files below a pinned directory, recording every link or special entry instead of following it.
+
+    An entry that disappears during the walk, such as another writer's temporary file, is skipped.
+    """
     with os.scandir(directory_fd) as entries:
         for entry in entries:
             path = f"{prefix}/{entry.name}"
-            status = entry.stat(follow_symlinks=False)
-            if stat.S_ISDIR(status.st_mode):
-                child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            try:
+                status = entry.stat(follow_symlinks=False)
+                child = (
+                    os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                    if stat.S_ISDIR(status.st_mode)
+                    else None
+                )
+            except FileNotFoundError:
+                continue
+            if child is not None:
                 try:
                     _walk(child, path, found, rejected)
                 finally:
@@ -303,7 +325,7 @@ def _citations(snapshot: Mapping[str, bytes]) -> dict[str, list[str]]:
     cited: dict[str, set[str]] = {}
     for path, payload in snapshot.items():
         for match in _CITATION.finditer(payload.decode()):
-            cited.setdefault(match.group(1).rstrip(".,;:!?"), set()).add(path)
+            cited.setdefault(_CITATION_SUFFIX.sub("", match.group(1)), set()).add(path)
     return {spelled: sorted(paths) for spelled, paths in cited.items()}
 
 
@@ -395,12 +417,7 @@ def _agenda(run: _Run, state: _State, waiting: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def check_consolidation(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    settings: MemoryConsolidationAutomation,  # noqa: ARG001 - every built-in's check takes its settings
-) -> Ask | None:
+def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Ask | None:
     """Return the dream prompt when an input changed or a proposal is unapplied, or None.
 
     Raises ``OSError`` or ``ValueError`` when memory or the state cannot be read safely.
@@ -408,7 +425,7 @@ def check_consolidation(
     # Automations only run for shared agents, whose file memory is the workspace root.
     runtime = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=None)
     root = runtime.file_memory_root
-    if root is None or runtime.workspace is None or runtime.workspace.root != root:
+    if root is None:
         return None
     now = datetime.now(UTC)
     today = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
@@ -422,7 +439,7 @@ def check_consolidation(
     inputs = _collect_inputs(config, runtime_paths, agent_name, root, snapshot, tree.versions, today, state.own_threads)
     if first_run:
         state.reviewed = _seeded(inputs.values(), now)
-        _save_state(runtime_paths, agent_name, state)
+        _update_state(runtime_paths, agent_name, lambda saved: saved.reviewed.update(state.reviewed))
     due = sorted((item for item in inputs.values() if state.reviewed.get(item.path) != item.version), key=_order)
     if not due and state.pending_run is None:
         return None
@@ -466,8 +483,12 @@ def _read_optional(root: Path, path: str) -> str | None:
 
 
 def _last_line(text: str | None) -> str:
-    """Return the last non-blank line without the code or emphasis marks a model may wrap it in."""
-    lines = [stripped for line in (text or "").splitlines() if (stripped := line.strip().strip("`*_ "))]
+    """Return the last non-blank line without the code, emphasis, list, or quote marks a model may add to it."""
+    lines = [
+        stripped
+        for line in (text or "").splitlines()
+        if (stripped := line.replace("`", "").replace("*", "").strip().lstrip("->").strip())
+    ]
     return lines[-1] if lines else ""
 
 
@@ -484,7 +505,6 @@ class _Deletion:
 def _deletions(run: _Run, staged: Mapping[str, bytes]) -> list[_Deletion]:
     """List every deleted non-blank line, kept when it appears inside any staged line."""
     staged_text = "\n".join(payload.decode() for payload in staged.values())
-    staged_lines = {line.strip() for line in staged_text.splitlines()}
     deletions: list[_Deletion] = []
     for path, before in run.snapshot.items():
         old = before.decode().splitlines()
@@ -503,7 +523,7 @@ def _deletions(run: _Run, staged: Mapping[str, bytes]) -> list[_Deletion]:
                             path=path,
                             line=index + 1,
                             text=old[index],
-                            kept=text in staged_lines or text in staged_text,
+                            kept=text in staged_text,
                             before=old[index - 1] if index > 0 else None,
                             after=old[index + 1] if index + 1 < len(old) else None,
                         ),
@@ -600,9 +620,7 @@ def _after_dream(
     write_file_within_root(run.root, f"{run.run_dir}/proposal.patch", _patch(run, proposal).encode())
     write_file_within_root(run.root, f"{run.run_dir}/deleted.txt", _deletion_report(deletions).encode())
     # Pending from now on, so a restart before the review finishes still carries the proposal forward.
-    state = _load_state(run.runtime_paths, run.agent_name) or _State()
-    _keep_pending(state, run)
-    _save_state(run.runtime_paths, run.agent_name, state)
+    _update_state(run.runtime_paths, run.agent_name, partial(_keep_pending, run=run))
     return Ask(
         config.render_prompt(
             "MEMORY_CONSOLIDATION_VERIFY_TEMPLATE",
@@ -637,7 +655,7 @@ def _end_without_change(run: _Run, thread_id: str) -> Done:
     return _end(
         run,
         "unchanged",
-        f"Memory consolidation reviewed {len(run.due)} inputs and changed nothing.",
+        f"Memory consolidation changed nothing (inputs reviewed: {len(run.due)}).",
         resolve=(thread_id,),
     )
 
@@ -653,7 +671,7 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
     if timed_out:
         verdict, detail = "REJECT", "the review did not finish within an hour"
     elif match := _VERDICT.fullmatch(_last_line(_read_optional(run.root, f"{run.run_dir}/verdict.md"))):
-        verdict, detail = match.group(1), match.group(2).strip()
+        verdict, detail = match.group(1).replace(" ", "-"), match.group(2).strip()
     else:
         verdict, detail = "REJECT", "the review wrote no verdict line"
     if verdict == "REJECT":
@@ -673,14 +691,15 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
             carry=True,
         )
     for path, payload in proposal.changed.items():
-        write_file_within_root(run.root, path, payload)
+        _publish(run.root, path, payload)
     for path in proposal.deleted:
         parent, name = path.rsplit("/", 1)
         with open_directory_within_root(run.root, parent) as parent_fd:
             os.unlink(name, dir_fd=parent_fd)
     notes = detail if verdict == "APPROVE-WITH-NOTES" and detail else None
     summary = (
-        f"✅ Memory consolidation applied: {len(proposal.changed)} files written, {len(proposal.deleted)} removed."
+        f"✅ Memory consolidation applied the reviewed proposal "
+        f"(files written: {len(proposal.changed)}, removed: {len(proposal.deleted)})."
     )
     return _end(
         run,
@@ -692,6 +711,13 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         # The refresh is scheduled on the event loop, which this step does not run on.
         on_loop=partial(refresh_agent_memory_search, run.agent_name, run.root, config, run.runtime_paths),
     )
+
+
+def _publish(root: Path, path: str, payload: bytes) -> None:
+    """Replace one memory file atomically, keeping its permissions like the memory tool does."""
+    parent, name = path.rsplit("/", 1)
+    with open_directory_within_root(root, parent, create=True) as parent_fd:
+        atomic_write_bytes_at(parent_fd, name, payload, file_mode=existing_file_mode(parent_fd, name))
 
 
 def _keep_pending(state: _State, run: _Run) -> None:
@@ -715,21 +741,23 @@ def _end(
 
     ``carry`` keeps an unapplied proposal for the next run, unless an older one is still unresolved.
     """
-    state = _load_state(run.runtime_paths, run.agent_name) or _State()
-    if outcome in {"applied", "unchanged"}:
-        reviewed = {path: version for path, version in state.reviewed.items() if path in run.inputs}
-        for item in run.due:
-            reviewed[item.path] = item.version
-        # A daily note this run edited is handled at its new version, so the edit does not make it due again.
-        for path in applied:
-            if path in reviewed and (version := _version(run.root, path)) is not None:
-                reviewed[path] = version
-        state.reviewed = reviewed
-        state.pending_run = None
-        state.notes = notes
-    elif carry:
-        _keep_pending(state, run)
-    _save_state(run.runtime_paths, run.agent_name, state)
+
+    def record(state: _State) -> None:
+        if outcome in {"applied", "unchanged"}:
+            reviewed = {path: version for path, version in state.reviewed.items() if path in run.inputs}
+            for item in run.due:
+                reviewed[item.path] = item.version
+            # A daily note this run edited is handled at its new version, so the edit does not make it due again.
+            for path in applied:
+                if path in reviewed and (version := _version(run.root, path)) is not None:
+                    reviewed[path] = version
+            state.reviewed = reviewed
+            state.pending_run = None
+            state.notes = notes
+        elif carry:
+            _keep_pending(state, run)
+
+    _update_state(run.runtime_paths, run.agent_name, record)
     try:
         with open_directory_within_root(run.root, run.run_dir) as run_fd:
             shutil.rmtree("staging", dir_fd=run_fd)

@@ -297,7 +297,7 @@ When you finish, MindRoom measures the files again and asks you to re-check if a
 Reply with one line saying what you changed."""
 PROMPT_CURATION_RECHECK_TEMPLATE = """⚠️ Prompt maintenance needs a re-check: {findings}.
 Compare your change with the commit you made before it, fix what is listed, and reply with one line saying what you fixed."""
-MEMORY_CONSOLIDATION_DREAM_TEMPLATE = """🌙 Memory consolidation: {input_count} inputs changed since your memory was last reconciled; the agenda is `{agenda_path}`.
+MEMORY_CONSOLIDATION_DREAM_TEMPLATE = """🌙 Memory consolidation: reconcile your memory with what changed since its last reconciliation, listed in the agenda `{agenda_path}` (changed inputs this run: {input_count}).
 
 Work only in `{staging_path}`, a copy of your memory/ files made for this run, and never edit memory/ itself; a separate review checks your change, and MindRoom applies it once approved.
 Work through the agenda in order:

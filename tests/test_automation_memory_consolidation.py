@@ -79,7 +79,7 @@ class _Workspace:
         return (self.root / path).read_text(encoding="utf-8")
 
     def check(self) -> Ask | None:
-        return check_consolidation(self.config, self.paths, "mind", MemoryConsolidationAutomation())
+        return check_consolidation(self.config, self.paths, "mind")
 
     def run_dir(self) -> Path:
         runs = sorted((self.root / ".mindroom/memory_consolidation/runs").iterdir())
@@ -167,7 +167,8 @@ def test_recent_conversations_and_daily_notes_are_on_the_agenda_and_today_is_not
     ask = _started(workspace)
 
     assert ask.new_thread
-    assert ask.text.startswith("🌙 Memory consolidation: 2 inputs changed")
+    assert ask.text.startswith("🌙 Memory consolidation: reconcile your memory")
+    assert "(changed inputs this run: 2)" in ask.text
     agenda = workspace.agenda()
     assert f"- `{EXPORT}`" in agenda
     assert f"- `{YESTERDAY}`" in agenda
@@ -195,7 +196,7 @@ def test_the_cap_leaves_the_rest_due_for_the_next_run(tmp_path: Path) -> None:
 
     done = workspace.dream(ask)
     assert isinstance(done, Done)
-    assert done.notice == "Memory consolidation reviewed 40 inputs and changed nothing."
+    assert done.notice == "Memory consolidation changed nothing (inputs reviewed: 40)."
     assert done.resolve == ("$dream",)
     _started(workspace)
     assert workspace.agenda().count("- `thread_exports/") == 5
@@ -226,6 +227,57 @@ def test_changed_and_dead_citations_are_on_the_agenda_under_the_path_memory_uses
     assert workspace.check() is None
     workspace.write("source_docs/setup.md", "Install with uv sync.\n")
     assert workspace.check() is not None
+
+
+def test_a_citation_with_an_anchor_or_line_number_cites_the_file(tmp_path: Path) -> None:
+    """`#section` and `:line` suffixes point into a file that exists, so it is not a dead citation."""
+    workspace = _Workspace(tmp_path)
+    workspace.add_knowledge_base("docs", "source_docs")
+    workspace.write("source_docs/setup.md", "Install with uv.\n", age=timedelta(days=30))
+    workspace.write(EXPORT, "messages: []\n", age=timedelta(days=30))
+    workspace.write(
+        "memory/setup.md",
+        f"- Install with uv (`knowledge/docs/setup.md#install`).\n- Decided in {EXPORT}:12.\n",
+        age=timedelta(days=30),
+    )
+
+    assert workspace.check() is None
+    assert {"source_docs/setup.md", EXPORT} <= set(workspace.state()["reviewed"])
+
+
+def test_an_entry_that_vanishes_during_the_scan_is_skipped(tmp_path: Path) -> None:
+    """Another writer's temporary file can disappear between listing and reading without failing the check."""
+    workspace = _workspace(tmp_path)
+    workspace.write(EXPORT, "messages: [hello]\n")
+    workspace.write("thread_exports/room/.thread.yaml.tmp", "partial\n")
+    real_scandir = os.scandir
+
+    class _Vanished:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self.name = entry.name
+            self._entry = entry
+
+        def stat(self, *, follow_symlinks: bool) -> os.stat_result:
+            if self.name.endswith(".tmp"):
+                raise FileNotFoundError(self.name)
+            return self._entry.stat(follow_symlinks=follow_symlinks)
+
+    class _Listing:
+        def __init__(self, fd: int) -> None:
+            self._listing = real_scandir(fd)
+
+        def __enter__(self) -> list[_Vanished]:
+            return [_Vanished(entry) for entry in self._listing.__enter__()]
+
+        def __exit__(self, *exc: object) -> None:
+            self._listing.__exit__(*exc)
+
+    with patch("mindroom.automations.memory_consolidation.os.scandir", side_effect=_Listing):
+        ask = _started(workspace)
+
+    assert f"- `{EXPORT}`" in workspace.agenda()
+    assert (workspace.run_dir() / "staging" / "memory" / "projects.md").read_text(encoding="utf-8") == PROJECTS
+    assert ask.new_thread
 
 
 def test_threads_the_automation_started_are_never_read_back(tmp_path: Path) -> None:
@@ -393,7 +445,7 @@ def test_an_approved_proposal_writes_only_what_changed_and_resolves_both_threads
 
     done = workspace.review(review, "VERDICT: APPROVE")
 
-    assert done.notice == "✅ Memory consolidation applied: 2 files written, 1 removed."
+    assert done.notice == "✅ Memory consolidation applied the reviewed proposal (files written: 2, removed: 1)."
     assert done.resolve == ("$dream", "$verify")
     assert workspace.read("memory/projects.md") == corrected
     assert workspace.read("memory/people/person-7.md") == "- Owns project 3.\n"
@@ -463,6 +515,40 @@ def test_a_daily_note_the_run_edited_is_not_due_again(tmp_path: Path) -> None:
     assert workspace.check() is None
 
 
+@pytest.mark.parametrize(
+    ("verdict", "notes"),
+    [
+        ("- VERDICT: APPROVE", None),
+        ("**VERDICT:** APPROVE", None),
+        ("> VERDICT: APPROVE WITH NOTES - count the moved lines", "count the moved lines"),
+    ],
+)
+def test_a_verdict_line_with_markdown_marks_still_counts(tmp_path: Path, verdict: str, notes: str | None) -> None:
+    """A copied bullet, bold label, quote, or spelled-out notes verdict is read as the model meant it."""
+    workspace = _workspace(tmp_path)
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+
+    done = workspace.review(workspace.dream(ask, report="Done.\n**DREAM:** DONE\n"), verdict)
+
+    assert done.notice.startswith("✅ Memory consolidation applied")
+    assert workspace.state()["notes"] == notes
+
+
+def test_an_applied_file_keeps_its_permissions(tmp_path: Path) -> None:
+    """Rewriting a memory file keeps its mode, like the memory tool does."""
+    workspace = _workspace(tmp_path)
+    (workspace.root / "memory/projects.md").chmod(0o644)
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+
+    workspace.review(workspace.dream(ask), "VERDICT: APPROVE")
+
+    assert (workspace.root / "memory/projects.md").stat().st_mode & 0o777 == 0o644
+
+
 def test_approve_with_notes_applies_and_hands_the_notes_to_the_next_run(tmp_path: Path) -> None:
     """Process notes do not hold back a sound patch; they lead the next agenda."""
     workspace = _workspace(tmp_path)
@@ -473,7 +559,7 @@ def test_approve_with_notes_applies_and_hands_the_notes_to_the_next_run(tmp_path
     done = workspace.review(workspace.dream(ask), "`VERDICT: APPROVE-WITH-NOTES — the report miscounts the changes`")
 
     assert done.notice == (
-        "✅ Memory consolidation applied: 1 files written, 0 removed. "
+        "✅ Memory consolidation applied the reviewed proposal (files written: 1, removed: 0). "
         "Notes for the next run: the report miscounts the changes"
     )
     workspace.write(EXPORT, "messages: [hello, again]\n")

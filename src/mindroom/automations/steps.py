@@ -32,7 +32,7 @@ class Ask:
 class Done:
     """End the chain: post ``notice`` in the last prompt's thread without mentioning the agent, and resolve threads."""
 
-    notice: str | None
+    notice: str
     resolve: tuple[str, ...] = ()
     # Called on the event loop, for work that must be scheduled there, such as a background re-index.
     on_loop: Callable[[], None] | None = None

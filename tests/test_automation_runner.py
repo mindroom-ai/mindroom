@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -15,7 +16,7 @@ from mindroom.automations.runner import AutomationRunner
 from mindroom.automations.steps import Ask, Done
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
-from mindroom.config.automations import PromptCurationAutomation
+from mindroom.config.automations import MemoryConsolidationAutomation, PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
@@ -432,3 +433,54 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
     ]
     assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
     assert loops == [asyncio.get_running_loop()]
+
+
+@pytest.mark.asyncio
+async def test_memory_consolidation_runs_its_dream_and_review_through_the_runner(tmp_path: Path) -> None:
+    """The dream and review each get a thread of their own, both are recorded as the automation's, and approval applies."""
+    agent = AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        rooms=[ROOM],
+        automations=[MemoryConsolidationAutomation()],
+    )
+    config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    assert root is not None
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "people.md").write_text("- Sam lives in Delft.\n", encoding="utf-8")
+    (root / "thread_exports" / "room").mkdir(parents=True)
+    (root / "thread_exports" / "room" / "thread.yaml").write_text(
+        "messages: [Sam moved to Utrecht]\n",
+        encoding="utf-8",
+    )
+    bot = _Bot()
+    runner = AutomationRunner(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
+    )
+
+    with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+        (run_dir,) = (root / ".mindroom/memory_consolidation/runs").iterdir()
+        (run_dir / "staging/memory/people.md").write_text("- Sam lives in Utrecht.\n", encoding="utf-8")
+        (run_dir / "report.md").write_text("Moved Sam.\nDREAM: DONE\n", encoding="utf-8")
+        runner.response_finished(["$event1"])
+        assert await wait_for_background_tasks(5)
+        (run_dir / "verdict.md").write_text("Checked.\nVERDICT: APPROVE\n", encoding="utf-8")
+        runner.response_finished(["$event2"])
+        assert await wait_for_background_tasks(5)
+
+    dream, review, notice = bot.sent
+    assert dream["body"].startswith("@mind 🌙 Memory consolidation: reconcile your memory")
+    assert review["body"].startswith("@mind 🔍 Memory consolidation review:")
+    assert notice["body"] == "✅ Memory consolidation applied the reviewed proposal (files written: 1, removed: 0)."
+    assert [message["thread_id"] for message in bot.sent] == [None, None, "$event2"]
+    assert (root / "memory" / "people.md").read_text(encoding="utf-8") == "- Sam lives in Utrecht.\n"
+    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    state = json.loads((tmp_path / "tracking/automations/mind/memory_consolidation.json").read_text(encoding="utf-8"))
+    assert state["own_threads"] == ["$event1", "$event2"]
+    assert "mind:memory_consolidation" not in runner._active
