@@ -19,7 +19,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.handled_turns import TurnRecordCodec
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
-from .models import DeliveryStage
+from .models import SUPERSEDED_FAILURE_REASON, DeliveryStage
 from .projection import is_tombstoned
 from .replies import AppliedTransition, adopt_historical_answer, apply, row_facts
 
@@ -133,7 +133,9 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans and give its outbox rows reply identity.
 # Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
-# reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources), the
+# reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources;
+# approvals a newer edit's answer replaced keep theirs on that answer's reply, finished unless its rows are in flight,
+# and their cleanup runs), the
 # state a frozen unacknowledged FINAL implies with its sources settled and its turn answered, a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; an
@@ -159,16 +161,14 @@ def classify(
     # One Matrix event is one reply: an edit's newer approval pauses the
     # event its original turn's rows created, and that event is adopted once.
     adopted_events: set[str] = set()
-    for continuation, superseded in _newest_continuations(transaction, principal_id, entity_name):
+    # Replies a newer edit's answer replaced, which only superseded approvals still name.
+    replaced: dict[str, tuple[ApprovalContinuation, ...]] = {}
+    for event_id, continuation, superseded in _newest_continuations(transaction, principal_id, entity_name):
+        if continuation is None:
+            replaced[event_id] = superseded
+            continue
         adoption = _paused_reply(transaction, principal_id, continuation, entity_name, presentations, now_ns)
-        adoption = replace(
-            adoption,
-            superseded=tuple(
-                # Paused before the pause that superseded it.
-                _pause_span(adoption.reply.reply_id, older, rl.SpanOutcome.SUPERSEDED, now_ns - 1)
-                for older in superseded
-            ),
-        )
+        adoption = replace(adoption, superseded=_superseded_pauses(adoption.reply.reply_id, superseded, now_ns))
         adoptions.append(adoption)
         adopted.update(span.delivery_id for span in adoption.spans)
         adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
@@ -179,11 +179,19 @@ def classify(
         adoption = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
         if adoption is None or adoption.reply.event_id in adopted_events:
             continue
+        if adoption.reply.event_id in replaced:
+            # The newer edit's answer is still in flight: its reply keeps the approvals it superseded.
+            superseded = replaced.pop(adoption.reply.event_id)
+            adoption = _with_replaced_approvals(adoption, superseded, now_ns)
         adoptions.append(adoption)
         adopted.add(delivery_id)
         adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
         if adoption.reply.event_id is not None:
             adopted_events.add(adoption.reply.event_id)
+    for event_id, superseded in replaced.items():
+        adoption = _replaced_reply(transaction, principal_id, event_id, superseded, entity_name, presentations, now_ns)
+        adoptions.append(adoption)
+        adopted_sources.update(source for span in adoption.superseded for source in span.sources.logical)
     adoptions.extend(
         _stream_created_reply(transaction, principal_id, record, entity_name, presentations, now_ns)
         for record in _pending_turns(transaction, principal_id, entity_name)
@@ -250,26 +258,87 @@ def _newest_continuations(
     transaction: Transaction,
     principal_id: str,
     entity_name: str,
-) -> tuple[tuple[ApprovalContinuation, tuple[ApprovalContinuation, ...]], ...]:
-    """Return the newest continuation of each earlier-release reply with the older ones it supersedes, as an edit does."""
+) -> tuple[tuple[str, ApprovalContinuation | None, tuple[ApprovalContinuation, ...]], ...]:
+    """Return each earlier-release reply's event, its newest live continuation, and the ones superseded on it.
+
+    A newer continuation supersedes older ones, as an edit does. A reply
+    whose newest answer replaced every continuation has no live one.
+    """
     newest: dict[str, ApprovalContinuation] = {}
     superseded: dict[str, list[ApprovalContinuation]] = {}
     for continuation in approval_continuations.for_principal(transaction, principal_id):
         if continuation.entity_name != entity_name:
             continue
-        if reply_messages.for_event(transaction, principal_id, continuation.response_event_id) is not None:
+        event_id = continuation.response_event_id
+        if reply_messages.for_event(transaction, principal_id, event_id) is not None:
             continue
-        older = newest.get(continuation.response_event_id)
+        if continuation.state == "failing" and continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
+            superseded.setdefault(event_id, []).append(continuation)
+            continue
+        older = newest.get(event_id)
         if older is not None:
             approval_continuations.fence(
                 transaction,
                 principal_id,
                 approval_id=older.approval_id,
-                reason=approval_continuations.SUPERSEDED_FAILURE_REASON,
+                reason=SUPERSEDED_FAILURE_REASON,
             )
-            superseded.setdefault(continuation.response_event_id, []).append(older)
-        newest[continuation.response_event_id] = continuation
-    return tuple((continuation, tuple(superseded.get(event_id, ()))) for event_id, continuation in newest.items())
+            superseded.setdefault(event_id, []).append(older)
+        newest[event_id] = continuation
+    return tuple(
+        (event_id, newest.get(event_id), tuple(superseded.get(event_id, ())))
+        for event_id in dict.fromkeys((*newest, *superseded))
+    )
+
+
+def _superseded_pauses(
+    reply_id: str,
+    superseded: tuple[ApprovalContinuation, ...],
+    now_ns: int,
+) -> tuple[rl.Span, ...]:
+    # Paused before whatever superseded them.
+    return tuple(_pause_span(reply_id, older, rl.SpanOutcome.SUPERSEDED, now_ns - 1) for older in superseded)
+
+
+def _with_replaced_approvals(
+    adoption: _Adoption,
+    superseded: tuple[ApprovalContinuation, ...],
+    now_ns: int,
+) -> _Adoption:
+    """Keep the pauses of approvals a newer answer replaced on that answer's reply, and run their cleanup."""
+    return replace(
+        adoption,
+        superseded=_superseded_pauses(adoption.reply.reply_id, superseded, now_ns),
+        effects=(*adoption.effects, *(rl.WakeApproval(older.approval_id) for older in superseded)),
+    )
+
+
+def _replaced_reply(
+    transaction: Transaction,
+    principal_id: str,
+    event_id: str,
+    superseded: tuple[ApprovalContinuation, ...],
+    entity_name: str,
+    presentations: LegacyPresentations,
+    now_ns: int,
+) -> _Adoption:
+    """The answer a newer edit delivered stands: the reply is finished, holding only the replaced approvals' pauses."""
+    newest = superseded[-1]
+    reply_id = _new_id()
+    pauses = _superseded_pauses(reply_id, superseded, now_ns)
+    reply = _reply(
+        transaction,
+        principal_id,
+        entity_name=entity_name,
+        room_id=newest.room_id,
+        thread_id=newest.thread_id,
+        state=rl.ReplyState.COMPLETED,
+        span=pauses[-1],
+        presentation=presentations.empty(newest.entity_kind == "team"),
+        now_ns=now_ns,
+        event_id=event_id,
+    )
+    return _with_replaced_approvals(_Adoption(reply=reply, spans=()), superseded, now_ns)
 
 
 def _reply(

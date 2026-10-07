@@ -10,6 +10,8 @@ import pytest
 from mindroom.event_journal import EventJournalStore, legacy_response_attempts, postgres_backend, sqlite_backend
 from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from mindroom.event_journal.approvals import StoredApprovalCard
+from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
+from mindroom.reply_lifecycle import ReplyState, WakeApproval
 from tests.legacy_reply_helpers import store_main_continuation
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_journal_upgrade_boundary import _LegacyDatabase
@@ -238,6 +240,42 @@ async def test_an_unclassified_continuation_settles_its_adopted_sources(legacy_d
         assert await principal.is_pending("$first")
         assert await principal.finish_approval_continuation("approval") is not None
         assert await principal.approval_continuation("approval") is None
+        assert not await principal.is_pending("$first")
+    finally:
+        await store.close()
+
+
+# A newer edit's regeneration answered the reply the approval paused, in v2026.10.199.
+_NEWER_ANSWER = """
+INSERT INTO response_attempts VALUES
+    ('@bot:example.org', '$edit', 'bot', '!room:example.org', 7, '$answer', '["$first","$second"]', 2, 5);
+INSERT INTO matrix_delivery_outbox (
+    principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
+    payload_json, result_json, edits_event_id, attempted, retired, acknowledged_event_id, created_at_ns
+) VALUES ('@bot:example.org', '$edit', 'final', 'm.room.message', '!room:example.org', 7, '', 'edit-transaction',
+    '{"body":"* regenerated"}', '{"body":"regenerated"}', '$answer', 1, 0, '$answer-edit', 2);
+"""
+
+
+@pytest.mark.asyncio
+async def test_an_approval_a_newer_answer_replaced_is_superseded(legacy_database: _LegacyDatabase) -> None:
+    """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it."""
+    legacy_database.execute(_ATTEMPT_OWNER)
+    legacy_database.execute(_NEWER_ANSWER)
+    store = legacy_database.open()
+    try:
+        principal = store.principal("@bot:example.org")
+        approval = await principal.approval_continuation("approval")
+        assert approval is not None
+        assert (approval.state, approval.failure_reason) == ("failing", SUPERSEDED_FAILURE_REASON)
+        await principal.replies.write_generation("gen-new", now_ns=10)
+        adopted = await principal.adopt_legacy_replies(entity_name="bot", presentations=LEGACY_PRESENTATIONS, now_ns=10)
+        assert [effect for applied in adopted for effect in applied.post_commit] == [WakeApproval("approval")]
+        reply = await principal.replies.for_event("$answer")
+        assert reply is not None
+        assert reply.state is ReplyState.COMPLETED
+        assert reply.approval_id is None
+        assert await principal.finish_approval_continuation("approval") is not None
         assert not await principal.is_pending("$first")
     finally:
         await store.close()

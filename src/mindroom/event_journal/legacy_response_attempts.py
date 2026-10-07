@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 from mindroom.handled_turns import TurnRecordCodec
 
 from . import journal, turn_records
+from .models import SUPERSEDED_FAILURE_REASON
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -105,6 +106,43 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
     }
 
 
+# LEGACY_COMPAT: Approvals whose reply a newer edit's answer already replaced.
+# Legacy format: a continuation whose response attempt a newer attempt of the same reply, room, membership, entity, and
+# logical sources superseded with a higher edit receipt order and an acknowledged answer FINAL editing the same event,
+# while its own FINAL holds no answer; v2026.10.199 retired such an approval's failure without a note.
+# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages fence an approval superseded
+# when the edit's regeneration claims its reply.
+# Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows and
+# keeps the approval's pause on it until its cleanup settles the sources it holds.
+# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded.
+def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool:
+    """Return whether a newer edit's acknowledged answer replaced the reply this attempt paused."""
+    row = transaction.fetchone(
+        """SELECT 1 AS present FROM response_attempts AS attempt
+        JOIN response_attempts AS newer
+          ON newer.principal_id = attempt.principal_id AND newer.room_id = attempt.room_id
+         AND newer.membership_epoch = attempt.membership_epoch
+         AND newer.response_event_id = attempt.response_event_id AND newer.entity_name = attempt.entity_name
+         AND newer.logical_source_key = attempt.logical_source_key
+         AND newer.edit_receipt_order > COALESCE(NULLIF(attempt.edit_receipt_order, 0), attempt.selected_receipt_order)
+        JOIN matrix_delivery_outbox AS delivery
+          ON delivery.principal_id = newer.principal_id AND delivery.delivery_id = newer.driving_event_id
+         AND delivery.room_id = newer.room_id AND delivery.membership_epoch = newer.membership_epoch
+         AND delivery.edits_event_id = newer.response_event_id
+        WHERE attempt.principal_id = ? AND attempt.driving_event_id = ? AND delivery.stage = 'final'
+          AND delivery.acknowledged_event_id IS NOT NULL AND delivery.result_json IS NOT NULL
+          AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS own
+            WHERE own.principal_id = attempt.principal_id AND own.delivery_id = attempt.driving_event_id
+              AND own.stage = 'final' AND own.result_json IS NOT NULL
+          )
+        LIMIT 1""",
+        (principal_id, driving),
+    )
+    return row is not None
+
+
 def _context_identity(entity_name: str, pending: list[str], context: Mapping[str, object]) -> dict[str, object]:
     """Read the identity v2026.9.137 and earlier kept in the continuation's context."""
     room_id = _required_text(context.get("room_id"))
@@ -195,6 +233,13 @@ def upgrade_continuation_identity(
                 stored,
             )
             claimed = row["state"] == "claimed"
+            if attempts and row["state"] != "failing" and _replaced(transaction, principal_id, pending[0]):
+                transaction.execute(
+                    """UPDATE approval_continuations SET state = 'failing', failure_reason = ?, runtime_generation = NULL
+                    WHERE principal_id = ? AND approval_id = ?""",
+                    (SUPERSEDED_FAILURE_REASON, principal_id, approval_id),
+                )
+                claimed = False
             stored[_IDENTITY_KEY] = {
                 **identity,
                 "thread_id": stored.get("thread_id"),
