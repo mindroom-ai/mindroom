@@ -781,7 +781,7 @@ To remove grants ConfigMaps that older chart versions left in the namespace, run
 ## Background Script Gateway
 
 Background scripts on Kubernetes workers call governed tools through the primary's capability-authenticated script gateway.
-MindRoom admits them only when workers reach that gateway through a listener that serves nothing else, because the general API port exposes more authority.
+MindRoom admits them only when workers reach that gateway through a listener that serves only the script gateway and capability-authenticated Agent CLI routes, because the general API port exposes more authority.
 Set `scriptGateway.enabled` to have the primary serve that listener on its own port:
 
 ```yaml
@@ -799,8 +799,9 @@ scriptGateway:
   port: 8767
 ```
 
-The primary container then exposes a `script-gateway` port where MindRoom serves only `/api/script-gateway` routes and returns 404 for every other API route.
+The primary container then exposes a `script-gateway` port where MindRoom serves only `/api/script-gateway` and `/api/agent-cli` routes and returns 404 for every other API route.
 The chart renders a `<fullname>-script-gateway` ClusterIP Service for that port and sets `MINDROOM_SCRIPT_GATEWAY_PORT`, `MINDROOM_SCRIPT_GATEWAY_URL`, and `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` on the primary.
+Unless `MINDROOM_AGENT_CLI_PRIMARY_URL` is set, [minimal-mode](../../../docs/tools/agent-cli.md#shell-in-a-worker) worker shells also call MindRoom through that Service, so they need no access to the general API port.
 Worker pods receive the Service's cluster-local host name in `NO_PROXY` so gateway calls bypass the egress proxy.
 If `workers.kubernetes.extraEnv` replaces `NO_PROXY` or `no_proxy`, include that host name yourself.
 A `<fullname>-script-gateway-workers` NetworkPolicy in the worker namespace adds egress from workers to the gateway port on the control-plane pod.

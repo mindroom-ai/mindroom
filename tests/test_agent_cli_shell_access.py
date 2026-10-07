@@ -137,6 +137,13 @@ def api_address() -> Iterator[None]:
     clear_api_server_address()
 
 
+_ISOLATED_GATEWAY = {
+    "MINDROOM_SCRIPT_GATEWAY_PORT": "8767",
+    "MINDROOM_SCRIPT_GATEWAY_URL": "http://mindroom-script-gateway:8767/api/script-gateway",
+    "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+}
+
+
 def _worker_paths(tmp_path: Path, **env: str) -> RuntimePaths:
     return resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -153,6 +160,18 @@ def _worker_paths(tmp_path: Path, **env: str) -> RuntimePaths:
         (
             {"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://mindroom:8765/"},
             "http://mindroom:8765",
+        ),
+        (
+            {"MINDROOM_WORKER_BACKEND": "kubernetes", **_ISOLATED_GATEWAY},
+            "http://mindroom-script-gateway:8767",
+        ),
+        (
+            {
+                "MINDROOM_WORKER_BACKEND": "kubernetes",
+                **_ISOLATED_GATEWAY,
+                "MINDROOM_AGENT_CLI_PRIMARY_URL": "https://mindroom.example",
+            },
+            "https://mindroom.example",
         ),
     ],
 )
@@ -184,6 +203,29 @@ def test_worker_shells_without_a_known_address_or_key_list_every_fix(tmp_path: P
     problems = minimal_shell_problems(config, paths, "helper")
 
     assert [problem.split("`")[1] for problem in problems] == ["MINDROOM_API_KEY", "MINDROOM_AGENT_CLI_PRIMARY_URL"]
+
+
+@pytest.mark.usefixtures("api_address")
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        {**_ISOLATED_GATEWAY, "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "false"},
+        {**_ISOLATED_GATEWAY, "MINDROOM_SCRIPT_GATEWAY_PORT": ""},
+        {**_ISOLATED_GATEWAY, "MINDROOM_SCRIPT_GATEWAY_URL": "https://proxy.example/prefix/api/script-gateway"},
+    ],
+    ids=["not-attested", "no-gateway-listener", "proxy-path-prefix"],
+)
+def test_worker_shells_use_only_this_primarys_isolated_gateway_listener(
+    tmp_path: Path,
+    gateway: dict[str, str],
+) -> None:
+    """A gateway URL that may not reach the gateway-only listener's CLI routes is not used."""
+    config = _runtime_context(tmp_path).config
+    paths = _worker_paths(tmp_path, MINDROOM_WORKER_BACKEND="kubernetes", **gateway)
+
+    problems = minimal_shell_problems(config, paths, "helper")
+
+    assert [problem.split("`")[1] for problem in problems] == ["MINDROOM_AGENT_CLI_PRIMARY_URL"]
 
 
 @pytest.mark.parametrize("worker", [False, True], ids=["local", "worker"])

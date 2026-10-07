@@ -2704,6 +2704,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
                 host=host,
                 broker=None if script_runtime is None else script_runtime.broker,
                 log_level=log_level,
+                agent_cli_registry=agent_cli_registry,
             ):
                 await server.serve()
         except SystemExit as exc:
