@@ -11,23 +11,30 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.automations import automation
 from mindroom.automations import runner as runner_module
+from mindroom.automations.registry import AutomationDefinition, compile_automations
 from mindroom.automations.runner import AutomationRunner
-from mindroom.automations.steps import Ask, Done
+from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
-from mindroom.config.automations import DreamingAutomation, PromptCurationAutomation
+from mindroom.config.automations import DreamingAutomation, PluginAutomation, PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from datetime import tzinfo
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.config.automations import Automation
+    from mindroom.config.memory import MemoryBackend
     from mindroom.constants import RuntimePaths
 
 ROOM = "!room:example.test"
@@ -75,26 +82,34 @@ def _setup(
     *,
     memory: str = MEMORY,
     rooms: list[str] | None = None,
+    automations: list[Automation] | None = None,
+    memory_backend: MemoryBackend = "file",
 ) -> tuple[Config, RuntimePaths, AutomationRunner, _Bot]:
     agent = AgentConfig(
         display_name="Mind",
-        memory_backend="file",
+        memory_backend=memory_backend,
         rooms=[ROOM] if rooms is None else rooms,
-        automations=[PromptCurationAutomation(trigger_tokens=1_000)],
+        automations=[PromptCurationAutomation(trigger_tokens=1_000)] if automations is None else automations,
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
-    assert root is not None
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "MEMORY.md").write_text(memory, encoding="utf-8")
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "MEMORY.md").write_text(memory, encoding="utf-8")
     bot = _Bot()
     runner = AutomationRunner(
         runtime_paths=paths,
         config_provider=lambda: config,
         bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
+        definition_provider=compile_automations([]).get,
     )
     return config, paths, runner, bot
+
+
+def _use_check(runner: AutomationRunner, check: Callable[[AutomationContext], Ask | None]) -> None:
+    """Make every enabled automation run ``check``, so a test controls what the chain does."""
+    runner.definition_provider = lambda name: AutomationDefinition(name, check, requires_file_memory=False)
 
 
 async def _tick(runner: AutomationRunner, now: datetime) -> None:
@@ -114,7 +129,7 @@ async def test_a_due_check_posts_a_visible_prompt_that_the_agent_answers(tmp_pat
     (prompt,) = bot.sent
     assert prompt["room_id"] == ROOM
     assert prompt["thread_id"] is None
-    assert prompt["source_hook"] == "prompt_curation"
+    assert prompt["source_hook"] == "automation/prompt_curation"
     assert prompt["trigger_dispatch"] is True
     assert prompt["body"].startswith("@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts")
     # No internal user is provisioned in this runtime, so no original sender is attached; the prompt owns its thread.
@@ -180,7 +195,7 @@ async def test_the_finished_response_triggers_verify_and_a_notice_in_the_prompt_
             "room_id": ROOM,
             "body": "Prompt maintenance changed nothing; the files stay at 1286 tokens.",
             "thread_id": "$event1",
-            "source_hook": "prompt_curation",
+            "source_hook": "automation/prompt_curation",
             "extra_content": None,
             "trigger_dispatch": False,
         },
@@ -296,9 +311,36 @@ async def test_a_run_that_never_reports_back_is_verified_after_an_hour(tmp_path:
 
     await _tick(runner, DAY_LATER + timedelta(minutes=59))
     assert len(bot.sent) == 1
-    await _tick(runner, DAY_LATER + timedelta(hours=1))
+    await _tick(runner, DAY_LATER + timedelta(hours=1, minutes=1))
 
     assert [message["thread_id"] for message in bot.sent] == [None, "$event1"]
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_hour_starts_when_the_prompt_is_delivered(tmp_path: Path) -> None:
+    """A check that takes ten minutes does not shorten the hour the agent has to answer."""
+    _config, _paths, runner, bot = _setup(tmp_path)
+
+    class _Clock(datetime):
+        offset = timedelta(0)
+
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return datetime.now(tz) + cls.offset
+
+    def slow(_ctx: AutomationContext) -> Ask | None:
+        _Clock.offset += timedelta(minutes=10)
+        return Ask("Do the work", new_thread=True, then=lambda _config, _thread, timed_out: Done(f"late={timed_out}"))
+
+    _use_check(runner, slow)
+    with patch.object(runner_module, "datetime", _Clock):
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+        await _tick(runner, DAY_LATER + timedelta(hours=1, minutes=5))
+        assert len(bot.sent) == 1
+        await _tick(runner, DAY_LATER + timedelta(hours=1, minutes=11))
+
+    assert [message["body"] for message in bot.sent] == ["@mind Do the work", "late=True"]
 
 
 @pytest.mark.asyncio
@@ -373,8 +415,12 @@ async def test_a_check_that_cannot_read_its_files_posts_a_visible_notice(tmp_pat
     _config, _paths, runner, bot = _setup(tmp_path)
     await _tick(runner, NOON)
 
-    with patch.object(runner_module, "check_curation", side_effect=ValueError("MEMORY.md is not valid UTF-8")):
-        await _tick(runner, DAY_LATER)
+    def unreadable(_ctx: AutomationContext) -> Ask | None:
+        msg = "MEMORY.md is not valid UTF-8"
+        raise ValueError(msg)
+
+    _use_check(runner, unreadable)
+    await _tick(runner, DAY_LATER)
 
     (notice,) = bot.sent
     assert notice["body"] == "⚠️ The prompt_curation automation could not run: MEMORY.md is not valid UTF-8"
@@ -392,13 +438,9 @@ async def test_a_step_that_fails_posts_a_notice_in_its_thread_and_ends_the_chain
         msg = "memory/ is a link"
         raise OSError(msg)
 
-    with patch.object(
-        runner_module,
-        "check_curation",
-        return_value=Ask("Do the work", new_thread=True, then=broken_step),
-    ):
-        await _tick(runner, NOON)
-        await _tick(runner, DAY_LATER)
+    _use_check(runner, lambda _ctx: Ask("Do the work", new_thread=True, then=broken_step))
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
     runner.response_finished(["$event1"])
     assert await wait_for_background_tasks(5)
 
@@ -418,10 +460,8 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
     review = Ask("Review it", new_thread=True, then=lambda _config, _thread, _timed_out: finish)
     first = Ask("Draft it", new_thread=True, then=lambda _config, _thread, _timed_out: review)
 
-    with (
-        patch.object(runner_module, "check_curation", return_value=first),
-        patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag,
-    ):
+    _use_check(runner, lambda _ctx: first)
+    with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
         runner.response_finished(["$event1"])
@@ -463,6 +503,7 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
         runtime_paths=paths,
         config_provider=lambda: config,
         bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
+        definition_provider=compile_automations([]).get,
     )
 
     with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
@@ -516,3 +557,96 @@ async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
 
     assert bot.sent[1]["body"].startswith("Dreaming changed nothing")
     assert bot.sent[2]["body"].startswith("@mind 🧹 Prompt maintenance")
+
+
+class _Plugin:
+    def __init__(self, name: str, *checks: object, settings: dict[str, object] | None = None) -> None:
+        self.name = name
+        self.entry_config = PluginEntryConfig(path=name, settings=settings or {})
+        self.discovered_automations = checks
+
+
+DIGEST = PluginAutomation(name="weekly_digest", cron="0 12 * * *", options={"target": "digest.md"})
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_automation_runs_its_chain_through_the_runner(tmp_path: Path) -> None:
+    """A plugin check gets its options and settings, posts in its own thread, and its step's notice ends the chain."""
+    seen: list[tuple[object, object]] = []
+
+    @automation("weekly_digest")
+    def check(ctx: AutomationContext) -> Ask | None:
+        seen.append((dict(ctx.options), dict(ctx.settings)))
+        return Ask(
+            "Write the digest",
+            new_thread=True,
+            then=lambda _config, thread, _timed_out: Done("Digest written", resolve=(thread,)),
+        )
+
+    _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST])
+    runner.definition_provider = compile_automations([_Plugin("digest", check, settings={"api": "x"})]).get
+    with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+        runner.response_finished(["$event1"])
+        assert await wait_for_background_tasks(5)
+
+    assert seen == [({"target": "digest.md"}, {"api": "x"})]
+    assert [(m["body"], m["source_hook"]) for m in bot.sent] == [
+        ("@mind Write the digest", "automation/weekly_digest"),
+        ("Digest written", "automation/weekly_digest"),
+    ]
+    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1"]
+    assert "mind" not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_an_entry_no_loaded_plugin_provides_is_skipped(tmp_path: Path) -> None:
+    """A missing plugin posts nothing and frees the agent; the occurrence is consumed, so the next one is tomorrow."""
+    _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST])
+    runner.definition_provider = compile_automations([]).get
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert bot.sent == []
+    assert "mind" not in runner._active
+    assert runner._next_due["mind:weekly_digest"][1] == DAY_LATER + timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_an_automation_needing_file_memory_is_skipped_on_another_backend(tmp_path: Path) -> None:
+    """A plugin automation that maintains file memory never runs for an agent without the file backend."""
+    calls: list[str] = []
+    check = automation("weekly_digest", requires_file_memory=True)(lambda ctx: calls.append(ctx.agent_name))
+    _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST], memory_backend="mem0")
+    runner.definition_provider = compile_automations([_Plugin("digest", check)]).get
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert calls == []
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_reload_between_steps_keeps_the_running_chain(tmp_path: Path) -> None:
+    """A chain finishes with the code that started it; the reloaded plugin applies from the next fire, on the same schedule."""
+    old = Ask("Old prompt", new_thread=True, then=lambda _config, _thread, _timed_out: Done("old step"))
+    new = Ask("New prompt", new_thread=True, then=lambda _config, _thread, _timed_out: Done("new step"))
+    _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST])
+    runner.definition_provider = compile_automations(
+        [_Plugin("digest", automation("weekly_digest")(lambda _ctx: old))],
+    ).get
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    due = runner._next_due["mind:weekly_digest"]
+
+    runner.definition_provider = compile_automations(
+        [_Plugin("digest", automation("weekly_digest")(lambda _ctx: new))],
+    ).get
+    await _tick(runner, DAY_LATER + timedelta(minutes=1))
+    runner.response_finished(["$event1"])
+    assert await wait_for_background_tasks(5)
+    await _tick(runner, DAY_LATER + timedelta(days=1))
+
+    assert runner._next_due["mind:weekly_digest"][1] == due[1] + timedelta(days=1)
+    assert [m["body"] for m in bot.sent] == ["@mind Old prompt", "old step", "@mind New prompt"]

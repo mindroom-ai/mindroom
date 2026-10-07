@@ -445,21 +445,20 @@
           "anyOf": [
             {
               "items": {
-                "discriminator": {
-                  "mapping": {
-                    "dreaming": "#/$defs/DreamingAutomation",
-                    "prompt_curation": "#/$defs/PromptCurationAutomation"
-                  },
-                  "propertyName": "name"
-                },
                 "oneOf": [
                   {
                     "$ref": "#/$defs/PromptCurationAutomation"
                   },
                   {
                     "$ref": "#/$defs/DreamingAutomation"
+                  },
+                  {
+                    "$ref": "#/$defs/PluginAutomation"
                   }
-                ]
+                ],
+                "discriminator": {
+                  "propertyName": "name"
+                }
               },
               "type": "array"
             },
@@ -1415,21 +1414,20 @@
           "default": [],
           "description": "Built-in automations, such as prompt_curation, for agents that do not list their own",
           "items": {
-            "discriminator": {
-              "mapping": {
-                "dreaming": "#/$defs/DreamingAutomation",
-                "prompt_curation": "#/$defs/PromptCurationAutomation"
-              },
-              "propertyName": "name"
-            },
             "oneOf": [
               {
                 "$ref": "#/$defs/PromptCurationAutomation"
               },
               {
                 "$ref": "#/$defs/DreamingAutomation"
+              },
+              {
+                "$ref": "#/$defs/PluginAutomation"
               }
-            ]
+            ],
+            "discriminator": {
+              "propertyName": "name"
+            }
           },
           "title": "Automations",
           "type": "array"
@@ -1543,7 +1541,10 @@
         }
       },
       "title": "DreamingAutomation",
-      "type": "object"
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "EmbedderConfig": {
       "description": "Configuration for memory embedder.",
@@ -3139,6 +3140,71 @@
       "title": "PersonalRoomsConfig",
       "type": "object"
     },
+    "PluginAutomation": {
+      "additionalProperties": false,
+      "description": "An automation a loaded plugin provides; its options mean what the plugin documents.",
+      "properties": {
+        "cron": {
+          "description": "When to check, in the configured timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model"
+        },
+        "name": {
+          "description": "Name of an automation a loaded plugin provides",
+          "not": {
+            "enum": [
+              "prompt_curation",
+              "dreaming"
+            ]
+          },
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "options": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Settings the plugin's automation reads",
+          "title": "Options",
+          "type": "object"
+        }
+      },
+      "required": [
+        "cron",
+        "name"
+      ],
+      "title": "Plugin automation",
+      "type": "object",
+      "x-mindroom": {
+        "union_tag": "plugin"
+      }
+    },
     "PluginEntryConfig": {
       "description": "Normalized plugin entry from the root config.",
       "properties": {
@@ -3255,7 +3321,10 @@
         }
       },
       "title": "PromptCurationAutomation",
-      "type": "object"
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "RealtimeCallProfile": {
       "additionalProperties": false,

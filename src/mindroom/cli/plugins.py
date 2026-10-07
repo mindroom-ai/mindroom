@@ -46,6 +46,7 @@ def plugin_check(
     console.print(f"[green]Plugin is compatible:[/green] {result.name}")
     console.print(f"  Tools:  {', '.join(result.tool_names) or 'none'}")
     console.print(f"  Hooks:  {', '.join(result.hook_names) or 'none'}")
+    console.print(f"  Automations: {', '.join(result.automation_names) or 'none'}")
     console.print(f"  Skills: {', '.join(result.skill_directories) or 'none'}")
 
 

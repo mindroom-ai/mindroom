@@ -19,21 +19,21 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
-from mindroom.automations.dreaming import check_dreaming
-from mindroom.automations.prompt_curation import check_curation
-from mindroom.automations.steps import Ask, Done
-from mindroom.automations.threads import record_automation_thread
+from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationContext, Done
+from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import create_background_task
-from mindroom.config.automations import PromptCurationAutomation
+from mindroom.config.automations import PluginAutomation
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from mindroom.automations.registry import AutomationDefinition
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.automations import Automation
     from mindroom.config.main import Config
@@ -53,6 +53,11 @@ class _Chain:
     agent_name: str
     settings: Automation
     room_id: str
+
+    @property
+    def hook_source(self) -> str:
+        """Return the hook source the chain's messages carry, which marks the turns they start as automation turns."""
+        return f"{AUTOMATION_HOOK_PREFIX}{self.settings.name}"
 
 
 @dataclass(frozen=True)
@@ -79,11 +84,29 @@ def _room_id(config: Config, runtime_paths: RuntimePaths, agent_name: str, room:
     return room_id if room_id.startswith("!") else None
 
 
-def _check(config: Config, runtime_paths: RuntimePaths, agent_name: str, automation: Automation) -> Ask | None:
+def _check(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    automation: Automation,
+    definition: AutomationDefinition,
+) -> Ask | None:
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
-    if isinstance(automation, PromptCurationAutomation):
-        return check_curation(config, runtime_paths, agent_name, automation)
-    return check_dreaming(config, runtime_paths, agent_name)
+    if definition.requires_file_memory and config.resolve_entity(agent_name).memory_backend != "file":
+        logger.warning("Automation needs file memory; skipped", agent=agent_name, automation=automation.name)
+        return None
+    runtime = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=None)
+    context = AutomationContext(
+        agent_name=agent_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        entry=automation,
+        options=automation.options if isinstance(automation, PluginAutomation) else {},
+        settings=definition.settings,
+        workspace=runtime.file_memory_root,
+        state_dir=automations_tracking_root(runtime_paths) / agent_name,
+    )
+    return definition.check(context)
 
 
 @dataclass
@@ -93,6 +116,8 @@ class AutomationRunner:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    # The automations the active plugin snapshot provides, beside the built-ins, by name.
+    definition_provider: Callable[[str], AutomationDefinition | None]
     # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
     _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
     # Agents with an automation between its check and the end of its chain; one agent's built-ins never overlap,
@@ -181,6 +206,7 @@ class AutomationRunner:
         now: datetime,
     ) -> None:
         posted = False
+        started = datetime.now(UTC)
         try:
             room_id = _room_id(config, self.runtime_paths, agent_name, automation.room)
             if room_id is None:
@@ -190,15 +216,23 @@ class AutomationRunner:
             if bot is None:
                 logger.warning("Automation agent is not running", agent=agent_name, automation=automation.name)
                 return
+            if (definition := self.definition_provider(automation.name)) is None:
+                logger.warning(
+                    "Automation is not provided by any loaded plugin",
+                    agent=agent_name,
+                    automation=automation.name,
+                )
+                return
             chain = _Chain(key, agent_name, automation, room_id)
             try:
-                step = await asyncio.to_thread(_check, config, self.runtime_paths, agent_name, automation)
+                step = await asyncio.to_thread(_check, config, self.runtime_paths, agent_name, automation, definition)
             except (OSError, ValueError) as exc:
                 logger.warning("Automation check failed", agent=agent_name, automation=automation.name, error=str(exc))
                 await self._notify(bot, chain, None, f"⚠️ The {automation.name} automation could not run: {exc}")
                 return
             if step is not None:
-                posted = await self._post(config, bot, chain, None, step, now)
+                # ``now`` is the tick's clock; the check's own run time is added to it.
+                posted = await self._post(config, bot, chain, None, step, now + (datetime.now(UTC) - started))
         finally:
             if not posted:
                 self._release(agent_name)
@@ -233,7 +267,7 @@ class AutomationRunner:
 
     async def _notify(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` without mentioning the agent, so it starts no run."""
-        await bot._hook_send_message(chain.room_id, text, thread_id, chain.settings.name)
+        await bot._hook_send_message(chain.room_id, text, thread_id, chain.hook_source)
 
     async def _post(
         self,
@@ -246,11 +280,14 @@ class AutomationRunner:
     ) -> bool:
         """Post ``ask`` and wait for its run; return whether it was posted."""
         target_thread = None if ask.new_thread else thread_id
+        send_started = datetime.now(UTC)
         event_id = await self._post_mention(config, bot, chain, ask.text, target_thread)
         if event_id is None:
             return False
         thread = event_id if target_thread is None else target_thread
-        self._pending[event_id] = _PendingRun(chain, thread, ask, now + _RUN_FALLBACK)
+        # The run's hour starts once the prompt is delivered, however long the check or the send took.
+        delivered = now + (datetime.now(UTC) - send_started)
+        self._pending[event_id] = _PendingRun(chain, thread, ask, delivered + _RUN_FALLBACK)
         self._wake.set()
         if target_thread is None:
             try:
@@ -302,7 +339,7 @@ class AutomationRunner:
             # Only a mentioned agent answers a message in a room with other responders.
             f"@{chain.agent_name} {text}",
             thread_id,
-            chain.settings.name,
+            chain.hook_source,
             extra_content,
             trigger_dispatch=True,
         )

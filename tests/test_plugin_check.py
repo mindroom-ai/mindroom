@@ -232,3 +232,40 @@ def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None
     assert result.exit_code == 2
     assert "does not exist" in result.output
     assert "Traceback (most recent call last)" not in result.output
+
+
+def test_check_plugin_lists_automations(tmp_path: Path) -> None:
+    """A plugin's automations are listed by name, like its hooks."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "digest", "hooks_module": "hooks.py"},
+        modules={
+            "hooks.py": (
+                "from mindroom.automations import automation\n"
+                "@automation('weekly_digest')\n"
+                "def check(ctx):\n"
+                "    return None\n"
+            ),
+        },
+    )
+
+    assert check_plugin(plugin_root).automation_names == ("weekly_digest",)
+
+
+def test_check_plugin_rejects_an_automation_named_like_a_built_in(tmp_path: Path) -> None:
+    """Built-in names are reserved, so a plugin cannot shadow `dreaming`."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "shadow", "hooks_module": "hooks.py"},
+        modules={
+            "hooks.py": (
+                "from mindroom.automations import automation\n"
+                "@automation('dreaming')\n"
+                "def check(ctx):\n"
+                "    return None\n"
+            ),
+        },
+    )
+
+    with pytest.raises(ValueError, match="dreaming"):
+        check_plugin(plugin_root)
