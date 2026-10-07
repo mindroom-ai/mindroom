@@ -5659,7 +5659,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
+expose = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
 from = ["mindroom.model_loading"]
 
 [[interfaces]]
@@ -6142,17 +6142,21 @@ expose = [
     "PluginValidationError",
     "_MODULE_IMPORT_CACHE",
     "_ModuleCacheEntry",
+    "_PLUGIN_CACHE",
     "_PluginBase",
     "_collect_plugin_bases",
     "_install_plugin_package_chain",
     "_log_skipped_plugin_entry",
     "_module_name",
+    "_prepare_module",
     "_reject_duplicate_plugin_manifest_names",
+    "_resolve_plugin_root",
     "_restore_plugin_package_chain",
     "_snapshot_plugin_package_chain",
 ]
 from = ["mindroom.tool_system.plugin_imports"]
 visibility = [
+    "mindroom.api.sandbox_runner",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registry_state",
