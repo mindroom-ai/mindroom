@@ -19,6 +19,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.handled_turns import TurnRecordCodec
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
+from .membership_state import claim_membership_epoch
 from .models import SUPERSEDED_FAILURE_REASON, DeliveryStage
 from .projection import is_tombstoned
 from .replies import AppliedTransition, adopt_historical_answer, apply, row_facts
@@ -976,6 +977,12 @@ def read_done(
             last,
             read,
             sources_pending=_any_pending(transaction, principal_id, last.sources.pending),
+            membership_current=claim_membership_epoch(
+                transaction,
+                principal_id,
+                room_id=reply.room_id,
+                expected_membership_epoch=reply.membership_epoch,
+            ),
             now_ns=now_ns,
         ),
     )

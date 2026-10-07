@@ -355,6 +355,18 @@ def _visible_event_ids(reply: Reply) -> tuple[str, ...]:
     return () if reply.event_id is None else (reply.event_id,)
 
 
+def _bound(reply: Reply, event_id: str, *, membership_current: bool) -> Reply:
+    """Bind the reply's event once it is known.
+
+    An event found after the reply was given up is removed, unless the room
+    was left, which drops everything owed to it.
+    """
+    bound = replace(reply, event_id=event_id)
+    if reply.state is ReplyState.GONE and membership_current:
+        bound = _with_redactions(bound, event_id)
+    return bound
+
+
 def _leaves_active(reply: Reply, new_state: ReplyState) -> Reply:
     """Queue the Stop button's redaction when the reply stops being active (I8).
 
@@ -896,11 +908,7 @@ def write_acknowledged(
             msg = f"Reply {reply.reply_id} is bound to {reply.event_id}, not {event_id}"
             raise _invalid(msg)
         if reply.event_id is None:
-            updated = replace(updated, event_id=event_id)
-            if reply.state is ReplyState.GONE and membership_current:
-                # Created after the reply was given up: the late event is removed,
-                # unless the room was left, which drops everything owed to it.
-                updated = _with_redactions(updated, event_id)
+            updated = _bound(updated, event_id, membership_current=membership_current)
     if updated.confirmed_seq is None or write.sequence > updated.confirmed_seq:
         updated = replace(updated, confirmed_seq=write.sequence)
         if write.sequence >= (updated.possibly_shown_seq or 0):
@@ -1894,7 +1902,15 @@ class LegacyRead:
     placeholder_only: bool = False
 
 
-def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pending: bool, now_ns: int) -> Transition:
+def legacy_read_done(
+    reply: Reply,
+    last: Span,
+    read: LegacyRead,
+    *,
+    sources_pending: bool,
+    membership_current: bool,
+    now_ns: int,
+) -> Transition:
     """Record what an earlier-release reply showed; a stream an earlier release stopped after its sources settled ends here.
 
     That stream gets the restart note when it was still streaming within
@@ -1907,12 +1923,9 @@ def legacy_read_done(reply: Reply, last: Span, read: LegacyRead, *, sources_pend
         return _unchanged(Outcome.DUPLICATE, reply)
     # What the event shows decides whether a later removal may redact it; a
     # read that found or knew nothing never claims it showed only the placeholder.
-    updated = replace(
-        reply,
-        legacy_pending=None,
-        event_id=reply.event_id or read.event_id,
-        placeholder_only=read.placeholder_only,
-    )
+    updated = replace(reply, legacy_pending=None, placeholder_only=read.placeholder_only)
+    if reply.event_id is None and read.event_id is not None:
+        updated = _bound(updated, read.event_id, membership_current=membership_current)
     if read.shown is not None:
         updated = replace(updated, presentation=read.shown, possibly_shown=read.shown)
     updated = _bump(updated, now_ns)

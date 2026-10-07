@@ -15,6 +15,7 @@ from mindroom.event_journal import (
     INTERRUPTED_FAILURE_REASON,
     ApprovalContinuation,
     DeliveryStage,
+    DepartureSource,
     EventKind,
     turn_records,
 )
@@ -28,6 +29,7 @@ from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord
+from tests.journal_membership_helpers import admit_room_membership
 from tests.legacy_reply_helpers import keep_main_paused_answer, store_main_continuation
 from tests.test_event_journal_store import ROOM, admit
 
@@ -392,6 +394,35 @@ async def test_a_pending_turn_whose_stream_created_its_reply_scans_for_it(journa
     found = await _only_reply(principal)
     assert found.event_id == "$streamed"
     assert found.legacy_pending is None
+
+
+@pytest.mark.parametrize("ended_by", ["deletion", "departure"])
+async def test_a_scanned_reply_that_ended_before_its_event_was_found_removes_it_unless_the_room_was_left(
+    journal_store: EventJournalStore,
+    ended_by: str,
+) -> None:
+    """A request deleted while the scan looks for its streamed reply has that event removed once the scan finds it.
+
+    Leaving the room drops everything owed to it, as for a late event a row creates.
+    """
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source")
+    (reply,) = await _adopt(principal)
+    assert reply.legacy_pending is rl.LegacyPending.ADOPTION_SCAN
+    if ended_by == "deletion":
+        await admit(principal, "$redaction", redacts="$source", kind=EventKind.REDACTION, content={})
+    else:
+        await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+    gone = await _only_reply(principal)
+    assert gone.state is rl.ReplyState.GONE
+    assert gone.redaction_pending == ()
+
+    await principal.finish_legacy_reply_read(reply.reply_id, rl.LegacyRead(event_id="$streamed"), now_ns=NOW)
+    found = await _only_reply(principal)
+    assert found.event_id == "$streamed"
+    assert found.legacy_pending is None
+    assert found.redaction_pending == (("$streamed",) if ended_by == "deletion" else ())
 
 
 async def test_an_unsettled_stop_reaches_the_reply_it_named(journal_store: EventJournalStore) -> None:
