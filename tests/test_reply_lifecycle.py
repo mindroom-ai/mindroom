@@ -491,6 +491,8 @@ def test_finish_of_a_stale_span_cancels_it() -> None:
 def test_approval_resume_finish_leaves_settlement_to_the_continuation() -> None:
     """A resumed reply's FINAL hands no sources over; the continuation's finish settles them."""
     reply, span = _turn()
+    # A resume runs while its continuation holds the reply.
+    reply = _held(reply)
     resume = replace(span, kind=SpanKind.APPROVAL_RESUME, approval_id="approval-1")
     transition = rl.finish(reply, resume, _write(reply, ReplyState.COMPLETED), now_ns=NOW)
     assert transition.row is not None
@@ -677,6 +679,64 @@ def test_an_edit_older_than_the_replys_stop_is_not_claimed() -> None:
         _context(reply, span, edit_receipt_order=9),
     )
     assert newer.claimed is not None
+
+
+def test_a_released_resumes_sources_settle_like_any_once_its_approval_is_gone() -> None:
+    """A release hands the resume's sources back to replay; a superseded replay or a removed entity settles them."""
+    reply, span, _transition = _paused()
+    resume = rl.claim(_request("resume", delivery_id="$source", approval_id="approval-1"), _context(reply, span))
+    assert resume.reply is not None
+    assert resume.claimed is not None
+    released = rl.approval_released(resume.reply, resume.claimed, now_ns=NOW)
+    assert released.reply is not None
+    # The release deleted the continuation, so the store loads the reply unheld.
+    unheld = _held(released.reply, None)
+    ended = _span_after(released, "resume")
+    superseded = rl.replay_superseded(unheld, ended, durable_write_debt=False, now_ns=NOW)
+    assert SettleSources("resume", answered=False) in superseded.effects
+    removed = rl.removed_entity(unheld, ended, now_ns=NOW)
+    assert removed.effects == (SettleSources("resume", answered=False),)
+
+
+def test_a_stop_racing_any_regeneration_exit_never_returns_to_unfinished_work() -> None:
+    """Suppression, a dispatch failure, or sources settling without an answer honor the Stop as a stopped exit does."""
+    for exit_rule in (
+        lambda reply, span: rl.suppress(reply, span, reason="suppressed", now_ns=NOW),
+        lambda reply, span: rl.dispatch_failed(reply, span, error_text="boom", now_ns=NOW),
+        lambda reply, span: rl.sources_settled_without_reply(reply, span, now_ns=NOW),
+    ):
+        reply, span = _interrupted_turn_regenerating()
+        stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+        assert stop.reply is not None
+        ended = exit_rule(stop.reply, span)
+        assert ended.reply is not None
+        assert ended.reply.state is ReplyState.CANCELLED, ended
+        assert not ended.reply.unapplied_stop
+
+
+def test_a_refused_cancelled_final_never_returns_to_unfinished_work() -> None:
+    """The Stop's own row refused for good fails the reply instead of restoring a turn that still waits for its retry."""
+    reply, span = _interrupted_turn_regenerating()
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    stopped = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
+    assert stopped.reply is not None
+    assert stopped.row is not None
+    facts = WriteFacts(
+        WriteStage.FINAL,
+        stopped.row.sequence,
+        span.span_id,
+        creates_event=False,
+        placeholder_only=False,
+    )
+    refused = rl.write_failed(
+        stopped.reply,
+        _span_after(stopped, span.span_id),
+        rl.FailedWrite(facts, "refused"),
+        now_ns=NOW,
+    )
+    assert refused.reply is not None
+    assert refused.reply.state is ReplyState.FAILED
 
 
 def test_a_stop_never_returns_a_regeneration_to_unfinished_work() -> None:

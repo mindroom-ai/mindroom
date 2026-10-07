@@ -380,8 +380,9 @@ def _settle_sources(reply: Reply, span: Span, *, answered: bool = True) -> tuple
     A resume's sources are its continuation's, and so are those of a span
     that waits in place: the continuation's finish settles them, and until
     then a wake that redispatches them is what runs its failure settlement.
+    Once a release handed them back to replay, the reply settles them as any.
     """
-    if span.kind is SpanKind.APPROVAL_RESUME or reply.approval_id is not None:
+    if reply.approval_id is not None:
         return ()
     return (SettleSources(span.span_id, answered=answered),)
 
@@ -590,9 +591,10 @@ def claim_blocked(reply: Reply, *, durable_write_debt: bool, driving_edit: bool)
 
     Earlier writes still unresolved, a note still owed, or a read an earlier
     release left would be overtaken by the new span. An edit also waits for an
-    approval that holds the reply past its decision: its run, or the settlement
-    a Stop or failure left, ends the reply first. One still waiting for its
-    decision does not hold an edit back: the edit supersedes it.
+    approval that holds the reply while a span runs for it or after that span
+    ended: that run, or the settlement a Stop or failure left, ends the reply
+    first. An approval that paused the reply with no span running for it does
+    not hold an edit back: the edit supersedes it.
     """
     if durable_write_debt or reply.owed_write is not None or reply.legacy_pending is not None:
         return True
@@ -986,7 +988,13 @@ def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, sequ
             outcome=Outcome.APPLIED,
             reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
         )
-    if _keeps_earlier_answer(reply, span, before_sequence=sequence):
+    # A refused cancelled row was the Stop's: it restores only a finished answer.
+    if _keeps_earlier_answer(
+        reply,
+        span,
+        finished_only=span.outcome is SpanOutcome.CANCELLED,
+        before_sequence=sequence,
+    ):
         return _restored(reply, span, now_ns)
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.FAILED, now_ns))
 
@@ -1222,7 +1230,7 @@ def suppress(
     if reply.event_id is None or reply.placeholder_only:
         gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
         return Transition(outcome=Outcome.APPLIED, reply=gone, spans=ended, effects=effects)
-    if _keeps_earlier_answer(reply, span):
+    if _keeps_earlier_answer(reply, span, finished_only=reply.unapplied_stop):
         return _restored(reply, span, now_ns, *effects)
     # What the reply showed stays, ended by a note: nothing else would replace the in-progress status it shows.
     if outcome is SpanOutcome.CANCELLED:
@@ -1347,8 +1355,8 @@ def approval_settled(
 ) -> Transition:
     """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
 
-    The turn stays unanswered when its sources were deleted or no owner is
-    left to answer it (``answers_turn``). Only an answer the span that ran the
+    The turn stays unanswered when no owner is left to answer it
+    (``answers_turn``); the store also leaves a deleted turn unanswered. Only an answer the span that ran the
     approved work completed consumes the edit a regeneration carries: a
     resume, or a span approved in place.
     """
@@ -1609,7 +1617,11 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
     """A dispatch failed before or after a claim: the reply shows the error."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if current is not None and not current.ended and _keeps_earlier_answer(reply, current):
+    if (
+        current is not None
+        and not current.ended
+        and _keeps_earlier_answer(reply, current, finished_only=reply.unapplied_stop)
+    ):
         return _restored(reply, current, now_ns, SettleSources(current.span_id))
     spans: tuple[Span, ...] = ()
     updated = reply
@@ -1637,7 +1649,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     if not (span.span_id == reply.current_span_id or span.outcome in _SOURCES_PENDING_OUTCOMES or awaiting_claim):
         return _unchanged(Outcome.STALE, reply)
     effects = _settle_sources(reply, span, answered=False)
-    if _keeps_earlier_answer(reply, span):
+    if _keeps_earlier_answer(reply, span, finished_only=reply.unapplied_stop):
         return _restored(reply, span, now_ns, *effects)
     spans: tuple[Span, ...] = ()
     updated = _clear_current(reply, span.span_id)

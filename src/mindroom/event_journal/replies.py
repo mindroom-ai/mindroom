@@ -114,11 +114,14 @@ def _run(
     match effect:
         case SettleSources(span_id=span_id, consumes_edit=consumes_edit, answered=answered):
             span = _span_for(transaction, principal_id, transition, span_id)
-            if not answered:
-                journal.settle_many(transaction, principal_id, span.sources.pending)
-                return
             reply = transition.reply
             assert reply is not None, "a settlement belongs to a reply's transition"
+            # Nothing answers a turn whose every message the user deleted, whichever rule settles it.
+            if not answered or all(
+                is_tombstoned(transaction, principal_id, reply.room_id, source) for source in span.sources.logical
+            ):
+                journal.settle_many(transaction, principal_id, span.sources.pending)
+                return
             completed = turn_records.settle_turn(
                 transaction,
                 principal_id,
@@ -265,15 +268,12 @@ def approval_finished(
 ) -> AppliedTransition | None:
     """Apply a finished continuation to the reply it paused, settling the sources its pause held.
 
-    Its turn stays unanswered when no owner is left to answer it or the user deleted every source it answers.
+    Its turn stays unanswered when no owner is left to answer it.
     """
     reply = lock_paused_reply(transaction, principal_id, continuation)
     if reply is None:
         return None
     assert continuation.span_id is not None, "a continuation with a reply names the span that paused it"
-    paused = reply_spans.load(transaction, principal_id, continuation.span_id)
-    assert paused is not None, "a continuation's paused span exists while it does"
-    deleted = all(is_tombstoned(transaction, principal_id, reply.room_id, source) for source in paused.sources.logical)
     failed = continuation.state == "failing"
     reason = continuation.failure_reason
     disposition: rl.FailureDisposition | None = None
@@ -295,7 +295,7 @@ def approval_finished(
             paused_span_id=continuation.span_id,
             result="failed" if failed else "finished",
             disposition=disposition,
-            answers_turn=owner_available and not deleted,
+            answers_turn=owner_available,
             now_ns=time.time_ns(),
         ),
     )
