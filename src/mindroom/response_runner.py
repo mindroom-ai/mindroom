@@ -343,12 +343,39 @@ def _resumed_reply() -> UnfinishedStreamedReply | None:
     return None if handle is None else handle.resumed
 
 
+def _existing_event(request: ResponseRequest) -> tuple[str | None, bool]:
+    """Return the event this response writes over, and whether that event is a placeholder rather than an answer.
+
+    Inside a span its reply's records say. Before the claim, the request names
+    the event it was dispatched for: an interactive selection's acknowledgement
+    is the placeholder its answer fills, while a regeneration or an approval
+    resume replaces an answer.
+    """
+    handle = current_span()
+    if handle is None:
+        event_id = request.existing_event_id
+        return event_id, event_id is not None and request.interactive_span_id is not None
+    reply = handle.reply
+    replaces_answer = handle.span.kind in {rl.SpanKind.REGENERATION, rl.SpanKind.APPROVAL_RESUME}
+    return reply.event_id, reply.event_id is not None and (not replaces_answer or reply.placeholder_only)
+
+
+def _existing_event_id(request: ResponseRequest) -> str | None:
+    """Return the event this response writes over, from its reply's records once claimed."""
+    return _existing_event(request)[0]
+
+
+def _shows_placeholder(request: ResponseRequest) -> bool:
+    """Return whether the event this response writes over is a placeholder rather than an answer."""
+    return _existing_event(request)[1]
+
+
 def _replaceable_placeholder(request: ResponseRequest) -> bool:
     """Return whether the adopted event holds only a placeholder that terminal handling may replace or redact.
 
     A resumed reply shows its stopped attempt's work, which no failure may remove.
     """
-    return request.existing_event_is_placeholder and _resumed_reply() is None
+    return _shows_placeholder(request) and _resumed_reply() is None
 
 
 def _split_delivery_tool_trace(
@@ -546,9 +573,11 @@ class ResponseRequest:
     participation: ParticipationConfig | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
+    # The event this response was dispatched to write over: the answer an edit
+    # regenerates or an approval resumes, or a selection's acknowledgement.
+    # Once claimed, the span's reply names the event instead.
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
-    existing_event_is_placeholder: bool = False
     # The span an interactive selection's acknowledgement created, which this answer adopts.
     interactive_span_id: str | None = None
     user_id: str | None = None
@@ -637,7 +666,7 @@ def _mid_turn_for_request(
     if gate is not None:
         # The ingress history may be stale until this response acquires the lock.
         gate.bind_conversation_context(None)
-    if gate is not None and request.existing_event_id and not request.existing_event_is_placeholder:
+    if gate is not None and request.existing_event_id and not _shows_placeholder(request):
         gate.visible_response_text = None
     return gate
 
@@ -665,7 +694,7 @@ def _participation_for_request(
 
 def _approve_continued_reply(participation: ParticipationGate | None, request: ResponseRequest) -> None:
     """A claim that continued a reply already showing this turn's answer needs no new participation decision."""
-    if participation is not None and request.existing_event_id is not None:
+    if participation is not None and _existing_event_id(request) is not None:
         participation.approve_existing_response()
 
 
@@ -765,7 +794,7 @@ async def _response_typing_indicator(
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
     """Return the thread root used for this response's model and delivery context."""
-    if request.existing_event_id and not request.existing_event_is_placeholder:
+    if _existing_event_id(request) and not _shows_placeholder(request):
         return request.thread_id
     return resolved_target.resolved_thread_id
 
@@ -2711,7 +2740,7 @@ class ResponseRunner:
                     identity=response_identity,
                     tool_trace=tool_trace,
                     extra_content=extra_content,
-                    existing_event_id=request.existing_event_id,
+                    existing_event_id=_existing_event_id(request),
                     existing_event_is_placeholder=_replaceable_placeholder(request),
                 ),
             )
@@ -3260,9 +3289,6 @@ class ResponseRunner:
         slot = current_slot()
         if slot is None:
             return request
-        # An edit regenerates the reply its turn record names; with no record
-        # of that reply, it is a historical answer with an unknown presentation.
-        regeneration = request.prepared_edit_record is not None
         try:
             handle = await self._claim_reply(replies, request, history_scope=history_scope)
         except rl.InvalidTransitionError as error:
@@ -3288,13 +3314,7 @@ class ResponseRunner:
                 request.source_handoff.set()
             return None
         slot.handle = handle
-        reply = handle.reply
-        return replace(
-            request,
-            existing_event_id=reply.event_id,
-            # A regeneration replaces an answer, not a placeholder, unless the reply shows only one.
-            existing_event_is_placeholder=reply.event_id is not None and (not regeneration or reply.placeholder_only),
-        )
+        return request
 
     async def _claim_reply(
         self,
@@ -3601,19 +3621,6 @@ class ResponseRunner:
 
         return persist_response_event_id
 
-    def _request_for_delivery(
-        self,
-        request: ResponseRequest,
-        *,
-        message_id: str | None,
-    ) -> ResponseRequest:
-        """Attach the current visible event id to one delivery request."""
-        if message_id is None:
-            return request
-        if request.existing_event_id is None:
-            return replace(request, existing_event_id=message_id, existing_event_is_placeholder=True)
-        return replace(request, existing_event_id=message_id)
-
     def _build_compaction_lifecycle(
         self,
         *,
@@ -3624,8 +3631,8 @@ class ResponseRunner:
         if _is_silent_schedule_response(request) or request.participation is not None:
             return None
         reply_to_event_id = (
-            request.existing_event_id
-            if request.existing_event_id is not None and request.existing_event_is_placeholder
+            _existing_event_id(request)
+            if _existing_event_id(request) is not None and _shows_placeholder(request)
             else request.reply_to_event_id
         )
         return MatrixCompactionLifecycle(
@@ -3955,7 +3962,7 @@ class ResponseRunner:
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
         self.deps.logger.info(
             "interrupted_attempt_resumed",
-            response_event_id=request.existing_event_id,
+            response_event_id=_existing_event_id(request),
             attempt_shown=unfinished is not None,
         )
         account = render_enrichment_block([EnrichmentItem(key="interrupted_attempt", text=instruction)])
@@ -4062,7 +4069,7 @@ class ResponseRunner:
         placeholder_event_id = None
         if (
             placeholder_message is not None
-            and request.existing_event_id is None
+            and _existing_event_id(request) is None
             and not await self._has_queued_forced_compaction(
                 session_id=resolved_target.session_id,
                 scope=history_scope,
@@ -4088,11 +4095,6 @@ class ResponseRunner:
             )
             if placeholder_event_id is not None:
                 placeholder_state.placeholder_sent = True
-                request = replace(
-                    request,
-                    existing_event_id=placeholder_event_id,
-                    existing_event_is_placeholder=True,
-                )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("placeholder_sent")
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
@@ -4177,7 +4179,7 @@ class ResponseRunner:
         # settlement writes what it shows.
         return FinalDeliveryOutcome(
             terminal_status="error",
-            event_id=progress.tracked_event_id or request.existing_event_id,
+            event_id=progress.tracked_event_id or _existing_event_id(request),
             is_visible_response=False,
             failure_reason=failure_reason,
         )
@@ -4241,7 +4243,7 @@ class ResponseRunner:
             await self._run_cancellable_response(
                 target=target,
                 response_function=response_function,
-                existing_event_id=request.existing_event_id,
+                existing_event_id=_existing_event_id(request),
                 user_id=user_id,
                 run_id=run_id,
                 on_cancelled=progress.note_task_cancelled,
@@ -4600,11 +4602,14 @@ class ResponseRunner:
         if request is None:
             return None
         team_request = replace(team_request, request=request)
+        # What the reply showed before this turn's delivery, which its terminal handling continues from.
+        team_existing_event_id = _existing_event_id(request)
+        team_replaceable_placeholder = _replaceable_placeholder(request)
         reason = team_request.resolution_reason
         if reason is not None:
             response_identity = self._response_identity(request, response_kind="team")
             lifecycle = self._build_lifecycle(identity=response_identity, request=request)
-            progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
+            progress = _DeliveryProgress(tracked_event_id=_existing_event_id(request))
 
             async def deliver_resolution_reason(message_id: str | None) -> None:
                 progress.settle(
@@ -4680,7 +4685,7 @@ class ResponseRunner:
         )
         delivery_target = (
             resolved_target
-            if request.existing_event_id is None or request.existing_event_is_placeholder
+            if _existing_event_id(request) is None or _shows_placeholder(request)
             else resolved_target.with_thread_root(request.thread_id)
         )
         delivery_request_base = resolved_request
@@ -4723,7 +4728,7 @@ class ResponseRunner:
             raise RuntimeError(msg)
         response_run_id = str(uuid4())
         team_run_metadata_content: dict[str, Any] = {}
-        progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
+        progress = _DeliveryProgress(tracked_event_id=_existing_event_id(request))
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = await self._active_response_event_ids(request.room_id)
         # Team entries refine entity_label to the materialized team label and
@@ -4784,7 +4789,7 @@ class ResponseRunner:
         )
 
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
-            delivery_request = self._request_for_delivery(delivery_request_base, message_id=message_id)
+            delivery_request = delivery_request_base
             if message_id is not None:
                 progress.track_event(message_id)
                 team_turn_recorder.set_response_event_id(message_id)
@@ -4801,9 +4806,7 @@ class ResponseRunner:
                 progress.track_event(response_event_id)
                 team_turn_recorder.set_response_event_id(response_event_id)
 
-            if use_streaming and (
-                delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
-            ):
+            if use_streaming and (_existing_event_id(delivery_request) is None or _shows_placeholder(delivery_request)):
                 async with _response_typing_indicator(
                     self._client(),
                     delivery_request,
@@ -4856,9 +4859,9 @@ class ResponseRunner:
                                 ),
                                 identity=response_identity,
                                 response_stream=response_stream,
-                                existing_event_id=delivery_request.existing_event_id,
-                                adopt_existing_placeholder=bool(delivery_request.existing_event_id)
-                                and delivery_request.existing_event_is_placeholder,
+                                existing_event_id=_existing_event_id(delivery_request),
+                                adopt_existing_placeholder=bool(_existing_event_id(delivery_request))
+                                and _shows_placeholder(delivery_request),
                                 show_tool_calls=show_tool_calls,
                                 # The live collector dict: the turn driver fills it
                                 # at terminal settle, before the stream's final
@@ -5053,15 +5056,15 @@ class ResponseRunner:
                 FinalizeStreamedResponseRequest(
                     target=delivery_target,
                     stream_transport_outcome=transport_outcome,
-                    initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                    initial_delivery_kind="edited" if team_existing_event_id else "sent",
                     identity=response_identity,
                     tool_trace=error.tool_trace if show_tool_calls else None,
                     extra_content=_merge_response_extra_content(
                         team_final_metadata_content(),
                         request.attachment_ids,
                     ),
-                    existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=_replaceable_placeholder(request),
+                    existing_event_id=team_existing_event_id,
+                    existing_event_is_placeholder=team_replaceable_placeholder,
                 ),
             )
 
@@ -5312,7 +5315,7 @@ class ResponseRunner:
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
                 is_team=False,
-                response_event_id=request.existing_event_id,
+                response_event_id=_existing_event_id(request),
             )
             raise
 
@@ -5413,9 +5416,8 @@ class ResponseRunner:
                         ),
                         identity=identity,
                         response_stream=wrapped_response_stream,
-                        existing_event_id=request.existing_event_id,
-                        adopt_existing_placeholder=bool(request.existing_event_id)
-                        and request.existing_event_is_placeholder,
+                        existing_event_id=_existing_event_id(request),
+                        adopt_existing_placeholder=bool(_existing_event_id(request)) and _shows_placeholder(request),
                         show_tool_calls=runtime.show_tool_calls,
                         extra_content=response_extra_content,
                         tool_trace_collector=tool_trace,
@@ -5440,7 +5442,7 @@ class ResponseRunner:
                         execution_identity=runtime.tool_dispatch.execution_identity,
                         run_id=run_id,
                         is_team=False,
-                        response_event_id=request.existing_event_id,
+                        response_event_id=_existing_event_id(request),
                     )
                 return transport_outcome
         except asyncio.CancelledError:
@@ -5453,7 +5455,7 @@ class ResponseRunner:
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
                 is_team=False,
-                response_event_id=request.existing_event_id,
+                response_event_id=_existing_event_id(request),
             )
             raise
 
@@ -5534,7 +5536,7 @@ class ResponseRunner:
                         session_id=runtime.session_id,
                         execution_identity=runtime.tool_dispatch.execution_identity,
                         run_id=run_id,
-                        response_event_id=request.existing_event_id,
+                        response_event_id=_existing_event_id(request),
                     )
             _raise_if_process_shutdown()
         except ResponsePausedForApproval:
@@ -5545,7 +5547,7 @@ class ResponseRunner:
             return build_outcome(
                 await self._settle_blocking_cancellation(
                     exc,
-                    message_id=request.existing_event_id,
+                    message_id=_existing_event_id(request),
                     restart_message="Non-streaming response interrupted by sync restart",
                     user_stop_message="Non-streaming response cancelled by user",
                     interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
@@ -5565,13 +5567,13 @@ class ResponseRunner:
             request.attachment_ids,
         )
         if on_delivery_started is not None:
-            on_delivery_started(request.existing_event_id)
+            on_delivery_started(_existing_event_id(request))
         try:
             delivery = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
                     target=runtime.resolved_target,
                     consumes_edit=request.prepared_edit_record is not None and turn_recorder.outcome == "completed",
-                    existing_event_id=request.existing_event_id,
+                    existing_event_id=_existing_event_id(request),
                     response_text=generation.response_text,
                     identity=response_identity,
                     tool_trace=generation.tool_trace if runtime.show_tool_calls else None,
@@ -5588,7 +5590,7 @@ class ResponseRunner:
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
                 is_team=False,
-                response_event_id=request.existing_event_id,
+                response_event_id=_existing_event_id(request),
             )
             raise
         self._note_final_delivery_timing(request, delivery)
@@ -5654,6 +5656,9 @@ class ResponseRunner:
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
             return _generation_outcome(delivery, turn_recorder)
 
+        # What the reply showed before this stream, which its terminal handling continues from.
+        existing_event_id = _existing_event_id(request)
+        replaceable_placeholder = _replaceable_placeholder(request)
         try:
             try:
                 with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
@@ -5717,12 +5722,12 @@ class ResponseRunner:
                     FinalizeStreamedResponseRequest(
                         target=runtime.resolved_target,
                         stream_transport_outcome=stream_transport_outcome,
-                        initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                        initial_delivery_kind="edited" if existing_event_id else "sent",
                         identity=response_identity,
                         tool_trace=error.tool_trace if runtime.show_tool_calls else None,
                         extra_content=response_extra_content,
-                        existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=_replaceable_placeholder(request),
+                        existing_event_id=existing_event_id,
+                        existing_event_is_placeholder=replaceable_placeholder,
                     ),
                 ),
             )
@@ -5732,7 +5737,7 @@ class ResponseRunner:
             log_cancelled_response(
                 self.deps.logger,
                 exc=exc,
-                message_id=request.existing_event_id,
+                message_id=existing_event_id,
                 restart_message="Bot streaming response interrupted by sync restart",
                 user_stop_message="Bot streaming response cancelled by user",
                 interrupted_message="Bot streaming response interrupted — traceback for diagnosis",
@@ -5750,24 +5755,24 @@ class ResponseRunner:
                         target=runtime.resolved_target,
                         stream_transport_outcome=build_terminal_stream_transport_outcome(
                             PendingVisibleResponse(
-                                tracked_event_id=request.existing_event_id,
+                                tracked_event_id=existing_event_id,
                                 run_message_id=None,
-                                existing_event_id=request.existing_event_id,
-                                existing_event_is_placeholder=_replaceable_placeholder(request),
+                                existing_event_id=existing_event_id,
+                                existing_event_is_placeholder=replaceable_placeholder,
                             ),
                             terminal_status="error",
                             failure_reason=str(error),
                             placeholder_body=PROGRESS_PLACEHOLDER,
                         ),
-                        initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                        initial_delivery_kind="edited" if existing_event_id else "sent",
                         identity=response_identity,
                         tool_trace=list(tool_trace) if runtime.show_tool_calls else None,
                         extra_content=_merge_response_extra_content(
                             run_metadata_content,
                             request.attachment_ids,
                         ),
-                        existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=_replaceable_placeholder(request),
+                        existing_event_id=existing_event_id,
+                        existing_event_is_placeholder=replaceable_placeholder,
                     ),
                 ),
             )
@@ -5786,7 +5791,7 @@ class ResponseRunner:
             run_completed=turn_recorder.outcome == "completed",
             delivery_target=runtime.resolved_target,
             transport_outcome=transport_outcome,
-            delivery_kind="edited" if request.existing_event_id else "sent",
+            delivery_kind="edited" if existing_event_id else "sent",
             response_identity=response_identity,
             tool_trace=tool_trace if runtime.show_tool_calls else None,
             extra_content=response_extra_content,
@@ -5963,7 +5968,7 @@ class ResponseRunner:
         generation: _ResponseGenerationOutcome | None = None
         attempt_run_ids: list[str] = []
         response_run_id = str(uuid4())
-        progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
+        progress = _DeliveryProgress(tracked_event_id=_existing_event_id(request))
         response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
             identity=response_identity,
@@ -5994,7 +5999,7 @@ class ResponseRunner:
         async def generate(message_id: str | None) -> None:
             nonlocal generation
             progress.track_event(message_id)
-            delivery_request = self._request_for_delivery(normalized_request, message_id=message_id)
+            delivery_request = normalized_request
             if use_streaming:
                 generation = await self._process_and_respond_streaming(
                     delivery_request,

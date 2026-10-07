@@ -1343,6 +1343,11 @@ class DeliveryGateway:
                 raise ReplyWriteRefusedError(delivery.enqueue.transition)
         if delivery.event_id is None:
             return None
+        if write.handle is not None and write.handle.reply.event_id is None:
+            # The reply's create bound its event when Matrix acknowledged it; the span reads it from here on.
+            reply = await self.deps.outbox.replies.load(write.reply_id)
+            if reply is not None:
+                write.handle.reply = reply
         if requested is not None and requested.event_id == delivery.event_id:
             return requested
         return DeliveredMatrixEvent(event_id=delivery.event_id, content_sent=content)

@@ -4688,7 +4688,6 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     request = harness.runner.requests[0]
     assert request.prompt == interactive.build_selection_prompt(selection)
     assert request.existing_event_id == "$sent-1:localhost"
-    assert request.existing_event_is_placeholder is True
     assert request.response_envelope.target.reply_to_event_id == selection.question_event_id
     assert request.response_envelope.target.resolved_thread_id == selection.thread_id
     assert request.sources == ResponseSources(

@@ -1878,7 +1878,6 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         response_target = request.response_envelope.target
         assert response_target.reply_to_event_id == "$original:example.com"
         assert request.existing_event_id == "$response:example.com"
-        assert request.existing_event_is_placeholder is False
         assert response_target == stored_target
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
@@ -4190,7 +4189,6 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
         request = mock_generate_response.await_args.args[0]
         assert request.existing_event_id == "$ack_event:example.com"
-        assert request.existing_event_is_placeholder is True
         assert request.reply_to_event_id == "$question:example.com"
         assert request.thread_id == "thread_id"
         assert request.response_envelope.source_event_id == "$reaction:example.com"
@@ -4289,7 +4287,6 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         assert bot._turn_store.is_handled("$question:example.com") is False
         request = mock_generate_response.await_args.args[0]
         assert request.existing_event_id == "$ack_event:example.com"
-        assert request.existing_event_is_placeholder is True
 
 
 @pytest.mark.asyncio

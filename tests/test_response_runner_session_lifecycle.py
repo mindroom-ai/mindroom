@@ -255,7 +255,6 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
             ),
             user_id="@alice:localhost",
             existing_event_id="$thinking",
-            existing_event_is_placeholder=True,
         )
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
             async with response_span(coordinator, request, placeholder_event_id="$thinking"):
@@ -1139,7 +1138,6 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
         request = replace(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
             existing_event_id="$thinking",
-            existing_event_is_placeholder=True,
         )
         async with response_span(coordinator, request, placeholder_event_id="$thinking"):
             generation = await coordinator._process_and_respond(request)

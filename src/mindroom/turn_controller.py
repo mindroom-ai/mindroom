@@ -1705,7 +1705,7 @@ class TurnController:
             return False
         selection_handled_turn = pending_turn
         # This acknowledgement is the placeholder the selection's answer then
-        # edits, which is what `existing_event_is_placeholder` below says, so it
+        # edits, which is what its `interactive_span_id` below says, so it
         # is the turn's initial delivery and not its answer. Staging it that way
         # also keeps it from settling the journal source: a placeholder
         # discharges nothing, and a crash before the model finished would
@@ -1777,7 +1777,6 @@ class TurnController:
                 history_boundary_event_id=source_event_id,
                 member_display_names=room_member_display_names(room),
                 existing_event_id=ack_event_id,
-                existing_event_is_placeholder=True,
                 interactive_span_id=interactive_span_id,
                 user_id=requester_user_id,
                 attachment_ids=selection_attachment_ids or None,

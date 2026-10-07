@@ -254,7 +254,6 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
         **{
             **request.__dict__,
             "existing_event_id": "$prior_answer",
-            "existing_event_is_placeholder": False,
             "prepared_edit_record": TurnRecord.create(["$event"], response_event_id="$prior_answer", completed=True),
         },
     )

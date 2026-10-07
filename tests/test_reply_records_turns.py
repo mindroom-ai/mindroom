@@ -613,7 +613,6 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
     request = replace(
         _plain_request(_target()),
         existing_event_id=ack_event_id,
-        existing_event_is_placeholder=True,
         interactive_span_id=span_id,
     )
     assert await _answer(bot, request, AsyncMock(return_value="Selected answer.")) == ack_event_id
@@ -696,7 +695,6 @@ async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_
     retry = replace(
         _plain_request(_target()),
         existing_event_id="$sent1",
-        existing_event_is_placeholder=True,
         prepare_source_turn=AsyncMock(return_value=True),
     )
     assert await _answer(bot, retry, AsyncMock(return_value="Never.")) is None
@@ -717,7 +715,6 @@ async def test_a_selection_whose_source_ended_before_its_claim_removes_the_ackno
     selection = replace(
         _plain_request(_target()),
         existing_event_id=ack_event_id,
-        existing_event_is_placeholder=True,
         interactive_span_id=span_id,
         prepare_source_turn=AsyncMock(return_value=True),
     )

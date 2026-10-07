@@ -694,7 +694,6 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         request = replace(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
             existing_event_id="$placeholder",
-            existing_event_is_placeholder=True,
         )
 
         resolution = await coordinator.generate_team_response_helper(

@@ -2240,7 +2240,6 @@ class TestAgentBot(AgentBotTestBase):
 
         team_request = mock_generate_team_response.await_args.args[0]
         assert team_request.existing_event_id is None
-        assert team_request.existing_event_is_placeholder is False
         mock_send_response.assert_not_awaited()
         # The reply's records record the turn answered; the controller writes nothing.
         tracker.record_handled_turn.assert_not_called()
@@ -2481,7 +2480,6 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_send_response.assert_not_awaited()
         assert mock_generate_response.await_args.kwargs["existing_event_id"] is None
-        assert mock_generate_response.await_args.kwargs["existing_event_is_placeholder"] is False
         # The reply's records record the turn answered; the controller writes nothing.
         tracker.record_handled_turn.assert_not_called()
 

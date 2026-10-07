@@ -58,6 +58,7 @@ from tests.bot_helpers import (
     make_mock_agent_user,
     make_test_agent_bot,
     make_test_team_bot,
+    unique_room_send_responses,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -822,7 +823,6 @@ class TestAgentBot(AgentBotTestBase):
                     prompt="Team, summarize this thread",
                     thread_history=[],
                     existing_event_id="$existing",
-                    existing_event_is_placeholder=True,
                     user_id="@alice:localhost",
                     response_envelope=_hook_envelope(body="hello", source_event_id="$event", thread_id="$thread"),
                     correlation_id="corr-nonteam-fallback",
@@ -1335,6 +1335,8 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        # The startup placeholder lands, binding the reply's event.
+        unique_room_send_responses(bot.client, prefix="$placeholder")
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
         with (
@@ -1370,8 +1372,6 @@ class TestAgentBot(AgentBotTestBase):
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
-                    existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_envelope=_hook_envelope(
                         body="Continue",
                         source_event_id="$event",
@@ -1387,7 +1387,10 @@ class TestAgentBot(AgentBotTestBase):
         assert _visible_response_event_id(resolution) == "$placeholder"
         mock_team_response.assert_not_awaited()
         send_kwargs = mock_send_streaming_response.await_args.kwargs
-        assert send_kwargs["existing_event_id"] == "$placeholder"
+        # The stream adopts the placeholder this turn's reply created.
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+        assert reply is not None
+        assert send_kwargs["existing_event_id"] == reply.event_id is not None
         assert send_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
@@ -1616,7 +1619,6 @@ class TestAgentBot(AgentBotTestBase):
                     thread_history=[],
                     user_id="@alice:localhost",
                     existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_envelope=_hook_envelope(
                         body="Continue",
                         source_event_id="$event",

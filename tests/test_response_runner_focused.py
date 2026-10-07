@@ -2504,8 +2504,6 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     assert [message.event_id for message in prepared_request.thread_history] == ["$history"]
     assert prepared_request.thread_history.is_full_history is True
     assert prepared_request.thread_history.diagnostics == {"cache_status": "fresh"}
-    assert prepared_request.existing_event_id == "$placeholder"
-    assert prepared_request.existing_event_is_placeholder is True
 
 
 @pytest.mark.asyncio

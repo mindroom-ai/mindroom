@@ -87,6 +87,7 @@ from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_record import TurnRecord
 from tests.ai_user_id_helpers import _prepared_prompt_result
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -1764,20 +1765,23 @@ class TestAgentBot(AgentBotTestBase):
             generation = await _in_span(
                 bot,
                 bot._response_runner._process_and_respond_streaming,
-                _response_request(
-                    room_id="!test:localhost",
-                    prompt="Please reply in thread",
-                    reply_to_event_id="$event456",
-                    thread_id=None,
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=_hook_envelope(
-                        body="Please reply in thread",
-                        source_event_id="$event456",
+                replace(
+                    _response_request(
+                        room_id="!test:localhost",
+                        prompt="Please reply in thread",
+                        reply_to_event_id="$event456",
+                        thread_id=None,
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=_hook_envelope(
+                            body="Please reply in thread",
+                            source_event_id="$event456",
+                        ),
+                        correlation_id="corr-stream-regenerate-noop",
+                        existing_event_id="$existing",
                     ),
-                    correlation_id="corr-stream-regenerate-noop",
-                    existing_event_id="$existing",
-                    existing_event_is_placeholder=False,
+                    # A regeneration of the answer the reply shows.
+                    prepared_edit_record=TurnRecord.create(["$event456"], response_event_id="$existing"),
                 ),
             )
 
@@ -2210,94 +2214,6 @@ class TestAgentBot(AgentBotTestBase):
         assert store_args[7] == "@alice:localhost"
 
     @pytest.mark.asyncio
-    async def test_generate_response_marks_fresh_thinking_message_as_adopted_placeholder(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Streaming generation should flag fresh thinking placeholders for adoption."""
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            await response_function("$thinking")
-            return "$thinking"
-
-        scheduled_tasks: list[asyncio.Task[None]] = []
-
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
-        def schedule_background_task(
-            coro: Coroutine[Any, Any, None],
-            *,
-            name: str,
-            error_handler: object | None = None,  # noqa: ARG001
-            owner: object | None = None,  # noqa: ARG001
-        ) -> asyncio.Task[None]:
-            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
-            scheduled_tasks.append(task)
-            return task
-
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-
-        with (
-            patch.object(
-                ResponseRunner,
-                "_process_and_respond_streaming",
-                new=AsyncMock(
-                    return_value=_ResponseGenerationOutcome(
-                        delivery=FinalDeliveryOutcome(
-                            terminal_status="completed",
-                            event_id="$thinking",
-                            is_visible_response=True,
-                            final_visible_body="",
-                            delivery_kind="edited",
-                        ),
-                        run_succeeded=True,
-                    ),
-                ),
-            ) as mock_process,
-            patch.object(
-                ResponseRunner,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
-            patch_response_runner_module(
-                should_use_streaming=AsyncMock(return_value=True),
-                create_background_task=schedule_background_task,
-                store_conversation_memory=fake_store_conversation_memory,
-            ),
-        ):
-            await bot._response_runner.generate_response(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=("$event",),
-                        logical_source_event_ids=("$event",),
-                    ),
-                    prompt="Continue",
-                    thread_history=[],
-                    user_id="@alice:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$event",
-                        prompt="Continue",
-                        user_id="@alice:localhost",
-                        agent_name=bot.agent_name,
-                    ),
-                ),
-            )
-
-        if scheduled_tasks:
-            await asyncio.gather(*scheduled_tasks)
-
-        request = mock_process.await_args.args[0]
-        assert request.existing_event_id == "$thinking"
-        assert request.existing_event_is_placeholder is True
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("source_kind", "expects_streaming"),
         [
@@ -2372,7 +2288,6 @@ class TestAgentBot(AgentBotTestBase):
         assert streaming.await_count == int(expects_streaming)
         assert blocking.await_count == int(not expects_streaming)
         assert send_text.await_count == int(expects_streaming)
-        assert run_attempt.await_args.kwargs["existing_event_id"] == ("$thinking" if expects_streaming else None)
         assert run_attempt.await_args.kwargs["show_stop_button"] is expects_streaming
 
     @pytest.mark.asyncio

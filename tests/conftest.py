@@ -2831,7 +2831,6 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             prompt=request.prompt,
             thread_history=request.thread_history,
             existing_event_id=request.existing_event_id,
-            existing_event_is_placeholder=request.existing_event_is_placeholder,
             user_id=request.user_id,
             media=request.media,
             attachment_ids=attachment_ids,
