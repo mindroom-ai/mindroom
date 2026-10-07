@@ -141,26 +141,30 @@ export default function BillingPage() {
               }`}>
                 {tierInfo.name}
               </span>
-              {hasPlan && <span className="text-2xl font-bold">{tierInfo.price}</span>}
-              {hasPlan && subscription?.status === 'active' && !subscription?.cancelled_at && (
-                <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
-                  Active
-                </span>
-              )}
-              {hasPlan && subscription?.status === 'trialing' && (
-                <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                  Trial
-                </span>
-              )}
-              {hasPlan && subscription?.status === 'past_due' && (
-                <span className="px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">
-                  Past Due
-                </span>
-              )}
-              {hasPlan && subscription?.status === 'cancelled' && (
-                <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
-                  Cancelled
-                </span>
+              {hasPlan && (
+                <>
+                  <span className="text-2xl font-bold">{tierInfo.price}</span>
+                  {subscription?.status === 'active' && !subscription?.cancelled_at && (
+                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                      Active
+                    </span>
+                  )}
+                  {subscription?.status === 'trialing' && (
+                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                      Trial
+                    </span>
+                  )}
+                  {subscription?.status === 'past_due' && (
+                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">
+                      Past Due
+                    </span>
+                  )}
+                  {subscription?.status === 'cancelled' && (
+                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
+                      Cancelled
+                    </span>
+                  )}
+                </>
               )}
             </div>
 
