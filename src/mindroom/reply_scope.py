@@ -409,7 +409,8 @@ class ReplyRuntime:
                 self.spans.forget(span_id)
         if transition.outcome is rl.Outcome.STALE:
             return ClaimRefused.RETIRED
-        if transition.outcome is rl.Outcome.DUPLICATE:
+        if transition.outcome is rl.Outcome.DUPLICATE or transition.unmodeled is not None:
+            # An unmodeled claim already ended the reply and settled its sources.
             return ClaimRefused.NOTHING_TO_RUN
         if transition.claimed is None or transition.reply is None:
             # Earlier writes of this reply are unresolved; their resolution
@@ -508,8 +509,9 @@ class ReplyRuntime:
             raise
         if claimed is None or transition.claimed is None or transition.reply is None:
             self.spans.forget(claim.span_id)
-            if transition.outcome is rl.Outcome.STALE:
-                # Another instance took the replies over; its approval recovery resumes this.
+            if transition.outcome is rl.Outcome.STALE or transition.unmodeled is not None:
+                # Another instance took the replies over, whose approval recovery resumes this; or the
+                # rules ended the reply and failed the approval, whose settlement ends it.
                 return None, None
             assert transition.reply is not None, "only a reply with earlier writes defers a resume"
             await self._wait_to_claim(

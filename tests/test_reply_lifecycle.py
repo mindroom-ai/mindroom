@@ -138,11 +138,15 @@ def test_claim_ends_a_span_an_older_generation_left_current() -> None:
     assert transition.claimed.kind is SpanKind.REPLAY
 
 
-def test_claim_with_a_live_span_is_invalid() -> None:
-    """Claims run under the conversation lock, so a live current span is a bug."""
+def test_claim_with_a_live_span_ends_the_reply_instead_of_raising() -> None:
+    """Claims run under the conversation lock, so a live current span is unmodeled: no span opens, the reply ends."""
     reply, span = _turn()
-    with pytest.raises(rl.InvalidTransitionError):
-        rl.claim(_request("span-2"), _context(reply, span))
+    transition = rl.claim(_request("span-2"), _context(reply, span))
+    assert transition.unmodeled is not None
+    assert transition.claimed is None
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.FAILED
+    assert CancelSpan(span.span_id) in transition.effects
 
 
 def test_claim_on_a_terminal_reply_without_an_edit_runs_nothing() -> None:
@@ -231,10 +235,11 @@ def test_an_answer_older_than_the_records_is_adopted_as_a_finished_reply() -> No
     assert regeneration.claimed.rollback.state is ReplyState.COMPLETED
 
 
-def test_a_regeneration_with_no_reply_is_invalid() -> None:
-    """The regenerator adopts the answer first, so no claim creates a reply to regenerate."""
-    with pytest.raises(rl.InvalidTransitionError):
-        rl.claim(_request(delivery_id="$edit", driving_edit_id="$edit"), _context())
+def test_a_regeneration_with_no_reply_runs_nothing() -> None:
+    """The regenerator regenerates only a reply it found, so no claim creates a reply to regenerate."""
+    transition = rl.claim(_request(delivery_id="$edit", driving_edit_id="$edit"), _context())
+    assert transition.claimed is None
+    assert transition.unmodeled is not None
 
 
 def test_regeneration_rerun_keeps_its_rollback() -> None:
@@ -429,14 +434,18 @@ def test_initial_create_acknowledgement_binds_the_event() -> None:
     assert acked.reply.event_id == "$reply"
     assert acked.reply.placeholder_only
     assert acked.reply.confirmed
-    with pytest.raises(rl.InvalidTransitionError):
-        rl.write_acknowledged(
-            acked.reply,
-            WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
-            event_id="$other",
-            membership_current=True,
-            now_ns=NOW,
-        )
+    # A second create of one reply keeps the first binding and redacts the stray event.
+    stray = rl.write_acknowledged(
+        acked.reply,
+        WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
+        event_id="$other",
+        membership_current=True,
+        now_ns=NOW,
+    )
+    assert stray.unmodeled is not None
+    assert stray.reply is not None
+    assert stray.reply.event_id == "$reply"
+    assert "$other" in stray.reply.redaction_pending
 
 
 def test_late_create_of_a_gone_reply_is_queued_for_redaction() -> None:
@@ -905,11 +914,13 @@ def test_deleting_sources_never_restores_unfinished_work() -> None:
     assert transition.reply.redaction_pending == ("$reply",)
 
 
-def test_stopped_without_a_recorded_stop_is_invalid() -> None:
-    """A span cannot report a Stop its reply never recorded."""
+def test_stopped_without_a_recorded_stop_ends_the_reply_unmodeled() -> None:
+    """A span cannot report a Stop its reply never recorded; the reply ends failed rather than raising."""
     reply, span = _turn()
-    with pytest.raises(rl.InvalidTransitionError):
-        rl.stopped(reply, span, _write(reply, ReplyState.CANCELLED), now_ns=NOW)
+    transition = rl.stopped(reply, span, _write(reply, ReplyState.CANCELLED), now_ns=NOW)
+    assert transition.unmodeled is not None
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.FAILED
 
 
 def test_an_interrupted_regeneration_that_wrote_nothing_leaves_the_answer_without_a_note() -> None:
@@ -1066,8 +1077,6 @@ def test_release_and_superseded_keep_sources_pending() -> None:
         assert transition.reply is not None
         assert transition.reply.state is ReplyState.ACTIVE
         assert transition.effects == ()
-    with pytest.raises(rl.InvalidTransitionError):
-        rl.release(reply, span, outcome=SpanOutcome.COMPLETED, now_ns=NOW)
 
 
 # --- pause and approvals --------------------------------------------------
@@ -2196,11 +2205,10 @@ def test_an_approval_settles_its_turn_unanswered_when_nothing_answers_it() -> No
 
 
 def test_span_outcome_is_written_once() -> None:
-    """Ending a span twice is a programming error."""
+    """Ending a span twice keeps its first outcome."""
     _reply, span = _turn()
-    ended = replace(span, outcome=SpanOutcome.COMPLETED)
-    with pytest.raises(rl.InvalidTransitionError):
-        rl._end(ended, SpanOutcome.FAILED, NOW)
+    ended = replace(span, outcome=SpanOutcome.COMPLETED, ended_at_ns=NOW)
+    assert rl._end(ended, SpanOutcome.FAILED, NOW + 1) == ended
 
 
 # --- regressions from review ----------------------------------------------
@@ -2477,3 +2485,38 @@ def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
     )
     assert failed.reply is not None
     assert failed.reply.state is ReplyState.FAILED
+
+
+# --- unmodeled events ------------------------------------------------------
+
+
+def test_an_unmodeled_event_ends_the_reply_failed_and_settles_its_sources() -> None:
+    """Nothing raises: the reply ends failed with the error note, its span cancelled, its sources settled once."""
+    reply, span = _turn()
+    transition = rl._unmodeled(reply, span, reason="test", now_ns=NOW)
+    assert transition.unmodeled == "test"
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.FAILED
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_ERROR)
+    assert _span_after(transition, span.span_id).outcome is SpanOutcome.FAILED
+    assert transition.effects == (CancelSpan(span.span_id), SettleSources(span.span_id))
+
+
+def test_an_unmodeled_event_on_a_held_reply_fails_its_approval() -> None:
+    """The approval's failure settlement settles the sources it holds."""
+    reply, _span, transition = _paused()
+    ended = rl._unmodeled(reply, _span_after(transition, "span-1"), reason="test", now_ns=NOW)
+    assert FenceApproval("approval-1", "failed") in ended.effects
+    assert WakeApproval("approval-1") in ended.effects
+    assert not any(isinstance(effect, SettleSources) for effect in ended.effects)
+
+
+def test_an_unmodeled_event_on_an_ended_reply_changes_nothing() -> None:
+    """A reply that already ended stays as it ended."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    ended = replace(reply, state=ReplyState.COMPLETED)
+    transition = rl._unmodeled(ended, span, reason="test", now_ns=NOW)
+    assert transition.outcome is Outcome.DUPLICATE
+    assert transition.reply == ended
+    assert transition.unmodeled == "test"

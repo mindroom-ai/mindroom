@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom import reply_lifecycle as rl
+from mindroom.logging_config import get_logger
 from mindroom.reply_lifecycle import (
     CancelSpan,
     Effect,
@@ -27,6 +28,8 @@ from mindroom.reply_lifecycle import (
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
 from .membership_state import claim_membership_epoch
 from .projection import is_tombstoned
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -94,6 +97,13 @@ def apply(transaction: Transaction, principal_id: str, transition: Transition) -
     read from the continuations, so a caller never caches a hold the
     transaction removed.
     """
+    if transition.unmodeled is not None:
+        logger.warning(
+            "reply_unmodeled",
+            principal_id=principal_id,
+            reply_id=None if transition.reply is None else transition.reply.reply_id,
+            reason=transition.unmodeled,
+        )
     reply_messages.persist(transaction, principal_id, transition)
     post_commit: list[PostCommitEffect] = []
     for effect in transition.effects:

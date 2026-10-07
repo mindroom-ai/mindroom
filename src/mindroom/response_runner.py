@@ -3328,13 +3328,7 @@ class ResponseRunner:
         slot = current_slot()
         if slot is None:
             return request
-        try:
-            handle = await self._claim_reply(replies, request, history_scope=history_scope)
-        except rl.InvalidTransitionError as error:
-            # A lookup bug, never a reason to add a second reply: the sources
-            # settle with a dispatch error instead of retrying forever.
-            self.deps.logger.exception("reply_claim_invalid", source_event_id=request.response_envelope.source_event_id)
-            raise PostLockRequestPreparationError from error
+        handle = await self._claim_reply(replies, request, history_scope=history_scope)
         if handle is ClaimRefused.NOTHING_TO_RUN:
             self.deps.logger.info(
                 "reply_claim_nothing_to_run",
