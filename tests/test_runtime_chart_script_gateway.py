@@ -67,7 +67,6 @@ def test_script_gateway_is_off_by_default() -> None:
     assert not [doc for doc in docs if doc["metadata"]["name"].startswith(GATEWAY_NAME)]
     assert [port["name"] for port in container["ports"]] == ["api"]
     assert not [name for name in env if name.startswith("MINDROOM_SCRIPT_GATEWAY_")]
-    assert "MINDROOM_AGENT_CLI_PRIMARY_URL" not in env
     assert GATEWAY_HOST not in worker_env["NO_PROXY"]
 
 
@@ -84,7 +83,6 @@ def test_script_gateway_wires_listener_service_and_runtime_env() -> None:
     assert env["MINDROOM_SCRIPT_GATEWAY_PORT"] == "9876"
     assert env["MINDROOM_SCRIPT_GATEWAY_URL"] == f"http://{GATEWAY_HOST}:9876/api/script-gateway"
     assert env["MINDROOM_SCRIPT_GATEWAY_ISOLATED"] == "true"
-    assert env["MINDROOM_AGENT_CLI_PRIMARY_URL"] == f"http://{GATEWAY_HOST}:9876"
     assert worker_env["NO_PROXY"].split(",") == ["localhost", "127.0.0.1", "::1", GATEWAY_HOST]
     assert worker_env["no_proxy"] == worker_env["NO_PROXY"]
 

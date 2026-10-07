@@ -185,7 +185,7 @@ export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gatew
 
 ### Kubernetes
 
-Kubernetes scripts stay disabled until the gateway runs on a listener that exposes nothing else, because workers that can reach the general API listener get more authority than the script gateway grants.
+Kubernetes scripts stay disabled until the gateway runs on a listener that exposes no other primary API routes, because workers that can reach the general API listener get more authority than the script gateway grants.
 Until then, `start_script` fails with `Kubernetes background scripts require a gateway-only listener; use Docker or explicit unsafe-local mode until that boundary is configured.`
 
 - `MINDROOM_SCRIPT_GATEWAY_PORT` makes the primary serve a second listener that answers only `/api/script-gateway` and the capability-authenticated [`/api/agent-cli`](https://docs.mindroom.chat/tools/agent-cli/#shell-in-a-worker) routes.

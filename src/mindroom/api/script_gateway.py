@@ -257,7 +257,7 @@ async def serve_script_gateway_listener(
     host: str,
     broker: _ScriptGatewayBroker | None,
     log_level: str,
-    agent_cli_registry: TurnToolRegistry | None = None,
+    agent_cli_registry: TurnToolRegistry | None,
 ) -> AsyncIterator[None]:
     """Serve only worker-facing capability routes on `MINDROOM_SCRIPT_GATEWAY_PORT` while the primary API runs.
 

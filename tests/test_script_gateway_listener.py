@@ -8,6 +8,7 @@ import socket
 from contextlib import closing
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -136,6 +137,8 @@ async def test_listener_serves_only_worker_capability_routes(tmp_path: Path) -> 
         assert (listing.status_code, listing.json()) == (200, {"operation": "tools.list", "window": None})
         unauthorized = await client.post(f"{_AGENT_CLI_PREFIX}/operations", json=cli_operation)
         assert unauthorized.status_code == 401
+        receipt_lookup = await client.get(f"{_AGENT_CLI_PREFIX}/calls/{uuid4()}")
+        assert receipt_lookup.status_code == 401
 
         for method, path in [
             *primary_requests,
@@ -248,7 +251,13 @@ async def test_listener_is_absent_without_a_configured_port(tmp_path: Path) -> N
     """Deployments that do not opt in keep a single primary API listener."""
     runtime_paths = _runtime_paths(tmp_path, {})
     with patch("mindroom.api.script_gateway.socket.create_server") as create_server:
-        async with serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=None, log_level="INFO"):
+        async with serve_script_gateway_listener(
+            runtime_paths,
+            host="127.0.0.1",
+            broker=None,
+            log_level="INFO",
+            agent_cli_registry=None,
+        ):
             pass
 
     create_server.assert_not_called()
@@ -261,7 +270,13 @@ async def test_listener_rejects_invalid_port(tmp_path: Path, raw_port: str) -> N
     runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": raw_port})
 
     with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_PORT"):
-        async with serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=None, log_level="INFO"):
+        async with serve_script_gateway_listener(
+            runtime_paths,
+            host="127.0.0.1",
+            broker=None,
+            log_level="INFO",
+            agent_cli_registry=None,
+        ):
             pass
 
 

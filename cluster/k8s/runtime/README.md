@@ -801,7 +801,7 @@ scriptGateway:
 
 The primary container then exposes a `script-gateway` port where MindRoom serves only `/api/script-gateway` and `/api/agent-cli` routes and returns 404 for every other API route.
 The chart renders a `<fullname>-script-gateway` ClusterIP Service for that port and sets `MINDROOM_SCRIPT_GATEWAY_PORT`, `MINDROOM_SCRIPT_GATEWAY_URL`, and `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` on the primary.
-It also points `MINDROOM_AGENT_CLI_PRIMARY_URL` at that Service, so [minimal-mode](../../../docs/tools/agent-cli.md#shell-in-a-worker) worker shells reach MindRoom without the general API port.
+Unless `MINDROOM_AGENT_CLI_PRIMARY_URL` is set, [minimal-mode](../../../docs/tools/agent-cli.md#shell-in-a-worker) worker shells also call MindRoom through that Service, so they need no access to the general API port.
 Worker pods receive the Service's cluster-local host name in `NO_PROXY` so gateway calls bypass the egress proxy.
 If `workers.kubernetes.extraEnv` replaces `NO_PROXY` or `no_proxy`, include that host name yourself.
 A `<fullname>-script-gateway-workers` NetworkPolicy in the worker namespace adds egress from workers to the gateway port on the control-plane pod.
