@@ -93,7 +93,7 @@ plugins:
 | --- | --- | --- | --- |
 | `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
 | `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
-| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks and OAuth module; masked as secret in the dashboard |
+| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module; masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
 Each hook override supports:
@@ -190,7 +190,7 @@ Validate a plugin against the installed MindRoom version before deployment:
 mindroom plugins check ./my-plugin
 ```
 
-The check strictly validates the manifest, imports declared modules, validates tool, hook, and OAuth registrations, and verifies that declared skill directories exist.
+The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 

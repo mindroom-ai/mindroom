@@ -285,7 +285,7 @@ agents:
 ```
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
-- Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning and fails `mindroom config validate`.
+- Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
 - `cron` is a five-field expression in the configured [timezone](#timezone).
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.

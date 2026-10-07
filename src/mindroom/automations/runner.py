@@ -121,7 +121,7 @@ class AutomationRunner:
     definition_provider: Callable[[str], AutomationDefinition | None]
     # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
     _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
-    # Agents with an automation between its check and the end of its chain; one agent's built-ins never overlap,
+    # Agents with an automation between its check and the end of its chain; one agent's automations never overlap,
     # because each one's run can change the memory files the other measures or applies to.
     _active: set[str] = field(default_factory=set, init=False)
     _pending: dict[str, _PendingRun] = field(default_factory=dict, init=False)

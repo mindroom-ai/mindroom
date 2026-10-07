@@ -24,8 +24,8 @@ class AutomationContext:
     ``options`` and ``settings`` are read-only.
     ``workspace`` is the agent's workspace root, which may not exist yet, or None for an agent without file memory,
     which has no workspace, and
-    ``state_dir`` is the agent's automation state directory in primary storage, outside the workspace, created when
-    something first writes there.
+    ``state_dir`` is the agent's automation state directory in primary storage, outside the workspace, which the automation
+    creates when it first writes there.
     """
 
     agent_name: str
