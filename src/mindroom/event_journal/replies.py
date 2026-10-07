@@ -215,7 +215,7 @@ def lock_paused_reply(
     # LEGACY_COMPAT: Continuations adopted from an earlier release before reply classification names their span.
     # Legacy format: an approval_continuations row with no span_id, as the schema upgrade leaves every continuation
     # until its entity's first start classifies it, and for good when that entity never starts again.
-    # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages name the paused span on
+    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages name the paused span on
     # every continuation they create.
     # Handling: no reply exists for it, so nothing is locked and its settlement reads the adopted identity instead.
     # Coverage: tests/test_legacy_continuation_identity.py::test_an_unclassified_continuation_settles_its_adopted_sources.

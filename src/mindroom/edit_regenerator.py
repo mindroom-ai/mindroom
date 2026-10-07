@@ -118,7 +118,7 @@ def _answer_to_regenerate(record: TurnRecord, reply: Reply | None) -> tuple[str 
     # Legacy format: a completed turn record whose response_event_id an earlier release wrote for an AI answer, with no
     # reply record for its sources; a dispatch failure's notice sent before any reply existed is current input named
     # the same way.
-    # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record each AI answer and
+    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record each AI answer and
     # its Stop on its reply.
     # Handling: the regenerator adopts that event as a finished reply before it prunes history, and the edit
     # regenerates that reply; a Stop that release kept on the turn record is not read, as no reply holds it.

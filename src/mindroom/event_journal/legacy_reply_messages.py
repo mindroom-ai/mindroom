@@ -66,7 +66,7 @@ class LegacyPausedAnswer:
 # LEGACY_COMPAT: Paused answers stored in approval continuation context.
 # Legacy format: approval_continuations.context_json carrying response_text, response_tool_trace, and
 # response_presentation_state, which earlier releases wrote at every pause before replies held what a pause shows.
-# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages keep the paused answer as
+# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages keep the paused answer as
 # the reply's answer segment and no longer write these keys.
 # Handling: adoption reads them once, from the stored context of a continuation it adopts, to build the paused
 # reply's presentation; nothing else reads them, and an advance rewrites the context without them.
@@ -130,7 +130,7 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # LEGACY_COMPAT: In-flight agent and team replies without reply records.
 # Legacy format: approval continuations, INITIAL and FINAL outbox rows without reply_id, and pending turn records that
 # earlier releases wrote for replies before reply_messages existed; the selected principal has no reply_legacy_classifications row.
-# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record every reply in
+# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans and give its outbox rows reply identity.
 # Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
 # reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources;
@@ -713,7 +713,7 @@ def _deleted_source_reply(
     # LEGACY_COMPAT: Placeholders of deleted requests that an earlier release still had to remove.
     # Legacy format: a reply-less INITIAL row, neither retired nor answered by a FINAL, whose turn's sources all
     # carry redaction tombstones; that release's deleted-INITIAL cleanup redacted its event and retired the row.
-    # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages end such a reply gone,
+    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages end such a reply gone,
     # with its event pending redaction.
     # Handling: the reply is adopted gone with its span cancelled, owing the redaction of the acknowledged event; a
     # create still owed is redacted when it lands, as any create of a gone reply is.

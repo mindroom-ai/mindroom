@@ -40,7 +40,7 @@ VALUES ('@bot:example.org', 'approval', 'bot', 'waiting',
 INSERT INTO approval_continuation_sources VALUES ('@bot:example.org', 'approval', '$edit', 0);
 """
 
-# What v2026.10.199 wrote: the continuation's identity in its response attempt tables.
+# What v2026.10.201 wrote: the continuation's identity in its response attempt tables.
 _ATTEMPT_OWNER = """
 CREATE TABLE matrix_sync_consumers (
     principal_id TEXT PRIMARY KEY, consumer_generation TEXT NOT NULL,
@@ -108,7 +108,7 @@ async def test_a_continuation_keeps_the_identity_its_context_held(legacy_databas
 
 @pytest.mark.asyncio
 async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legacy_database: _LegacyDatabase) -> None:
-    """The identity v2026.10.199 kept in response attempts moves onto the continuation, and the tables go."""
+    """The identity v2026.10.201 kept in response attempts moves onto the continuation, and the tables go."""
     legacy_database.execute(_ATTEMPT_OWNER)
     store = legacy_database.open()
     try:
@@ -143,7 +143,7 @@ async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legac
 
 @pytest.mark.asyncio
 async def test_a_claimed_continuation_keeps_its_claim_across_the_upgrade(legacy_database: _LegacyDatabase) -> None:
-    """A claim v2026.10.199 stored on the continuation reads as claimed by no running instance until classification."""
+    """A claim v2026.10.201 stored on the continuation reads as claimed by no running instance until classification."""
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(
         "UPDATE approval_continuations SET state = 'claimed', runtime_generation = 'old-runtime' "
@@ -250,7 +250,7 @@ async def test_an_unclassified_continuation_settles_its_adopted_sources(legacy_d
         await store.close()
 
 
-# A newer edit's regeneration answered the reply the approval paused, in v2026.10.199.
+# A newer edit's regeneration answered the reply the approval paused, in v2026.10.201.
 _NEWER_ANSWER = """
 INSERT INTO response_attempts VALUES
     ('@bot:example.org', '$edit', 'bot', '!room:example.org', 7, '$answer', '["$first","$second"]', 2, 5);
@@ -263,7 +263,7 @@ INSERT INTO matrix_delivery_outbox (
 
 
 def _paused_turn_rows() -> str:
-    """Return the placeholder row and turn record v2026.10.199 kept for the turn the approval paused."""
+    """Return the placeholder row and turn record v2026.10.201 kept for the turn the approval paused."""
     record = TurnRecord.create(
         ["$first", "$second"],
         requester_id="@user:example.org",

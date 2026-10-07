@@ -92,7 +92,7 @@ class WriteStage(StrEnum):
 
 # LEGACY_COMPAT: Replies adopted from an earlier release whose event only Matrix can read.
 # Legacy format: a reply adoption created for an earlier release's in-flight work, marked with this pending read.
-# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record every write ahead of
+# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record every write ahead of
 # sending it, so no reply is adopted with a pending read.
 # Handling: claims and owed notes defer while it is set (``claim``, ``flush_owed_write``), replays wait for it
 # (``replay_dropped``), and ``legacy_read_done`` applies the read once.
@@ -1850,7 +1850,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
 # LEGACY_COMPAT: Applying what an earlier-release reply's event showed, read once its room synced.
 # Legacy format: a reply adopted with legacy_pending, and the read the post-sync reader in legacy_reply_messages.py
 # built from its event's body, wire status, and timestamp.
-# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record every write ahead of
+# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record every write ahead of
 # sending it, so no reply needs a read.
 # Handling: ``legacy_read_done`` binds what the event showed once; a stream that release stopped after its sources
 # settled ends as its wire status says, else failed, with the restart note when it was recent enough for that

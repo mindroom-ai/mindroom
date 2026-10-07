@@ -286,7 +286,7 @@ def _terminal_status_of_span(span: rl.Span | None) -> Literal["completed", "canc
     """Return the status a frozen approval FINAL reports, from the span that wrote it."""
     # LEGACY_COMPAT: Approval answers frozen before reply records, reported as completed.
     # Legacy format: an acknowledged FINAL row without span_id from an approval resume.
-    # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record the outcome of the
+    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record the outcome of the
     # span that wrote each FINAL.
     # Handling: such a row reports completed, as it did.
     # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
@@ -2204,7 +2204,7 @@ class ResponseRunner:
             # LEGACY_COMPAT: Approval answers frozen before reply records, with their body in the result.
             # Legacy format: an acknowledged FINAL row without reply_id whose result_json holds the body the
             # completed approval resume showed.
-            # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages read the body
+            # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages read the body
             # from the presentation of the reply the row answered.
             # Handling: the result's body, else the payload's, restores the answer's visible body.
             # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
