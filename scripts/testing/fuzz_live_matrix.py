@@ -5931,6 +5931,10 @@ class FinalStateAuditor:
         if old_record is not None and (old_record.completed or source not in old_record.source_event_ids):
             return None
         old_response = old_record.response_event_id if old_record is not None else None
+        if old_response is None and old_record is not None:
+            # Reply records keep the interrupted reply's event; the turn ledger names it only for an answered turn.
+            visible = self._visible_record_reply_ids(old_record, replies)
+            old_response = next(iter(visible)) if len(visible) == 1 else None
         old_view = _canonical_response_view(events, old_response, self.agent_id) if old_response is not None else None
         if old_response is None:
             if replies.get(source):
@@ -5940,7 +5944,8 @@ class FinalStateAuditor:
             or old_response not in self._visible_record_reply_ids(old_record, replies)
             or old_view is None
             or old_view.stream_status != "error"
-            or not old_view.body.endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
+            # A superseded replay ends its reply with the interrupted note; a restart left the restart note.
+            or not old_view.body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE))
         ):
             return None
         anchor = self._completed_supersession_anchor(newer, snapshot.records, events, replies)

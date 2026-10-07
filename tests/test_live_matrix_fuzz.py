@@ -85,7 +85,7 @@ import scripts.testing.fuzz_live_matrix as live_fuzz
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.turn_record import RevisionReplay
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from scripts.testing.fuzz_live_matrix import (
@@ -6818,6 +6818,58 @@ def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) ->
         "$c": None,
     }
     assert records["$unanswered"].response_event_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note", [INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE])
+async def test_supersession_proof_reads_the_interrupted_reply_of_an_unanswered_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    note: str,
+) -> None:
+    """Only reply records name an unanswered turn's interrupted reply; a superseded replay ends it interrupted."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = FinalStateAuditor(
+        client,
+        ExactReplyOracle(client, "@agent:example"),
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=tmp_path / "event_journal.db",
+    )
+    monkeypatch.setattr(auditor, "_supersession_source_pair", lambda *_args, **_kwargs: "$root")
+    monkeypatch.setattr(auditor, "_completed_supersession_anchor", lambda *_args, **_kwargs: ("$newer", "$anchor"))
+    interrupted = _agent_reply_event("$source", "$reply", f"partial\n\n{note}")
+    interrupted["content"]["io.mindroom.stream_status"] = "error"
+    snapshot = live_fuzz._SupersessionSnapshot(
+        records={"$source": TurnRecord.create(source_event_ids=("$source",), completed=False)},
+        sources={
+            "$source": live_fuzz._SettledJournalSource(
+                "$source",
+                "!room:example",
+                "$root",
+                "@user:example",
+                1,
+                "settled",
+                "message",
+            ),
+        },
+        pending_deliveries=(),
+    )
+    try:
+        proof = auditor._prove_supersession(
+            "$source",
+            "$newer",
+            snapshot,
+            {"$reply": interrupted},
+            {"$source": {"$reply"}},
+            {},
+            sent_records={},
+        )
+    finally:
+        await client.close()
+
+    assert proof is not None
+    assert proof.interrupted_response_event_id == "$reply"
 
 
 @pytest.mark.asyncio
