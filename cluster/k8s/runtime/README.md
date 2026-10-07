@@ -781,7 +781,7 @@ To remove grants ConfigMaps that older chart versions left in the namespace, run
 ## Background Script Gateway
 
 Background scripts on Kubernetes workers call governed tools through the primary's capability-authenticated script gateway.
-MindRoom admits them only when workers reach that gateway through a listener that serves nothing else, because the general API port exposes more authority.
+MindRoom admits them only when workers reach that gateway through a listener that serves only the script gateway and capability-authenticated Agent CLI routes, because the general API port exposes more authority.
 Set `scriptGateway.enabled` to have the primary serve that listener on its own port:
 
 ```yaml
