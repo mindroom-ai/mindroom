@@ -19,6 +19,19 @@ This page is for contributors: it names the records, the rules that change them,
 | `stop.py` | `SpanRegistry`: the task and Agno run of each span this instance executes. |
 | `delivery_gateway.py` | Rendering and sending reply rows, owed notes, Stop buttons, and redactions. |
 
+## Ownership
+
+Every fact about an AI reply has one owner and one writer; other stores hold only what is theirs.
+`SpanHandle.reply` and the turn ledger's in-memory map are caches of their owners, never separately written state.
+
+| Store | Owns |
+|---|---|
+| Reply records (`reply_messages`, `reply_spans`, `reply_span_sources`) | Everything about an AI reply: its event, state, presentation and tool-call visibility, the Stop and whether it applied, the edit order a regeneration answers, each span's sources and their settlement, redactions including deleted sources, the approval it waits on, the span that claims that approval, and a regeneration's selected edit. |
+| Turn ledger (`turn_records`) | User-message and turn facts: sources, aliases, prompts, revisions, tombstones, requester, history scope, conversation target, voice and command checkpoints, `completed` ("this agent answered this message", agent-scoped across re-logins), and `response_event_id` for turns that are not AI replies, such as commands, rejections, and router notices. |
+| Journal | Whether each event is pending or settled: the work queue of one Matrix identity. |
+| Outbox (`matrix_delivery_outbox`) | Transport for every Matrix write: key, room, thread, membership epoch, transaction id, frozen payload, continuation segments, edit target, attempt, device, acknowledgement, permanent failure, fence, and for a reply row its owner (`reply_id`, `span_id`, `reply_sequence`), with no reply meaning. |
+| Approval run (`approval_continuations`, calls, cards, grants) | Consent and the Agno payload: the approval id, the span whose pause created it (`span_id`), the span that claims it (`claim_span_id`), generation, calls and decisions, publication lease, `waiting`, `ready`, or `failing`, failure text, and the run snapshot. Its room, thread, event, entity, held sources, visibility, and selected edit are read from that paused span and its reply. |
+
 ## Records
 
 A reply (`reply_messages`) is one visible message in one room, with its event id once Matrix created it.
@@ -38,7 +51,7 @@ Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`
 
 A rule returns one outcome: `applied`, `stale` (the span is no longer current), `duplicate` (already true), `deferred` (earlier writes are unresolved), `recompute` (a Stop, deletion, or departure committed after the caller rendered), or `stopped`.
 A rule that can never apply raises `InvalidTransitionError`; callers treat it as a bug and settle the sources with a dispatch error instead of retrying.
-Effects run in the rule's transaction (`SettleSources`, `FenceApproval`, and `TransferStop`, which writes the turn record's Stop) or after it commits (`CancelSpan`, `WakeApproval`, and the turn ledger's cache learning a transferred Stop); post-commit effects are best effort because the records already say what must happen.
+Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen.
 
 Callers render a payload from the reply's revision before the transaction; a rule that would choose different content returns `recompute`, writes nothing, and the caller renders again.
 
@@ -61,7 +74,7 @@ Recovery renders from the possibly-shown presentation, so a restart continues be
 
 ## Stop
 
-A Stop on an event commits on the reply in the transaction that records it on the turn.
+A Stop on an event commits on the reply it names; the turn ledger does not hold Stops.
 A current span this instance runs is cancelled through the `SpanRegistry`; a span nobody runs ends at once with the cancel note owed.
 A Stop on an event whose create is still unacknowledged waits in `pending_reply_stops` and applies when the create is acknowledged.
 A Stop after the terminal row is satisfied by it.
@@ -69,8 +82,9 @@ The Stop button belongs to the reply: it is recorded when sent and redacted when
 
 ## Approvals
 
-A pause, the continuation it creates or advances, and the pause row commit together.
-A resume claims the continuation and an `approval_resume` span of the paused reply together, and continues the paused answer segment.
+A pause, the continuation it creates or advances, and the pause row commit together; the continuation names the paused span and holds that span's pending sources.
+A resume claims an `approval_resume` span of the paused reply and names it as the continuation's claim in one transaction, and continues the paused answer segment.
+A claimed continuation stays `ready` and reads as claimed by the bot instance of the span its claim names; a further pause clears the claim.
 A failure or Stop fences the continuation; its settlement writes the note and finishes the reply in the continuation's finish.
 A response-local CLI approval waits in place: its span stays current through the wait, and once approved it runs for that approval as a resume does, so the continuation's finish or failure settles the sources and ends the reply.
 
@@ -95,5 +109,9 @@ The handled-turn retention pass deletes finished replies that owe nothing, with 
 - I6. A span's sources settle with its terminal transition, except spans that hand them to a continuation, a retry, or a replay.
 - I7. Every reply write is recorded before it is sent.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place.
+- I-S1. Every reply fact in the ownership table is read from reply records or a cache of them; no other store writes it.
+- I-S2. An AI reply's journal sources settle only through `SettleSources`, and the turn they index is marked answered in the same transaction.
+- I-S3. The outbox commits nothing outside transport for a row with `reply_id`.
+- I-S4. A continuation names its reply through its paused span and holds no reply or source fact of its own.
 
 `tests/test_reply_lifecycle_fuzz.py` checks that at most one span is current and I4 through I8 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approvals, deletions, departures, supersessions, and dropped replays, from the spans that run; the unit tests cover stale and retired spans and the remaining rules.

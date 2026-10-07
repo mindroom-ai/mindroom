@@ -223,7 +223,7 @@ def _refused_reply_outcome(
 
 
 @dataclass
-class ReplyStop:
+class _ReplyStop:
     """What a Stop on one event reaches among the reply records, before it is recorded."""
 
     event_id: str
@@ -1648,7 +1648,7 @@ class DeliveryGateway:
             # The reply left active while the button was sent.
             await self.settle_reply_debt(handle.reply_id)
 
-    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> ReplyStop:
+    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> _ReplyStop:
         """Return what a Stop on one event reaches among the reply records.
 
         A Stop on an event no reply is bound to yet, while a reply create in
@@ -1662,13 +1662,13 @@ class DeliveryGateway:
             may_wait=may_wait,
             now_ns=time.time_ns(),
         )
-        return ReplyStop(event_id=event_id, receipt_order=receipt_order, target=target)
+        return _ReplyStop(event_id=event_id, receipt_order=receipt_order, target=target)
 
     async def accepts_reply_stop(self, event_id: str, room_id: str) -> bool:
         """Return whether a Stop reaction on this event reaches a running reply or a pending create."""
         return await self.deps.outbox.replies.accepts_stop(event_id, room_id)
 
-    async def finish_reply_stop(self, stop: ReplyStop) -> bool:
+    async def finish_reply_stop(self, stop: _ReplyStop) -> bool:
         """Record a Stop on the reply it reaches and run what it left, cancelling the span or owing the note.
 
         Returns whether a reply owns the event.

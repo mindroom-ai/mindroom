@@ -32,11 +32,9 @@ That progress closes before the approval lifecycle delivers the durable final ed
 `FinalDeliveryOutcome` exposes terminal run identity from the frozen delivery payload through its typed contract, keeping live and recovered history linkage consistent.
 
 `ResponseSources` captures immutable pending events, logical sources, discovery aliases, and the selected edit receipt for one request.
-The journal registers `ResponseAttempt` identity atomically with approval creation or response delivery enqueue, and binds the visible response on acknowledgement.
-Normalized attempt rows survive approval deletion; `approval_continuation_sources` alone owns pending approval settlement.
-Current `TurnRecord` selection and STOP watermarks govern edits selected before execution, while the outbox alone owns frozen payloads, results, acknowledgement, and retirement.
-STOP and stale approval failure decisions query exact durable identity; prepared turn snapshots remain solely for terminal commit and recovery.
-`response_sources.py` owns the immutable runtime values, `event_journal/response_attempts.py` owns normalized durable registration and lookup, and `event_journal/legacy_response_attempts.py` owns one-time transactional adoption from released snapshots.
+Once a reply span claims the request, the span's records own its sources and the reply's event, and an approval continuation holds the pending sources of the span whose pause created it (see [Reply messages](reply-messages.md#ownership)).
+Current `TurnRecord` selection governs edits selected before execution, the reply governs whether a Stop came after an edit, and the outbox alone owns frozen payloads, acknowledgement, and retirement.
+`response_sources.py` owns the immutable runtime values, and `event_journal/legacy_response_attempts.py` owns the one-time adoption of approval continuation identity from released stores.
 
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
@@ -218,7 +216,7 @@ An ordinary callback moves through these lifecycle phases; durable and in-proces
 - Downstream-owned: the callback handed the source to lane, coalescing, or turn work, so the journal row stays pending while the live owner exists.
 - Prepared voice checkpoint: an incomplete `TurnStore` record preserves normalized content before response ownership begins; the pending journal source still owns retry.
 - Durably pending turn: `TurnStore.record_pending_turn` wrote `completed=False`; response ownership has begun.
-- Terminal delivery: the final outbox enqueue or an intentional no-answer decision settles the journal source; delivery acknowledgement commits the corresponding terminal turn record when needed.
+- Terminal delivery: for an AI reply, the reply rule that ends its span settles the journal sources and marks the turn answered in one transaction; for a turn that is not an AI reply, such as a command, the final outbox enqueue settles the source and its acknowledgement commits the terminal turn record.
 
 Two claim types cross these states.
 
@@ -245,8 +243,8 @@ journal event pending
   -> normalization and ingress admission under that claim
   -> journal event remains pending while downstream owns work
   -> durable pending TurnStore record when response ownership begins
-  -> final outbox enqueue settles the journal sources atomically
-  -> delivery acknowledgement projects the server-ordered Matrix event and binds its terminal TurnStore record atomically
+  -> the reply's terminal row settles the journal sources and marks the turn answered atomically
+  -> delivery acknowledgement projects the server-ordered Matrix event and binds it to the reply
 ```
 
 The pending claim must be acquired before normalization and released on every non-admission or failure path.
@@ -316,11 +314,9 @@ Physical source IDs are exclusive turn claims, while discovery aliases are advis
 An interrupted turn stays pending, and replay continues its reply in place.
 An interrupted edit regeneration also stays pending but starts over, because a newer edit may have replaced the prompt its stopped attempt answered.
 Each bot instance ends what an earlier instance left running from the reply records at startup (see [Reply messages](reply-messages.md#lifetime)); a reply whose sources still replay waits for its replay.
-Same-requester supersession of a replay follows its reply's records (see [Reply messages](reply-messages.md#lifetime)); for a turn without a reply record, it preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
-When every current source is deleted, the reply records end a reply that has not answered and owe the redaction of what it showed; once the reply has ended, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
-Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.
-Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
-An approval continuation retains its response INITIAL even when all source messages are deleted; the approval card remains the explicit consent surface.
+Same-requester supersession of a replay follows its reply's records (see [Reply messages](reply-messages.md#lifetime)).
+When every current source is deleted, the reply records end a reply that has not answered and owe the redaction of what it showed, and stale history for a surviving request retries canonical preparation with a refreshed payload.
+An approval continuation keeps its reply even when all source messages are deleted; the approval card remains the explicit consent surface.
 
 Policy approval events eligible for timed grants expose a canonical `approval_scope` containing an opaque scope ID, entity, invoking agent, and concrete operation (including MCP server and remote tool when applicable).
 One-shot-only approvals omit this optional scope and remain individually reviewable.
@@ -373,10 +369,9 @@ Retention also keeps every turn record that carries a redaction tombstone for a 
 Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts.
 The revision map remains ledger-owned; model runs carry consumption provenance.
 Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
-Successful edit generation freezes its selected turn record in the final outbox result before sending; internal prompts and ledger metadata never enter the Matrix payload.
-A winning acknowledgement under active delivery ownership commits that exact historical consumption proof with the canonical response identity, merging current tombstones, STOP, and newer edit facts in the same transaction.
-Acknowledgements and ordinary ledger writes claim the same existing canonical rows before merging, so a delayed cached write cannot erase delivered proof before cache publication or restart.
-Cache publication uses the actual committed record; final-delivery recovery uses the frozen outbox result without another model call.
+A regeneration's span carries the edit it selected; the turn record takes those revisions and prompts in the transaction that settles the span's sources with its answer, and internal prompts and ledger metadata never enter the Matrix payload.
+Reply settlement and ordinary ledger writes claim the same existing canonical rows before merging, so a delayed cached write cannot erase a committed answer before cache publication or restart.
+Cache publication uses the actual committed record; final-delivery recovery resends the frozen row without another model call.
 Coalesced regeneration refills invalidated slots through strict paginated reads proving source, requester, and visible revision, including sidecars.
 An exact principal/room/source projection tombstone proves canonical deletion during refill, allowing the edit owner to reconcile cleanup and rebuild surviving sources before the room FIFO reaches the deletion callback; missing unproven data still blocks generation.
 The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.

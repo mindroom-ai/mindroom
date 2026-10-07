@@ -327,7 +327,7 @@ def claim(
 # Stop
 
 
-def record_stop(
+def _record_stop(
     transaction: Transaction,
     principal_id: str,
     *,
@@ -845,7 +845,7 @@ class ReplyStore:
     async def record_stop(self, event_id: str, receipt_order: int) -> AppliedTransition | None:
         """Record a Stop on the reply bound to one event; ``None`` when no reply is bound to it."""
         return await self._backend.write(
-            lambda transaction: record_stop(
+            lambda transaction: _record_stop(
                 transaction,
                 self._principal_id,
                 event_id=event_id,

@@ -26,7 +26,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approvals, membership_hooks, reply_messages
+from . import approval_continuations, approvals, membership_hooks, reply_messages
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -695,7 +695,7 @@ def _advance_membership_epoch(
         f"""
         DELETE FROM approval_continuations
         WHERE principal_id = ?
-          AND {approvals.approval_continuations.holds_source_in_room("approval_continuations")}
+          AND {approval_continuations.holds_source_in_room("approval_continuations")}
         """,  # noqa: S608 - a fixed SQL fragment, not input
         (principal_id, room_id),
     )
@@ -915,7 +915,7 @@ def _settle_tombstoned_turn_source(
         WHERE principal_id = ? AND room_id = ? AND event_id = ? AND state = ?
           AND kind IN ({kind_placeholders})
           AND NOT EXISTS (
-              SELECT 1 FROM {approvals.approval_continuations.HELD_SOURCES}
+              SELECT 1 FROM {approval_continuations.HELD_SOURCES}
               WHERE held_source.principal_id = ? AND held_source.event_id = ?
           )
         """,  # noqa: S608 - placeholders are generated, values are still bound
@@ -1063,7 +1063,7 @@ def _pending_rows(
     kind_clause = "" if kind is None else " AND kind = ?"
     kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
     continuation_joins = f"""
-        LEFT JOIN ({approvals.approval_continuations.HELD_SOURCES})
+        LEFT JOIN ({approval_continuations.HELD_SOURCES})
           ON held_source.principal_id = events.principal_id
          AND held_source.event_id = events.event_id
         LEFT JOIN reply_spans AS claim_span

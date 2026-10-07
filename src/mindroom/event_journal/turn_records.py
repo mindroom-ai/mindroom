@@ -203,10 +203,10 @@ def settle_turn(
     and an approval continuation's finish both come here.
     """
     journal.settle_many(transaction, principal_id, pending)
-    return complete_turn(transaction, agent_name, logical_event_ids=logical, prepared_edit=prepared_edit)
+    return _complete_turn(transaction, agent_name, logical_event_ids=logical, prepared_edit=prepared_edit)
 
 
-def complete_turn(
+def _complete_turn(
     transaction: Transaction,
     agent_name: str,
     *,
@@ -365,4 +365,14 @@ def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequen
     )
 
 
-__all__ = ["commit_terminal", "forget", "load_all", "load_record", "upsert", "write_record"]
+__all__ = [
+    "commit_terminal",
+    "decode_prepared_edit",
+    "encode_prepared_edit",
+    "forget",
+    "load_all",
+    "load_record",
+    "settle_turn",
+    "upsert",
+    "write_record",
+]

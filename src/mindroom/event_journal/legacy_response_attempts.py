@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 _IDENTITY_KEY = "legacy_identity"
 
 
-class LegacyIdentity(TypedDict):
+class _LegacyIdentity(TypedDict):
     """The reply identity a continuation adopted from an earlier release answers."""
 
     entity_name: str
@@ -250,7 +250,7 @@ def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, obj
     }
 
 
-def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> LegacyIdentity:
+def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _LegacyIdentity:
     """Return the identity a continuation was adopted with, until reply classification names its span."""
     raw = context.get(_IDENTITY_KEY)
     if not isinstance(raw, dict):
