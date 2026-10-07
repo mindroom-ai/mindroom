@@ -1556,7 +1556,7 @@ class ResponseRunner:
                 and current.session_id == paused.session_id
                 and current.cli_call == paused.cli_call
             ):
-                await self._end_expired_in_place_wait(current)
+                await self._end_expired_in_place_wait()
                 return FinalDeliveryOutcome(
                     terminal_status="suspended",
                     event_id=current.response_event_id,
@@ -1759,7 +1759,6 @@ class ResponseRunner:
                     reply_write=pause_write(
                         handle,
                         _paused_presentation(handle, paused, waiting_text=waiting_text),
-                        approval_id=advance.approval_id,
                         in_place=in_place,
                         enqueue=partial(self.deps.approval_store.pause_for_approval, advance),
                     ),
@@ -1809,7 +1808,7 @@ class ResponseRunner:
             reply_pause=partial(self._advance_reply_pause, handle, target, in_place=True),
         )
 
-    async def _end_expired_in_place_wait(self, current: ApprovalContinuation) -> None:
+    async def _end_expired_in_place_wait(self) -> None:
         """End the span of a response-local wait that expired; the reply waits for the decision."""
         handle = current_span()
         assert handle is not None, "a response-local wait runs in its reply's span"
@@ -1823,7 +1822,6 @@ class ResponseRunner:
             pause_decision(
                 handle,
                 decode_presentation(reply.presentation),
-                approval_id=current.approval_id,
                 in_place=False,
                 stage=None,
             ),
@@ -1853,7 +1851,7 @@ class ResponseRunner:
         if stage is None:
             return await self.deps.delivery_gateway.pause_shown_reply(
                 handle,
-                pause_decision(handle, shown, approval_id=continuation.approval_id, in_place=in_place, stage=None),
+                pause_decision(handle, shown, in_place=in_place, stage=None),
                 enqueue=enqueue,
                 target=target,
             )
@@ -1867,7 +1865,6 @@ class ResponseRunner:
                 reply_write=pause_write(
                     handle,
                     shown,
-                    approval_id=continuation.approval_id,
                     in_place=in_place,
                     enqueue=enqueue,
                 ),

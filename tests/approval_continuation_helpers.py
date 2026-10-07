@@ -98,7 +98,6 @@ async def advance_continuation(
                 reply,
                 held,
                 rl.PauseWrite(shown=reply.presentation, prepared_revision=reply.revision, stage=None),
-                approval_id=approval_id,
                 in_place=False,
                 now_ns=time.time_ns(),
             ),

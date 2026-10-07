@@ -478,7 +478,6 @@ _TABLES = (
         owed_write_json TEXT,
         -- The last allocated value of the reply's one write sequence.
         reply_sequence BIGINT NOT NULL,
-        approval_id TEXT,
         created_at_ns BIGINT NOT NULL,
         updated_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, reply_id),

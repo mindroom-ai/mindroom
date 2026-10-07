@@ -9,7 +9,7 @@ reply someone owns.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 from hypothesis import HealthCheck, settings
@@ -117,6 +117,17 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             return None
         return current
 
+    def _held_by(self) -> str | None:
+        """Return the approval that holds the reply, as the store reads it from the continuation."""
+        approval = self.model.approval
+        if approval is None or approval.disposition == "superseded":
+            return None
+        return approval.approval_id
+
+    def _derive_hold(self) -> None:
+        if self.model.reply is not None:
+            self.model.reply = replace(self.model.reply, approval_id=self._held_by())
+
     def _apply(self, transition: rl.Transition) -> rl.Transition:
         if transition.outcome is Outcome.RECOMPUTE:
             msg = "rendered from the current revision, yet asked to recompute"
@@ -136,6 +147,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self.model.spans[span.span_id] = span
         for effect in transition.effects:
             self._apply_effect(effect)
+        self._derive_hold()
         if transition.row is not None:
             reply = self.model.reply
             assert reply is not None
@@ -478,6 +490,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if span.kind is SpanKind.APPROVAL_RESUME:
             self._apply(rl.approval_released(self.model.reply, span, now_ns=self._now()))  # type: ignore[arg-type]
             self.model.approval = None
+            self._derive_hold()
             return
         outcome = SpanOutcome.SUPERSEDED if superseded else SpanOutcome.RELEASED
         self._apply(rl.release(self.model.reply, span, outcome=outcome, now_ns=self._now()))  # type: ignore[arg-type]
@@ -555,7 +568,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 prepared_revision=reply.revision,
                 stage=WriteStage.EDIT if reply.event_id is not None else WriteStage.INITIAL,
             ),
-            approval_id=approval_id,
             in_place=in_place,
             now_ns=self._now(),
         )
@@ -564,6 +576,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             return
         self._apply(transition)
         self.model.approval = _Approval(approval_id, span.span_id, "waiting")
+        self._derive_hold()
 
     @precondition(
         lambda self: (
@@ -622,6 +635,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.approval = None
         self.model.settled |= self.model.held
         self.model.held = set()
+        self._derive_hold()
 
     # --- reply-authored -----------------------------------------------------
 
@@ -683,6 +697,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         transition = self._apply(rl.approval_released(self.model.reply, current, now_ns=self._now()))  # type: ignore[arg-type]
         if transition.applied:
             self.model.approval = None
+            self._derive_hold()
 
     @precondition(lambda self: self.model.reply is not None and not self.model.reply.terminal)
     @rule()
@@ -698,6 +713,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self._apply(rl.departed(self.model.reply, self._current(), now_ns=self._now()))  # type: ignore[arg-type]
         self.model.rows = [row for row in self.model.rows if row.intent.stage is not WriteStage.EDIT]
         self.model.approval = None
+        self._derive_hold()
 
     @precondition(
         lambda self: (

@@ -18,18 +18,31 @@ from mindroom.reply_lifecycle import (
 )
 
 from . import reply_spans
+from .models import SUPERSEDED_FAILURE_REASON
 
 if TYPE_CHECKING:
     from mindroom.reply_lifecycle import Span, Transition
 
     from .backend import Row, Transaction
 
-_REPLY_COLUMNS = """
+# The approval that holds a ``reply_messages`` row: a continuation that names one of the
+# reply's spans and that no edit superseded. The continuation row is the only record
+# of the hold; the reply reads it, so the two cannot disagree.
+_HELD_BY = f"""(
+    SELECT continuation.approval_id FROM approval_continuations AS continuation
+    JOIN reply_spans AS held_span
+      ON held_span.principal_id = continuation.principal_id AND held_span.span_id = continuation.span_id
+    WHERE held_span.principal_id = reply_messages.principal_id AND held_span.reply_id = reply_messages.reply_id
+      AND NOT (continuation.state = 'failing' AND COALESCE(continuation.failure_reason, '') = '{SUPERSEDED_FAILURE_REASON}')
+    LIMIT 1
+)"""  # noqa: S608 - a fixed constant, not input
+
+_REPLY_COLUMNS = f"""
     reply_id, entity_name, room_id, thread_id, membership_epoch,
     event_id, state, current_span_id, last_span_id, presentation_json,
     frozen_display_json, possibly_shown_json, possibly_shown_seq, confirmed_seq, revision, legacy_pending,
     placeholder_only, stop_receipt_order, stop_applied_receipt_order, edit_receipt_order, stop_button_event_id,
-    redaction_pending_json, owed_write_json, reply_sequence, approval_id, created_at_ns, updated_at_ns
+    redaction_pending_json, owed_write_json, reply_sequence, {_HELD_BY} AS approval_id, created_at_ns, updated_at_ns
 """
 
 
@@ -117,6 +130,15 @@ def load(transaction: Transaction, principal_id: str, reply_id: str) -> Reply | 
         (principal_id, reply_id),
     )
     return None if row is None else _reply(row)
+
+
+def held_by(transaction: Transaction, principal_id: str, reply_id: str) -> str | None:
+    """Return the approval that holds one reply now, if any."""
+    row = transaction.fetchone(
+        f"SELECT {_HELD_BY} AS approval_id FROM reply_messages WHERE principal_id = ? AND reply_id = ?",  # noqa: S608
+        (principal_id, reply_id),
+    )
+    return None if row is None else cast("str | None", row["approval_id"])
 
 
 def lock(transaction: Transaction, principal_id: str, reply_id: str) -> Reply | None:
@@ -250,15 +272,21 @@ def ended_by_deletion(transaction: Transaction, principal_id: str, event_id: str
 def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: int, limit: int) -> int:
     """Delete up to ``limit`` finished replies unchanged since ``before_ns``, with their spans; return how many.
 
-    Only replies that owe nothing: no redaction, note, unsent row, approval, or
-    Stop still to apply. Pending Stops that old are dropped too.
+    Only replies that owe nothing: no redaction, note, unsent row, or Stop still
+    to apply, and that no continuation names, superseded or not: its cleanup
+    reads the reply. Pending Stops that old are dropped too.
     """
     rows = transaction.fetchall(
         """
         SELECT reply.reply_id FROM reply_messages AS reply
         WHERE reply.principal_id = ? AND reply.state IN ('completed', 'cancelled', 'failed', 'gone')
           AND reply.updated_at_ns < ?
-          AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL AND reply.approval_id IS NULL
+          AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM approval_continuations AS continuation
+            JOIN reply_spans AS named ON named.principal_id = continuation.principal_id AND named.span_id = continuation.span_id
+            WHERE named.principal_id = reply.principal_id AND named.reply_id = reply.reply_id
+          )
           AND (reply.stop_receipt_order IS NULL OR reply.stop_applied_receipt_order >= reply.stop_receipt_order)
           AND NOT EXISTS (
             SELECT 1 FROM matrix_delivery_outbox AS row
@@ -354,8 +382,8 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             current_span_id, last_span_id, presentation_json, frozen_display_json, possibly_shown_json,
             possibly_shown_seq, confirmed_seq, revision, legacy_pending, placeholder_only, stop_receipt_order,
             stop_applied_receipt_order, edit_receipt_order, stop_button_event_id, redaction_pending_json,
-            owed_write_json, reply_sequence, approval_id, created_at_ns, updated_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            owed_write_json, reply_sequence, created_at_ns, updated_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
             event_id = excluded.event_id,
             state = excluded.state,
@@ -376,7 +404,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             redaction_pending_json = excluded.redaction_pending_json,
             owed_write_json = excluded.owed_write_json,
             reply_sequence = excluded.reply_sequence,
-            approval_id = excluded.approval_id,
             updated_at_ns = excluded.updated_at_ns
         """,
         (
@@ -405,7 +432,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             _ids_json(reply.redaction_pending),
             _owed_json(reply.owed_write),
             reply.reply_sequence,
-            reply.approval_id,
             reply.created_at_ns,
             reply.updated_at_ns,
         ),

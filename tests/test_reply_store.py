@@ -6,6 +6,7 @@ import inspect
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -36,6 +37,7 @@ from mindroom.reply_lifecycle import (
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.turn_record import TurnRecord
 from tests import test_event_journal_store as journal_tests
+from tests.approval_continuation_helpers import claim_continuation
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import ROOM, admit, text
@@ -84,7 +86,7 @@ def _first_claim(**changes: object) -> rl.Transition:
 
 
 async def test_reply_and_span_round_trip_every_field(journal_store: EventJournalStore) -> None:
-    """Every reply column and span column restores as written."""
+    """Every reply column and span column restores as written; the approval hold is read, never written."""
     principal = journal_store.principal(PRINCIPAL)
     transition = _first_claim()
     applied = await _apply(journal_store, transition)
@@ -106,7 +108,6 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
         redaction_pending=("$old",),
         owed_write=OwedWrite("span-1", rl._NOTE_ERROR, "boom"),
         reply_sequence=4,
-        approval_id="approval-1",
         revision=7,
     )
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply))
@@ -964,6 +965,97 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
     assert not await alice.is_pending("$source-1")
 
 
+async def test_a_reply_is_held_by_the_continuation_that_names_its_span(journal_store: EventJournalStore) -> None:
+    """The hold is read from the continuation row, so no copy on the reply can drift from it."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    continuation = await paused_for_approval(
+        alice,
+        journal_tests.TestApprovalContinuations.continuation(state="waiting"),
+    )
+    assert continuation is not None
+    assert continuation.span_id is not None
+    paused = await alice.replies.span(continuation.span_id)
+    assert paused is not None
+    held = await alice.replies.load(paused.reply_id)
+    assert held is not None
+    assert held.approval_id == "approval-1"
+
+    # An edit's fence supersedes it: the continuation stays for its cleanup but holds nothing.
+    assert await alice.request_approval_failure("approval-1", "superseded", expected_state="waiting") is not None
+    released = await alice.replies.load(paused.reply_id)
+    assert released is not None
+    assert released.approval_id is None
+
+
+async def test_an_edit_held_back_by_a_settling_approval_is_retried_when_it_finishes(
+    journal_store: EventJournalStore,
+) -> None:
+    """B1: the edit's claim waits while the approval settles, and the approval's finish retries it."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    paused = await paused_for_approval(alice, journal_tests.TestApprovalContinuations.continuation(state="ready"))
+    assert paused is not None
+    claimed = await claim_continuation(alice, "approval-1", runtime_generation="gen-test")
+    assert claimed is not None
+    assert claimed.claim_span_id is not None
+    resume = await alice.replies.span(claimed.claim_span_id)
+    assert resume is not None
+    # The resume ends without its answer; its approval still has to settle.
+    await alice.replies.decide(
+        reply_id=resume.reply_id,
+        span_id=resume.span_id,
+        decide=lambda reply, span: rl.fail(reply, span, None, phase="pre_delivery", now_ns=1),
+    )
+    retried: list[tuple[str, ...]] = []
+    runtime = reply_scope.ReplyRuntime(
+        store=alice,
+        entity_name="agent",
+        generation="gen-test",
+        retry_sources=lambda _room_id, sources: retried.append(sources),
+        complete_turn=AsyncMock(),
+        clean_up_superseded=lambda _continuation: None,
+    )
+    await admit(alice, "$edit")
+    refused = await runtime.claim(
+        delivery_id="$edit",
+        sources=SpanSources(pending=("$edit",), logical=claimed.sources.logical_source_event_ids),
+        room_id=ROOM,
+        thread_id="$thread",
+        driving_edit_id="$edit",
+    )
+    assert refused is reply_scope.ClaimRefused.DEFERRED
+    assert retried == []
+
+    assert (
+        await alice.request_approval_failure(
+            "approval-1",
+            "superseded",
+            expected_state="claimed",
+            expected_runtime_generation="gen-test",
+        )
+        is not None
+    )
+    assert await runtime.finish_approval("approval-1")
+    assert retried == [("$edit",)]
+
+
+async def test_retention_keeps_a_reply_a_continuation_still_names(journal_store: EventJournalStore) -> None:
+    """A finished reply whose continuation waits for its cleanup is not forgotten, so that continuation still reads."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    continuation = await paused_for_approval(
+        alice,
+        journal_tests.TestApprovalContinuations.continuation(state="waiting"),
+    )
+    assert continuation is not None
+    # The entity left the configuration: its reply ends while the unavailable-owner cleanup still has to discard it.
+    assert await journal_store.end_entity_replies(lambda _name: True, now_ns=10) == 1
+
+    assert await alice.replies.forget_finished(before_ns=10**18, limit=10) == 0
+    assert await alice.approval_continuation("approval-1") is not None
+
+
 @pytest.mark.parametrize("kind", [rl.SpanKind.TURN, rl.SpanKind.APPROVAL_RESUME])
 @pytest.mark.parametrize("taken_over", [False, True])
 async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
@@ -1015,7 +1107,6 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
                 reply,
                 span,
                 rl.PauseWrite(shown=reply.presentation, prepared_revision=reply.revision, stage=None),
-                approval_id="approval-1",
                 in_place=True,
                 now_ns=60,
             ),

@@ -17,7 +17,7 @@ from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from . import membership_state, outbox, reply_messages, reply_spans, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .legacy_response_attempts import legacy_identity, legacy_identity_context
-from .models import DeliveryStage
+from .models import SUPERSEDED_FAILURE_REASON, DeliveryStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,8 +63,6 @@ def holds_source_in_room(alias: str) -> str:
     """  # noqa: S608 - a fixed alias, not input
 
 
-# The failure reason of an approval an edit superseded.
-SUPERSEDED_FAILURE_REASON = "superseded"
 _FENCEABLE = ("waiting", "ready")
 # The failure reason of a resume a shutdown cut short, which the next instance
 # hands back to replay.
@@ -899,26 +897,18 @@ def fence(
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
-def finish(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    approval_id: str,
-) -> bool:
-    """End a paused run after terminal FINAL delivery, proven failed-response deletion, or supersession.
+def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str) -> ApprovalContinuation | None:
+    """Lock a paused run that may end: after terminal FINAL delivery, proven failed-response deletion, or supersession.
 
-    The caller settles its sources through the reply settlement path in the same transaction.
+    The caller applies the finish to the reply it paused while the run still
+    holds that reply, then deletes the run with ``delete``.
     """
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
-        return False
+        return None
     if continuation.state == "failing" and continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
         # An edit regenerates the reply; the old approval publishes nothing.
-        transaction.execute(
-            "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
-            (principal_id, approval_id),
-        )
-        return True
+        return continuation
     delivered = transaction.fetchone(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox
@@ -928,22 +918,26 @@ def finish(
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
     if delivered is None and not deleted_delivery_is_terminal(transaction, principal_id, continuation):
-        return False
+        return None
+    return continuation
+
+
+def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:
+    """Delete a paused run whose end the reply it paused already applied."""
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
     )
-    return True
 
 
-def release(
+def may_release(
     transaction: Transaction,
     principal_id: str,
     *,
     approval_id: str,
     expected_generation: int,
-) -> bool:
-    """Hand an interrupted continuation's still-pending sources back to ordinary replay.
+) -> ApprovalContinuation | None:
+    """Lock an interrupted continuation whose still-pending sources may go back to ordinary replay.
 
     A restart cut the approved run short before any FINAL, so its reply is still
     the unfinished stream of one turn, which replay adopts and continues like
@@ -952,41 +946,37 @@ def release(
     """
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing" or continuation.generation != expected_generation:
-        return False
+        return None
     delivery_id = continuation.source_event_ids[0]
     if outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL) is not None:
-        return False
+        return None
     initial = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
     if initial is not None and initial.retired:
-        return False
-    transaction.execute(
-        "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
-        (principal_id, approval_id),
-    )
-    return True
+        return None
+    return continuation
 
 
-def discard_unavailable(
+def may_discard_unavailable(
     transaction: Transaction,
     principal_id: str,
     *,
     approval_id: str,
     notice_principal_id: str,
-) -> bool:
-    """End a permanently unavailable owner's paused run after visible card cleanup; the caller settles its sources."""
+) -> ApprovalContinuation | None:
+    """Lock a permanently unavailable owner's paused run whose visible card cleanup is done, so it may end."""
     observed = get(transaction, principal_id, approval_id=approval_id)
     if observed is None or observed.state != "failing":
-        return False
+        return None
     membership_epoch = membership_state.claim_active_membership_epoch(
         transaction,
         notice_principal_id,
         room_id=observed.room_id,
     )
     if membership_epoch is None:
-        return False
+        return None
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing" or continuation.room_id != observed.room_id:
-        return False
+        return None
     delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
     # The membership row is already held before the cross-principal
     # continuation lock. The helper's membership claim is therefore reentrant;
@@ -1000,7 +990,7 @@ def discard_unavailable(
         expected_room_id=continuation.room_id,
     )
     if ownership is None:
-        return False
+        return None
     delivered = transaction.fetchone(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox
@@ -1009,13 +999,7 @@ def discard_unavailable(
         """,
         (notice_principal_id, delivery_id, DeliveryStage.FINAL.value),
     )
-    if delivered is None:
-        return False
-    transaction.execute(
-        "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
-        (principal_id, approval_id),
-    )
-    return True
+    return None if delivered is None else continuation
 
 
 def _get_locked(

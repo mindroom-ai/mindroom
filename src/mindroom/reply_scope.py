@@ -223,6 +223,9 @@ class ReplyRuntime:
         if finished is None:
             return False
         await self.run_effects(finished.post_commit)
+        # A claim an approval held back may run now that the run is gone.
+        for reply_id in tuple(self._waiting_for_rows):
+            self.rows_resolved(reply_id)
         return True
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
@@ -239,20 +242,24 @@ class ReplyRuntime:
         self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
     async def _wait_for_rows(self, reply_id: str, room_id: str, sources: tuple[str, ...]) -> None:
-        """Retry sources once the reply's earlier writes resolve, instead of retrying at once."""
+        """Retry sources once what blocked their claim on the reply is gone, instead of retrying at once.
+
+        The wait registers first and then rechecks, so a resolution that landed
+        in between still retries them. A retry claims again and may wait again.
+        """
         self._waiting_for_rows.setdefault(reply_id, []).append((room_id, sources))
         reply = await self.store.replies.load(reply_id)
-        if reply is None or (
-            reply.owed_write is None
-            and reply.legacy_pending is None
-            and not await self.store.replies.has_unresolved_rows(reply_id)
+        if reply is None or not rl.claim_blocked(
+            reply,
+            durable_write_debt=await self.store.replies.has_unresolved_rows(reply_id),
+            driving_edit=True,
         ):
-            # They resolved before this claim registered its wait. A note still
-            # owed and not yet enqueued wakes it when its row resolves.
+            # A note still owed and not yet enqueued wakes it when its row
+            # resolves; an approval's finish wakes it when the run is gone.
             self.rows_resolved(reply_id)
 
     def rows_resolved(self, reply_id: str) -> None:
-        """Retry the claims that waited for this reply's earlier writes."""
+        """Retry the claims that waited on this reply."""
         for room_id, sources in self._waiting_for_rows.pop(reply_id, ()):
             self.retry_sources(room_id, sources)
 
@@ -594,7 +601,6 @@ def pause_decision(
     handle: SpanHandle,
     shown: Presentation,
     *,
-    approval_id: str,
     in_place: bool,
     stage: rl.WriteStage | None,
 ) -> Decide:
@@ -609,7 +615,6 @@ def pause_decision(
         reply,
         span,
         write,
-        approval_id=approval_id,
         in_place=in_place,
         now_ns=time.time_ns(),
     )
@@ -619,7 +624,6 @@ def pause_write(
     handle: SpanHandle,
     shown: Presentation,
     *,
-    approval_id: str,
     in_place: bool,
     enqueue: ReplyRowEnqueuer,
 ) -> ReplyWrite:
@@ -630,7 +634,7 @@ def pause_write(
         handle=handle,
         stage=rl.WriteStage.EDIT,
         shown=shown,
-        decide=pause_decision(handle, shown, approval_id=approval_id, in_place=in_place, stage=rl.WriteStage.EDIT),
+        decide=pause_decision(handle, shown, in_place=in_place, stage=rl.WriteStage.EDIT),
         enqueue=enqueue,
     )
 

@@ -329,7 +329,6 @@ async def pause_shown_reply(
                 reply,
                 held,
                 rl.PauseWrite(shown=reply.presentation, prepared_revision=reply.revision, stage=None),
-                approval_id=continuation.approval_id,
                 in_place=False,
                 now_ns=time.time_ns(),
             ),

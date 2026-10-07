@@ -618,9 +618,17 @@ class TestEditApprovalOwnership:
         case = approval_case
         if transport_fails:
             await case.failed_stop()
-            # The newer edit's claim waits for the note the reply still owes.
+            # The newer edit's claim waits for the note the reply still owes, and for the
+            # stopped approval's settlement that the Stop's wake runs.
             await case.gateway.recover_deliveries()
-        newer = await case.pause_newer()
+            await case.runner.handoff_approval_source("$edit")
+            await case.runner.wait_for_source_owned_inbox_responses()
+            assert await case.principal.approval_continuation(case.approval.approval_id) is None
+            await case.dispatch_newer()
+            newer = await case.principal.approval_continuation_for_source("$newer-edit")
+            assert newer is not None
+        else:
+            newer = await case.pause_newer()
         sends = case.bot.client.room_send.await_count
         await case.stop()
         await case.assert_stopped_edit_settled()

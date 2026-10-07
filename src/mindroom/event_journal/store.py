@@ -1660,15 +1660,17 @@ class PrincipalStore:
             continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
             if continuation is not None:
                 replies.lock_paused_reply(transaction, self._principal_id, continuation)
-            if not approval_continuations.release(
+            released = approval_continuations.may_release(
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
                 expected_generation=expected_generation,
-            ):
+            )
+            if released is None:
                 return False
-            if continuation is not None:
-                replies.approval_released(transaction, self._principal_id, continuation)
+            # The reply hands its span back to replay while the run still holds it; the run goes after.
+            replies.approval_released(transaction, self._principal_id, released)
+            approval_continuations.delete(transaction, self._principal_id, approval_id=approval_id)
             return True
 
         return await self._backend.write(release)
@@ -1714,17 +1716,18 @@ class PrincipalStore:
             continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
             if continuation is not None:
                 replies.lock_paused_reply(transaction, self._principal_id, continuation)
-            if not approval_continuations.discard_unavailable(
+            discarded = approval_continuations.may_discard_unavailable(
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
                 notice_principal_id=notice_principal_id,
-            ):
+            )
+            if discarded is None:
                 return False
-            if continuation is not None:
-                # The owner that could settle the reply is gone; the notice is what the room sees.
-                # No live ledger of that owner learns it; its next start loads it.
-                _settled_approval(transaction, self._principal_id, continuation)
+            # The owner that could settle the reply is gone; the notice is what the room sees.
+            # No live ledger of that owner learns it; its next start loads it.
+            _settled_approval(transaction, self._principal_id, discarded)
+            approval_continuations.delete(transaction, self._principal_id, approval_id=approval_id)
             return True
 
         return await self._backend.write(discard)
@@ -1962,11 +1965,13 @@ def _finish_approval_continuation(
     continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if continuation is not None:
         replies.lock_paused_reply(transaction, principal_id, continuation)
-    if not approval_continuations.finish(transaction, principal_id, approval_id=approval_id):
+    finishing = approval_continuations.may_finish(transaction, principal_id, approval_id=approval_id)
+    if finishing is None:
         return None
-    if continuation is None:
-        return FinishedApproval(post_commit=())
-    return FinishedApproval(post_commit=_settled_approval(transaction, principal_id, continuation))
+    # The reply learns the finish while the run still holds it; the run goes after.
+    post_commit = _settled_approval(transaction, principal_id, finishing)
+    approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
+    return FinishedApproval(post_commit=post_commit)
 
 
 def _settled_approval(

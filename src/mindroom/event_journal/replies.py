@@ -86,11 +86,20 @@ def settled_event_ids(transaction: Transaction, principal_id: str, transition: T
 
 
 def apply(transaction: Transaction, principal_id: str, transition: Transition) -> AppliedTransition:
-    """Write one transition and run its in-transaction effects; return the post-commit ones."""
+    """Write one transition and run its in-transaction effects; return the post-commit ones.
+
+    The reply comes back with the approval that holds it after those effects,
+    read from the continuations, so a caller never caches a hold the
+    transaction removed.
+    """
     reply_messages.persist(transaction, principal_id, transition)
     post_commit: list[PostCommitEffect] = []
     for effect in transition.effects:
         _run(transaction, principal_id, transition, effect, post_commit)
+    if transition.reply is not None:
+        held = reply_messages.held_by(transaction, principal_id, transition.reply.reply_id)
+        if held != transition.reply.approval_id:
+            transition = replace(transition, reply=replace(transition.reply, approval_id=held))
     return AppliedTransition(transition=transition, post_commit=tuple(post_commit))
 
 
