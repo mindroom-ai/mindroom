@@ -976,22 +976,20 @@ def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, sequ
         raise _invalid(msg)
     if first_create:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.GONE, now_ns))
-    if reply.placeholder_only:
-        # The answer never replaced the placeholder, which says so instead.
-        owed = OwedWrite(span.span_id, _NOTE_DELIVERY_FAILED)
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
-        )
     # A refused cancelled row was the Stop's: it restores only a finished answer.
-    if _keeps_earlier_answer(
+    if not reply.placeholder_only and _keeps_earlier_answer(
         reply,
         span,
         finished_only=span.outcome is SpanOutcome.CANCELLED,
         before_sequence=sequence,
     ):
         return _restored(reply, span, now_ns)
-    return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.FAILED, now_ns))
+    # What the reply shows, its placeholder or its progress, would read as unfinished: it says delivery failed instead.
+    owed = OwedWrite(span.span_id, _NOTE_DELIVERY_FAILED)
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
+    )
 
 
 # ---------------------------------------------------------------------------

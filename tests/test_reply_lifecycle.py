@@ -737,6 +737,7 @@ def test_a_refused_cancelled_final_never_returns_to_unfinished_work() -> None:
     )
     assert refused.reply is not None
     assert refused.reply.state is ReplyState.FAILED
+    assert refused.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
 
 
 def test_a_stop_never_returns_a_regeneration_to_unfinished_work() -> None:
@@ -812,6 +813,8 @@ def test_a_refused_final_restores_only_when_nothing_before_it_was_written() -> N
     failed = refused_final(_progress(reply, span), span)
     assert failed.reply is not None
     assert failed.reply.state is ReplyState.FAILED
+    # The progress it showed would read as still streaming: the delivery-failed note replaces it.
+    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
 
 
 def test_deleting_sources_never_restores_unfinished_work() -> None:
@@ -2079,7 +2082,8 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
         now_ns=NOW,
     )
     assert failed.reply is not None
-    assert failed.reply.owed_write is None
+    # The progress stays its event's content, never redacted as a placeholder; the note ends it.
+    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
     assert failed.reply.state is ReplyState.FAILED
     assert failed.reply.redaction_pending == ()
 
