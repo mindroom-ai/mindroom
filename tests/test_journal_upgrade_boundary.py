@@ -299,13 +299,16 @@ async def test_concurrent_startups_share_one_upgrade(legacy_database: _LegacyDat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drop_column", [True, False])
+@pytest.mark.parametrize(
+    "dropped_columns",
+    [(), ("toolkit_name",), ("toolkit_name", "arguments_digest")],
+    ids=["current", "before-toolkit", "before-toolkit-and-digest"],
+)
 @pytest.mark.parametrize("state", ["waiting", "ready", "claimed"])
 async def test_approval_toolkit_upgrade_fences_unresumable_calls(
     legacy_database: _LegacyDatabase,
     state: str,
-    *,
-    drop_column: bool,
+    dropped_columns: tuple[str, ...],
 ) -> None:
     """Old calls become cleanup work before a click can approve an unresumable run."""
     store = legacy_database.open()
@@ -327,8 +330,10 @@ async def test_approval_toolkit_upgrade_fences_unresumable_calls(
     assert original is not None
     assert original.state == state
     await store.close()
-    if drop_column:
-        legacy_database.execute("ALTER TABLE approval_continuation_calls DROP COLUMN toolkit_name")
+    for column in dropped_columns:
+        legacy_database.execute(f"ALTER TABLE approval_continuation_calls DROP COLUMN {column}")
+    if "arguments_digest" in dropped_columns:
+        original = replace(original, calls=tuple(replace(call, arguments_digest=None) for call in original.calls))
     rows_before = legacy_database.query("SELECT event_id, state FROM journal_events ORDER BY event_id")
     cards_before = legacy_database.query("SELECT * FROM approval_cards")
 
