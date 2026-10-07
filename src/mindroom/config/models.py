@@ -498,7 +498,7 @@ class DefaultsConfig(BaseModel):
     )
     automations: AutomationList = Field(
         default_factory=list,
-        description="Built-in automations, such as prompt_curation, for agents that do not list their own",
+        description="Automations, built-in such as prompt_curation or from a plugin, for agents that do not list their own",
     )
     tool_output_auto_save_threshold_bytes: int = Field(
         default=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,

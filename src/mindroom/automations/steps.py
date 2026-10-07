@@ -1,14 +1,41 @@
-"""The two step types a built-in automation returns to the runner."""
+"""What an automation's check receives, and the two step types it returns to the runner."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
+    from pathlib import Path
 
+    from mindroom.config.automations import Automation
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+
+
+@dataclass(frozen=True)
+class AutomationContext:
+    """Everything an automation's check gets when its cron fires for one agent.
+
+    ``config`` is the config at fire time; later steps receive the current one.
+    ``entry`` is the agent's entry for this automation, ``options`` its ``options`` (empty for a built-in), and
+    ``settings`` the plugin's own ``settings`` (empty for a built-in).
+    ``options`` and ``settings`` are read-only.
+    ``workspace`` is the agent's workspace root, which may not exist yet, or None for an agent without file memory,
+    which has no workspace, and
+    ``state_dir`` is the agent's automation state directory in primary storage, outside the workspace, which the automation
+    creates when it first writes there.
+    """
+
+    agent_name: str
+    config: Config
+    runtime_paths: RuntimePaths
+    entry: Automation
+    options: Mapping[str, Any]
+    settings: Mapping[str, Any]
+    workspace: Path | None
+    state_dir: Path
 
 
 @dataclass(frozen=True)
@@ -34,3 +61,12 @@ class Done:
     resolve: tuple[str, ...] = ()
     # Called on the event loop, for work that must be scheduled there, such as a background re-index.
     on_loop: Callable[[], None] | None = None
+
+
+# Every message the runner posts carries this hook source prefix, so the turns it starts are known as automation turns.
+AUTOMATION_HOOK_PREFIX = "automation/"
+
+
+def is_automation_hook_source(hook_source: str | None) -> bool:
+    """Return whether a trusted message's hook source marks a turn an automation started."""
+    return hook_source is not None and hook_source.startswith(AUTOMATION_HOOK_PREFIX)

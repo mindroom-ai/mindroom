@@ -10183,9 +10183,14 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
 
 @pytest.mark.parametrize(
     ("hook_source", "flushed"),
-    [(None, True), ("dreaming", False), ("prompt_curation", False)],
+    [
+        (None, True),
+        ("automation/dreaming", False),
+        ("automation/weekly_digest", False),
+        ("digest:message:received", True),
+    ],
 )
-def test_a_built_in_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
+def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
     """A maintenance turn, such as an unreviewed memory proposal, never reaches auto-flush; other turns do."""
     runner = ResponseRunner(deps=MagicMock())
     runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "file"

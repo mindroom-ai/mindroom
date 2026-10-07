@@ -381,7 +381,7 @@ class AgentConfig(BaseModel):
     )
     automations: AutomationList | None = Field(
         default=None,
-        description="Built-in automations for this agent, such as prompt_curation; omitted inherits defaults.automations",
+        description="Automations for this agent, built-in such as prompt_curation or from a plugin; omitted inherits defaults.automations",
     )
     skill_learning: SkillLearningConfig = Field(
         default_factory=SkillLearningConfig,

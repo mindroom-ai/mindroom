@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from mindroom.automations.registry import AutomationCatalog, compile_automations
 from mindroom.logging_config import get_logger
 
 from .decorators import get_hook_metadata
@@ -14,6 +15,7 @@ from .types import HookCallback, RegisteredHook
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from mindroom.automations.registry import CheckFn
     from mindroom.config.plugin import PluginEntryConfig
 
 logger = get_logger(__name__)
@@ -26,6 +28,7 @@ class HookRegistryPlugin(Protocol):
     entry_config: PluginEntryConfig
     plugin_order: int
     discovered_hooks: tuple[HookCallback, ...]
+    discovered_automations: tuple[CheckFn, ...]
 
 
 def _callback_source_lineno(callback: HookCallback) -> int:
@@ -34,9 +37,10 @@ def _callback_source_lineno(callback: HookCallback) -> int:
 
 @dataclass(frozen=True, slots=True)
 class HookRegistry:
-    """Compiled immutable event -> hooks mapping."""
+    """Compiled immutable snapshot of what loaded plugins provide: hooks by event, and automations by name."""
 
     _hooks_by_event: dict[str, tuple[RegisteredHook, ...]]
+    automations: AutomationCatalog = field(default_factory=AutomationCatalog)
 
     @classmethod
     def empty(cls) -> HookRegistry:
@@ -46,6 +50,7 @@ class HookRegistry:
     @classmethod
     def from_plugins(cls, plugins: Iterable[HookRegistryPlugin]) -> HookRegistry:
         """Compile one immutable snapshot from loaded plugins."""
+        plugins = list(plugins)
         hooks_by_event: defaultdict[str, list[RegisteredHook]] = defaultdict(list)
         seen_hook_names: set[tuple[str, str]] = set()
 
@@ -108,6 +113,7 @@ class HookRegistry:
                 )
                 for event_name, registered_hooks in hooks_by_event.items()
             },
+            automations=compile_automations(plugins),
         )
 
     def hooks_for(self, event_name: str) -> tuple[RegisteredHook, ...]:

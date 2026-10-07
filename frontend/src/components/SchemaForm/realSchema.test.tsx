@@ -127,6 +127,34 @@ describe("forms rendered from the real configuration schema", () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it("shows a plugin automation entry with its name and keeps it through an edit", () => {
+    const changes: unknown[] = [];
+    const entry = {
+      name: "weekly_digest",
+      cron: "0 9 * * 1",
+      options: { target: "digest.md" },
+    };
+    render(
+      <SchemaSection
+        title="More settings"
+        definition="AgentConfig"
+        value={{ automations: [entry] }}
+        path={["probe"]}
+        onFieldChange={(key, next) => changes.push({ [key]: next })}
+      />,
+    );
+    expandEverything();
+
+    expect(screen.getByDisplayValue("Plugin automation")).toBeInTheDocument();
+    const name = screen.getByDisplayValue("weekly_digest");
+    fireEvent.change(name, { target: { value: "daily_digest" } });
+
+    expect(changes[changes.length - 1]).toEqual({
+      automations: [{ ...entry, name: "daily_digest" }],
+    });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it.each(EDITOR_DEFINITIONS)("renders and expands %s", (definition) => {
     render(<StatefulSection definition={definition} />);
     expandEverything();

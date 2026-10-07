@@ -263,9 +263,10 @@ Without it, or after a schedule edit, MindRoom resumes from the next future occu
 Restarts do not post the same trigger twice.
 For `schedule:fired` hooks that run more than once for the same occurrence, see [Hooks](https://docs.mindroom.chat/hooks/#event-notes).
 
-## Built-in Automations
+## Automations
 
-Built-in automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](https://docs.mindroom.chat/plugins/#automations) can add more.
 The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
 Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
 
@@ -280,22 +281,25 @@ agents:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
       - dreaming
+      - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}   # from a plugin
 ```
 
-- An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
+- An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
+- Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
 - `cron` is a five-field expression in the configured [timezone](#timezone).
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
+- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to a prompt is final, or after an hour without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
+- When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
 - An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
 - A check that cannot read what it checks posts a warning in the room.
 - A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
-For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](https://docs.mindroom.chat/hooks/#event-notes), which can suppress a fire or rewrite its message.
+For conditions that need your own code, write a [plugin automation](https://docs.mindroom.chat/plugins/#automations), or gate an ordinary recurring schedule with a [`schedule:fired` hook](https://docs.mindroom.chat/hooks/#event-notes), which can suppress a fire or rewrite its message.
 
 ### `prompt_curation`
 

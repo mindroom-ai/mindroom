@@ -475,6 +475,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+            definition_provider=lambda name: self.hook_registry.automations.get(name),
         )
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
@@ -576,7 +577,7 @@ class _MultiAgentOrchestrator:
 
     @property
     def automations(self) -> AutomationRunner:
-        """Return the orchestrator-owned runner of built-in automations."""
+        """Return the orchestrator-owned runner of automations."""
         return self._automations
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:

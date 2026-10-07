@@ -32,9 +32,9 @@ from mindroom.approval_response import (
     require_ordered_pause_presentation,
 )
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
+from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.cli_approval_waits import CliApprovalWaits
-from mindroom.config.automations import AUTOMATION_NAMES
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -2224,8 +2224,8 @@ class ResponseRunner:
         hook_source: str | None,
     ) -> Callable[[], None] | None:
         """Build the shared completed-agent memory handoff, or None for a turn that is not memory."""
-        if hook_source in AUTOMATION_NAMES:
-            # A built-in automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
+        if is_automation_hook_source(hook_source):
+            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
             return None
 
         def queue() -> None:

@@ -414,7 +414,7 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     origin: TurnOrigin,
-    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages
+    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages, "automation/<name>" for automation prompts and notices
     dispatch_policy_source_kind: str | None,
 )
 # Derived properties: room_id (from target), requester_id, sender_id, source_kind (from origin).

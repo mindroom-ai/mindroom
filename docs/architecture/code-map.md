@@ -157,12 +157,13 @@ Matrix sync callback
 | `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
 | `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
-| `automations/runner.py` | Built-in automation schedule loop: cron timing, the visible hook-dispatched prompts, and the steps after their runs |
-| `automations/steps.py` | The `Ask` and `Done` steps a built-in automation returns to the runner |
-| `automations/threads.py` | The record of threads built-in automations started, under `tracking/automations/`, so none is read back as a conversation |
+| `automations/runner.py` | Automation schedule loop: cron timing, definition lookup and `AutomationContext`, the visible prompts tagged `automation/<name>`, and the steps after their runs |
+| `automations/registry.py` | The `@automation` decorator, discovery in plugin hooks modules, and the catalog of plugin automations beside the lazily loaded built-ins, carried by the plugin snapshot (`HookRegistry.automations`) |
+| `automations/steps.py` | `AutomationContext`, the `Ask` and `Done` steps an automation returns to the runner, and the automation hook-source prefix |
+| `automations/threads.py` | The record of threads automations started, under `tracking/automations/`, so none is read back as a conversation |
 | `automations/prompt_curation.py` | The `prompt_curation` automation: size check over always-loaded files, the bounded prompt, and the verify that asks for a re-check |
 | `automations/dreaming.py` | The `dreaming` automation: changed-input agenda, per-run staging of `memory/`, proposal validation, the fresh-thread review, and batch-conflict apply with progress under `tracking/automations/` |
-| `config/automations.py` | Built-in automation settings and validation |
+| `config/automations.py` | Automation entries (built-in and plugin) and their validation |
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |

@@ -1,12 +1,24 @@
-"""Built-in automations an operator enables per agent: a cron schedule, a check in code, and a visible prompt."""
+"""Automations an operator enables per agent: a cron schedule, a check in code, and a chain of visible prompts."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self, cast
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items
 
 _CRON_FIELDS = 5
@@ -15,9 +27,11 @@ MAX_FILE_SHRINK = 0.25
 
 
 class _ScheduledAutomation(BaseModel):
-    """Fields every built-in shares: when it checks, where it posts, and which model answers."""
+    """Fields every automation shares: when it checks, where it posts, and which model answers."""
 
     model_config = ConfigDict(extra="forbid")
+    # Whether the automation maintains file memory, so only agents with the file backend can run it.
+    requires_file_memory: ClassVar[bool] = True
 
     cron: str
     room: str | None = Field(
@@ -27,6 +41,7 @@ class _ScheduledAutomation(BaseModel):
     model: str | None = Field(
         default=None,
         description="Model for the prompt's runs, a key of models; defaults to the agent's own model",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
 
     @field_validator("cron")
@@ -97,22 +112,59 @@ class DreamingAutomation(_ScheduledAutomation):
     cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
 
 
-Automation = Annotated[PromptCurationAutomation | DreamingAutomation, Field(discriminator="name")]
-# Every automation message carries its automation's name as its hook source, so the turns it starts can be recognized.
-AUTOMATION_NAMES = frozenset(
-    model.model_fields["name"].default for model in (PromptCurationAutomation, DreamingAutomation)
-)
+# Reserved for the built-ins, so every entry matches one kind of automation.
+BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming")
+
+
+class PluginAutomation(_ScheduledAutomation):
+    """An automation a loaded plugin provides; its options mean what the plugin documents."""
+
+    # A plugin automation's own needs are checked when it fires, once its plugin is loaded.
+    requires_file_memory: ClassVar[bool] = False
+
+    name: str = Field(
+        pattern=r"^[a-z][a-z0-9_]*$",
+        description="Name of an automation a loaded plugin provides",
+        json_schema_extra={"not": {"enum": list(BUILTIN_AUTOMATION_NAMES)}},
+    )
+    cron: str = Field(description="When to check, in the configured timezone")
+    options: dict[str, Any] = Field(default_factory=dict, description="Settings the plugin's automation reads")
+
+    @field_validator("name")
+    @classmethod
+    def reject_builtin_name(cls, value: str) -> str:
+        """Keep built-in names for the built-ins, so every entry matches one kind of automation."""
+        if value in BUILTIN_AUTOMATION_NAMES:
+            msg = f"{value!r} is a built-in automation"
+            raise ValueError(msg)
+        return value
+
+
+def _automation_kind(value: object) -> str:
+    """Pick the entry's model: a built-in name selects that built-in, any other name a plugin automation."""
+    if isinstance(value, PromptCurationAutomation | DreamingAutomation | PluginAutomation):
+        return value.name if value.name in BUILTIN_AUTOMATION_NAMES else "plugin"
+    name = cast("Mapping[str, object]", value).get("name") if isinstance(value, Mapping) else None
+    return name if isinstance(name, str) and name in BUILTIN_AUTOMATION_NAMES else "plugin"
+
+
+Automation = Annotated[
+    Annotated[PromptCurationAutomation, Tag("prompt_curation")]
+    | Annotated[DreamingAutomation, Tag("dreaming")]
+    | Annotated[PluginAutomation, Tag("plugin")],
+    Discriminator(_automation_kind),
+]
 
 
 def _normalize_automation_entries(values: object) -> object:
-    """Accept a bare built-in name as shorthand for that built-in with its defaults."""
+    """Accept a bare name as shorthand for that automation with its defaults; a plugin automation still needs a cron."""
     if not isinstance(values, list):
         return values
     return [{"name": value} if isinstance(value, str) else value for value in values]
 
 
 def _validate_unique_automations(values: list[Automation]) -> list[Automation]:
-    """Allow each built-in at most once per agent."""
+    """Allow each automation at most once per agent."""
     if duplicates := duplicate_items([automation.name for automation in values]):
         msg = f"Duplicate automations are not allowed: {', '.join(duplicates)}"
         raise ValueError(msg)

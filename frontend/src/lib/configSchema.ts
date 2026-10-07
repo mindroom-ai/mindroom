@@ -11,6 +11,8 @@ export interface SchemaHint {
   key_reference?: ReferenceKind;
   secret?: boolean;
   multiline?: boolean;
+  /** Error-path tag of a union variant whose discriminator has no fixed value. */
+  union_tag?: string;
 }
 
 export interface JsonSchema {
@@ -51,7 +53,10 @@ export type SchemaNodeKind =
 export interface UnionVariant {
   label: string;
   schema: JsonSchema;
+  /** The discriminator's fixed value; undefined for the variant every other value selects. */
   discriminatorValue?: unknown;
+  /** The segment Pydantic puts in error paths for this variant. */
+  errorTag?: string;
 }
 
 export interface SchemaNode {
@@ -183,7 +188,7 @@ export function classifySchemaNode(
     }));
     return node;
   }
-  // Pydantic emits oneOf only for discriminated unions, tagged by a const.
+  // Pydantic emits oneOf only for discriminated unions, tagged by a const; one variant may leave the tag free.
   if (resolved.oneOf != null) {
     const discriminator = resolved.discriminator!.propertyName;
     node.kind = "union";
@@ -191,10 +196,18 @@ export function classifySchemaNode(
     node.variants = resolved.oneOf.map((branch) => {
       const variant = resolveSchema(branch, root);
       const discriminatorValue = variant.properties![discriminator].const;
+      if (discriminatorValue === undefined) {
+        return {
+          label: variant.title ?? "Other",
+          schema: variant,
+          errorTag: variant["x-mindroom"]?.union_tag,
+        };
+      }
       return {
         label: fieldLabel(String(discriminatorValue)),
         schema: variant,
         discriminatorValue,
+        errorTag: String(discriminatorValue),
       };
     });
     return node;
@@ -346,8 +359,18 @@ export function matchUnionVariant(
 ): number {
   if (node.discriminator != null) {
     const tag = isPlainObject(value) ? value[node.discriminator] : undefined;
+    const exact =
+      tag === undefined
+        ? -1
+        : node.variants.findIndex(
+            (variant) => variant.discriminatorValue === tag,
+          );
+    if (exact >= 0 || typeof tag !== "string") {
+      return exact;
+    }
+    // A tag no variant fixes belongs to the variant that takes any other value.
     return node.variants.findIndex(
-      (variant) => variant.discriminatorValue === tag,
+      (variant) => variant.discriminatorValue === undefined,
     );
   }
   return node.variants.findIndex((variant) =>

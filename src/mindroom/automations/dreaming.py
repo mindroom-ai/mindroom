@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
-from mindroom.automations.steps import Ask, Done
+from mindroom.automations.registry import automation
+from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads, automations_tracking_root
 from mindroom.logging_config import get_logger
 from mindroom.memory import refresh_agent_memory_search, write_scope_markdown_file
@@ -34,7 +35,6 @@ from mindroom.path_confinement import (
     read_regular_file_within_root,
     write_file_within_root,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -375,14 +375,15 @@ def _context_files(config: Config, agent_name: str) -> set[str]:
     return {PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files}
 
 
-def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Ask | None:
+@automation("dreaming", requires_file_memory=True)
+def check_dreaming(ctx: AutomationContext) -> Ask | None:
     """Return the dream prompt when an input no agenda has listed is due, or None.
 
     Raises ``OSError`` or ``ValueError`` when memory or the state cannot be read safely.
     """
+    config, runtime_paths, agent_name = ctx.config, ctx.runtime_paths, ctx.agent_name
     # Automations only run for shared agents, whose file memory is the workspace root.
-    runtime = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=None)
-    root = runtime.file_memory_root
+    root = ctx.workspace
     # A workspace appears with the agent's first turn.
     if root is None or not root.is_dir():
         return None

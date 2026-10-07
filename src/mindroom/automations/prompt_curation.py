@@ -15,8 +15,9 @@ from functools import partial
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from mindroom.automations.steps import Ask, Done
-from mindroom.config.automations import MAX_FILE_SHRINK
+from mindroom.automations.registry import automation
+from mindroom.automations.steps import Ask, AutomationContext, Done
+from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
 from mindroom.logging_config import get_logger
 from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
-    from mindroom.config.automations import PromptCurationAutomation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -214,14 +214,14 @@ def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResul
     return f"✅ Prompt files condensed from {plan.measured_tokens} to {result.tokens_after} tokens."
 
 
-def check_curation(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    settings: PromptCurationAutomation,
-) -> Ask | None:
+@automation("prompt_curation", requires_file_memory=True)
+def check_curation(ctx: AutomationContext) -> Ask | None:
     """Return the prompt asking for a cut, or None while the files are within the trigger."""
-    plan = _plan_curation(config, runtime_paths, agent_name, settings)
+    if not isinstance(ctx.entry, PromptCurationAutomation):
+        msg = f"prompt_curation cannot run the {ctx.entry.name} entry"
+        raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
+    config, agent_name = ctx.config, ctx.agent_name
+    plan = _plan_curation(config, ctx.runtime_paths, agent_name, ctx.entry)
     if plan is None:
         return None
     logger.info(

@@ -14,8 +14,8 @@ from urllib.parse import quote
 import pytest
 
 from mindroom.automations.dreaming import check_dreaming
-from mindroom.automations.steps import Ask, Done
-from mindroom.automations.threads import record_automation_thread
+from mindroom.automations.steps import Ask, AutomationContext, Done
+from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.config.agent import AgentConfig
 from mindroom.config.automations import DreamingAutomation
 from mindroom.config.main import Config
@@ -68,7 +68,19 @@ class _Workspace:
         return (self.root / path).read_text(encoding="utf-8")
 
     def check(self) -> Ask | None:
-        return check_dreaming(self.config, self.paths, "mind")
+        (entry,) = self.config.resolve_entity("mind").automations
+        return check_dreaming(
+            AutomationContext(
+                agent_name="mind",
+                config=self.config,
+                runtime_paths=self.paths,
+                entry=entry,
+                options={},
+                settings={},
+                workspace=self.root,
+                state_dir=automations_tracking_root(self.paths) / "mind",
+            ),
+        )
 
     def run_dir(self) -> Path:
         runs = sorted((self.root / ".mindroom/dreaming/runs").iterdir())
