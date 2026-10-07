@@ -426,6 +426,23 @@ async def test_an_unsettled_stop_on_a_finished_answer_is_kept_on_its_reply(journ
     assert reply.owed_write is None
 
 
+async def test_a_settled_stop_on_a_finished_answer_still_covers_edits_admitted_before_it(
+    journal_store: EventJournalStore,
+) -> None:
+    """Main settled the Stop, but an edit it covers may still wait in the journal: the adopted answer keeps it."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.settle_many(("$source",))
+    await _turn(journal_store, "$source", completed=True, response_event_id="$reply", stop_order=5, stop_settled=True)
+
+    await _adopt(principal)
+    reply = await _only_reply(principal)
+    assert reply.event_id == "$reply"
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.stop_receipt_order == 5
+    assert reply.owed_write is None
+
+
 async def test_a_stop_is_read_before_the_ledger_rewrites_its_turn(journal_store: EventJournalStore) -> None:
     """Adopted before the ledger loads, a Stop main kept on a turn record reaches its reply though the load drops it."""
     principal = journal_store.principal(PRINCIPAL)

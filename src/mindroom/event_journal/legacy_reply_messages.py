@@ -138,8 +138,9 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # and their cleanup runs), the
 # state a frozen unacknowledged FINAL implies with its sources settled and its turn answered, a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
-# its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; an
-# unsettled Stop is applied to the reply it names, adopting a finished answer's reply when nothing in flight held it. A coalesced turn is adopted once, under whichever source keyed its
+# its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; a
+# Stop is kept on the reply it names, adopting a finished answer's reply when nothing in flight held it, even for a Stop
+# that release settled, so an edit admitted before it stays covered. A coalesced turn is adopted once, under whichever source keyed its
 # rows, and an adopted INITIAL, owed or acknowledged, becomes the reply's first row. What only Matrix knows is marked
 # legacy_pending and read after the room syncs.
 # Coverage: tests/test_legacy_reply_messages.py.
@@ -197,7 +198,7 @@ def classify(
         if adopted_sources.isdisjoint(record.source_event_ids)
     )
     applied = [_write(transaction, principal_id, adoption) for adoption in adoptions]
-    applied.extend(_unsettled_stops(transaction, principal_id, entity_name, presentations, now_ns))
+    applied.extend(_turn_stops(transaction, principal_id, entity_name, presentations, now_ns))
     transaction.execute(
         "INSERT INTO reply_legacy_classifications (principal_id, classified_at_ns) VALUES (?, ?)",
         (principal_id, now_ns),
@@ -888,17 +889,18 @@ def _finished_answer(
     return adopt_historical_answer(transaction, principal_id, request, record.response_event_id)
 
 
-def _unsettled_stops(
+def _turn_stops(
     transaction: Transaction,
     principal_id: str,
     entity_name: str,
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
-    """Apply each Stop a turn recorded but an earlier release never settled to the reply it names.
+    """Keep each Stop a turn recorded on the reply it names, where an edit it covers finds it.
 
-    A turn whose answer finished before the Stop had nothing in flight to
-    adopt: its answer becomes a finished reply, which keeps the Stop.
+    A turn whose answer finished had nothing in flight to adopt: its answer
+    becomes a finished reply, which keeps the Stop even when that release
+    already settled it, since an edit admitted before the Stop may still wait.
     """
     applied: list[AppliedTransition] = []
     seen: set[str] = set()
@@ -908,17 +910,15 @@ def _unsettled_stops(
         if record is None or record.response_event_id is None or record.response_event_id in seen:
             continue
         stop = _stop_of(raw)
-        if stop is None or stop.settled:
+        if stop is None:
             continue
         seen.add(record.response_event_id)
-        found = reply_messages.for_event(transaction, principal_id, record.response_event_id) or _finished_answer(
-            transaction,
-            principal_id,
-            record,
-            entity_name,
-            presentations,
-            now_ns,
-        )
+        found = reply_messages.for_event(transaction, principal_id, record.response_event_id)
+        if found is None:
+            found = _finished_answer(transaction, principal_id, record, entity_name, presentations, now_ns)
+        elif stop.settled:
+            # That release already ended the reply this adoption found as its Stop asked.
+            continue
         if found is None or found.stop_receipt_order is not None:
             continue
         reply = reply_messages.lock(transaction, principal_id, found.reply_id)
