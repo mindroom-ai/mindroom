@@ -542,7 +542,7 @@ class TestEditApprovalOwnership:
         assert not await case.runner._approval_responses.settle_failure(claimed, "Paused run is no longer available")
         final = await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
         assert final is not None
-        assert final.result is not None
+        assert final.permanent_failure_reason is None
         assert not final.retired
         await case.recover_final(claimed)
 
