@@ -299,14 +299,14 @@ For conditions that need your own code, gate an ordinary recurring schedule with
 Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
-1. The check measures `MEMORY.md` plus the agent's `context_files`, except `protected_files`, with the estimate behind `static_prompt_tokens` (characters / 4).
+1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4).
 2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
     - a file can no longer be read safely;
-    - a file shrank by more than `max_file_shrink`;
+    - a file shrank by more than 25%;
     - the files total less than the floor, or did not shrink;
-    - a protected file changed, or a file is no longer valid UTF-8;
+    - a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
 When the files changed and none of these holds, verify reports the new size and marks the thread resolved.
@@ -318,11 +318,9 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 | `cron` | `0 4 * * *` | When to check |
 | `room` | first configured room | Where to post the prompt |
 | `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
-| `min_reduction` | `0.10` | Smallest cut the prompt asks for |
+| `min_reduction` | `0.10` (at most `0.25`) | Smallest cut the prompt asks for; no file may shrink more than 25%, so no pass can be asked for more |
 | `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
-| `max_file_shrink` | `0.25` | Largest shrink of any single file before verify asks for a re-check |
 | `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
 | `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
-| `protected_files` | `[]` | Workspace-relative paths the run should leave unchanged |
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.

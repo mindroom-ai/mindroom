@@ -484,7 +484,7 @@ models:
     id: gpt-6-astra
     provider: openai
   sol:
-    id: gpt-6-sol
+    id: gpt-6.1-sol
     provider: openai
   # --- Google ---
   gemini_flash:

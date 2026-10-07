@@ -157,8 +157,9 @@ Nio alone owns encryption recipients and room-key sharing.
 Application lookups are reused until the room projection changes, a membership or history-loss record arrives, or nio replaces the room; concurrent lookups share one request.
 Nio history-loss records create a durable `room_history_recovery` obligation in the same transaction as the admitted sequence.
 The obligation exists even when the projection is empty, and recording it retracts completeness for every room and thread marker.
-A repairable room reads as unhydrated for every conversation in it, so the next read walks `/messages` past the prompt window until readable server exhaustion or a configured cost ceiling.
-Only readable server exhaustion clears the obligation; malformed or unreadable events fail the read and leave it repairable, while a cost ceiling retains a truncated obligation and bounded context without claiming completeness.
+A repairable room reads as unhydrated for every conversation in it, so the next read walks `/messages` past the prompt window until server exhaustion or a configured cost ceiling.
+Server exhaustion clears the obligation, while a cost ceiling retains a truncated obligation and bounded context without claiming completeness.
+Malformed or undecryptable events at server exhaustion do not fail the repair, as [contract 7](../dev/matrix-event-journal-contracts.md) describes.
 Every later signal resets the obligation to repairable and increments its revision, and settlement compares that exact revision so an older walk cannot clear a newer gap.
 A departure drops the old membership's obligation, and a signal received while departure remains fenced is ignored.
 An event that never reached either durable owner and later falls outside Matrix replay is the explicit pre-admission loss boundary.

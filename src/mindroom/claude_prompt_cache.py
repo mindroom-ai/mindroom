@@ -449,6 +449,18 @@ def _replay_safe_message_content(
     return sanitized_content, changed
 
 
+# AGNO_COMPAT: Claude history replays tool-search response blocks the request schema rejects.
+# Reason: Agno 3.0.9 stores captured server-tool blocks with `model_dump()` and replays them verbatim, so a
+# `tool_search_tool_result` keeps response-only fields (`citations`, `parsed_output`, `text`), and a search
+# `server_tool_use` without its result is replayed too; either makes every later request fail with a 400.
+# Upstream issue: https://github.com/agno-agi/agno/issues/8687, open; the same verbatim replay for
+# code-execution citations, not tool-search blocks or unpaired search uses. Agno PR #6879 added the replay.
+# Upstream PR: https://github.com/agno-agi/agno/pull/8686, open and partial; strips citations only from
+# code-execution result blocks.
+# Remove when: The pinned Agno replays tool-search blocks in request shape and drops unpaired search uses.
+# Dropping references to tools absent from the current request stays MindRoom policy.
+# Coverage: tests/test_extra_kwargs.py::test_replay_safe_tool_search_results_strips_response_only_fields;
+# tests/test_extra_kwargs.py::test_replay_safe_tool_search_results_drops_only_orphaned_search_uses.
 def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Repair replayed tool-search blocks before sending assistant history.
 

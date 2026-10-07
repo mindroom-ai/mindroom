@@ -607,6 +607,105 @@ When a workspace tool needs a login, it returns its own chat authorization link.
 Workspace tools never fall back to the default Google client or a global service account, and like the built-in Google tools they always run in the primary runtime.
 Functions are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `send_email` does not match `secondary_send_email`.
 
+### Google Cloud tools
+
+A plugin tool that calls Google Cloud client libraries, such as `google-cloud-storage`, can reuse the built-in read-only **Google Cloud** connection instead of defining its own OAuth provider.
+See [Google Services OAuth](deployment/google-services-oauth.md#providers) for the connection's scope, client setup, service-account option, and account restrictions.
+
+Subclass `GoogleCloudToolkit`, set `_oauth_provider` and `_oauth_tool_name`, and pass the managed constructor values through:
+
+```python
+import json
+
+from mindroom.custom_tools.google_service import GoogleCloudToolkit
+from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+
+
+class CloudStorageBrowserTools(GoogleCloudToolkit):
+    _oauth_provider = google_cloud_oauth_provider()
+    _oauth_tool_name = "cloud_storage_browser"
+
+    def __init__(self, *, project, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs):
+        self.project = project
+        super().__init__(
+            name="cloud_storage_browser",
+            tools=[self.list_buckets],
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            **kwargs,
+        )
+
+    def list_buckets(self) -> str:
+        """List the Cloud Storage buckets in the configured project."""
+        from google.api_core.exceptions import GoogleAPIError
+        from google.cloud import storage
+
+        try:
+            client = self._google_cloud_client(
+                "storage",
+                lambda creds: storage.Client(project=self.project, credentials=creds),
+            )
+            return json.dumps({"buckets": [bucket.name for bucket in client.list_buckets()]})
+        except GoogleAPIError as exc:
+            return self._google_cloud_error_result("Cloud Storage", "list_buckets", exc)
+```
+
+Register the tool in the same module with an OAuth setup, the Google Cloud provider, the primary runtime, and the four managed init args that the constructor receives:
+
+```python
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
+from mindroom.tool_system.registration import register_tool_with_metadata
+
+
+@register_tool_with_metadata(
+    name="cloud_storage_browser",
+    display_name="Cloud Storage Browser",
+    description="List Google Cloud Storage buckets",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.REQUIRES_CONFIG,
+    file_access=ToolFileAccess.NONE,
+    setup_type=SetupType.OAUTH,
+    auth_provider="google_cloud",
+    requires_primary_runtime=True,
+    config_fields=[ConfigField(name="project", label="Project", type="text", required=True)],
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
+    ),
+    dependencies=[
+        "google-cloud-storage",
+        "google-api-python-client",
+        "google-auth-httplib2",
+        "google-auth-oauthlib",
+    ],
+)
+def cloud_storage_browser_tools() -> type[CloudStorageBrowserTools]:
+    return CloudStorageBrowserTools
+```
+
+The base class provides three helpers:
+
+| Method | What it does |
+| --- | --- |
+| `self._google_cloud_credentials()` | Returns credentials for the requester's connection or the configured service account; when the account is not connected, the tool call returns the standard connect prompt instead |
+| `self._google_cloud_client(name, factory)` | Returns a client built by `factory(credentials)` and reuses it only for the same requester's current connection |
+| `self._google_cloud_error_result(service_name, operation, exc)` | Returns a JSON error that exposes only the HTTP status, and turns an HTTP 401 into a reconnect prompt |
+
+The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client`, `google-auth-httplib2`, and `google-auth-oauthlib`.
+MindRoom installs them only as extras of its built-in Google tools, so a clean install without them fails to load the tool; see [Dependencies](#dependencies).
+Build clients only from the credentials the helpers return, without copies such as `with_quota_project`, and call them from the tool function itself rather than background threads or transfer managers; otherwise an expired or revoked connection returns a generic error instead of a connect prompt.
+
 ### Additional Atlassian connections
 
 Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.

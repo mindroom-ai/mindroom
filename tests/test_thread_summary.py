@@ -2553,7 +2553,7 @@ class TestGenerateSummary:
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
         assert mock_model.temperature == 0.1
 
-    @pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])
+    @pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"])
     async def test_generate_summary_omits_unsupported_direct_gpt6_temperature_from_request(self, model_id: str) -> None:
         """Direct GPT-6 summary requests must omit unsupported sampling controls."""
         model = MindRoomOpenAIResponses(id=model_id, api_key="dummy-key", temperature=0.9)
@@ -2566,7 +2566,7 @@ class TestGenerateSummary:
 
         assert "temperature" not in model.get_request_params()
 
-    @pytest.mark.parametrize("model_id", ["openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna"])
+    @pytest.mark.parametrize("model_id", ["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-6-luna"])
     async def test_generate_summary_omits_unsupported_openrouter_gpt6_temperature_from_request(
         self,
         model_id: str,

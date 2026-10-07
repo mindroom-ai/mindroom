@@ -181,12 +181,14 @@ The write checks the expected refresh token and membership epoch, rejects a tomb
 An admitted producer `LOSS` record also creates a durable room-history-loss obligation.
 Strict conversation reads ask the shared hydrator to repair it through the room's `/messages` history, including the threaded events returned there.
 Concurrent room and thread readers share one repair walk per room.
-That walk can continue beyond the logical prompt window to readable server exhaustion, but its request count and raw-event count remain bounded.
+That walk can continue beyond the logical prompt window to server exhaustion, but its request count and raw-event count remain bounded.
 Each page is installed under the exact recovery revision and membership epoch, so a new loss obligation or membership change fences stale work.
 
-Readable server exhaustion completes the obligation; reaching a ceiling retains a durable truncated result.
+Server exhaustion completes the obligation; reaching a ceiling retains a durable truncated result.
 A later read does not repeat the same bounded repair under the same policy, while a complete-history caller with a higher policy rank can request a further bounded attempt.
-Fetch failures or unreadable history at server exhaustion fail the read and leave the obligation repairable.
+Fetch failures fail the read and leave the obligation repairable.
+Unreadable history at server exhaustion still settles the obligation for every caller, because a missing room key may never arrive and live sync admits such events without failing any read.
+That settlement records the room conversation as incomplete and revokes every thread's hydration marker, since the walk cannot always tell which thread an unreadable event belonged to, so each thread's next walk decides whether it is complete; a complete-history caller refuses there, only for the threads that hold such an event.
 These repairs are read-triggered; there is no unrestricted periodic background rescan.
 
 ### 8. Membership epochs fence every derived and pending fact

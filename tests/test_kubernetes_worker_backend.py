@@ -504,7 +504,12 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     """A compatible main-image rollout does not invalidate a live script worker."""
     backend, _apps, _core = _backend(config_snapshot={})
     initial = backend.script_recovery_signature()
-    backend.config = replace(backend.config, image="mindroom:upgraded", image_pull_policy="Always")
+    backend.config = replace(
+        backend.config,
+        image="mindroom:upgraded",
+        image_pull_policy="Always",
+        image_pull_secrets=("private-registry-pull",),
+    )
 
     assert backend.script_recovery_signature() == initial
 
@@ -698,6 +703,7 @@ def _backend(
     config_snapshot: dict[str, object] | None = None,
     tmp_size_limit: str | None = None,
     user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
+    image_pull_secrets: tuple[str, ...] = (),
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -734,6 +740,7 @@ def _backend(
         agent_vault=agent_vault,
         tmp_size_limit=tmp_size_limit,
         user_resources=user_resources or {},
+        image_pull_secrets=image_pull_secrets,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -1106,6 +1113,26 @@ def test_kubernetes_worker_omits_runtime_class_when_unset(tmp_path: Path) -> Non
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     assert "runtimeClassName" not in apps_api.created_bodies[0]["spec"]["template"]["spec"]
+
+
+def test_kubernetes_worker_pod_uses_image_pull_secrets_only_when_configured(tmp_path: Path) -> None:
+    """Configured pull secrets recreate workers with them; unset secrets leave the pod template unchanged."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    assert "imagePullSecrets" not in apps_api.created_bodies[0]["spec"]["template"]["spec"]
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, image_pull_secrets=("private-registry-pull",))
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+    updated_backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert apps_api.created_bodies[-1]["spec"]["template"]["spec"]["imagePullSecrets"] == [
+        {"name": "private-registry-pull"},
+    ]
 
 
 def test_kubernetes_worker_never_receives_credentials_encryption_key(tmp_path: Path) -> None:

@@ -4,21 +4,28 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom import tools as _mindroom_tools  # noqa: F401
 from mindroom.api import tools as tools_api
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.oauth.google_tasks import google_tasks_oauth_provider
+from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.metadata import export_tools_metadata
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
+    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -43,12 +50,12 @@ def _worker_target(requester_id: str) -> ResolvedWorkerTarget:
     return resolve_worker_target("user_agent", "code", execution_identity=identity)
 
 
-def _context(
+def _provider_context(
+    provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget,
 ) -> tools_api._ResolvedToolAvailabilityContext:
-    provider = github_oauth_provider()
     return tools_api._ResolvedToolAvailabilityContext(
         execution_scope="user_agent",
         dashboard_configuration_supported=True,
@@ -56,10 +63,18 @@ def _context(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
         allowed_shared_services=None,
-        auth_provider_credential_services={"github": provider.credential_service},
-        oauth_providers={"github": provider},
+        auth_provider_credential_services={provider.id: provider.credential_service},
+        oauth_providers={provider.id: provider},
         runtime_paths=runtime_paths,
     )
+
+
+def _context(
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget,
+) -> tools_api._ResolvedToolAvailabilityContext:
+    return _provider_context(github_oauth_provider(), runtime_paths, credentials_manager, worker_target)
 
 
 def _github_tool() -> dict[str, object]:
@@ -153,11 +168,11 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
     manager = get_runtime_credentials_manager(runtime_paths)
     target = resolve_worker_target("shared", "code", execution_identity=None, tenant_id="test-tenant")
     assert target.worker_key is not None
-    manager.for_worker(target.worker_key).save_credentials("google_bigquery", {"project": "worker-planted"})
+    manager.for_worker(target.worker_key).save_credentials("postgres", {"host": "worker-planted.example.test"})
     tool = {
-        "name": "google_bigquery",
+        "name": "postgres",
         "status": "requires_config",
-        "config_fields": [{"name": "project", "required": True}],
+        "config_fields": [{"name": "host", "required": True}],
     }
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope="shared",
@@ -174,6 +189,141 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
     await tools_api._update_tools_statuses([tool], context)
     assert tool["status"] == "requires_config"
 
-    manager.for_primary_runtime_agent_scope("code").save_credentials("google_bigquery", {"project": "primary"})
+    manager.for_primary_runtime_agent_scope("code").save_credentials("postgres", {"host": "primary.example.test"})
     await tools_api._update_tools_statuses([tool], context)
+    assert tool["status"] == "available"
+
+
+def _google_tool(tool_name: str) -> dict[str, Any]:
+    tool = export_tools_metadata({tool_name: TOOL_METADATA[tool_name]})[0]
+    assert tool["status"] == "requires_config"
+    return tool
+
+
+def _connect_google(
+    provider: OAuthProvider,
+    connection: str,
+    tmp_path: Path,
+    target: ResolvedWorkerTarget,
+) -> tuple[RuntimePaths, CredentialsManager]:
+    """Return a runtime whose Google provider is connected through OAuth or the service account file."""
+    process_env = (
+        {"GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json")}
+        if connection == "service_account"
+        else {}
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env=process_env,
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    if connection == "oauth":
+        manager.save_credentials(
+            "google_oauth_client",
+            {"client_id": "client-id", "client_secret": "client-secret", "_source": "ui"},
+        )
+        publish_oauth_credentials(
+            provider,
+            {
+                "token": "access-token",
+                "refresh_token": "refresh-token",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "client-id",
+                "expires_at": 4_102_444_800.0,
+                "scopes": list(provider.scopes),
+                "_source": "oauth",
+                "_oauth_provider": provider.id,
+            },
+            credentials_manager=manager,
+            worker_target=target,
+        )
+    return runtime_paths, manager
+
+
+def _save_bigquery_settings(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget,
+    settings: dict[str, str],
+) -> None:
+    save_scoped_credentials(
+        "google_bigquery",
+        settings,
+        credentials_manager=manager,
+        worker_target=target,
+        primary_built_tool=True,
+    )
+
+
+_BIGQUERY_SETTINGS = {"project": "example-project", "dataset": "analytics", "location": "US"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connection", ["oauth", "service_account"])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"project": "example-project", "dataset": "analytics"},
+        {"dataset": "analytics", "location": "US"},
+    ],
+)
+async def test_connected_google_cloud_tool_without_required_settings_requires_config(
+    tmp_path: Path,
+    connection: str,
+    settings: dict[str, str],
+) -> None:
+    provider = google_cloud_oauth_provider()
+    target = _worker_target("@alice:example.test")
+    runtime_paths, manager = _connect_google(provider, connection, tmp_path, target)
+    if settings:
+        _save_bigquery_settings(manager, target, settings)
+    tool = _google_tool("google_bigquery")
+
+    await tools_api._update_tools_statuses([tool], _provider_context(provider, runtime_paths, manager, target))
+
+    assert tool["status"] == "requires_config"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connection", ["oauth", "service_account"])
+async def test_connected_google_cloud_tool_with_required_settings_is_available(
+    tmp_path: Path,
+    connection: str,
+) -> None:
+    provider = google_cloud_oauth_provider()
+    target = _worker_target("@alice:example.test")
+    runtime_paths, manager = _connect_google(provider, connection, tmp_path, target)
+    _save_bigquery_settings(manager, target, _BIGQUERY_SETTINGS)
+    tool = _google_tool("google_bigquery")
+
+    await tools_api._update_tools_statuses([tool], _provider_context(provider, runtime_paths, manager, target))
+
+    assert tool["status"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_google_cloud_settings_alone_do_not_make_tool_available(tmp_path: Path) -> None:
+    provider = google_cloud_oauth_provider()
+    target = _worker_target("@alice:example.test")
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    _save_bigquery_settings(manager, target, _BIGQUERY_SETTINGS)
+    tool = _google_tool("google_bigquery")
+
+    await tools_api._update_tools_statuses([tool], _provider_context(provider, runtime_paths, manager, target))
+
+    assert tool["status"] == "requires_config"
+
+
+@pytest.mark.asyncio
+async def test_connected_oauth_tool_without_required_settings_is_available(tmp_path: Path) -> None:
+    provider = google_tasks_oauth_provider()
+    target = _worker_target("@alice:example.test")
+    runtime_paths, manager = _connect_google(provider, "oauth", tmp_path, target)
+    tool = _google_tool("google_tasks")
+    assert not any(field["required"] for field in tool["config_fields"])
+
+    await tools_api._update_tools_statuses([tool], _provider_context(provider, runtime_paths, manager, target))
+
     assert tool["status"] == "available"

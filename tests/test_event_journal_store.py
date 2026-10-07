@@ -4708,6 +4708,7 @@ class TestBoundedHydrationInstallation:
         outcome = await recovering.settle_room_history_recovery(
             recovery,
             exhausted_server=True,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=epoch,
         )
@@ -4764,6 +4765,7 @@ class TestBoundedHydrationInstallation:
         outcome = await alice.settle_room_history_recovery(
             recovery,
             exhausted_server=True,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=epoch,
         )
@@ -4787,6 +4789,7 @@ class TestBoundedHydrationInstallation:
         outcome = await recovering.settle_room_history_recovery(
             recovery,
             exhausted_server=False,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=await recovering.membership_epoch(ROOM),
         )
@@ -4912,6 +4915,7 @@ class TestBoundedHydrationInstallation:
         outcome = await recovering.settle_room_history_recovery(
             old_recovery,
             exhausted_server=True,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=stale_epoch,
         )
@@ -5335,6 +5339,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
             recovering.settle_room_history_recovery(
                 old_recovery,
                 exhausted_server=True,
+                unreadable=False,
                 attempted_policy_rank=2,
                 expected_membership_epoch=await reader.membership_epoch(ROOM),
             ),

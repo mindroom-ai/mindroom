@@ -124,24 +124,26 @@ def save_independent_usage(
         {**run, "run_id": usage_id, "user_id": requester_id, "metadata": None, "parent_run_id": None, "team_id": None},
     )
     snapshot["kind"] = kind
-    session_table = (
-        storage._get_table("sessions", create_table_if_not_found=True) if initial_session is not None else None
-    )
+    session_insert = None
+    if initial_session is not None:
+        is_team = isinstance(initial_session, TeamSession)
+        values = {
+            "session_id": session_id,
+            "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
+            "team_id" if is_team else "agent_id": (
+                initial_session.team_id if isinstance(initial_session, TeamSession) else initial_session.agent_id
+            ),
+            "created_at": initial_session.created_at,
+            "updated_at": initial_session.updated_at,
+        }
+        session_insert = (
+            insert(agno_compat_sqlite.owned_table(storage, "sessions"))
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["session_id"])
+        )
     with storage.db_engine.begin() as connection:
-        if initial_session is not None and session_table is not None:
-            is_team = isinstance(initial_session, TeamSession)
-            values = {
-                "session_id": session_id,
-                "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
-                "team_id" if is_team else "agent_id": (
-                    initial_session.team_id if isinstance(initial_session, TeamSession) else initial_session.agent_id
-                ),
-                "created_at": initial_session.created_at,
-                "updated_at": initial_session.updated_at,
-            }
-            connection.execute(
-                insert(session_table).values(**values).on_conflict_do_nothing(index_elements=["session_id"]),
-            )
+        if session_insert is not None:
+            connection.execute(session_insert)
         connection.exec_driver_sql(usage_table_sql(storage.session_table_name))
         connection.exec_driver_sql(
             usage_upsert_sql(storage.session_table_name),
@@ -502,6 +504,14 @@ def save_runs(
     runs = list(runs)
     if not runs:
         return
+    # AGNO_COMPAT: Session reads hand out shared, mutable run objects.
+    # Reason: Agno 3.0.9's session cache returns the same run objects to every read; its docstring calls
+    # them immutable, but nothing enforces that, so editing a loaded run in place corrupts later reads.
+    # Upstream issue: Tracking gap; no matching issue identified.
+    # Upstream PR: None identified.
+    # Remove when: Agno session reads return per-read copies or frozen runs, so editing a loaded run
+    # cannot affect later reads.
+    # Coverage: tests/test_agent_storage_runs.py::test_save_runs_refuses_a_run_object_loaded_from_the_session.
     loaded = {id(existing) for existing in session.runs or []}
     if any(id(run) in loaded for run in runs):
         msg = "save_runs received a run object loaded from the session; edit a copy instead"
@@ -553,6 +563,16 @@ def _run_has_prompt_messages(run: object, prompt_roles: frozenset[str]) -> bool:
     )
 
 
+# AGNO_COMPAT: Stored runs persist their system and developer messages with no opt-out.
+# Reason: Agno 3.0.9 saves every run's system and developer messages; its `store_history_messages`,
+# `store_tool_messages`, and `store_media` switches cover history, tool, and media content but not
+# these prompt roles. MindRoom rebuilds them from config, so the stored copies are stale.
+# Upstream issue: Tracking gap; no matching issue identified.
+# Upstream PR: None identified.
+# Remove when: Agno can skip every configured prompt role, including a custom `system_message_role`,
+# when it stores a run, while keeping them on paused runs until their continuation completes.
+# Coverage: tests/test_agent_storage_runs.py::test_upsert_run_strips_prompt_roles_from_the_row_only;
+# tests/test_history_scope_state.py::test_shared_session_paused_run_preserves_prompt_roles_until_continuation_completes.
 def _run_without_prompt_messages(run: _PersistedRun, prompt_roles: frozenset[str]) -> _PersistedRun:
     if not isinstance(run, (RunOutput, TeamRunOutput)) or not _run_has_prompt_messages(run, prompt_roles):
         return run

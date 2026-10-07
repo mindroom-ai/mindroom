@@ -3143,9 +3143,9 @@
         },
         "min_reduction": {
           "default": 0.1,
-          "description": "Smallest fraction of the files' size each pass is asked to remove",
-          "exclusiveMaximum": 1,
+          "description": "Smallest fraction of the files' size each pass is asked to remove, at most the 0.25 per-file bound",
           "exclusiveMinimum": 0,
+          "maximum": 0.25,
           "title": "Min Reduction",
           "type": "number"
         },
@@ -3155,14 +3155,6 @@
           "exclusiveMaximum": 1,
           "exclusiveMinimum": 0,
           "title": "Max Reduction",
-          "type": "number"
-        },
-        "max_file_shrink": {
-          "default": 0.25,
-          "description": "Largest fraction any single file may shrink in one pass before verify asks for a re-check",
-          "exclusiveMinimum": 0,
-          "maximum": 1,
-          "title": "Max File Shrink",
           "type": "number"
         },
         "max_content_loss": {
@@ -3185,15 +3177,6 @@
           "default": null,
           "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
           "title": "Model"
-        },
-        "protected_files": {
-          "default": [],
-          "description": "Workspace-relative files the pass should leave unchanged",
-          "items": {
-            "type": "string"
-          },
-          "title": "Protected Files",
-          "type": "array"
         }
       },
       "title": "PromptCurationAutomation",

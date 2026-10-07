@@ -604,6 +604,8 @@ def _paused_attempt(
 class HandledAttempt:
     """One streaming error whose user-facing text was already emitted."""
 
+    metadata_content: dict[str, Any] | None = None
+
 
 @dataclass(frozen=True)
 class SkippedAttempt:
@@ -1348,6 +1350,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             sinks.turn_recorder.mark_suspended()
                         raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                     if isinstance(resolution, HandledAttempt):
+                        _publish_run_metadata(sinks, resolution.metadata_content)
                         _record_turn_excluded_fallback(
                             ctx,
                             adapter.persist_standalone_replay,

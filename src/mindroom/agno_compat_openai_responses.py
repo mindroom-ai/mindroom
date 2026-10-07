@@ -99,8 +99,8 @@ _RESPONSES_FILE_MIME_TYPES = {
 # AGNO_COMPAT: Responses usage parsing drops cache-write input tokens.
 # Reason: Agno 3.0.9 copies cached and reasoning token details but omits
 # OpenAI's input_tokens_details.cache_write_tokens counter.
-# Upstream issue: No matching issue identified; this metrics gap is untracked.
-# Upstream PR: None identified.
+# Upstream issue: https://github.com/agno-agi/agno/issues/10314, open.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10313, open.
 # Remove when: The pinned Agno parser preserves cache-write tokens while still
 # accepting provider payloads that predate the newer field.
 # Coverage: tests/test_openai_models.py::test_openai_metrics_preserve_sdk_input_details.
@@ -108,7 +108,7 @@ _RESPONSES_FILE_MIME_TYPES = {
 # AGNO_COMPAT: Failed Responses streams discard received terminal usage.
 # Reason: Agno parses usage only on response.completed, then transfers it to
 # assistant metrics only at clean EOF; failure cleanup therefore counts zero.
-# Upstream issue: None identified; tracked locally at https://github.com/mindroom-ai/mindroom/issues/1952.
+# Upstream issue: Tracking gap; no matching issue identified.
 # Upstream PR: None identified; PR #10135 does not preserve failed-stream usage.
 # Remove when: Agno preserves reported completed, incomplete, and failed usage
 # on stream failure or cancellation without counting successful streams twice.
@@ -375,7 +375,7 @@ class OpenAIResponsesProviderCompat:
     # AGNO_COMPAT: A successful stream retry replaces earlier failed-attempt usage.
     # Reason: Agno replaces assistant metrics with only the successful stream's
     # metrics, dropping counters retained during failed invocation cleanup.
-    # Upstream issue: None identified; tracked locally at https://github.com/mindroom-ai/mindroom/issues/1952.
+    # Upstream issue: Tracking gap; no matching issue identified.
     # Upstream PR: None identified.
     # Remove when: Agno carries received usage across stream retries exactly once.
     # Coverage: tests/test_openai_responses_stream.py::test_terminal_usage_survives_retry.

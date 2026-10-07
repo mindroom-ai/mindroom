@@ -1704,7 +1704,7 @@ def test_a_usage_write_that_fails_never_fails_the_skill_change(tmp_path: Path) -
 async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -> None:
     """Without its own model setting, a review that cannot fork uses the response's model, not the agent default."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
-    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-sol")
+    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6.1-sol")
     primary = _model(("shell", {"cmd": "make deploy"}))
     capture = SkillReviewCapture()
     await _answer(primary, capture, _agent_tools(config, paths, []), model_name="thread")
@@ -1732,7 +1732,7 @@ class _PendingMessage:
 async def test_the_capture_names_each_attempts_model(tmp_path: Path) -> None:
     """A dynamic continuation can switch models, so the review forks the final attempt's model, not the first one's."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
-    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-sol")
+    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6.1-sol")
     config.agents["mind"].skill_learning.model = "thread"
     model = _model()
     capture = SkillReviewCapture()

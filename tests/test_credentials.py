@@ -2081,21 +2081,21 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Pa
         agent_name="alpha",
         execution_identity=None,
     )
-    settings = {"project": "alpha-project", "dataset": "demo", "location": "us-central1"}
+    settings = {"host": "alpha-db.example.test", "db_name": "demo", "user": "alpha"}
 
-    save_credentials_for_target("google_bigquery", settings, target)
+    save_credentials_for_target("postgres", settings, target)
 
-    primary_settings = manager.for_primary_runtime_agent_scope("alpha").load_credentials("google_bigquery")
-    worker_settings = worker_manager.load_credentials("google_bigquery")
+    primary_settings = manager.for_primary_runtime_agent_scope("alpha").load_credentials("postgres")
+    worker_settings = worker_manager.load_credentials("postgres")
     assert (primary_settings, worker_settings) == (settings, None)
-    assert load_credentials_for_target("google_bigquery", target) == settings
+    assert load_credentials_for_target("postgres", target) == settings
     access = _DashboardCredentialAccess(target=target, oauth_services=OAuthCredentialServices(providers={}))
-    assert "google_bigquery" in access.list_services()
+    assert "postgres" in access.list_services()
     # A worker copy of a tool's settings is ignored, so it is not listed either.
-    delete_credentials_for_target("google_bigquery", target)
-    worker_manager.save_credentials("google_bigquery", {"project": "planted"})
-    assert load_credentials_for_target("google_bigquery", target) is None
-    assert "google_bigquery" not in access.list_services()
+    delete_credentials_for_target("postgres", target)
+    worker_manager.save_credentials("postgres", {"host": "planted.example.test"})
+    assert load_credentials_for_target("postgres", target) is None
+    assert "postgres" not in access.list_services()
 
 
 def test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings(tmp_path: Path) -> None:

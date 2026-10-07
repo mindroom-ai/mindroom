@@ -316,9 +316,8 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
 async def test_team_response_stream_publishes_usage_when_stream_errors() -> None:
     """An errored team stream still publishes the usage it observed.
 
-    The error arm ends the turn with a handled attempt (the driver never sees
-    a resolution to publish from), so the attempt must fill the collector
-    itself — otherwise billed tokens vanish from the run metadata.
+    The error arm hands that usage to the driver on its handled attempt, which
+    publishes it; otherwise billed tokens vanish from the run metadata.
     """
     orchestrator, config = _make_orchestrator()
 

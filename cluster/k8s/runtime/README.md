@@ -750,7 +750,7 @@ workers:
 ```
 
 The chart renders no access-grant resources by default.
-When access grants are enabled and at least one grant is configured, the chart renders a ConfigMap plus a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
+When access grants are enabled and at least one grant is configured, the chart renders a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
 The helper resolves worker keys and vault names through MindRoom's worker-routing code, creates or joins the vault when needed, and grants the configured email the `admin` role.
 The helper is idempotent, so running it again with the same grants changes nothing.
 If an email has not registered and verified in Agent Vault yet, the helper reports a warning and the grant can be applied again after registration.
@@ -768,14 +768,15 @@ When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
 With the default `fixed`, both Jobs keep stable names and the access-grant Job is a Helm `post-install,post-upgrade` hook, so `helm install` and `helm upgrade` replace and rerun it.
 The bootstrap Job is not a hook, so changing its pod template requires deleting the finished Job first, even with `helm upgrade`.
 Workflows that apply rendered manifests, such as `kubectl kustomize --enable-helm` followed by `kubectl apply`, ignore Helm hook annotations, and Job pod templates are immutable.
-With `fixed`, those workflows do not rerun an existing access-grant Job for a changed grant list, and they fail to apply a changed pod template until the old Job is deleted.
+With `fixed`, those workflows fail to apply a changed grant list or pod template until the old Job is deleted, and do not rerun an existing Job otherwise.
 Set `jobNaming: contentHash` for those workflows.
-The chart then drops the hook and appends a hash of each Job's rendered pod spec, plus the grant config for the access-grant Job, to the Job name.
-The grants ConfigMap name gets a hash of its config too, so each access-grant Job reads the grants it was created for; `kubectl apply` leaves earlier grants ConfigMaps in place until you delete them or apply with `--prune`.
+The chart then drops the hook and appends a hash of each Job's rendered pod spec to the Job name.
+The access-grant Job's pod spec includes its grant config, so each access-grant Job applies the grants it was created for.
 Applying changed inputs creates a new Job, and applying unchanged inputs leaves the existing Job alone.
 In either mode, a chart upgrade that changes only the chart or app version keeps both Job names and pod templates, while changed inputs still get a new `contentHash` name.
 Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
 To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
+To remove grants ConfigMaps that older chart versions left in the namespace, run `kubectl delete configmap -l app.kubernetes.io/component=agent-vault-access-grants` once.
 
 ## Background Script Gateway
 
@@ -918,7 +919,10 @@ workers:
 - With `workers.kubernetes.reconcilePodTemplates` (default `true`), each cleanup pass recreates scaled-down worker Deployments whose pod template (image, env, resources) drifted from the configured spec, so existing workers do not need manual recycling after upgrades.
   Running workers are recreated on their next provisioning after they scale down.
 - `workers.kubernetes.runtimeClassName` optionally applies one RuntimeClass to the entire generated worker pool, including background-script workers. Verify the RuntimeClass handler on every eligible node and validate that it supports the worker storage driver and access mode before enabling it. Changing the value can recreate existing workers when they are next ensured, so finish active work first.
+- Dedicated worker pods also get the chart's `imagePullSecrets`, so they can pull a worker image from a private registry.
+  Pod-level pull secrets replace the worker ServiceAccount's `imagePullSecrets`, so list every Secret workers need in `imagePullSecrets`.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
+  Create the `imagePullSecrets` Secrets in that namespace too, because the chart does not copy them and worker pods cannot pull without them.
   Kubernetes owner references are only set by default for same-namespace workers.
   The sandbox proxy token secret is only needed by the primary runtime; dedicated worker pods receive per-worker derived runner tokens.
 - Mount arbitrary platform-specific files, projected secrets, ConfigMaps, init containers, and sidecars through `extraVolumes`, `extraVolumeMounts`, `initContainers`, and `extraContainers`.

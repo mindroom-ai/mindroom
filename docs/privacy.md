@@ -106,9 +106,9 @@ When a paired local installation uses MindRoom's desktop OAuth client, the provi
 The local MindRoom process performs the token exchange with Google and stores the resulting tokens; the provisioning service does not receive the Google authorization code, tokens, or Google API data.
 Control of the OAuth app registration lets the project maintainers manage or disable the client, but it does not by itself reveal a user's OAuth tokens or Google data to them.
 
-Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Docs document contents, Calendar data, Sheets spreadsheet values, and Tasks task lists and tasks.
+Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Docs document contents, Calendar data, Sheets spreadsheet values, Tasks task lists and tasks, and Google Cloud data such as BigQuery table schemas and query results.
 
-The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, editing a document, managing a calendar event, reading and updating a spreadsheet, or creating and completing a task.
+The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, editing a document, managing a calendar event, reading and updating a spreadsheet, creating and completing a task, or running a read-only BigQuery query.
 
 Google connections follow the selected agent's saved effective execution scope.
 MindRoom uses `private.per` first, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope:

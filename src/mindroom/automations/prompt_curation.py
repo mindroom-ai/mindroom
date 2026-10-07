@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from mindroom.config.automations import MAX_FILE_SHRINK
 from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -39,7 +40,7 @@ class CurationPlan:
     agent_name: str
     root: Path
     settings: PromptCurationAutomation
-    # Curated and protected files, by workspace-relative path, as they were at fire time; only compared, never written.
+    # Curated files, by workspace-relative path, as they were at fire time; only compared, never written.
     snapshot: Mapping[str, bytes]
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
@@ -76,7 +77,7 @@ def _tokens(payload: bytes) -> int:
 def _memory_dir_tokens(root: Path, exclude: Iterable[str]) -> int:
     """Return the estimated tokens of the memory/ topic files, except ``exclude``.
 
-    Curated and protected files are excluded even under memory/, so their content is counted once.
+    Curated files are excluded even under memory/, so their content is counted once.
     """
     excluded = set(exclude)
     return sum(
@@ -86,9 +87,9 @@ def _memory_dir_tokens(root: Path, exclude: Iterable[str]) -> int:
     )
 
 
-def _curated_paths(config: Config, agent_name: str, settings: PromptCurationAutomation) -> list[str]:
+def _curated_paths(config: Config, agent_name: str) -> list[str]:
     paths = [_ENTRYPOINT, *(PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files)]
-    return [path for path in dict.fromkeys(paths) if path not in settings.protected_files]
+    return list(dict.fromkeys(paths))
 
 
 def plan_curation(
@@ -106,24 +107,18 @@ def plan_curation(
     if root is None:
         return None
     curated_payloads = {
-        path: payload
-        for path in _curated_paths(config, agent_name, settings)
-        if (payload := _read(root, path)) is not None
+        path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
     curated = {path: _tokens(payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
     if measured <= settings.trigger_tokens:
         return None
-    protected_payloads = {
-        path: payload for path in settings.protected_files if (payload := _read(root, path)) is not None
-    }
-    snapshot = {**curated_payloads, **protected_payloads}
     return CurationPlan(
         agent_name=agent_name,
         root=root,
         settings=settings,
-        snapshot=snapshot,
-        memory_tokens=_memory_dir_tokens(root, exclude=snapshot),
+        snapshot=curated_payloads,
+        memory_tokens=_memory_dir_tokens(root, exclude=curated_payloads),
         curated=curated,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
@@ -132,17 +127,14 @@ def plan_curation(
 
 def curation_prompt(config: Config, plan: CurationPlan) -> str:
     """Render the visible prompt that asks the agent for this plan's cut."""
-    settings = plan.settings
-    protected = ", ".join(settings.protected_files)
     return config.render_prompt(
         "PROMPT_CURATION_PROMPT_TEMPLATE",
         measured_tokens=plan.measured_tokens,
-        trigger_tokens=settings.trigger_tokens,
+        trigger_tokens=plan.settings.trigger_tokens,
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
         upper_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
-        max_file_shrink_percent=round(100 * settings.max_file_shrink),
-        protected_line=f"6. Leave {protected} unchanged.\n" if protected else "",
+        max_file_shrink_percent=round(100 * MAX_FILE_SHRINK),
     )
 
 
@@ -159,7 +151,6 @@ def _findings(
     after_run: Mapping[str, bytes | None | OSError | ValueError],
 ) -> tuple[int, list[str]]:
     """Return the curated files' total after the run and what looks outside the plan's bounds."""
-    settings = plan.settings
     after: dict[str, int] = {}
     unreadable: list[str] = []
     for path in plan.curated:
@@ -174,15 +165,12 @@ def _findings(
     if unreadable:
         # Without every file's size, totals and loss would read an unreadable file as deleted.
         return plan.measured_tokens, unreadable
+    # The global loss allowance can hide a small file, such as SOUL.md, being cut whole, so each file has its own bound.
     findings = [
-        f"{path} changed although it is protected"
-        for path in settings.protected_files
-        if path in plan.snapshot and after_run[path] != plan.snapshot[path]
+        f"{path} shrank {round(100 * (before - after[path]) / before)}% (more than {round(100 * MAX_FILE_SHRINK)}%)"
+        for path, before in plan.curated.items()
+        if before and after[path] < before * (1 - MAX_FILE_SHRINK)
     ]
-    for path, before in plan.curated.items():
-        if before and after[path] < before * (1 - settings.max_file_shrink):
-            shrink = round(100 * (before - after[path]) / before)
-            findings.append(f"{path} shrank {shrink}% (more than {round(100 * settings.max_file_shrink)}%)")
     total = sum(after.values())
     if total < plan.floor_tokens:
         findings.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")

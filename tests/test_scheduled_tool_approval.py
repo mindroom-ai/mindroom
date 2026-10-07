@@ -1100,7 +1100,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
 
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling._start_scheduled_task") as start,
+        patch("mindroom.scheduling._start_new_scheduled_task") as start,
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1164,7 +1164,7 @@ async def test_schedule_tool_call_offers_only_exact_approval_where_any_arguments
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling.resolve_tool_approval_approver", return_value=approver),
-        patch("mindroom.scheduling._start_scheduled_task"),
+        patch("mindroom.scheduling._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1227,7 +1227,7 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
 
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling._start_scheduled_task"),
+        patch("mindroom.scheduling._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1338,7 +1338,7 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
-        patch("mindroom.scheduling._start_scheduled_task") as start,
+        patch("mindroom.scheduling._start_new_scheduled_task") as start,
         tool_runtime_context(context),
         _responders(context.config, "general"),
         pytest.raises(raised),
@@ -1365,7 +1365,7 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
-        patch("mindroom.scheduling._start_scheduled_task") as start,
+        patch("mindroom.scheduling._start_new_scheduled_task") as start,
         tool_runtime_context(context),
         _responders(context.config, "general"),
         pytest.raises(RuntimeError, match="Failed to schedule"),

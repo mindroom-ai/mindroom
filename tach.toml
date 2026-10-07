@@ -5433,7 +5433,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.redaction"
-depends_on = ["mindroom.git_urls"]
+depends_on = ["mindroom.git_urls", "mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.git_urls"
@@ -5672,6 +5672,7 @@ from = ["mindroom.matrix.identity"]
 expose = [
     "ScheduledWorkflowOutcome",
     "execute_scheduled_workflow",
+    "scheduled_trigger_message_type",
     "send_scheduled_failure_notice",
     "set_scheduling_hook_registry",
 ]
@@ -7487,7 +7488,7 @@ visibility = ["mindroom.agent_storage", "mindroom.history.archive"]
 from = ["mindroom.agno_compat_sqlite"]
 expose = [
     "remove_default_pragmas",
-    "run_table",
+    "owned_table",
     "insert_run_row",
     "upsert_run_at_end",
     "run_deletion_transaction",
@@ -7963,12 +7964,12 @@ visibility = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.config.automations"
-depends_on = ["mindroom.config.validation", "mindroom.tool_system.worker_routing"]
-visibility = ["mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
+depends_on = ["mindroom.config.validation"]
+visibility = ["mindroom.automations.prompt_curation", "mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
-depends_on = ["mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
+depends_on = ["mindroom.config.automations", "mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
 visibility = ["mindroom.automations.runner"]
 
 [[modules]]
@@ -8049,3 +8050,7 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.cli.local_model_config"
 depends_on = ["mindroom.atomic_file", "mindroom.cli.config", "mindroom.config.main", "mindroom.path_confinement"]
 visibility = ["mindroom.cli.config"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.google_service"]
+expose = ["GoogleCloudToolkit"]

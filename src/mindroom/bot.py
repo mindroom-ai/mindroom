@@ -144,11 +144,14 @@ from .response_runner import (
 )
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .scheduling import (
+    ScheduledTaskRunnerOwner,
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
+    clear_scheduled_task_runner_owner,
     drain_deferred_overdue_tasks,
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
+    set_scheduled_task_runner_owner,
 )
 from .startup_errors import PermanentStartupError
 from .turn_controller import TurnController, TurnControllerDeps
@@ -1931,6 +1934,8 @@ class AgentBot:
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+            if self.agent_name == ROUTER_AGENT_NAME:
+                set_scheduled_task_runner_owner(ScheduledTaskRunnerOwner(client, self._conversation_reader))
         except BaseException:
             await self._close_owned_matrix_after_start_failure()
             raise
@@ -2289,6 +2294,7 @@ class AgentBot:
         try:
             if self.agent_name == ROUTER_AGENT_NAME:
                 self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
+                clear_scheduled_task_runner_owner()
                 cleared_queued_tasks = clear_deferred_overdue_tasks()
                 if cleared_queued_tasks > 0:
                     self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
