@@ -385,7 +385,7 @@ def claim(
     return apply(transaction, principal_id, rl.claim(request, context))
 
 
-def _adopt_historical_answer(
+def adopt_historical_answer(
     transaction: Transaction,
     principal_id: str,
     request: rl.ClaimRequest,
@@ -844,7 +844,7 @@ class ReplyStore:
     async def adopt_historical_answer(self, request: rl.ClaimRequest, event_id: str) -> Reply:
         """Give an answer older than the reply records its reply, unless one already holds its event or sources."""
         return await self._backend.write(
-            lambda transaction: _adopt_historical_answer(transaction, self._principal_id, request, event_id),
+            lambda transaction: adopt_historical_answer(transaction, self._principal_id, request, event_id),
         )
 
     async def decide(

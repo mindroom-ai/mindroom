@@ -24,6 +24,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS, LegacyReplyReads
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
+from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord
@@ -407,6 +408,47 @@ async def test_an_unsettled_stop_reaches_the_reply_it_named(journal_store: Event
     assert reply.owed_write is not None
     assert reply.owed_write.note == rl._NOTE_CANCELLED
     assert not await principal.is_pending("$source")
+
+
+async def test_an_unsettled_stop_on_a_finished_answer_is_kept_on_its_reply(journal_store: EventJournalStore) -> None:
+    """The answer finished before main settled its Stop: the answer is adopted finished, and the Stop is kept."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.settle_many(("$source",))
+    await _turn(journal_store, "$source", completed=True, response_event_id="$reply", stop_order=5)
+
+    await _adopt(principal)
+    reply = await _only_reply(principal)
+    assert reply.event_id == "$reply"
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.stop_receipt_order == 5
+    assert not reply.unapplied_stop
+    assert reply.owed_write is None
+
+
+async def test_a_stop_is_read_before_the_ledger_rewrites_its_turn(journal_store: EventJournalStore) -> None:
+    """Adopted before the ledger loads, a Stop main kept on a turn record reaches its reply though the load drops it."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _turn(journal_store, "$source", response_event_id="$reply", stop_order=5)
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    runtime = ReplyRuntime(
+        store=principal,
+        entity_name=ENTITY,
+        generation="gen-new",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+        clean_up_superseded=lambda _continuation: None,
+    )
+
+    adopted = await runtime.adopt_legacy()
+    # Loading the ledger rewrites the record through the current codec, which keeps no Stop.
+    await _turn(journal_store, "$source", response_event_id="$reply")
+    await runtime.start(adopted)
+
+    reply = await _only_reply(principal)
+    assert reply.state is rl.ReplyState.CANCELLED
+    assert reply.stop_receipt_order == 5
 
 
 async def test_command_turns_and_finished_answers_get_no_reply(journal_store: EventJournalStore) -> None:

@@ -1887,10 +1887,12 @@ class AgentBot:
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
             await self._set_avatar_if_available()
+            # Earlier-release replies are adopted before loading the ledger rewrites the turn records they read.
+            adopted = await self._reply_runtime.adopt_legacy()
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
             # This bot instance now owns its replies; spans of earlier instances can no longer write.
-            await self._reply_runtime.start()
+            await self._reply_runtime.start(adopted)
             client = self.client
             assert client is not None
 
