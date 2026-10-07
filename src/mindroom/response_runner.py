@@ -652,6 +652,9 @@ class ResponseRequest:
     prepare_source_turn: (
         Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool | EditPreparation]] | None
     ) = None
+    # Runs once the turn claimed its reply, before the response is prepared: an edit prunes the history it
+    # replaces only then, so a Stop that refuses the claim leaves that history whole.
+    on_reply_claimed: Callable[[], Awaitable[None]] | None = None
     # Settles the turn's sources when they became terminal before any reply existed to settle them.
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
@@ -3974,6 +3977,8 @@ class ResponseRunner:
         if claimed_request is None:
             return None
         request = claimed_request
+        if request.on_reply_claimed is not None:
+            await request.on_reply_claimed()
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
             agent_names=request.participating_agent_names or (self.deps.agent_name,),

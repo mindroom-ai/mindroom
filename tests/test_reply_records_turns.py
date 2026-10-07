@@ -601,6 +601,21 @@ async def test_regeneration_failing_before_its_first_write_is_retried(tmp_path: 
     assert not await bot._reply_runtime.store.is_pending("$edit")
 
 
+async def test_an_edit_the_replys_stop_covers_prunes_no_history(tmp_path: Path) -> None:
+    """A Stop received after the edit, even while the edit waited for the conversation, refuses its claim first."""
+    bot = await _streaming_bot(tmp_path)
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer.")) == "$sent1"
+    assert await bot._reply_runtime.store.replies.record_stop("$sent1", 5) is not None
+    prune = AsyncMock()
+    model = AsyncMock(return_value="Unreachable.")
+    regeneration = replace(_regeneration(answer_event_id="$sent1"), on_reply_claimed=prune)
+
+    assert await _answer(bot, regeneration, model) is None
+
+    prune.assert_not_awaited()
+    model.assert_not_awaited()
+
+
 async def test_regenerating_an_answer_older_than_the_records_adopts_it(tmp_path: Path) -> None:
     """An answer written before durable records becomes a finished reply, which the edit then regenerates."""
     bot = await _streaming_bot(tmp_path)

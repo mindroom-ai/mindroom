@@ -357,6 +357,9 @@ def _generate_response_with_locked_callback(
             request.on_lifecycle_lock_acquired()
         if request.prepare_source_turn is not None and await request.prepare_source_turn(request.thread_history):
             return None
+        # The claim of the reply succeeded, as the runner's admission would run its hook.
+        if request.on_reply_claimed is not None:
+            await request.on_reply_claimed()
         return response_event_id
 
     return _generate_response
@@ -2109,6 +2112,8 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
     async def fail_visible_update(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
+        assert request.on_reply_claimed is not None
+        await request.on_reply_claimed()
         outcome = await final_in_span(
             gateway,
             principal,

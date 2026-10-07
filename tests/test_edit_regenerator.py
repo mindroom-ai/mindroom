@@ -386,8 +386,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_repeated_locked_preparation_removes_stale_runs_once(tmp_path: Path) -> None:
-    """Repeated source gates prune one immutable edit snapshot only once."""
+async def test_an_edit_prunes_the_history_it_replaces_only_once_its_reply_is_claimed(tmp_path: Path) -> None:
+    """Source gates prune nothing; the claim of the reply does, once, so a refused claim leaves history whole."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event()
@@ -396,8 +396,9 @@ async def test_repeated_locked_preparation_removes_stale_runs_once(tmp_path: Pat
 
     request = harness.generate_response.await_args.args[0]
     prepare = request.prepare_source_turn
-    harness.turn_store.remove_stale_runs_for_edit.assert_not_called()
     assert await prepare(request.thread_history) is False
+    harness.turn_store.remove_stale_runs_for_edit.assert_not_called()
+    await request.on_reply_claimed()
     assert await prepare(request.thread_history) is False
     harness.turn_store.remove_stale_runs_for_edit.assert_called_once()
     removal_kwargs = harness.turn_store.remove_stale_runs_for_edit.call_args.kwargs
@@ -428,7 +429,7 @@ async def test_an_answer_older_than_the_records_is_adopted_before_history_is_pru
     request = harness.generate_response.await_args.args[0]
     adopt.assert_not_awaited()
     assert await request.prepare_source_turn(request.thread_history) is False
-    assert await request.prepare_source_turn(request.thread_history) is False
+    await request.on_reply_claimed()
     assert order.mock_calls == [call.adopt(), call.prune()]
     (event_id,) = adopt.await_args.args
     assert event_id == request.existing_event_id
@@ -1927,6 +1928,9 @@ async def test_unsettled_cancellation_leaves_interrupted_edit_uncommitted(tmp_pa
         attempts += 1
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
+        # The reply was claimed, so the history the edit replaces went before the cancellation.
+        assert request.on_reply_claimed is not None
+        await request.on_reply_claimed()
         raise asyncio.CancelledError
 
     harness.generate_response.side_effect = interrupt

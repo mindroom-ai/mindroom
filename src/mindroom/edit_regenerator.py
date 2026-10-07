@@ -431,10 +431,9 @@ class EditRegenerator:
             ),
         )
 
-        stale_runs_removed = False
+        claimed = False
 
         async def prepare_snapshot(history: Sequence[ResolvedVisibleMessage]) -> bool | EditPreparation:
-            nonlocal stale_runs_removed
             result = await self.deps.turn_store.prepare_edit_snapshot(
                 record=record,
                 driving_revision_id=driving_edit.revision[1],
@@ -442,30 +441,33 @@ class EditRegenerator:
                 thread_history=history,
             )
             mailbox.rebuild_requested = result is EditPreparation.REBUILD
-            if result is False and not stale_runs_removed:
-                current = await self.deps.reply_for_sources(record.source_event_ids)
-                stop = None if current is None else current.stop_receipt_order
-                if stop is not None and stop >= active_receipt_order:
-                    # A Stop that arrived while the edit waited covers it: nothing runs, so nothing is pruned.
-                    return True
-                if reply is None:
-                    # Pruning may remove the history run that alone names this answer; its reply keeps it.
-                    await self.deps.adopt_historical_answer(
-                        answer_event_id,
-                        sources=SpanSources(
-                            pending=(),
-                            logical=record.source_event_ids,
-                            discovery=record.discovery_event_ids,
-                        ),
-                        room_id=target.room_id,
-                        thread_id=target.resolved_thread_id,
-                    )
-                await self.deps.turn_store.remove_stale_runs_for_edit(
-                    turn_record=record,
-                    requester_user_id=requester_id,
+            if result is not False or claimed:
+                # Once the reply is claimed, a Stop reaches the running span instead.
+                return result
+            current = await self.deps.reply_for_sources(record.source_event_ids)
+            stop = None if current is None else current.stop_receipt_order
+            if stop is not None and stop >= active_receipt_order:
+                # A Stop that arrived while the edit waited covers it: nothing runs.
+                return True
+            if current is None:
+                # The claim regenerates a reply: an answer older than the records becomes one first.
+                await self.deps.adopt_historical_answer(
+                    answer_event_id,
+                    sources=SpanSources(
+                        pending=(),
+                        logical=record.source_event_ids,
+                        discovery=record.discovery_event_ids,
+                    ),
+                    room_id=target.room_id,
+                    thread_id=target.resolved_thread_id,
                 )
-                stale_runs_removed = True
             return result
+
+        async def prune_replaced_history() -> None:
+            nonlocal claimed
+            claimed = True
+            # The claimed reply holds the answer, so the history runs this edit replaces may go.
+            await self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
 
         return (
             ResponseRequest(
@@ -490,6 +492,7 @@ class EditRegenerator:
                 current_timestamp_ms=normalize_timestamp_ms(driving_edit.revision[0]),
                 current_prompt_is_structured=structured,
                 prepare_source_turn=prepare_snapshot,
+                on_reply_claimed=prune_replaced_history,
                 prepared_edit_record=record,
                 source_handoff=asyncio.Event(),
                 sync_restart_retry_source_event_id=retry_source_event_id,
