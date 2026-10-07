@@ -197,10 +197,11 @@ def settle_turn(
     logical: tuple[str, ...],
     prepared_edit: TurnRecord | None,
 ) -> TurnRecord | None:
-    """Settle an AI reply's journal sources and record its turn answered, in one transaction.
+    """Settle the sources an AI reply answers and record their turn answered, in one transaction.
 
-    The only way an AI reply's sources settle: a reply rule's ``SettleSources``
-    and an approval continuation's finish both come here.
+    A reply rule's ``SettleSources`` comes here, and so does the finish of a
+    continuation an earlier release left that reply classification never
+    named a span for.
     """
     journal.settle_many(transaction, principal_id, pending)
     return _complete_turn(transaction, agent_name, logical_event_ids=logical, prepared_edit=prepared_edit)

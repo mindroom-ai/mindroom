@@ -492,8 +492,8 @@ _TABLES = (
         span_id TEXT NOT NULL,
         reply_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('turn', 'replay', 'approval_resume', 'regeneration')),
-        -- The driving event: it keys the span's outbox rows and response
-        -- attempt, and spans of one reply can share it.
+        -- The driving event: it keys the span's outbox rows, and spans of
+        -- one reply can share it.
         delivery_id TEXT NOT NULL,
         approval_id TEXT,
         bot_generation TEXT NOT NULL,

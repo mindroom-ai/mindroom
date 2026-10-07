@@ -2034,6 +2034,9 @@ def _pause_for_approval(
     new_text: str | None,
 ) -> ReplyRowEnqueue:
     """Create or advance the continuation, then pause its reply, so neither exists without the other."""
+    if request.create is None:
+        # Reply before continuation, as every path that holds both takes them.
+        reply_messages.lock(transaction, principal_id, request.reply_id)
     held = (
         hold.apply(transaction, principal_id)
         if isinstance(hold, ApprovalAdvance)

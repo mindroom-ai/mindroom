@@ -2021,7 +2021,6 @@ class ResponseRunner:
                         identity=identity,
                         tool_trace=visible_tool_trace if show_tool_calls else None,
                         extra_content=_merge_response_extra_content(result.metadata_content, claimed.attachment_ids),
-                        consumes_edit=claimed.prepared_edit_record is not None,
                     ),
                 ),
                 current,

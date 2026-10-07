@@ -26,7 +26,7 @@ Every fact about an AI reply has one owner and one writer; other stores hold onl
 
 | Store | Owns |
 |---|---|
-| Reply records (`reply_messages`, `reply_spans`, `reply_span_sources`) | Everything about an AI reply: its event, state, presentation and tool-call visibility, the Stop and whether it applied, the edit order a regeneration answers, each span's sources and their settlement, redactions including deleted sources, the approval it waits on, the span that claims that approval, and a regeneration's selected edit. |
+| Reply records (`reply_messages`, `reply_spans`, `reply_span_sources`) | Everything about an AI reply: its event, state, presentation and tool-call visibility, the Stop and whether it applied, the edit order a regeneration answers, each span's sources and their settlement, redactions including deleted sources, the approval it waits on, the bot instance and outcome of the span that claims that approval, and a regeneration's selected edit. |
 | Turn ledger (`turn_records`) | User-message and turn facts: sources, aliases, prompts, revisions, tombstones, requester, history scope, conversation target, voice and command checkpoints, `completed` ("this agent answered this message", agent-scoped across re-logins), and `response_event_id` for turns that are not AI replies, such as commands, rejections, and router notices. |
 | Journal | Whether each event is pending or settled: the work queue of one Matrix identity. |
 | Outbox (`matrix_delivery_outbox`) | Transport for every Matrix write: key, room, thread, membership epoch, transaction id, frozen payload, continuation segments, edit target, attempt, device, acknowledgement, permanent failure, fence, and for a reply row its owner (`reply_id`, `span_id`, `reply_sequence`), with no reply meaning. |
@@ -110,7 +110,8 @@ The handled-turn retention pass deletes finished replies that owe nothing, with 
 - I7. Every reply write is recorded before it is sent.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place.
 - I-S1. Every reply fact in the ownership table is read from reply records or a cache of them; no other store writes it.
-- I-S2. An AI reply's journal sources settle only through `SettleSources`, and the turn they index is marked answered in the same transaction.
+- I-S2. A reply answers its journal sources only through `SettleSources`, which settles them and marks the turn they index answered in the same transaction, including a finished approval's paused span and a reply its sources' deletion ended.
+  Sources settled without an answer, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
 - I-S3. The outbox commits nothing outside transport for a row with `reply_id`.
 - I-S4. A continuation names its reply through its paused span and holds no reply or source fact of its own.
 
