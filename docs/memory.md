@@ -301,10 +301,13 @@ Facts in `memory/` go stale when a later conversation corrects them or a cited s
 Enable the [`dreaming`](scheduling.md#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations, daily notes, and changed cited sources, through a proposal that a second run reviews before MindRoom applies it.
 
 ```yaml
+memory:
+  auto_flush:
+    enabled: true           # writes the daily notes dreaming reviews
 agents:
   mind:
     memory_backend: file
-    thread_exports: true    # optional: adds conversations as input
+    thread_exports: true    # also reviews threaded conversations
     automations: [dreaming]
 ```
 

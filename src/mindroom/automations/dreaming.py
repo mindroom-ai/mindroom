@@ -739,7 +739,7 @@ def _outside_memory(run: _Run) -> list[str]:
 def _end_without_change(run: _Run, thread_id: str) -> Done:
     """Acknowledge the inputs of a run that changed nothing, unless memory changed under it."""
     if not _unchanged_since_fire(run):
-        return _end(run, "conflict", "⚠️ Memory changed during the run, so its review is repeated next time.")
+        return _end(run, "conflict", "⚠️ Memory changed during the run, so a later run reviews these inputs again.")
     return _end(
         run,
         "unchanged",

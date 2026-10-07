@@ -616,7 +616,7 @@ def test_a_run_that_changes_nothing_acknowledges_its_inputs_unless_memory_moved(
     done = workspace.dream(ask)
 
     assert isinstance(done, Done)
-    assert done.notice == "⚠️ Memory changed during the run, so its review is repeated next time."
+    assert done.notice == "⚠️ Memory changed during the run, so a later run reviews these inputs again."
     assert EXPORT not in workspace.state()["reviewed"]
     assert workspace.state()["pending_run"] is None
 
