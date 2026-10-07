@@ -166,10 +166,11 @@ def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
 class ClaimRefused(Enum):
     """Why a claim opened no span."""
 
-    # Earlier writes of the reply are unresolved; their resolution retries the sources.
+    # The reply cannot be claimed yet; what blocks it retries the sources once it resolves.
     DEFERRED = "deferred"
-    # A retried regeneration whose edit the reply already answered.
-    ANSWERED = "answered"
+    # Nothing runs for these sources: the reply already answered the edit, a
+    # Stop ended the reply or covers the edit, or a Stop ended a selection.
+    NOTHING_TO_RUN = "nothing_to_run"
     # Another bot instance took this principal's replies over; it replays the sources.
     RETIRED = "retired"
 
@@ -410,7 +411,7 @@ class ReplyRuntime:
         if transition.outcome is rl.Outcome.STALE:
             return ClaimRefused.RETIRED
         if transition.outcome is rl.Outcome.DUPLICATE:
-            return ClaimRefused.ANSWERED
+            return ClaimRefused.NOTHING_TO_RUN
         if transition.claimed is None or transition.reply is None:
             # Earlier writes of this reply are unresolved; their resolution
             # wakes these sources instead of waiting under the conversation lock.

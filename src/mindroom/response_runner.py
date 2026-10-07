@@ -2199,7 +2199,8 @@ class ResponseRunner:
         reply = None if delivery.reply_id is None else await self.deps.replies.store.replies.load(delivery.reply_id)
         body: object
         if reply is not None:
-            body, _trace = render_body(decode_presentation(reply.presentation))
+            # What the FINAL showed: the final transform's display when it reshaped the answer.
+            body, _trace = render_body(decode_presentation(reply.frozen_display or reply.presentation))
         else:
             # LEGACY_COMPAT: Approval answers frozen before reply records, with their body in the result.
             # Legacy format: an acknowledged FINAL row without reply_id whose result_json holds the body the
@@ -3333,9 +3334,9 @@ class ResponseRunner:
     ) -> ResponseRequest | None:
         """Claim the reply this request answers, after the first source gate passed.
 
-        ``None`` means no span opened: earlier writes of the reply are
-        unresolved, and the claim retries the sources once they resolve; or a
-        retried regeneration finds its edit already answered.
+        ``None`` means no span opened: the reply cannot be claimed yet, and the
+        claim retries the sources once what blocks it resolves; or nothing runs
+        for them, as when the reply already answered the edit or a Stop covers it.
         """
         replies = self.deps.replies
         slot = current_slot()
@@ -3348,9 +3349,9 @@ class ResponseRunner:
             # settle with a dispatch error instead of retrying forever.
             self.deps.logger.exception("reply_claim_invalid", source_event_id=request.response_envelope.source_event_id)
             raise PostLockRequestPreparationError from error
-        if handle is ClaimRefused.ANSWERED:
+        if handle is ClaimRefused.NOTHING_TO_RUN:
             self.deps.logger.info(
-                "sync_restart_retry_skipped",
+                "reply_claim_nothing_to_run",
                 source_event_id=request.response_envelope.source_event_id,
             )
             return None

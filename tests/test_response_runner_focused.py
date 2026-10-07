@@ -106,6 +106,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_scope import current_span
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
@@ -2077,6 +2078,43 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
     with patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=outcome))):
         restored = await runner._approval_outcome_from_delivery(replace(frozen, span_id="span-resume"))
     assert restored.terminal_status == status
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_approval_answer_reports_what_its_final_showed(tmp_path: Path) -> None:
+    """A final transform reshaped the answer the FINAL showed; recovered after-response work sees that, not the raw answer."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "* transformed", "m.new_content": {"body": "transformed"}},
+        edits_event_id="$waiting",
+    )
+    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$final",
+        delivered_projections=(),
+    )
+    frozen = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert frozen is not None
+    reply = MagicMock(
+        presentation=encode_presentation(Presentation(segments=(Segment(kind="answer", text="raw answer"),))),
+        frozen_display=encode_presentation(Presentation(segments=(Segment(kind="answer", text="transformed"),))),
+    )
+    with (
+        patch.object(ReplyStore, "load", AsyncMock(return_value=reply)),
+        patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=rl.SpanOutcome.COMPLETED))),
+    ):
+        restored = await runner._approval_outcome_from_delivery(
+            replace(frozen, reply_id="reply-1", span_id="span-resume"),
+        )
+    assert restored.final_visible_body == "transformed"
 
 
 @pytest.mark.asyncio
