@@ -1449,7 +1449,7 @@ def test_github_provider_failure_reports_status_without_provider_text(
     sentinel = "provider-controlled-secret-for-status"
     tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
 
-    wrapped_result = tool.get_file_content("example/project", "src/notes.txt", ref="jmt/composite-pulses")
+    wrapped_result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
     owned_result = tool.edit_issue("example/project", 7, title="Updated")
 
     assert json.loads(wrapped_result) == {"error": expected_error}
