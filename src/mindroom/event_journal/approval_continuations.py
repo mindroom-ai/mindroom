@@ -16,7 +16,7 @@ from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import membership_state, outbox, reply_messages, reply_spans, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
-from .legacy_response_attempts import legacy_identity, legacy_identity_context
+from .legacy_response_attempts import legacy_identity
 from .models import SUPERSEDED_FAILURE_REASON, DeliveryStage
 
 if TYPE_CHECKING:
@@ -271,7 +271,6 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
             {"sender": turn.sender, "body": turn.body} for turn in continuation.memory_thread_history
         ],
         "thread_summary_message_count_hint": continuation.thread_summary_message_count_hint,
-        **legacy_identity_context(continuation),
     }
 
 

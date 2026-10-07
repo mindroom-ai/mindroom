@@ -96,14 +96,18 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
 # LEGACY_COMPAT: Approvals whose reply a newer edit's answer already replaced.
 # Legacy format: a continuation whose response attempt a newer attempt of the same reply, room, membership, entity, and
 # logical sources superseded with a higher edit receipt order and an acknowledged answer FINAL editing the same event,
-# while its own FINAL holds no answer; v2026.10.201 retired such an approval's failure without a note.
+# while its own FINAL holds no answer and no approved resume advanced it to a later pause; v2026.10.201 retired such an
+# approval's failure without a note.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages fence an approval superseded
 # when the edit's regeneration claims its reply.
 # Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows and
 # keeps the approval's pause on it until its cleanup settles the sources it holds.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded.
-def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool:
-    """Return whether a newer edit's acknowledged answer replaced the reply this attempt paused."""
+def _replaced(transaction: Transaction, principal_id: str, approval_id: str, driving: str) -> bool:
+    """Return whether a newer edit's acknowledged answer replaced the reply this attempt paused.
+
+    An approval a resume advanced paused again, possibly after that answer, so it stands.
+    """
     row = transaction.fetchone(
         """SELECT 1 AS present FROM response_attempts AS attempt
         JOIN response_attempts AS newer
@@ -116,6 +120,8 @@ def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool
           ON delivery.principal_id = newer.principal_id AND delivery.delivery_id = newer.driving_event_id
          AND delivery.room_id = newer.room_id AND delivery.membership_epoch = newer.membership_epoch
          AND delivery.edits_event_id = newer.response_event_id
+        JOIN approval_continuations AS paused
+          ON paused.principal_id = attempt.principal_id AND paused.approval_id = ? AND paused.generation = 0
         WHERE attempt.principal_id = ? AND attempt.driving_event_id = ? AND delivery.stage = 'final'
           AND delivery.acknowledged_event_id IS NOT NULL AND delivery.result_json IS NOT NULL
           AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
@@ -125,7 +131,7 @@ def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool
               AND own.stage = 'final' AND own.result_json IS NOT NULL
           )
         LIMIT 1""",
-        (principal_id, driving),
+        (approval_id, principal_id, driving),
     )
     return row is not None
 
@@ -219,7 +225,7 @@ def upgrade_continuation_identity(
                 pending,
                 stored,
             )
-            if attempts and _replaced(transaction, principal_id, pending[0]):
+            if attempts and _replaced(transaction, principal_id, approval_id, pending[0]):
                 transaction.execute(
                     """UPDATE approval_continuations SET state = 'failing', failure_reason = ?, runtime_generation = NULL
                     WHERE principal_id = ? AND approval_id = ?""",
@@ -248,34 +254,6 @@ def upgrade_continuation_identity(
     if attempts:
         transaction.execute("DROP TABLE IF EXISTS response_attempt_sources")
         transaction.execute("DROP TABLE IF EXISTS response_attempts")
-
-
-def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, object]:
-    """Return the context entries that keep a continuation's adopted identity until its span is named.
-
-    That includes the visibility and selected edit an earlier release kept in
-    the context; a named span's reply holds both instead.
-    """
-    if continuation.span_id is not None:
-        return {}
-    return {
-        "show_tool_calls": continuation.show_tool_calls,
-        "prepared_edit_record": (
-            None
-            if continuation.prepared_edit_record is None
-            else TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
-        ),
-        _IDENTITY_KEY: {
-            "entity_name": continuation.entity_name,
-            "room_id": continuation.room_id,
-            "thread_id": continuation.thread_id,
-            "response_event_id": continuation.response_event_id,
-            "pending_event_ids": list(continuation.source_event_ids),
-            "logical_source_event_ids": list(continuation.sources.logical_source_event_ids),
-            "discovery_event_ids": list(continuation.sources.discovery_event_ids),
-            "edit_receipt_order": continuation.sources.edit_receipt_order,
-        },
-    }
 
 
 def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _LegacyIdentity:

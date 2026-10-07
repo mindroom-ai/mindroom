@@ -313,6 +313,30 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
 
 
 @pytest.mark.asyncio
+async def test_an_approval_a_resume_paused_again_keeps_its_reply_beside_a_newer_answer(
+    legacy_database: _LegacyDatabase,
+) -> None:
+    """An approved resume that paused again may have done so after the edit's answer: its approval stands."""
+    legacy_database.execute(_ATTEMPT_OWNER)
+    legacy_database.execute(_NEWER_ANSWER)
+    legacy_database.execute("UPDATE approval_continuations SET generation = 1 WHERE approval_id = 'approval'")
+    store = legacy_database.open()
+    try:
+        principal = store.principal("@bot:example.org")
+        approval = await principal.approval_continuation("approval")
+        assert approval is not None
+        assert approval.state == "waiting"
+        await principal.replies.write_generation("gen-new", now_ns=10)
+        await principal.adopt_legacy_replies(entity_name="bot", presentations=LEGACY_PRESENTATIONS, now_ns=10)
+        reply = await principal.replies.for_event("$answer")
+        assert reply is not None
+        assert reply.state is ReplyState.PAUSED
+        assert reply.approval_id == "approval"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_a_card_of_an_unclassified_continuation_names_its_adopted_entity(
     journal_store: EventJournalStore,
 ) -> None:

@@ -257,6 +257,45 @@ async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJ
     )
 
 
+async def test_an_older_approval_whose_failure_was_delivered_is_superseded_by_the_newer_pause(
+    journal_store: EventJournalStore,
+) -> None:
+    """The newer approval's pause is what the reply shows; the older one's delivered failure does not keep it holding."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await admit(principal, "$edit")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    older = replace(_continuation("failing"), failure_reason="expired")
+    await _main_continuation(principal, older)
+    await _row(
+        principal,
+        "$source",
+        DeliveryStage.FINAL,
+        "Approval expired.",
+        status="error",
+        edits="$reply",
+        acknowledged="$note",
+    )
+    newer = replace(
+        _continuation("waiting", approval_id="approval-2"),
+        sources=ResponseSources(("$edit",), ("$source",)),
+    )
+    await _main_continuation(principal, newer, text="Rereading")
+
+    await _adopt(principal)
+    superseded = await principal.approval_continuation("approval-1")
+    assert superseded is not None
+    assert (superseded.state, superseded.failure_reason) == ("failing", "superseded")
+    reply = await principal.replies.for_event("$reply")
+    assert reply is not None
+    assert reply.approval_id == "approval-2"
+    # The older approval's cleanup leaves the reply paused for the newer one.
+    assert await principal.finish_approval_continuation("approval-1") is not None
+    reply = await principal.replies.for_event("$reply")
+    assert reply is not None
+    assert (reply.state, reply.approval_id) == (rl.ReplyState.PAUSED, "approval-2")
+
+
 async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store: EventJournalStore) -> None:
     """A paused regeneration main left still answers the edit it selected once its reply is adopted."""
     principal = journal_store.principal(PRINCIPAL)

@@ -186,11 +186,11 @@ def _newest_continuations(
             continue
         older = newest.get(event_id)
         if older is not None:
-            approval_continuations.fence(
-                transaction,
-                principal_id,
-                approval_id=older.approval_id,
-                reason=SUPERSEDED_FAILURE_REASON,
+            # The newer pause is what the reply shows, even over an answer the older one delivered.
+            transaction.execute(
+                "UPDATE approval_continuations SET state = 'failing', failure_reason = ? "
+                "WHERE principal_id = ? AND approval_id = ?",
+                (SUPERSEDED_FAILURE_REASON, principal_id, older.approval_id),
             )
             superseded.setdefault(event_id, []).append(older)
         newest[event_id] = continuation

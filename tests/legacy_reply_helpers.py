@@ -6,9 +6,8 @@ import json
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from mindroom.event_journal import (
-    approval_continuations,
-)
+from mindroom.event_journal import approval_continuations
+from mindroom.handled_turns import TurnRecordCodec
 from mindroom.tool_system.events import serialize_tool_trace
 from tests.conftest import unwrap_extracted_collaborator
 
@@ -83,7 +82,26 @@ async def store_main_continuation(store: PrincipalStore, continuation: ApprovalC
     """
 
     def write(transaction: Transaction) -> None:
-        context = approval_continuations._context(continuation)
+        # The identity the upgrade copied into the context, read until reply classification names the paused span.
+        context = {
+            **approval_continuations._context(continuation),
+            "show_tool_calls": continuation.show_tool_calls,
+            "prepared_edit_record": (
+                None
+                if continuation.prepared_edit_record is None
+                else TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
+            ),
+            "legacy_identity": {
+                "entity_name": continuation.entity_name,
+                "room_id": continuation.room_id,
+                "thread_id": continuation.thread_id,
+                "response_event_id": continuation.response_event_id,
+                "pending_event_ids": list(continuation.source_event_ids),
+                "logical_source_event_ids": list(continuation.sources.logical_source_event_ids),
+                "discovery_event_ids": list(continuation.sources.discovery_event_ids),
+                "edit_receipt_order": continuation.sources.edit_receipt_order,
+            },
+        }
         transaction.execute(
             """
             INSERT INTO approval_continuations (
