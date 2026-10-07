@@ -7987,7 +7987,7 @@ visibility = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.config.automations"
-depends_on = ["mindroom.config.validation"]
+depends_on = ["mindroom.config.schema_hints", "mindroom.config.validation"]
 visibility = [
     "mindroom.automations.prompt_curation",
     "mindroom.automations.registry",

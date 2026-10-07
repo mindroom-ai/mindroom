@@ -12,6 +12,7 @@ is the cooldown, and a restart only skips the occurrence it missed.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -102,8 +103,9 @@ def _check(
         config=config,
         runtime_paths=runtime_paths,
         entry=automation,
-        options=MappingProxyType(dict(automation.options) if isinstance(automation, PluginAutomation) else {}),
-        settings=definition.settings,
+        # Each check gets its own copies, so nothing it changes reaches the config or a later check.
+        options=MappingProxyType(deepcopy(automation.options) if isinstance(automation, PluginAutomation) else {}),
+        settings=MappingProxyType(deepcopy(dict(definition.settings))),
         workspace=runtime.workspace.root if runtime.workspace is not None else None,
         state_dir=automations_tracking_root(runtime_paths) / agent_name,
     )
@@ -152,6 +154,8 @@ class AutomationRunner:
         if config is None:
             return
         enabled: set[str] = set()
+        # ``now`` is the loop's clock; prompts measure their hour on it from the moment they are delivered.
+        clock_offset = now - datetime.now(UTC)
         for agent_name in config.agents:
             for automation in config.resolve_entity(agent_name).automations:
                 key = f"{agent_name}:{automation.name}"
@@ -164,7 +168,7 @@ class AutomationRunner:
                     self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
                     self._active.add(agent_name)
                     create_background_task(
-                        self._fire(config, agent_name, automation, key, now),
+                        self._fire(config, agent_name, automation, key, clock_offset),
                         name=f"automation:{key}",
                     )
         for key in set(self._next_due) - enabled:
@@ -204,10 +208,9 @@ class AutomationRunner:
         agent_name: str,
         automation: Automation,
         key: str,
-        now: datetime,
+        clock_offset: timedelta,
     ) -> None:
         posted = False
-        started = datetime.now(UTC)
         try:
             room_id = _room_id(config, self.runtime_paths, agent_name, automation.room)
             if room_id is None:
@@ -232,8 +235,7 @@ class AutomationRunner:
                 await self._notify(bot, chain, None, f"⚠️ The {automation.name} automation could not run: {exc}")
                 return
             if step is not None:
-                # ``now`` is the tick's clock; the check's own run time is added to it.
-                posted = await self._post(config, bot, chain, None, step, now + (datetime.now(UTC) - started))
+                posted = await self._post(config, bot, chain, None, step, clock_offset)
         finally:
             if not posted:
                 self._release(agent_name)
@@ -261,7 +263,7 @@ class AutomationRunner:
                 for thread_id in step.resolve:
                     await self._resolve_thread(bot, chain, thread_id)
                 return
-            posted = await self._post(config, bot, chain, pending.thread_id, step, datetime.now(UTC))
+            posted = await self._post(config, bot, chain, pending.thread_id, step, timedelta(0))
         finally:
             if not posted:
                 self._release(chain.agent_name)
@@ -277,17 +279,16 @@ class AutomationRunner:
         chain: _Chain,
         thread_id: str | None,
         ask: Ask,
-        now: datetime,
+        clock_offset: timedelta,
     ) -> bool:
         """Post ``ask`` and wait for its run; return whether it was posted."""
         target_thread = None if ask.new_thread else thread_id
-        send_started = datetime.now(UTC)
         event_id = await self._post_mention(config, bot, chain, ask.text, target_thread)
         if event_id is None:
             return False
         thread = event_id if target_thread is None else target_thread
-        # The run's hour starts once the prompt is delivered, however long the check or the send took.
-        delivered = now + (datetime.now(UTC) - send_started)
+        # The run's hour starts once the prompt is delivered, however long the wait, the check, or the send took.
+        delivered = datetime.now(UTC) + clock_offset
         self._pending[event_id] = _PendingRun(chain, thread, ask, delivered + _RUN_FALLBACK)
         self._wake.set()
         if target_thread is None:

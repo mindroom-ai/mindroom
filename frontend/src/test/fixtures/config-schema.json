@@ -1530,7 +1530,10 @@
           ],
           "default": null,
           "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "name": {
           "const": "dreaming",
@@ -3173,7 +3176,10 @@
           ],
           "default": null,
           "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "name": {
           "description": "Name of an automation a loaded plugin provides",
@@ -3279,7 +3285,10 @@
           ],
           "default": null,
           "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "name": {
           "const": "prompt_curation",

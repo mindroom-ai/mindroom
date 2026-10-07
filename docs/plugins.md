@@ -816,6 +816,7 @@ plugins:
   - path: plugins/weekly-digest
 agents:
   mind:
+    display_name: Mind
     memory_backend: file   # gives the agent a workspace
     tools: [file]          # the agent writes the digest
     automations:

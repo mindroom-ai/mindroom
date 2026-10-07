@@ -655,3 +655,27 @@ async def test_a_reload_between_steps_keeps_the_running_chain(tmp_path: Path) ->
 
     assert runner._next_due["mind:weekly_digest"][1] == due[1] + timedelta(days=1)
     assert [m["body"] for m in bot.sent] == ["@mind Old prompt", "old step", "@mind New prompt"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_cannot_change_nested_options_or_settings_for_later_runs(tmp_path: Path) -> None:
+    """Each check gets its own copies, so changing a nested value never reaches the config or the next check."""
+    entry = PluginAutomation(name="weekly_digest", cron="0 12 * * *", options={"targets": ["a.md"]})
+    seen: list[list[str]] = []
+
+    @automation("weekly_digest")
+    def check(ctx: AutomationContext) -> Ask | None:
+        seen.append(list(ctx.options["targets"]))
+        ctx.options["targets"].append("b.md")
+        ctx.settings["tags"].append("x")
+        return None
+
+    _config, _paths, runner, _bot = _setup(tmp_path, automations=[entry])
+    runner.definition_provider = compile_automations([_Plugin("digest", check, settings={"tags": []})]).get
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    await _tick(runner, DAY_LATER + timedelta(days=1))
+
+    assert seen == [["a.md"], ["a.md"]]
+    assert entry.options == {"targets": ["a.md"]}
+    assert runner.definition_provider("weekly_digest").settings == {"tags": []}

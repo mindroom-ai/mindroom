@@ -6,7 +6,6 @@ import inspect
 import re
 from dataclasses import dataclass, field
 from functools import cache
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.config.automations import BUILTIN_AUTOMATION_NAMES
@@ -90,7 +89,7 @@ class AutomationDefinition:
 def _definition(check: CheckFn, settings: Mapping[str, Any]) -> AutomationDefinition:
     metadata = _metadata(check)
     assert metadata is not None
-    return AutomationDefinition(metadata.name, check, metadata.requires_file_memory, MappingProxyType(dict(settings)))
+    return AutomationDefinition(metadata.name, check, metadata.requires_file_memory, dict(settings))
 
 
 @cache

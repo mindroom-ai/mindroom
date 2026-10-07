@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items
 
 _CRON_FIELDS = 5
@@ -40,6 +41,7 @@ class _ScheduledAutomation(BaseModel):
     model: str | None = Field(
         default=None,
         description="Model for the prompt's runs, a key of models; defaults to the agent's own model",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
 
     @field_validator("cron")
