@@ -19,7 +19,7 @@ from mindroom.event_journal import (
     EventKind,
     turn_records,
 )
-from mindroom.event_journal.replies import ReplyCreation, ReplyRowRequest
+from mindroom.event_journal.replies import ClaimLookup, ReplyCreation, ReplyRowRequest
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS, LegacyReplyReads
@@ -472,6 +472,67 @@ async def test_a_settled_stop_on_a_finished_answer_still_covers_edits_admitted_b
     assert reply.state is rl.ReplyState.COMPLETED
     assert reply.stop_receipt_order == 5
     assert reply.owed_write is None
+
+
+@pytest.mark.parametrize("in_flight", ["cancelled_final", "stopped_approval"])
+async def test_a_settled_stop_on_a_reply_still_in_flight_covers_edits_admitted_before_it(
+    journal_store: EventJournalStore,
+    in_flight: str,
+) -> None:
+    """Main settled the Stop before the reply it ended was done: the adopted reply keeps it for an older edit.
+
+    The cancelled answer's FINAL was still owed, or the approval the Stop
+    failed had not written its note yet.
+    """
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await admit(principal, "$edit")
+    await _turn(journal_store, "$source", response_event_id="$reply", stop_order=5, stop_settled=True)
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    if in_flight == "cancelled_final":
+        await _row(principal, "$source", DeliveryStage.FINAL, "Partial", status="cancelled", edits="$reply")
+    else:
+        stopped = replace(_continuation("failing"), failure_reason="cancelled_by_user")
+        await _main_continuation(principal, stopped)
+
+    await _adopt(principal)
+    reply = await _only_reply(principal)
+    assert reply.stop_receipt_order == 5
+    if in_flight == "cancelled_final":
+        assert reply.state is rl.ReplyState.CANCELLED
+        assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+        await principal.acknowledge_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final",
+            delivered_projections=(),
+        )
+    else:
+        assert reply.state is rl.ReplyState.PAUSED
+        assert reply.approval_id == "approval-1"
+    edit = rl.ClaimRequest(
+        span_id="span-edit",
+        delivery_id="$edit",
+        sources=rl.SpanSources(pending=("$edit",), logical=("$source",)),
+        bot_generation="gen-new",
+        now_ns=NOW,
+        new_reply_id="reply-edit",
+        entity_name=ENTITY,
+        room_id=ROOM,
+        thread_id=None,
+        membership_epoch=await principal.membership_epoch(ROOM),
+        empty_presentation=encode_presentation(Presentation()),
+        driving_edit_id="$edit",
+    )
+
+    # Received before the Stop, the edit regenerates nothing and leaves the stopped approval to its settlement.
+    applied = await principal.replies.claim(edit, ClaimLookup(existing_event_id="$reply", edit_receipt_order=3))
+    assert applied.transition.outcome is rl.Outcome.DUPLICATE
+    assert applied.transition.effects == ()
+    if in_flight == "stopped_approval":
+        continuation = await principal.approval_continuation("approval-1")
+        assert continuation is not None
+        assert continuation.failure_reason == "cancelled_by_user"
 
 
 async def test_a_stop_is_read_before_the_ledger_rewrites_its_turn(journal_store: EventJournalStore) -> None:

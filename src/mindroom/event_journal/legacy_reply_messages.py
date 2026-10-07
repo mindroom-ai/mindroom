@@ -198,8 +198,9 @@ def classify(
         for record in _pending_turns(transaction, principal_id, entity_name)
         if adopted_sources.isdisjoint(record.source_event_ids)
     )
+    stops = _recorded_stops(transaction, entity_name)
     applied = [_write(transaction, principal_id, adoption) for adoption in adoptions]
-    applied.extend(_turn_stops(transaction, principal_id, entity_name, presentations, now_ns))
+    applied.extend(_keep_stops(transaction, principal_id, stops, entity_name, presentations, now_ns))
     transaction.execute(
         "INSERT INTO reply_legacy_classifications (principal_id, classified_at_ns) VALUES (?, ?)",
         (principal_id, now_ns),
@@ -894,20 +895,13 @@ def _finished_answer(
     return adopt_historical_answer(transaction, principal_id, request, record.response_event_id)
 
 
-def _turn_stops(
-    transaction: Transaction,
-    principal_id: str,
-    entity_name: str,
-    presentations: LegacyPresentations,
-    now_ns: int,
-) -> tuple[AppliedTransition, ...]:
-    """Keep each Stop a turn recorded on the reply it names, where an edit it covers finds it.
+def _recorded_stops(transaction: Transaction, entity_name: str) -> tuple[tuple[TurnRecord, _TurnStop], ...]:
+    """Return the Stop each answered turn's record holds, one per answer event.
 
-    A turn whose answer finished had nothing in flight to adopt: its answer
-    becomes a finished reply, which keeps the Stop even when that release
-    already settled it, since an edit admitted before the Stop may still wait.
+    Read before any adoption answers a turn: answering rewrites the record
+    through the current codec, which keeps no Stop.
     """
-    applied: list[AppliedTransition] = []
+    stops: list[tuple[TurnRecord, _TurnStop]] = []
     seen: set[str] = set()
     for index_event_id, _anchor, record_json in turn_records.load_all(transaction, entity_name):
         raw = json.loads(record_json)
@@ -918,12 +912,31 @@ def _turn_stops(
         if stop is None:
             continue
         seen.add(record.response_event_id)
+        stops.append((record, stop))
+    return tuple(stops)
+
+
+def _keep_stops(
+    transaction: Transaction,
+    principal_id: str,
+    stops: tuple[tuple[TurnRecord, _TurnStop], ...],
+    entity_name: str,
+    presentations: LegacyPresentations,
+    now_ns: int,
+) -> tuple[AppliedTransition, ...]:
+    """Keep each Stop a turn recorded on the reply it names, where an edit it covers finds it.
+
+    A turn whose answer finished had nothing in flight to adopt: its answer
+    becomes a finished reply. Every reply keeps the Stop even when that
+    release already settled it, since an edit admitted before the Stop may
+    still wait.
+    """
+    applied: list[AppliedTransition] = []
+    for record, stop in stops:
+        assert record.response_event_id is not None
         found = reply_messages.for_event(transaction, principal_id, record.response_event_id)
         if found is None:
             found = _finished_answer(transaction, principal_id, record, entity_name, presentations, now_ns)
-        elif stop.settled:
-            # That release already ended the reply this adoption found as its Stop asked.
-            continue
         if found is None or found.stop_receipt_order is not None:
             continue
         reply = reply_messages.lock(transaction, principal_id, found.reply_id)
