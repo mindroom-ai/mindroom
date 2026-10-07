@@ -13,7 +13,7 @@ From the hero camera the model reproduces the SVG silhouette; from other front-f
 | `hero.png` | Orthographic render on the SVG background and navy frame, 1024 × 1024. |
 | `studio.png` | Perspective three-quarter view on a glossy navy floor, 1024 × 1024. |
 | `sway.mp4` | Seamless ±30° sway loop starting from the hero pose, 120 frames at 30 fps. |
-| `crystal.py` | Restyles the model as solid azure crystal around a glowing tesseract and renders its effects. |
+| `crystal.py` | Restyles the model as framed crystal or ice legs, glowing white, around a tesseract and renders its effects. |
 | `crystal.blend` | Saved crystal scene for the still. |
 | `crystal.png` | Crystal M on a dark mirror floor from the logo's viewpoint, 1080 × 1080. |
 | `crystal-lock-in.mp4` | The camera glides from a scattered view into the one viewpoint where the M forms. |
@@ -54,8 +54,10 @@ blender --background --factory-startup --python assets/logo/blender/crystal.py -
   --render hyperspin ignition lock-in --resolution 960 --samples 48 --output-dir /tmp/mindroom-crystal
 ```
 
+Add `--frozen` to either command for frosted, cracked ice instead of clear crystal.
+
 Each effect writes 120 numbered frames, four seconds at 30 fps, for the same `ffmpeg` command as the sway loop.
-On a 12-core CPU the still takes about 75 seconds and an effect frame about 17 seconds at these settings.
+On a 12-core CPU the clear still takes about 1.5 minutes, and `--frozen` takes about three times as long.
 The first run downloads the CC0 [Poly Haven](https://polyhaven.com/a/studio_small_09) studio HDRI into `~/.cache/mindroom-logo/`.
 
 The look rests on a few choices:
@@ -63,6 +65,8 @@ The look rests on a few choices:
 - The towers and blocks are solid glass with rounded 0.04-unit edges (`HOLLOW = False`); thin hollow walls read as acrylic boxes.
 - The glass is tinted at its surface rather than by thickness, so the tall towers stay azure, and faint internal scattering lets it glow from within like ice.
 - The set is dark: a glossy navy floor, an HDRI for reflections that fades out toward the horizon, a high back light, rim strips, and a cool pool on the floor behind the letter for the glass to refract.
+- Each tower and foot sits in a navy frame like the cube's, around a white light that fades from its center, so the legs glow from within.
+- `--frozen` turns the crystal into ice: a paler tint, patchy frost, a hammered surface, and thin fracture planes of dense scattering along the edges of large Voronoi cells.
 - The cube is a tesseract: a slimmer navy frame (`CUBE_BEAM = 0.11`) around an inner cube of gold filaments, joined corner to corner by struts.
   Panes are left out because they mirror the azure towers over the gold, and the core light skips the frame so its beams stay dark.
 
@@ -71,7 +75,7 @@ At angle 0 the near cell matches the navy frame and the far cell is the glowing 
 
 - **Lock-in** keeps the drawing's full depth (`TOWER_SLIDE = 0`), so the parts start visibly apart.
   A dolly zoom lengthens the lens toward orthographic while the camera swings into the logo's view, and the lights and HDRI turn with the camera.
-- **Ignition** lights a spark at the center, traces the inner cube's edges, grows the struts outward, then fills in the light.
+- **Ignition** lights a spark at the center, traces the inner cube's edges, grows the struts outward, fills in the light, and finally wakes the glow in the legs.
 - **Hyperspin** turns the tesseract once in 4D; the gold inner cube grows through the frame while the outer cell shrinks inward, and the loop is seamless.
 
 ## How the SVG becomes 3D

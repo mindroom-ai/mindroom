@@ -6,10 +6,11 @@ Run from the repository root:
 
     blender --background --factory-startup --python assets/logo/blender/crystal.py -- --render still
 
-The geometry comes from build_scene.py. This script makes the glass solid, turns
-the central cube into a hypercube (an inner cube joined to the frame by struts,
-projected from real 4D vertices), stages it on a dark mirror floor, and renders
-a still or one of three effects as numbered PNG frames for ffmpeg.
+The geometry comes from build_scene.py. This script makes the glass solid, sets
+each leg in a navy frame around a soft white light, turns the central cube into a
+hypercube (an inner cube joined to the frame by struts, projected from real 4D
+vertices), stages it on a dark mirror floor, and renders a still or one of three
+effects as numbered PNG frames for ffmpeg.
 """
 
 import argparse
@@ -41,6 +42,7 @@ GOLD = "#ffc566"
 # A 4D viewer at distance 4 draws the far cell at 3/5 the size of the near one.
 VIEW_DISTANCE_4D = 4.0
 FILAMENT = {"inner": 24.0, "strut": 8.0, "outer": 8.0}  # Emission strengths per edge family.
+LEG_GLOW = 10.0  # Emission strength at the center of each leg's white core.
 
 
 def node_material(name: str) -> tuple[bpy.types.Material, bpy.types.NodeTree]:
@@ -55,7 +57,7 @@ def output(tree: bpy.types.NodeTree) -> bpy.types.Node:
     return next(node for node in tree.nodes if node.bl_idname == "ShaderNodeOutputMaterial")
 
 
-def crystal_glass() -> bpy.types.Material:
+def crystal_glass(*, frozen: bool) -> bpy.types.Material:
     """Solid azure crystal that glows from within: a surface tint plus faint internal scattering."""
     material, tree = node_material("azure-crystal")
     nodes, links = tree.nodes, tree.links
@@ -76,7 +78,53 @@ def crystal_glass() -> bpy.types.Material:
     links.new(absorb.outputs["Volume"], volume.inputs[0])
     links.new(scatter.outputs["Volume"], volume.inputs[1])
     links.new(volume.outputs["Shader"], output(tree).inputs["Volume"])
+    if frozen:
+        frost(tree, glass, scatter)
+        material.cycles.volume_step_rate = 0.25  # The thin fracture planes need finer volume steps.
     return material
+
+
+def frost(tree: bpy.types.NodeTree, glass: bpy.types.Node, scatter: bpy.types.Node) -> None:
+    """Turn the crystal into ice: a paler tint, patchy frost, a hammered surface, and fracture planes."""
+    nodes, links = tree.nodes, tree.links
+    glass.inputs["Base Color"].default_value = logo.srgb("#a6dcf2")
+    coords = nodes.new("ShaderNodeTexCoord")
+    patches = nodes.new("ShaderNodeTexNoise")
+    patches.inputs["Scale"].default_value = 4.0
+    patches.inputs["Detail"].default_value = 6.0
+    links.new(coords.outputs["Object"], patches.inputs["Vector"])
+    roughness = nodes.new("ShaderNodeMapRange")
+    roughness.inputs["From Min"].default_value = 0.4
+    roughness.inputs["From Max"].default_value = 0.7
+    roughness.inputs["To Min"].default_value = 0.02
+    roughness.inputs["To Max"].default_value = 0.16
+    links.new(patches.outputs["Fac"], roughness.inputs["Value"])
+    links.new(roughness.outputs["Result"], glass.inputs["Roughness"])
+    grain = nodes.new("ShaderNodeTexNoise")
+    grain.inputs["Scale"].default_value = 18.0
+    grain.inputs["Detail"].default_value = 4.0
+    links.new(coords.outputs["Object"], grain.inputs["Vector"])
+    relief = nodes.new("ShaderNodeBump")
+    relief.inputs["Strength"].default_value = 0.06
+    relief.inputs["Distance"].default_value = 0.02
+    links.new(grain.outputs["Fac"], relief.inputs["Height"])
+    links.new(relief.outputs["Normal"], glass.inputs["Normal"])
+    # Fractures are thin sheets of dense white scattering along the edges of large Voronoi cells.
+    cells = nodes.new("ShaderNodeTexVoronoi")
+    cells.feature = "DISTANCE_TO_EDGE"
+    cells.inputs["Scale"].default_value = 2.5
+    links.new(coords.outputs["Object"], cells.inputs["Vector"])
+    fractures = nodes.new("ShaderNodeMapRange")
+    fractures.inputs["From Min"].default_value = 0.0
+    fractures.inputs["From Max"].default_value = 0.025
+    fractures.inputs["To Min"].default_value = 35.0
+    fractures.inputs["To Max"].default_value = 0.0
+    links.new(cells.outputs["Distance"], fractures.inputs["Value"])
+    density = nodes.new("ShaderNodeMath")
+    density.inputs[1].default_value = scatter.inputs["Density"].default_value
+    links.new(fractures.outputs["Result"], density.inputs[0])
+    links.new(density.outputs["Value"], scatter.inputs["Density"])
+    scatter.inputs["Color"].default_value = logo.srgb("#f2fbff")
 
 
 def lacquer() -> bpy.types.Material:
@@ -278,10 +326,80 @@ def build_tesseract(collection: bpy.types.Collection) -> None:
     update_tesseract(0.0)
 
 
+# ---------------------------------------------------------------- legs
+
+
+def leg_boxes() -> list[tuple[Vector, Vector]]:
+    """Lowest and highest corners of the towers and feet, after the slides and the mirroring."""
+    x0, x1 = logo.WING_X
+    y0, y1 = logo.TOWER_Y
+    parts = [
+        (Vector((x0, y0, logo.TOWER_BOTTOM)), Vector((x1, y1, logo.H)), logo.TOWER_SLIDE),
+        (Vector((x0, y0, logo.FOOT_Z[0])), Vector((x1, y1, logo.FOOT_Z[1])), logo.foot_slide()),
+    ]
+    boxes = []
+    for low, high, slide in parts:
+        lo, hi = low + slide * logo.TOWARD_CAMERA, high + slide * logo.TOWARD_CAMERA
+        boxes.append((lo, hi))
+        boxes.append((Vector((lo.y, lo.x, lo.z)), Vector((hi.y, hi.x, hi.z))))  # The mirrored wing.
+    return boxes
+
+
+def leg_frames(collection: bpy.types.Collection) -> None:
+    """Navy beams along every edge of the legs, so they read as glass set in frames like the cube."""
+    beam, outset = 0.05, 0.006
+    paint = bpy.data.materials["navy-lacquer"]
+    for i, (low, high) in enumerate(leg_boxes()):
+        lo, hi = low - Vector((outset,) * 3), high + Vector((outset,) * 3)
+        bm = bmesh.new()
+        logo.add_box(bm, lo, hi)
+        frame = logo.mesh_object(f"leg-frame-{i}", bm, paint, collection)
+        for axis in range(3):  # Hollowing the box through each axis leaves only its edges.
+            cut_lo = [lo[k] + beam for k in range(3)]
+            cut_hi = [hi[k] - beam for k in range(3)]
+            cut_lo[axis], cut_hi[axis] = lo[axis] - 1.0, hi[axis] + 1.0
+            bm = bmesh.new()
+            logo.add_box(bm, cut_lo, cut_hi)
+            logo.subtract(frame, logo.cutter(f"leg-frame-{i}-cut-{axis}", bm, collection))
+        logo.bevel(frame, 0.01)
+
+
+def leg_glow(collection: bpy.types.Collection) -> None:
+    """A white light inside each leg: an emitting volume that fades from the center toward the faces."""
+    material, tree = node_material("leg-glow")
+    nodes, links = tree.nodes, tree.links
+    coords = nodes.new("ShaderNodeTexCoord")
+    offset = nodes.new("ShaderNodeVectorMath")
+    offset.operation = "SUBTRACT"
+    offset.inputs[1].default_value = (0.5, 0.5, 0.5)
+    links.new(coords.outputs["Generated"], offset.inputs[0])
+    distance = nodes.new("ShaderNodeVectorMath")
+    distance.operation = "LENGTH"
+    links.new(offset.outputs["Vector"], distance.inputs[0])
+    falloff = nodes.new("ShaderNodeMapRange")
+    falloff.name = "glow-falloff"  # The ignition fades the glow in through its peak strength.
+    falloff.interpolation_type = "SMOOTHSTEP"
+    falloff.inputs["From Min"].default_value = 0.12
+    falloff.inputs["From Max"].default_value = 0.5
+    falloff.inputs["To Min"].default_value = LEG_GLOW
+    falloff.inputs["To Max"].default_value = 0.0
+    links.new(distance.outputs["Value"], falloff.inputs["Value"])
+    glow = nodes.new("ShaderNodeEmission")
+    glow.inputs["Color"].default_value = logo.srgb("#f2fbff")
+    links.new(falloff.outputs["Result"], glow.inputs["Strength"])
+    links.new(glow.outputs["Emission"], output(tree).inputs["Volume"])
+    inset = Vector((0.02, 0.02, 0.02))
+    for i, (lo, hi) in enumerate(leg_boxes()):
+        bm = bmesh.new()
+        logo.add_box(bm, lo + inset, hi - inset)
+        core = logo.mesh_object(f"leg-glow-{i}", bm, material, collection)
+        core.visible_shadow = False
+
+
 # ---------------------------------------------------------------- scene
 
 
-def crystallize(scene: bpy.types.Scene) -> None:
+def crystallize(scene: bpy.types.Scene, *, frozen: bool) -> None:
     """Swap the logo look for solid crystal, an open navy frame, and the tesseract's light."""
     for name in ("hero-set", "studio-set"):
         bpy.data.collections[name].hide_render = True
@@ -291,7 +409,7 @@ def crystallize(scene: bpy.types.Scene) -> None:
     pivot.driver_remove("rotation_euler", 2)
     pivot.rotation_euler = (0.0, 0.0, 0.0)
 
-    glass = crystal_glass()
+    glass = crystal_glass(frozen=frozen)
     for side in ("left", "right"):
         for part in ("tower", "foot"):
             bpy.data.objects[f"{side}-{part}"].data.materials[0] = glass
@@ -357,17 +475,19 @@ def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
     return rig
 
 
-def build(slide: float) -> dict[str, bpy.types.Object]:
-    """Build the model with the given tower slide and stage it."""
+def build(slide: float, *, frozen: bool = False) -> dict[str, bpy.types.Object]:
+    """Build the model with the given tower slide and stage it, in clear crystal or frosted ice."""
     logo.TOWER_SLIDE = slide
     logo.HOLLOW = False
     logo.GLASS_BEVEL = (0.04, 6)
     logo.CUBE_BEAM = 0.11  # Slimmer beams open the frame enough to see the inner cube.
     logo.build_scene()
     scene = bpy.context.scene
-    crystallize(scene)
+    crystallize(scene, frozen=frozen)
     collection = logo.new_collection("crystal-set")
     build_tesseract(collection)
+    leg_frames(collection)
+    leg_glow(collection)
     rig = studio(collection)
     rig["core"] = bpy.data.objects["core"]
     camera = logo.add_camera("crystal-camera", collection)
@@ -416,12 +536,14 @@ def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
 
 
 def ignition(rig: dict[str, bpy.types.Object], frame: int) -> None:
-    """A spark at the center, then the inner cube traces on, struts reach the frame, and light fills in."""
+    """A spark at the center, the inner cube traces on, struts reach the frame, light fills in, and the legs wake."""
     spark = ease((frame - 10) / 12)
     light = ease((frame - 50) / 40)
+    legs = ease((frame - 72) / 30)
     bpy.data.materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * spark
     rig["core"].data.energy = 700.0 * light
     bpy.data.materials["lantern"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 0.6 * light
+    bpy.data.materials["leg-glow"].node_tree.nodes["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * legs
     progress = {
         "inner": ease((frame - 22) / 30),
         "strut": ease((frame - 46) / 24),
@@ -436,9 +558,9 @@ def hyperspin(rig: dict[str, bpy.types.Object], frame: int) -> None:
     update_tesseract(2 * math.pi * (frame - 1) / FRAMES)
 
 
-def render(effect: str, output_dir: Path, resolution: int, samples: int) -> None:
+def render(effect: str, output_dir: Path, resolution: int, samples: int, *, frozen: bool = False) -> None:
     """Build and render one effect: a still PNG, or numbered frames in a folder."""
-    rig = build(EFFECTS[effect])
+    rig = build(EFFECTS[effect], frozen=frozen)
     scene = bpy.context.scene
     scene.render.resolution_x = scene.render.resolution_y = resolution
     scene.cycles.samples = samples
@@ -464,9 +586,10 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--output-dir", type=Path, default=HERE)
     parser.add_argument("--blend", type=Path, help="Also save the scene of the last effect here.")
+    parser.add_argument("--frozen", action="store_true", help="Frosted, cracked ice instead of clear crystal.")
     args = parser.parse_args(argv)
     for effect in args.render:
-        render(effect, args.output_dir, args.resolution, args.samples)
+        render(effect, args.output_dir, args.resolution, args.samples, frozen=args.frozen)
     if args.blend:
         bpy.context.preferences.filepaths.save_version = 0
         bpy.ops.wm.save_as_mainfile(filepath=str(args.blend), compress=True)
