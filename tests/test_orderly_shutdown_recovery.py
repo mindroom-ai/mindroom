@@ -140,7 +140,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     assert not interrupted.source_event_revisions
 
     async def recover(request: ResponseRequest) -> str:
-        await _acknowledge_test_edit(tmp_path, request, NEW_RESPONSE_EVENT_ID, store, journal_store=journal_store)
+        await _acknowledge_test_edit(tmp_path, request, store, journal_store=journal_store)
         return NEW_RESPONSE_EVENT_ID
 
     harness.regenerator.deps = replace(harness.regenerator.deps, generate_response=recover)

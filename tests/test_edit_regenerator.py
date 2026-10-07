@@ -29,13 +29,13 @@ from mindroom.edit_regenerator import (
     _Mailbox,
 )
 from mindroom.event_journal import (
-    DeliveryStage,
     EventClass,
     EventJournalStore,
     EventKind,
     IngestionBatchAdmission,
     IngestionRecordAdmission,
     IngestionRecordDisposition,
+    turn_records,
 )
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.types import HistoryScope
@@ -54,13 +54,12 @@ from mindroom.turn_record import EditPreparation
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import make_relation_lookup, make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
-from tests.test_response_delivery_gateway import _gateway
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import JournalEvent, MatrixDelivery
+    from mindroom.event_journal import JournalEvent
     from mindroom.hooks import MessageEnvelope
 
 AGENT_NAME = "assistant"
@@ -229,7 +228,7 @@ def _harness(
 
     turn_store.record_turn.side_effect = record_turn
     turn_store.record_responded_turn.side_effect = record_turn
-    turn_store.publish_committed_response.side_effect = lambda _turn_id, _event_id, committed: record_turn(committed)
+    turn_store.publish_completed_turn.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
     turn_store._prepare_response_for_redactions.return_value = False
 
@@ -262,7 +261,6 @@ def _harness(
                 await _acknowledge_test_edit(
                     tmp_path,
                     request,
-                    event_id,
                     regenerator.deps.turn_store,
                     journal_store=journal_store,
                 )
@@ -306,38 +304,30 @@ async def _handle_edit(harness: _Harness, event: nio.RoomMessageText, event_info
 async def _acknowledge_test_edit(
     tmp_path: Path,
     request: ResponseRequest,
-    event_id: str,
     store: TurnStore,
     *,
     journal_store: EventJournalStore | None = None,
 ) -> None:
-    """Model successful generation with an actual frozen outbox acknowledgement."""
-    assert request.prepared_edit_record is not None
+    """Model a completed regeneration: its answer's settlement commits the edit it selected, as its reply does."""
+    selected = request.prepared_edit_record
+    assert selected is not None
     journal = journal_store or EventJournalStore.open_sqlite(tmp_path / "edit-delivery.sqlite")
-    gateway = _gateway(
-        tmp_path,
-        journal.principal("assistant@test"),
-        terminal_turn_committed=store.publish_committed_response,
-    )
-    gateway = replace(gateway, deps=replace(gateway.deps, agent_name=AGENT_NAME))
-
-    async def send(_delivery: MatrixDelivery) -> str:
-        return event_id
-
-    worker = replace(gateway._response_delivery(send, handoff=None), observe_delivered=None)
     try:
-        await worker.deliver(
-            delivery_id=request.correlation_id,
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM_ID,
-            thread_id=request.thread_id,
-            edits_event_id=request.existing_event_id,
-            payload={"msgtype": "m.text", "body": "generated answer"},
-            result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(request.prepared_edit_record)},
+        completed = await journal.backend.write(
+            lambda transaction: turn_records.settle_turn(
+                transaction,
+                "assistant@test",
+                AGENT_NAME,
+                pending=(request.correlation_id,),
+                logical=selected.source_event_ids,
+                prepared_edit=selected,
+            ),
         )
     finally:
         if journal_store is None:
             await journal.close()
+    if completed is not None:
+        await store.publish_completed_turn(completed)
 
 
 def _assert_no_regeneration(harness: _Harness) -> None:
@@ -375,8 +365,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
     assert metadata_kwargs["additional_discovery_event_ids"] == ()
 
-    harness.turn_store.publish_committed_response.assert_called_once()
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    harness.turn_store.publish_completed_turn.assert_called_once()
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_ids == (ORIGINAL_EVENT_ID,)
     assert recorded.anchor_event_id == ORIGINAL_EVENT_ID
@@ -473,7 +463,7 @@ async def test_newer_same_source_edit_rejects_older_callback_during_generation(t
 
     harness.generate_response.assert_awaited_once()
     assert harness.generate_response.await_args.args[0].prompt == "newest body"
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_010, "$edit-z:example.org"),
@@ -594,7 +584,7 @@ async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Pa
             {first_event_id: "first edited", second_event_id: "second edited"},
         ),
     ]
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
         first_event_id: "first edited",
         second_event_id: "second edited",
@@ -845,7 +835,7 @@ async def test_newer_edit_arriving_under_response_lock_is_drained(tmp_path: Path
         "older body",
         "newest body",
     ]
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-new:example.org"),
@@ -901,7 +891,7 @@ async def test_cancelled_drain_is_retried_by_waiting_newer_edit(tmp_path: Path) 
     await retry_task
 
     assert generation_count == 2
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-retry:example.org"),
     }
@@ -981,7 +971,7 @@ async def test_persisted_revision_rejects_stale_edit_after_regenerator_restart(t
         server_timestamp=1_000_020,
     )
     await _handle_edit(first_harness, newer, newer_info)
-    persisted_record = first_harness.turn_store.publish_committed_response.call_args.args[2]
+    persisted_record = first_harness.turn_store.publish_completed_turn.call_args.args[0]
 
     restarted_harness = _harness(tmp_path, turn_record=persisted_record)
     older, older_info = _edit_event(
@@ -1347,7 +1337,7 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     }
     assert metadata_call.kwargs["additional_discovery_event_ids"] == ()
 
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_prompts == {
         first_event_id: "edited first message",
@@ -1595,7 +1585,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_metadata == record.source_event_metadata
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_metadata == record.source_event_metadata
 
 
@@ -1688,7 +1678,7 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
     assert "human edited" in request.prompt
     assert "human base" not in request.prompt
     assert "relay base" in request.prompt
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
         relay_event_id: "relay base",
         human_event_id: "human edited",
@@ -1748,7 +1738,7 @@ async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: 
     request = harness.generate_response.await_args.args[0]
     assert "first edited" in request.prompt
     assert "first base" not in request.prompt
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_prompts == {first_relay: "first edited", second_relay: "second base"}
     assert recorded.source_event_revisions == {first_human: (event.server_timestamp, event.event_id)}
 
@@ -1957,7 +1947,7 @@ async def test_restart_replays_durably_committed_interrupted_edit(tmp_path: Path
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "latest after process restart"
     assert request.sync_restart_retry_source_event_id == ORIGINAL_EVENT_ID
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
+    recorded = harness.turn_store.publish_completed_turn.call_args.args[0]
     assert recorded.source_event_revisions == {ORIGINAL_EVENT_ID: revision}
 
 
@@ -2283,7 +2273,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
         prompts.append(request.prompt)
-        await _acknowledge_test_edit(tmp_path, request, RESPONSE_EVENT_ID, store, journal_store=journal_store)
+        await _acknowledge_test_edit(tmp_path, request, store, journal_store=journal_store)
         return RESPONSE_EVENT_ID
 
     harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store, generate_response=generate)
@@ -2394,7 +2384,6 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
         await _acknowledge_test_edit(
             tmp_path,
             request,
-            RESPONSE_EVENT_ID,
             harness.regenerator.deps.turn_store,
             journal_store=journal_store,
         )
@@ -2495,7 +2484,6 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         await _acknowledge_test_edit(
             tmp_path,
             request,
-            RESPONSE_EVENT_ID,
             harness.regenerator.deps.turn_store,
             journal_store=journal_store,
         )
