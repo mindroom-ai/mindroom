@@ -219,11 +219,10 @@ async def test_only_approvals_are_adopted_and_only_at_the_first_start(journal_st
     assert await principal.replies.for_sources(("$source",)) is None
 
 
-async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJournalStore) -> None:
-    """Only the newest continuation pauses the reply; the older one is fenced, as an edit supersedes it.
-
-    The original turn's rows created the same event, which stays one reply.
-    """
+async def test_older_approvals_of_one_reply_are_discarded_with_their_sources_settled(
+    journal_store: EventJournalStore,
+) -> None:
+    """Only the newest continuation pauses the reply; an older one is dropped, its source settled, its cards gone."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await admit(principal, "$edit")
@@ -239,73 +238,26 @@ async def test_older_approvals_of_one_reply_are_superseded(journal_store: EventJ
     await _adopt(principal)
     reply = await principal.replies.for_event("$reply")
     assert reply is not None
-    assert reply.approval_id == "approval-2"
+    assert (reply.state, reply.approval_id) == (rl.ReplyState.PAUSED, "approval-2")
     assert _text(reply.presentation) == "Rereading"
-    older = await principal.approval_continuation("approval-1")
-    assert older is not None
-    assert older.state == "failing"
-    assert older.failure_reason == "superseded"
-    # Its pause stays on the reply, superseded, and still holds its source for its cleanup.
-    assert await _spans(principal, reply) == [
-        (rl.SpanKind.TURN, rl.SpanOutcome.SUPERSEDED),
-        (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
-    ]
-    assert older.span_id is not None
-    assert await principal.approval_continuation_for_source("$source") == older
+    assert await _spans(principal, reply) == [(rl.SpanKind.TURN, rl.SpanOutcome.PAUSED)]
+    assert await principal.approval_continuation("approval-1") is None
+    assert not await principal.is_pending("$source")
     assert await principal.approval_continuation_for_source("$edit") == await principal.approval_continuation(
         "approval-2",
     )
-
-
-async def test_an_older_approval_whose_failure_was_delivered_is_superseded_by_the_newer_pause(
-    journal_store: EventJournalStore,
-) -> None:
-    """The newer approval's pause is what the reply shows; the older one's delivered failure does not keep it holding."""
-    principal = journal_store.principal(PRINCIPAL)
-    await admit(principal, "$source")
-    await admit(principal, "$edit")
-    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
-    older = replace(_continuation("failing"), failure_reason="expired")
-    await _main_continuation(principal, older)
-    await _row(
-        principal,
-        "$source",
-        DeliveryStage.FINAL,
-        "Approval expired.",
-        status="error",
-        edits="$reply",
-        acknowledged="$note",
-    )
-    newer = replace(
-        _continuation("waiting", approval_id="approval-2"),
-        sources=ResponseSources(("$edit",), ("$source",)),
-    )
-    await _main_continuation(principal, newer, text="Rereading")
-
-    await _adopt(principal)
-    superseded = await principal.approval_continuation("approval-1")
-    assert superseded is not None
-    assert (superseded.state, superseded.failure_reason) == ("failing", "superseded")
-    reply = await principal.replies.for_event("$reply")
-    assert reply is not None
-    assert reply.approval_id == "approval-2"
-    # The older approval's cleanup leaves the reply paused for the newer one.
-    assert await principal.finish_approval_continuation("approval-1") is not None
-    reply = await principal.replies.for_event("$reply")
-    assert reply is not None
-    assert (reply.state, reply.approval_id) == (rl.ReplyState.PAUSED, "approval-2")
 
 
 @pytest.mark.parametrize(
     ("reason", "state"),
     [("expired", rl.ReplyState.FAILED), ("cancelled_by_user", rl.ReplyState.CANCELLED)],
 )
-async def test_a_failing_approval_whose_note_was_delivered_ends_its_reply_until_its_cleanup(
+async def test_a_failing_approval_whose_note_was_delivered_is_adopted_paused_and_its_cleanup_ends_it(
     journal_store: EventJournalStore,
     reason: str,
     state: rl.ReplyState,
 ) -> None:
-    """The room already shows the failure note: the reply has ended, and an edit waits for the cleanup still owed."""
+    """The room already shows the failure note: the owed cleanup ends the reply without writing it again."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
@@ -321,16 +273,26 @@ async def test_a_failing_approval_whose_note_was_delivered_ends_its_reply_until_
     )
 
     await _adopt(principal)
-    reply = await _only_reply(principal)
-    assert (reply.state, reply.approval_id) == (state, "approval-1")
-    assert await _spans(principal, reply) == [(rl.SpanKind.TURN, rl.SpanOutcome.PAUSED)]
-    assert rl.claim_blocked(reply, durable_write_debt=False, driving_edit=True)
-
+    assert (await _only_reply(principal)).state is rl.ReplyState.PAUSED
     assert await principal.finish_approval_continuation("approval-1") is not None
-    settled = await _only_reply(principal)
-    assert (settled.state, settled.approval_id, settled.owed_write) == (state, None, None)
+    ended = await _only_reply(principal)
+    assert (ended.state, ended.approval_id, ended.owed_write) == (state, None, None)
     assert not await principal.is_pending("$source")
-    assert not rl.claim_blocked(settled, durable_write_debt=False, driving_edit=True)
+
+
+async def test_a_stored_superseded_approval_is_discarded_at_adoption(journal_store: EventJournalStore) -> None:
+    """An approval an earlier release superseded and never cleaned up is dropped, its source settled."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    await _main_continuation(principal, replace(_continuation("failing"), failure_reason="superseded"))
+
+    assert (
+        await principal.adopt_legacy_replies(entity_name=ENTITY, presentations=LEGACY_PRESENTATIONS, now_ns=NOW) == ()
+    )
+    assert await principal.approval_continuation("approval-1") is None
+    assert not await principal.is_pending("$source")
+    assert await principal.replies.for_event("$reply") is None
 
 
 async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store: EventJournalStore) -> None:

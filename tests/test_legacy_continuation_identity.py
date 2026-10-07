@@ -20,7 +20,7 @@ from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import ReplyState, SpanKind, SpanOutcome, WakeApproval
+from mindroom.reply_lifecycle import ReplyState
 from mindroom.turn_record import TurnRecord
 from tests.legacy_reply_helpers import store_main_continuation
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
@@ -196,20 +196,18 @@ def test_the_adoption_pages_through_every_continuation(
     ]
 
 
-def test_an_unprovable_identity_rolls_back_the_upgrade(legacy_database: _LegacyDatabase) -> None:
-    """A live continuation whose reply cannot be named aborts the whole schema transaction."""
+@pytest.mark.asyncio
+async def test_an_unprovable_identity_is_discarded_and_its_sources_settle(legacy_database: _LegacyDatabase) -> None:
+    """A continuation whose reply cannot be named is dropped with a warning; the upgrade and every other row go on."""
     legacy_database.execute(_CONTEXT_OWNER)
     legacy_database.execute("UPDATE approval_continuations SET context_json = '{}' WHERE approval_id = 'approval'")
-    with pytest.raises(ValueError, match="identity"):
-        legacy_database.open()
-    columns = (
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = 'approval_continuations' AND column_name = 'span_id'"
-        if legacy_database.postgres
-        else "SELECT name FROM pragma_table_info('approval_continuations') WHERE name = 'span_id'"
-    )
-    assert legacy_database.query(columns) == []
-    assert legacy_database.query("SELECT state FROM journal_events WHERE event_id = '$edit'") == [("pending",)]
+    store = legacy_database.open()
+    try:
+        principal = store.principal("@bot:example.org")
+        assert await principal.approval_continuation("approval") is None
+        assert not await principal.is_pending("$edit")
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -270,17 +268,16 @@ INSERT INTO matrix_delivery_outbox (
 @pytest.mark.parametrize("with_turn_rows", [False, True])
 @pytest.mark.parametrize("failing", [False, True])
 @pytest.mark.asyncio
-async def test_an_approval_a_newer_answer_replaced_is_superseded(
+async def test_an_approval_a_newer_answer_replaced_is_discarded(
     legacy_database: _LegacyDatabase,
     *,
     failing: bool,
     with_turn_rows: bool,
 ) -> None:
-    """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it.
+    """The regenerated answer stands: the approval is dropped at upgrade, never shown again, its source settled.
 
-    One that already failed is superseded too, even after a resume paused it again, so its failure is never
-    published over the newer answer, and the placeholder row of the turn it paused does not make that turn look in
-    flight.
+    One that already failed is dropped too, even after a resume paused it again, so its failure is never
+    published over the newer answer.
     """
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(_NEWER_ANSWER)
@@ -294,22 +291,14 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
     store = legacy_database.open()
     try:
         principal = store.principal("@bot:example.org")
-        approval = await principal.approval_continuation("approval")
-        assert approval is not None
-        assert (approval.state, approval.failure_reason) == ("failing", SUPERSEDED_FAILURE_REASON)
-        await principal.replies.write_generation("gen-new", now_ns=10)
-        adopted = await principal.adopt_legacy_replies(entity_name="bot", presentations=LEGACY_PRESENTATIONS, now_ns=10)
-        assert [effect for applied in adopted for effect in applied.post_commit] == [WakeApproval("approval")]
-        reply = await principal.replies.for_event("$answer")
-        assert reply is not None
-        assert reply.state is ReplyState.COMPLETED
-        assert reply.approval_id is None
-        answer = await principal.replies.span(reply.last_span_id)
-        assert answer is not None
-        # The answer the newer edit delivered is the reply's own span, so a later edit rolls back to it.
-        assert (answer.kind, answer.outcome, answer.delivery_id) == (SpanKind.TURN, SpanOutcome.COMPLETED, "$answer")
-        assert await principal.finish_approval_continuation("approval") is not None
+        assert await principal.approval_continuation("approval") is None
         assert not await principal.is_pending("$first")
+        await principal.replies.write_generation("gen-new", now_ns=10)
+        assert (
+            await principal.adopt_legacy_replies(entity_name="bot", presentations=LEGACY_PRESENTATIONS, now_ns=10) == ()
+        )
+        # The newer answer gets no record; nothing regenerates an answer from before the upgrade.
+        assert await principal.replies.for_event("$answer") is None
     finally:
         await store.close()
 

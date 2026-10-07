@@ -43,7 +43,4 @@ def _paused(continuation: ApprovalContinuation, answer: LegacyPausedAnswer, span
     return encode_presentation(presentation)
 
 
-LEGACY_PRESENTATIONS = LegacyPresentations(
-    empty=lambda team: encode_presentation(Presentation(placeholder=TEAM_PLACEHOLDER if team else AGENT_PLACEHOLDER)),
-    paused=_paused,
-)
+LEGACY_PRESENTATIONS = LegacyPresentations(paused=_paused)

@@ -6,9 +6,9 @@ import json
 from typing import TYPE_CHECKING, TypedDict, cast
 
 from mindroom.handled_turns import TurnRecordCodec
+from mindroom.logging_config import get_logger
 
 from . import journal
-from .models import SUPERSEDED_FAILURE_REASON
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -27,8 +27,11 @@ if TYPE_CHECKING:
 # approval_continuations.span_id and read the reply's identity and held sources from the reply's records.
 # Handling: the schema upgrade adds span_id, copies each continuation's identity and pending sources into its context
 # once, and drops approval_continuation_sources, the entity_name column, and the response attempt tables; such a
-# continuation is read from that copy until reply classification names its span.
+# continuation is read from that copy until reply classification names its span. One whose identity it cannot prove
+# is discarded with a warning, its sources settled unanswered, rather than guessed or allowed to stop the upgrade.
 # Coverage: tests/test_legacy_continuation_identity.py.
+
+logger = get_logger(__name__)
 
 _IDENTITY_KEY = "legacy_identity"
 
@@ -105,11 +108,11 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
 # logical sources superseded with a higher edit receipt order and an acknowledged answer FINAL editing the same event,
 # while its own FINAL holds no answer and it is failing or no approved resume advanced it to a later pause;
 # v2026.10.201 retired such an approval's failure without a note.
-# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages fence an approval superseded
-# when the edit's regeneration claims its reply.
-# Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows and
-# keeps the approval's pause on it until its cleanup settles the sources it holds.
-# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded,
+# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages never let an edit regenerate a
+# reply an approval holds.
+# Handling: the upgrade discards it with its cards and settles its sources unanswered, so the newer answer stands and
+# the approval is never shown again.
+# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_discarded,
 # tests/test_legacy_continuation_identity.py::test_an_approval_a_resume_paused_again_keeps_its_reply_beside_a_newer_answer.
 def _replaced(transaction: Transaction, principal_id: str, approval_id: str, driving: str) -> bool:
     """Return whether a newer edit's acknowledged answer replaced the reply this attempt paused.
@@ -144,6 +147,54 @@ def _replaced(transaction: Transaction, principal_id: str, approval_id: str, dri
         (approval_id, principal_id, driving),
     )
     return row is not None
+
+
+def _proven_identity(
+    transaction: Transaction,
+    principal_id: str,
+    entity_name: object,
+    pending: list[str],
+    context: object,
+    *,
+    attempts: bool,
+) -> dict[str, object] | None:
+    """Return the identity a continuation's released stores prove, or nothing when they cannot."""
+    if not isinstance(context, dict) or not pending:
+        return None
+    try:
+        return (attempts and _attempt_identity(transaction, principal_id, pending[0])) or _context_identity(
+            _required_text(entity_name),
+            pending,
+            cast("dict[str, object]", context),
+        )
+    except ValueError:
+        return None
+
+
+def discard_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    pending_event_ids: tuple[str, ...],
+    *,
+    why: str,
+    cards: bool = True,
+) -> None:
+    """Drop an earlier release's continuation the reply rules do not model, with its cards; its sources settle unanswered.
+
+    A click on one of its cards then finds no card and does nothing.
+    """
+    if cards:
+        transaction.execute(
+            "DELETE FROM approval_cards WHERE principal_id = ? AND continuation_id = ?",
+            (principal_id, approval_id),
+        )
+    transaction.execute(
+        "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+        (principal_id, approval_id),
+    )
+    journal.settle_many(transaction, principal_id, pending_event_ids)
+    logger.warning("legacy_approval_discarded", principal_id=principal_id, approval_id=approval_id, reason=why)
 
 
 def _context_identity(entity_name: str, pending: list[str], context: Mapping[str, object]) -> dict[str, object]:
@@ -198,6 +249,8 @@ def upgrade_continuation_identity(
     transaction.execute("ALTER TABLE approval_continuations ADD COLUMN span_id TEXT")
     transaction.execute("ALTER TABLE approval_continuations ADD COLUMN claim_span_id TEXT")
     attempts = "response_attempts" in existing_tables
+    # Releases before approval cards kept none to drop.
+    cards = "approval_cards" in existing_tables
     cursor: tuple[str, str] | None = None
     while True:
         rows = (
@@ -217,8 +270,6 @@ def upgrade_continuation_identity(
         for row in rows:
             principal_id, approval_id = str(row["principal_id"]), str(row["approval_id"])
             context = json.loads(str(row["context_json"]))
-            if not isinstance(context, dict):
-                raise _identity_error()
             pending = [
                 str(source["event_id"])
                 for source in transaction.fetchall(
@@ -227,20 +278,35 @@ def upgrade_continuation_identity(
                     (principal_id, approval_id),
                 )
             ]
-            if not pending:
-                raise _identity_error()
-            stored = cast("dict[str, object]", context)
-            identity = (attempts and _attempt_identity(transaction, principal_id, pending[0])) or _context_identity(
-                _required_text(row["entity_name"]),
+            identity = _proven_identity(
+                transaction,
+                principal_id,
+                row["entity_name"],
                 pending,
-                stored,
+                context,
+                attempts=attempts,
             )
-            if attempts and _replaced(transaction, principal_id, approval_id, pending[0]):
-                transaction.execute(
-                    """UPDATE approval_continuations SET state = 'failing', failure_reason = ?, runtime_generation = NULL
-                    WHERE principal_id = ? AND approval_id = ?""",
-                    (SUPERSEDED_FAILURE_REASON, principal_id, approval_id),
+            if identity is None:
+                discard_continuation(
+                    transaction,
+                    principal_id,
+                    approval_id,
+                    tuple(pending),
+                    why="unprovable_identity",
+                    cards=cards,
                 )
+                continue
+            if attempts and _replaced(transaction, principal_id, approval_id, pending[0]):
+                discard_continuation(
+                    transaction,
+                    principal_id,
+                    approval_id,
+                    tuple(pending),
+                    why="replaced_by_newer_answer",
+                    cards=cards,
+                )
+                continue
+            stored = cast("dict[str, object]", context)
             stored[_IDENTITY_KEY] = {
                 **identity,
                 "thread_id": stored.get("thread_id"),
