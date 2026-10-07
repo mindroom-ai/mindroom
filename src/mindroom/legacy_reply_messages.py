@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Matrix events of replies an earlier release left in flight.
 # Legacy format: a reply adopted with legacy_pending set, whose event an earlier release streamed into directly, so only
 # the event's latest edit holds what it showed and its io.mindroom.stream_status says whether it ended.
-# Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages record every write ahead of
+# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record every write ahead of
 # sending it, so no reply needs its event read back.
 # Handling: after the reply's room syncs, its event is read once per recovery pass, up to three passes, and the read
 # becomes its presentation; a stream that ended without a terminal status within that release's six-hour stale-stream

@@ -92,7 +92,7 @@ class WriteStage(StrEnum):
 
 # LEGACY_COMPAT: Replies adopted from an earlier release whose event only Matrix can read.
 # Legacy format: a reply adoption created for an earlier release's in-flight work, marked with this pending read.
-# Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages record every write ahead of
+# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record every write ahead of
 # sending it, so no reply is adopted with a pending read.
 # Handling: claims and owed notes defer while it is set (``claim``, ``flush_owed_write``), replays wait for it
 # (``replay_dropped``), and ``legacy_read_done`` applies the read once.

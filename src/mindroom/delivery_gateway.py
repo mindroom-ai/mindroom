@@ -1031,7 +1031,7 @@ class DeliveryGateway:
         # LEGACY_COMPAT: Regeneration answers queued before reply records, carrying their selected edit.
         # Legacy format: a FINAL row with no reply_id whose result_json holds the regeneration's prepared_edit_record;
         # an edit's answer row is keyed by the edit event, so reply classification leaves it unowned.
-        # Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages keep the selected edit
+        # Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages keep the selected edit
         # on the regeneration span and commit it when the answer settles its sources.
         # Handling: the acknowledgement commits that edit with the answer, as the earlier release did.
         # Coverage: tests/test_edit_delivery_settlement.py::test_an_edit_answer_an_earlier_release_queued_consumes_its_edit_when_delivered.

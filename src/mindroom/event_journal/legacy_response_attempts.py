@@ -17,10 +17,10 @@ if TYPE_CHECKING:
 
 # LEGACY_COMPAT: Approval continuations whose reply identity lived outside the continuation.
 # Legacy format: approval_continuations without a span_id column. Every release kept a continuation's entity in its
-# entity_name column and its pending sources in approval_continuation_sources; v2026.10.196 kept its entity, room, visible event, logical and discovery sources, and
+# entity_name column and its pending sources in approval_continuation_sources; v2026.10.199 kept its entity, room, visible event, logical and discovery sources, and
 # edit receipt order in response_attempts and response_attempt_sources, keyed by its first pending source;
 # v2026.9.137 and earlier kept room_id, response_event_id, and any prepared edit record in context_json.
-# Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages name the paused span in
+# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages name the paused span in
 # approval_continuations.span_id and read the reply's identity and held sources from the reply's records.
 # Handling: the schema upgrade adds span_id, copies each continuation's identity and pending sources into its context
 # once, and drops approval_continuation_sources, the entity_name column, and the response attempt tables; such a
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Approval continuations that stored their claim.
 # Legacy format: approval_continuations rows in state 'claimed' with the claimant's runtime_generation; the upgrade that
 # adds span_id selects them.
-# Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages keep a claimed continuation
+# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages keep a claimed continuation
 # ready and name the span that runs it in approval_continuations.claim_span_id.
 # Handling: the upgrade stores such a row as ready with no runtime generation and marks the claim in its adopted
 # identity, so it reads as claimed until reply classification adopts its reply with the resume the stopped instance
@@ -82,7 +82,7 @@ def _event_ids(value: object) -> list[str]:
 
 
 def _attempt_identity(transaction: Transaction, principal_id: str, driving: str) -> dict[str, object] | None:
-    """Read the identity v2026.10.196 stored in its response attempt tables."""
+    """Read the identity v2026.10.199 stored in its response attempt tables."""
     attempt = transaction.fetchone(
         "SELECT * FROM response_attempts WHERE principal_id = ? AND driving_event_id = ?",
         (principal_id, driving),
