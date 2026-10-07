@@ -841,6 +841,35 @@ async def test_an_earlier_queued_edit_answer_refused_for_good_leaves_the_later_o
     assert applied.transition.outcome is rl.Outcome.APPLIED
 
 
+async def test_an_edit_answer_queued_before_a_delivered_one_is_superseded(journal_store: EventJournalStore) -> None:
+    """A newer edit's answer that release already delivered stands; the older queued answer is never sent over it."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.settle_many(("$source",))
+    await _turn(journal_store, "$source", completed=True, response_event_id="$reply")
+    await admit(principal, "$edit-old")
+    await _row(principal, "$edit-old", DeliveryStage.FINAL, "Stale answer.", status="completed", edits="$reply")
+    await _row(
+        principal,
+        "$edit-new",
+        DeliveryStage.FINAL,
+        "Newer answer.",
+        status="completed",
+        edits="$reply",
+        acknowledged="$edit-new-sent",
+    )
+
+    await _adopt(principal)
+    reply = await principal.replies.for_event("$reply")
+    assert reply is not None
+    stale = await principal.load_matrix_delivery(delivery_id="$edit-old", stage=DeliveryStage.FINAL)
+    assert stale is not None
+    assert stale.retired
+    assert not await principal.is_pending("$edit-old")
+    assert (rl.SpanKind.REGENERATION, rl.SpanOutcome.SUPERSEDED) in await _spans(principal, reply)
+    assert not await principal.replies.has_unresolved_rows(reply.reply_id)
+
+
 @pytest.mark.parametrize("approval", ["answered", "waiting"])
 async def test_an_edit_answer_queued_before_an_approval_of_the_same_reply_is_superseded(
     journal_store: EventJournalStore,

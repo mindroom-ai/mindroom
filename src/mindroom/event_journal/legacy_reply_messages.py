@@ -954,9 +954,10 @@ def _edit_answers(
     """Give each regeneration answer an earlier release queued to the reply of the answer it edits.
 
     Such a row is keyed by its edit, which indexes no turn. Taken in the order
-    they were queued, one newer than everything the reply wrote becomes its
-    next write, so a newer edit waits for its delivery. One the reply already
-    wrote past, or one beside a reply still in flight, is superseded: it is
+    they were queued, one newer than everything the reply wrote, delivered
+    edits of its event included, becomes its next write, so a newer edit
+    waits for its delivery. One the reply already wrote past, or one beside a
+    reply still in flight, is superseded: it is
     never sent, since what the reply shows now is newer. Either way a
     completed one consumes the edit it selected, as a regeneration's
     terminal row does now. The answer it edits becomes a finished reply first
@@ -992,11 +993,18 @@ def _edit_answers(
 
 
 def _latest_write_ns(transaction: Transaction, principal_id: str, reply: rl.Reply) -> int:
-    """Return when the reply's newest write was queued: a row it owns, or the pause of an approval naming it."""
+    """Return when the reply's newest write was queued.
+
+    That is a row it owns, the pause of an approval naming it, or an edit of
+    its event an earlier release already delivered.
+    """
     row = transaction.fetchone(
         """
         SELECT MAX(created_at_ns) AS latest FROM (
             SELECT created_at_ns FROM matrix_delivery_outbox WHERE principal_id = ? AND reply_id = ?
+            UNION ALL
+            SELECT created_at_ns FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND reply_id IS NULL AND edits_event_id = ? AND acknowledged_event_id IS NOT NULL
             UNION ALL
             SELECT continuation.created_at_ns FROM approval_continuations AS continuation
             JOIN reply_spans AS paused
@@ -1004,7 +1012,7 @@ def _latest_write_ns(transaction: Transaction, principal_id: str, reply: rl.Repl
             WHERE continuation.principal_id = ? AND paused.reply_id = ?
         ) AS writes
         """,
-        (principal_id, reply.reply_id, principal_id, reply.reply_id),
+        (principal_id, reply.reply_id, principal_id, reply.event_id, principal_id, reply.reply_id),
     )
     return 0 if row is None or row["latest"] is None else int(row["latest"])
 
