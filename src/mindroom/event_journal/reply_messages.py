@@ -18,7 +18,6 @@ from mindroom.reply_lifecycle import (
 )
 
 from . import reply_spans
-from .models import SUPERSEDED_FAILURE_REASON
 
 if TYPE_CHECKING:
     from mindroom.reply_lifecycle import Span, Transition
@@ -26,23 +25,22 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 # The approval that holds a ``reply_messages`` row: a continuation that names one of the
-# reply's spans and that no edit superseded. The continuation row is the only record
-# of the hold; the reply reads it, so the two cannot disagree.
-_HELD_BY = f"""(
+# reply's spans. The continuation row is the only record of the hold; the reply reads
+# it, so the two cannot disagree.
+_HELD_BY = """(
     SELECT continuation.approval_id FROM approval_continuations AS continuation
     JOIN reply_spans AS held_span
       ON held_span.principal_id = continuation.principal_id AND held_span.span_id = continuation.span_id
     WHERE held_span.principal_id = reply_messages.principal_id AND held_span.reply_id = reply_messages.reply_id
-      AND NOT (continuation.state = 'failing' AND COALESCE(continuation.failure_reason, '') = '{SUPERSEDED_FAILURE_REASON}')
     ORDER BY continuation.created_at_ns, continuation.approval_id
     LIMIT 1
-)"""  # noqa: S608 - a fixed constant, not input
+)"""
 
 _REPLY_COLUMNS = f"""
     reply_id, entity_name, room_id, thread_id, membership_epoch,
     event_id, state, current_span_id, last_span_id, presentation_json,
     frozen_display_json, possibly_shown_json, possibly_shown_seq, confirmed_seq, revision,
-    placeholder_only, stop_receipt_order, stop_applied_receipt_order, edit_receipt_order, stop_button_event_id,
+    placeholder_only, stop_receipt_order, stop_applied_receipt_order, stop_button_event_id,
     redaction_pending_json, owed_write_json, reply_sequence, {_HELD_BY} AS approval_id, created_at_ns, updated_at_ns
 """
 
@@ -114,7 +112,6 @@ def _reply(row: Row) -> Reply:
         placeholder_only=bool(row["placeholder_only"]),
         stop_receipt_order=_optional_int(row["stop_receipt_order"]),
         stop_applied_receipt_order=_optional_int(row["stop_applied_receipt_order"]),
-        edit_receipt_order=_optional_int(row["edit_receipt_order"]),
         stop_button_event_id=cast("str | None", row["stop_button_event_id"]),
         redaction_pending=_ids(row["redaction_pending_json"]),
         approval_id=cast("str | None", row["approval_id"]),
@@ -392,9 +389,9 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             principal_id, reply_id, entity_name, room_id, thread_id, membership_epoch, event_id, state,
             current_span_id, last_span_id, presentation_json, frozen_display_json, possibly_shown_json,
             possibly_shown_seq, confirmed_seq, revision, placeholder_only, stop_receipt_order,
-            stop_applied_receipt_order, edit_receipt_order, stop_button_event_id, redaction_pending_json,
+            stop_applied_receipt_order, stop_button_event_id, redaction_pending_json,
             owed_write_json, reply_sequence, created_at_ns, updated_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
             membership_epoch = excluded.membership_epoch,
             event_id = excluded.event_id,
@@ -410,7 +407,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             placeholder_only = excluded.placeholder_only,
             stop_receipt_order = excluded.stop_receipt_order,
             stop_applied_receipt_order = excluded.stop_applied_receipt_order,
-            edit_receipt_order = excluded.edit_receipt_order,
             stop_button_event_id = excluded.stop_button_event_id,
             redaction_pending_json = excluded.redaction_pending_json,
             owed_write_json = excluded.owed_write_json,
@@ -437,7 +433,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             reply.placeholder_only,
             reply.stop_receipt_order,
             reply.stop_applied_receipt_order,
-            reply.edit_receipt_order,
             reply.stop_button_event_id,
             _ids_json(reply.redaction_pending),
             _owed_json(reply.owed_write),

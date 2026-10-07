@@ -596,7 +596,6 @@ def _build_harness(
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
                 complete_turn=AsyncMock(),
-                clean_up_superseded=lambda _continuation: None,
             ),
         ),
     )
@@ -1762,7 +1761,7 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 
     metadata = request.matrix_run_metadata
     assert metadata is not None
-    assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
+    assert metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == [event.event_id]
     assert harness.turn_store.is_handled(event.event_id) is True
 
 

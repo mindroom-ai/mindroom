@@ -24,7 +24,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -174,12 +174,13 @@ if TYPE_CHECKING:
     from mindroom.coalescing_batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
-    from mindroom.event_journal import AdmissionFacts, ApprovalContinuation, IngestionRecordAdmission
+    from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
     from mindroom.event_journal.models import ResponseRecoveryState
     from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
+    from mindroom.reply_lifecycle import Reply
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
 
@@ -641,7 +642,6 @@ class AgentBot:
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
-            clean_up_superseded=self._clean_up_superseded_approval,
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
@@ -780,15 +780,15 @@ class AgentBot:
                 resolver=self._conversation_resolver,
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
-                generate_response=lambda request: self._run_regenerated_response(request),
-                wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
+                start_regeneration=self._start_regeneration,
+                stop_reply=self._stop_reply_for_edit,
                 receipt_order=self._journal_dispatcher.receipt_order,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
                     timezone=self.config.timezone,
                 ),
                 reply_for_sources=self._reply_runtime.store.replies.for_sources,
-                adopt_historical_answer=self._reply_runtime.adopt_historical_answer,
+                later_human_message=self._later_human_message,
             ),
         )
         self._turn_policy = TurnPolicy(
@@ -957,15 +957,6 @@ class AgentBot:
             name=f"reply_debt_{reply_id}",
             owner=self._runtime_view,
             # Outside any span the resolving task runs: debt belongs to the reply.
-            context=Context(),
-        )
-
-    def _clean_up_superseded_approval(self, continuation: ApprovalContinuation) -> None:
-        """Start an edit-superseded approval's cleanup outside the conversation its regeneration holds."""
-        create_background_task(
-            self._response_runner.settle_superseded_approval(continuation),
-            name=f"superseded_approval_{continuation.approval_id}",
-            owner=self._runtime_view,
             context=Context(),
         )
 
@@ -2853,6 +2844,37 @@ class AgentBot:
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""
         return await self._response_runner.generate_response(request)
+
+    def _start_regeneration(self, request: ResponseRequest) -> asyncio.Task[None]:
+        """Run an edit's regeneration on a runner-owned task, off the room's event lane."""
+
+        async def regenerate() -> None:
+            await self._run_regenerated_response(request)
+
+        return self._response_runner.track_inbox_response(
+            regenerate(),
+            name=f"edit_regeneration:{request.correlation_id}",
+            room_id=request.response_envelope.target.room_id,
+            # Its edit stays pending until its span settles it, so a restart regenerates again.
+            recovery_proof_ready=lambda: True,
+            source_event_ids=request.sources.pending_event_ids,
+        )
+
+    async def _stop_reply_for_edit(self, reply: Reply, receipt_order: int) -> None:
+        """Stop a reply that still runs before an edit regenerates it, as a Stop reaction would."""
+        assert reply.event_id is not None, "an edit regenerates only a reply that showed something"
+        await self._user_stop_reconciler.finalize(reply.event_id, receipt_order, room_id=reply.room_id)
+
+    async def _later_human_message(self, record: TurnRecord) -> bool:
+        """Return whether a human wrote in the turn's conversation after it, so an edit of it regenerates nothing."""
+        target = record.conversation_target
+        assert target is not None, "an edit regenerates only a turn with a conversation"
+        return await self._reply_runtime.store.later_message_exists(
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            source_event_ids=record.source_event_ids,
+            excluded_senders=persisted_bot_user_ids(self.runtime_paths),
+        )
 
     async def _hook_send_message(
         self,

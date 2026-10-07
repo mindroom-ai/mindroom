@@ -9556,7 +9556,7 @@ def _install_runtime_redaction_observer(path: Path) -> None:
                 f"{self.deps.agent_name}@{self.deps.resolver.deps.matrix_id.full_id}",
                 source_event_id,
                 time.monotonic_ns(),
-                self.is_revision_redacted(source_event_id)
+                self._is_revision_redacted(source_event_id)
                 or any(
                     revision.redacted
                     for record in self._ledger.all_turn_records()

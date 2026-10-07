@@ -1486,7 +1486,7 @@ async def test_runtime_redaction_observer_records_before_original(
     path = tmp_path / "entries.jsonl"
     path.touch()
     store = _redaction_observer_store()
-    monkeypatch.setattr(TurnStore, "is_revision_redacted", lambda _self, _target: False)
+    monkeypatch.setattr(TurnStore, "_is_revision_redacted", lambda _self, _target: False)
     calls: list[str] = []
     error = RuntimeError("original mutation failed")
     cancelled = asyncio.CancelledError("original cancelled")
@@ -1554,7 +1554,7 @@ def test_real_runtime_child_installs_observer_across_generations(
 
     monkeypatch.setattr(cli_main, "app", app)
     monkeypatch.setattr(live_fuzz.sys, "argv", ["harness"])
-    monkeypatch.setattr(TurnStore, "is_revision_redacted", lambda _self, _target: generation == 2)
+    monkeypatch.setattr(TurnStore, "_is_revision_redacted", lambda _self, _target: generation == 2)
     live_fuzz._ModelHandler.reset_observations()
     monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 100)
     live_fuzz._ModelHandler._record_observation(90, frozenset({"marker"}))
@@ -1597,7 +1597,7 @@ async def test_runtime_redaction_observer_rejects_recovered_revision_without_phy
             revision_replay={"$edit": RevisionReplay("$source", 100, redacted=True)},
         ),
     )
-    assert not store.is_revision_redacted("$edit")
+    assert not store._is_revision_redacted("$edit")
     path = tmp_path / "entries.jsonl"
     path.touch()
     monkeypatch.setattr(TurnStore, "mark_source_redacted", TurnStore.mark_source_redacted)

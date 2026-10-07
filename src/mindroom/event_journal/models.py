@@ -134,7 +134,7 @@ class DeliveryProjectionPendingError(RuntimeError):
     """An interactive source arrived before a visible delivery was projected."""
 
 
-# The failure reason of an approval an edit superseded: it no longer holds its reply.
+# The failure reason an earlier release gave an approval an edit superseded; reply classification discards such rows.
 SUPERSEDED_FAILURE_REASON = "superseded"
 
 

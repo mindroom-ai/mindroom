@@ -6,7 +6,6 @@ import json
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from enum import Enum
 from types import MappingProxyType
 
 from mindroom.history.types import HistoryScope
@@ -133,12 +132,6 @@ class SourceEventMetadata:
 
 
 SourceEventRevision = tuple[int, str]
-
-
-class EditPreparation(Enum):
-    """A locked edit snapshot needs rebuilding without settling its callback."""
-
-    REBUILD = "rebuild"
 
 
 class RevisionSnapshotChangedError(RuntimeError):
@@ -353,18 +346,6 @@ class TurnRecord:
         if selected is not None:
             revisions.append(selected)
         return max(revisions, default=None)
-
-    @property
-    def invalidated_prompt_sources(self) -> frozenset[str]:
-        """Return slots whose deleted revision still lacks a canonical refill."""
-        prompts = self.source_event_prompts or {}
-        return frozenset(
-            value.source_event_id
-            for value in (self.revision_replay or {}).values()
-            if value.redacted
-            and value.source_event_id not in prompts
-            and value.source_event_id in self.replay_source_event_ids
-        )
 
     @property
     def indexed_event_ids(self) -> tuple[str, ...]:

@@ -15,7 +15,7 @@ from agno.run.requirement import RunRequirement
 from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.cancellation import request_task_cancel
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import DeliveryStage
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.reply_presentation import (
@@ -34,6 +34,7 @@ from mindroom.turn_store import TurnStore
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _noop_typing, _plain_request, _target
 from tests.test_reply_records_turns import (
+    _admit_edit,
     _FlakyHomeserver,
     _pending_turn,
     _regeneration,
@@ -133,16 +134,6 @@ async def _run_approval_wakes(bot: AgentBot, wakes: list[tuple[str, ...]]) -> No
     while wakes:
         assert await runner.handoff_approval_source(wakes.pop(0)[0]) is False
         await runner.wait_for_source_owned_inbox_responses()
-
-
-async def _superseded_cleanup(bot: AgentBot) -> None:
-    """Wait for the old approval's cleanup, which runs outside the conversation."""
-
-    async def finished() -> None:
-        while await bot.journal_principal().approval_continuation_for_source("$event") is not None:  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(finished(), timeout=5)
 
 
 async def _span_kinds(bot: AgentBot) -> list[tuple[rl.SpanKind, rl.SpanOutcome | None]]:
@@ -561,139 +552,33 @@ async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: 
         ]
 
 
-@pytest.mark.parametrize("already_failing", [False, True])
-async def test_an_edit_supersedes_the_approval_of_the_reply_it_regenerates(
-    tmp_path: Path,
-    already_failing: bool,
-) -> None:
-    """Decision 1: the old approval settles without a note while the regeneration still runs.
-
-    That holds for an approval whose failure was still settling: the
-    regeneration owns the reply, so no failure note follows.
-    """
+async def test_an_edit_of_a_paused_reply_runs_nothing(tmp_path: Path) -> None:
+    """The approval holds its reply, so an edit's regeneration claims nothing and the pause stays as it was."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
-        old = await bot.journal_principal().approval_continuation_for_source("$event")
-        assert old is not None
-
-        runner = unwrap_extracted_collaborator(bot._response_runner)
-        if already_failing:
-            assert await runner._approval_responses.request_failure(old, "Approval card creation failed") is not None
-        answering, release = asyncio.Event(), asyncio.Event()
-
-        async def slow_answer(*_args: object, **_kwargs: object) -> str:
-            answering.set()
-            await release.wait()
-            return "A fresh answer."
-
-        with patch_response_runner_module(
-            ai_response=AsyncMock(side_effect=slow_answer),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ):
-            response = asyncio.create_task(runner.generate_response(_regeneration(answer_event_id="$sent1")))
-            await asyncio.wait_for(answering.wait(), timeout=5)
-            sends = len(_sent_bodies(bot))
-
-            async def settled() -> None:
-                while await bot.journal_principal().approval_continuation_for_source("$event") is not None:  # noqa: ASYNC110
-                    await asyncio.sleep(0.01)
-
-            # The regeneration holds the conversation; the old approval's cleanup does not wait for it.
-            await asyncio.wait_for(settled(), timeout=5)
-            assert not await bot._reply_runtime.store.is_pending("$event")
-            assert len(_sent_bodies(bot)) == sends
-            release.set()
-            assert await asyncio.wait_for(response, timeout=5) == "$sent1"
-
-        reply = await _reply(bot)
-        assert reply.state is rl.ReplyState.COMPLETED
-        assert _sent_bodies(bot)[-1] == "A fresh answer."
-
-
-async def _admit_edit(bot: AgentBot) -> None:
-    """Record the edit ingress admitted, which the regeneration takes as its source."""
-    await bot.journal_principal().admit(
-        InboundEvent(
-            event_id="$edit",
-            room_id="!room:localhost",
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=2,
-            source={},
-        ),
-    )
-
-
-async def test_a_regeneration_of_a_paused_reply_that_fails_is_retried_without_its_old_consent(tmp_path: Path) -> None:
-    """A model error before the regeneration shows anything keeps the edit for a retry; the old approval stays superseded."""
-    async with _approval_bot(tmp_path, requires_human=True) as bot:
-        await _respond(bot)
+        paused = await bot.journal_principal().approval_continuation_for_source("$event")
+        assert paused is not None
         await _admit_edit(bot)
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        with (
-            patch_response_runner_module(
-                ai_response=AsyncMock(side_effect=RuntimeError("model down")),
-                should_use_streaming=AsyncMock(return_value=False),
-                typing_indicator=_noop_typing,
-            ),
-            pytest.raises(RuntimeError, match="model down"),
-        ):
-            await runner.generate_response(_regeneration(answer_event_id="$sent1"))
-
-        reply = await _reply(bot)
-        assert reply.state is rl.ReplyState.ACTIVE
-        assert reply.approval_id is None
-        assert await bot._reply_runtime.store.is_pending("$edit")
-        # The superseded approval's cleanup finished it.
-        await _superseded_cleanup(bot)
-
+        model = AsyncMock(return_value="Unreachable.")
+        claimed = AsyncMock()
+        sends = len(_sent_bodies(bot))
         with patch_response_runner_module(
-            ai_response=AsyncMock(return_value="The edited answer."),
+            ai_response=model,
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):
-            await runner.generate_response(_regeneration(answer_event_id="$sent1"))
+            regeneration = replace(_regeneration(answer_event_id="$sent1"), on_reply_claimed=claimed)
+            assert await runner.generate_response(regeneration) is None
 
-        answered = await _reply(bot)
-        assert answered.state is rl.ReplyState.COMPLETED
-        assert await _span_kinds(bot) == [
-            (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
-            (rl.SpanKind.REGENERATION, rl.SpanOutcome.RELEASED),
-            (rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED),
-        ]
-        assert _sent_bodies(bot)[-1] == "The edited answer."
-        assert not await bot._reply_runtime.store.is_pending("$edit")
-
-
-async def test_a_regeneration_of_a_paused_reply_may_pause_again(tmp_path: Path) -> None:
-    """The edit's new answer asks again; the old approval is superseded and one continuation holds the reply."""
-    async with _approval_bot(tmp_path, requires_human=True) as bot:
-        await _respond(bot)
-        # Ingress admitted the edit; the new continuation takes it as its source.
-        await _admit_edit(bot)
-        runner = unwrap_extracted_collaborator(bot._response_runner)
-        with patch_response_runner_module(
-            ai_response=AsyncMock(side_effect=ResponsePausedForApproval(_paused(run_id="run-edit", text="Rereading"))),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ):
-            await runner.generate_response(_regeneration(answer_event_id="$sent1"))
-
+        model.assert_not_awaited()
+        claimed.assert_not_awaited()
         reply = await _reply(bot)
-        newer = await bot.journal_principal().approval_continuation_for_source("$edit")
-        assert newer is not None
         assert reply.state is rl.ReplyState.PAUSED
-        assert reply.approval_id == newer.approval_id
-        # The old approval was superseded, and its cleanup finished it.
-        await _superseded_cleanup(bot)
-        assert await _span_kinds(bot) == [
-            (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
-            (rl.SpanKind.REGENERATION, rl.SpanOutcome.PAUSED),
-        ]
-        assert _sent_bodies(bot)[-1] == "Rereading"
+        assert reply.approval_id == paused.approval_id
+        assert await bot.journal_principal().approval_continuation_for_source("$event") == paused
+        assert await _span_kinds(bot) == [(rl.SpanKind.TURN, rl.SpanOutcome.PAUSED)]
+        assert len(_sent_bodies(bot)) == sends
 
 
 async def test_a_failure_note_that_could_not_be_sent_is_resent_not_written_again(tmp_path: Path) -> None:

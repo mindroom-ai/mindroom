@@ -239,6 +239,46 @@ def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
     return len(rows)
 
 
+def later_message_exists(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    source_event_ids: tuple[str, ...],
+    excluded_senders: frozenset[str],
+) -> bool:
+    """Return whether a message from someone outside ``excluded_senders`` came after these sources in one conversation.
+
+    A source no longer visible counts as nothing coming after it.
+    """
+    placeholders = ", ".join("?" for _ in source_event_ids)
+    excluded = ", ".join("?" for _ in excluded_senders) or "NULL"
+    row = transaction.fetchone(
+        f"""
+        SELECT 1 AS present FROM visible_messages AS later
+        WHERE later.principal_id = ? AND later.room_id = ? AND later.thread_id = ?
+          AND later.logical_event_id NOT IN ({placeholders})
+          AND later.sender NOT IN ({excluded})
+          AND later.created_ts > (
+            SELECT MAX(source.created_ts) FROM visible_messages AS source
+            WHERE source.principal_id = later.principal_id AND source.room_id = later.room_id
+              AND source.logical_event_id IN ({placeholders})
+          )
+        LIMIT 1
+        """,  # noqa: S608 - generated placeholders, values still bound
+        (
+            principal_id,
+            room_id,
+            encode_thread_id(thread_id),
+            *source_event_ids,
+            *excluded_senders,
+            *source_event_ids,
+        ),
+    )
+    return row is not None
+
+
 def latest_visible_event_id(
     transaction: Transaction,
     principal_id: str,

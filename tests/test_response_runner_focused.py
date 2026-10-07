@@ -164,7 +164,6 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext, build_exec
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
-from mindroom.turn_record import EditPreparation
 from tests.approval_continuation_helpers import claim_continuation, freeze_resume_final
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
@@ -1470,12 +1469,12 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("final_result", [False, True, EditPreparation.REBUILD])
+@pytest.mark.parametrize("final_result", [False, True])
 async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecycle_hooks(
     tmp_path: Path,
-    final_result: bool | EditPreparation,
+    final_result: bool,
 ) -> None:
-    """The final owner gate sees refreshed history and keeps rebuild distinct from suppression."""
+    """The final owner gate sees refreshed history and suppresses the turn when its source ended."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread", reply_to_event_id="$event")

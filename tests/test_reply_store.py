@@ -38,7 +38,6 @@ from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.stop import SpanRegistry
 from mindroom.turn_record import TurnRecord
 from tests import test_event_journal_store as journal_tests
-from tests.approval_continuation_helpers import claim_continuation
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import ROOM, admit, text
@@ -365,7 +364,7 @@ async def test_post_commit_effects_are_returned(journal_store: EventJournalStore
     claim = _first_claim()
     await _apply(journal_store, claim)
     assert claim.reply is not None
-    stop = rl.stop(claim.reply, claim.claimed, rl.StopFacts(3, newer_edit=False, span_live=True), now_ns=40)
+    stop = rl.stop(claim.reply, claim.claimed, rl.StopFacts(3, span_live=True), now_ns=40)
     applied = await _apply(journal_store, stop)
     assert applied.post_commit == (rl.CancelSpan("span-1", by_stop=True),)
     stored = await principal.replies.load("reply-1")
@@ -438,7 +437,7 @@ async def test_a_stop_committed_after_rendering_writes_nothing(journal_store: Ev
     """A payload rendered for an older revision is refused with Recompute and settles nothing."""
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
-    await _apply(journal_store, rl.stop(reply, span, rl.StopFacts(4, newer_edit=False, span_live=True), now_ns=40))
+    await _apply(journal_store, rl.stop(reply, span, rl.StopFacts(4, span_live=True), now_ns=40))
     enqueued = await principal.enqueue_reply_row(
         request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish(revision=0)),
         room_id=ROOM,
@@ -830,7 +829,6 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        clean_up_superseded=lambda _continuation: None,
     )
     runtime.spans.expect(span.span_id)
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -856,7 +854,6 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        clean_up_superseded=lambda _continuation: None,
         spans=spans,
     )
     await _delete(principal, "$source")
@@ -871,26 +868,6 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
 
 def _span_outcome(applied: AppliedTransition, span_id: str) -> SpanOutcome | None:
     return next(span.outcome for span in applied.transition.spans if span.span_id == span_id)
-
-
-async def test_an_answer_older_than_the_records_is_adopted_once(journal_store: EventJournalStore) -> None:
-    """Adoption binds the answer's event to a finished reply over its turn's sources, and keeps any reply that holds either."""
-    principal = journal_store.principal(PRINCIPAL)
-    await principal.replies.write_generation("gen-1", now_ns=1)
-    request = replace(_request(), sources=SpanSources(pending=(), logical=("$source",)))
-    adopted = await principal.replies.adopt_historical_answer(request, "$answer")
-    assert adopted.state is ReplyState.COMPLETED
-    assert adopted.event_id == "$answer"
-    # A cancellation right after adoption loses nothing: the next edit finds the reply by its sources.
-    assert await principal.replies.for_sources(("$source",)) == adopted
-    again = replace(_request("span-2", reply_id="reply-2"), sources=request.sources)
-    assert await principal.replies.adopt_historical_answer(again, "$answer") == adopted
-    assert await principal.replies.adopt_historical_answer(again, "$other-answer") == adopted
-    elsewhere = replace(
-        _request("span-3", reply_id="reply-3"),
-        sources=SpanSources(pending=(), logical=("$elsewhere",)),
-    )
-    assert await principal.replies.adopt_historical_answer(elsewhere, "$answer") == adopted
 
 
 async def _regeneration_with_selected_edit(
@@ -1181,95 +1158,6 @@ async def test_a_reply_is_held_by_the_continuation_that_names_its_span(journal_s
     held = await alice.replies.load(paused.reply_id)
     assert held is not None
     assert held.approval_id == "approval-1"
-
-    # An edit's fence supersedes it: the continuation stays for its cleanup but holds nothing.
-    assert await alice.request_approval_failure("approval-1", "superseded", expected_state="waiting") is not None
-    released = await alice.replies.load(paused.reply_id)
-    assert released is not None
-    assert released.approval_id is None
-
-
-async def test_an_edit_held_back_by_a_settling_approval_is_retried_when_it_finishes(
-    journal_store: EventJournalStore,
-) -> None:
-    """B1: the edit's claim waits while the approval settles, and the approval's finish retries it."""
-    alice = journal_store.principal("agent@alice")
-    await journal_tests.TestApprovalContinuations.admit_sources(alice)
-    paused = await paused_for_approval(alice, journal_tests.TestApprovalContinuations.continuation(state="ready"))
-    assert paused is not None
-    claimed = await claim_continuation(alice, "approval-1", runtime_generation="gen-test")
-    assert claimed is not None
-    assert claimed.claim_span_id is not None
-    resume = await alice.replies.span(claimed.claim_span_id)
-    assert resume is not None
-    # The resume ends without its answer; its approval still has to settle.
-    await alice.replies.decide(
-        reply_id=resume.reply_id,
-        span_id=resume.span_id,
-        decide=lambda reply, span: rl.fail(reply, span, None, phase="pre_delivery", now_ns=1),
-    )
-    retried: list[tuple[str, ...]] = []
-    runtime = reply_scope.ReplyRuntime(
-        store=alice,
-        entity_name="agent",
-        generation="gen-test",
-        retry_sources=lambda _room_id, sources: retried.append(sources),
-        complete_turn=AsyncMock(),
-        clean_up_superseded=lambda _continuation: None,
-    )
-    await admit(alice, "$edit")
-    refused = await runtime.claim(
-        delivery_id="$edit",
-        sources=SpanSources(pending=("$edit",), logical=claimed.sources.logical_source_event_ids),
-        room_id=ROOM,
-        thread_id="$thread",
-        driving_edit_id="$edit",
-    )
-    assert refused is reply_scope.ClaimRefused.DEFERRED
-    assert retried == []
-
-    # The runtime fails the approval, writes its note as the reply's FINAL, and finishes once Matrix took it.
-    assert (
-        await alice.request_approval_failure(
-            "approval-1",
-            "failed",
-            expected_state="claimed",
-            expected_runtime_generation="gen-test",
-        )
-        is not None
-    )
-    await alice.enqueue_reply_row(
-        request=ReplyRowRequest(
-            reply_id=resume.reply_id,
-            span_id=resume.span_id,
-            decide=lambda reply, span: rl.approval_failure_note(
-                reply,
-                span,
-                approval_id="approval-1",
-                shown=encode_presentation(Presentation()),
-                state=ReplyState.FAILED,
-                prepared_revision=reply.revision,
-                span_has_final=False,
-                now_ns=2,
-            ),
-        ),
-        room_id=ROOM,
-        thread_id="$thread",
-        payload={"body": "approval failed"},
-    )
-    assert await alice.claim_matrix_delivery(delivery_id=resume.delivery_id, stage=DeliveryStage.FINAL)
-    await alice.acknowledge_matrix_delivery(
-        delivery_id=resume.delivery_id,
-        stage=DeliveryStage.FINAL,
-        event_id="$failure-note",
-        delivered_projections=(),
-    )
-    assert await runtime.finish_approval("approval-1")
-    assert retried == [("$edit",)]
-    ended = await alice.replies.load(resume.reply_id)
-    assert ended is not None
-    assert ended.state is ReplyState.FAILED
-    assert ended.approval_id is None
 
 
 async def test_an_approval_whose_sources_were_deleted_leaves_its_turn_unanswered(

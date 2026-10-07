@@ -2117,6 +2117,54 @@ class TestLatestVisibleEvent:
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
 
 
+class TestLaterMessage:
+    """Whether someone wrote after a turn's messages, which decides whether an edit of them regenerates."""
+
+    async def _later(self, store: PrincipalStore, *sources: str, thread_id: str | None = "$root") -> bool:
+        return await store.later_message_exists(
+            room_id=ROOM,
+            thread_id=thread_id,
+            source_event_ids=sources,
+            excluded_senders=frozenset({BOB}),
+        )
+
+    async def test_a_later_message_in_the_thread_counts(self, alice: PrincipalStore) -> None:
+        """A later message in the thread counts."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$asked", ts=2_000, thread_id="$root")
+        assert not await self._later(alice, "$asked")
+
+        await admit(alice, "$next", ts=3_000, thread_id="$root")
+
+        assert await self._later(alice, "$asked")
+
+    async def test_an_edit_of_the_source_does_not_count(self, alice: PrincipalStore) -> None:
+        """An edit revises the source itself, so nothing came after it."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$asked", ts=2_000, thread_id="$root")
+        await admit(alice, "$asked-edit", ts=3_000, thread_id="$root", content=edit("$asked", "revised"))
+
+        assert not await self._later(alice, "$asked")
+
+    async def test_an_excluded_sender_and_another_thread_do_not_count(self, alice: PrincipalStore) -> None:
+        """An agent's answer and messages elsewhere in the room are not a later turn of this conversation."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$asked", ts=2_000, thread_id="$root")
+        await admit(alice, "$answer", ts=3_000, thread_id="$root", sender=BOB)
+        await admit(alice, "$elsewhere", ts=4_000, thread_id="$other-root")
+        await admit(alice, "$room-message", ts=5_000)
+
+        assert not await self._later(alice, "$asked")
+
+    async def test_a_thread_root_counts_the_replies_in_its_thread(self, alice: PrincipalStore) -> None:
+        """A root is stored in the room conversation, but its turn continues in its thread."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+
+        assert await self._later(alice, "$root")
+        assert not await self._later(alice, "$root", thread_id=None)
+
+
 class TestProjectedInteractivePrompts:
     """The Matrix-visible revision is the sole active-prompt authority."""
 

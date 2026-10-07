@@ -460,7 +460,6 @@ def _regeneration(*, answer_event_id: str, edit_event_id: str = "$edit") -> Resp
         sources=ResponseSources(
             pending_event_ids=(edit_event_id,),
             logical_source_event_ids=("$event",),
-            edit_receipt_order=1,
         ),
         prepared_edit_record=TurnRecord.create(["$event"], response_event_id=answer_event_id, completed=True),
         existing_event_id=answer_event_id,
@@ -603,59 +602,35 @@ async def test_regeneration_failing_before_its_first_write_is_retried(tmp_path: 
     assert not await bot._reply_runtime.store.is_pending("$edit")
 
 
-async def test_an_edit_the_replys_stop_covers_prunes_no_history(tmp_path: Path) -> None:
-    """A Stop received after the edit, even while the edit waited for the conversation, refuses its claim first."""
+async def test_an_edit_regenerates_in_place_the_streaming_answer_it_stopped(tmp_path: Path) -> None:
+    """An edit stops a still-streaming answer as a Stop does, and its regeneration then rewrites that answer."""
     bot = await _streaming_bot(tmp_path)
-    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer.")) == "$sent1"
-    assert await bot._reply_runtime.store.replies.record_stop("$sent1", 5) is not None
+    response, _streaming = await _blocked_stream(bot)
+    streamed = await _reply(bot)
+    assert streamed.event_id is not None
+    await _pending_turn(bot)
+    assert await bot._user_stop_reconciler.finalize(streamed.event_id, 5, room_id=_target().room_id)
+    await asyncio.wait_for(response, timeout=5)
+    await _admit_edit(bot)
     prune = AsyncMock()
-    model = AsyncMock(return_value="Unreachable.")
-    regeneration = replace(_regeneration(answer_event_id="$sent1"), on_reply_claimed=prune)
+    regeneration = replace(_regeneration(answer_event_id=streamed.event_id), on_reply_claimed=prune)
 
-    assert await _answer(bot, regeneration, model) is None
+    assert await _answer(bot, regeneration, AsyncMock(return_value="Edited answer.")) == streamed.event_id
 
-    prune.assert_not_awaited()
-    model.assert_not_awaited()
-
-
-async def test_regenerating_an_answer_older_than_the_records_adopts_it(tmp_path: Path) -> None:
-    """An answer written before durable records becomes a finished reply, which the edit then regenerates."""
-    bot = await _streaming_bot(tmp_path)
-    target = _target()
-    await bot._reply_runtime.adopt_historical_answer(
-        "$older",
-        sources=rl.SpanSources(pending=(), logical=("$event",)),
-        room_id=target.room_id,
-        thread_id=target.resolved_thread_id,
-    )
-
-    assert await _answer(bot, _regeneration(answer_event_id="$older"), AsyncMock(return_value="New answer.")) == (
-        "$older"
-    )
-
-    reply = await bot._reply_runtime.store.replies.for_event("$older")
-    assert reply is not None
+    prune.assert_awaited_once()
+    reply = await _reply(bot)
+    assert reply.reply_id == streamed.reply_id
     assert reply.state is rl.ReplyState.COMPLETED
-    spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
-    assert [(span.kind, span.outcome) for span in spans] == [
-        (rl.SpanKind.TURN, rl.SpanOutcome.COMPLETED),
-        (rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED),
-    ]
-    edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
-    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$older"}
-    assert edit["m.new_content"]["body"] == "New answer."
+    assert _sent_bodies(bot)[-1] == "Edited answer."
+    assert not await bot._reply_runtime.store.is_pending("$edit")
 
 
-async def test_an_interrupted_regeneration_of_an_older_answer_leaves_that_answer_shown(tmp_path: Path) -> None:
+async def test_an_interrupted_regeneration_leaves_the_answer_it_replaced_shown(tmp_path: Path) -> None:
     """A regeneration cancelled before it wrote anything writes no note over the answer it was replacing."""
     bot = await _streaming_bot(tmp_path)
-    target = _target()
-    await bot._reply_runtime.adopt_historical_answer(
-        "$older",
-        sources=rl.SpanSources(pending=(), logical=("$event",)),
-        room_id=target.room_id,
-        thread_id=target.resolved_thread_id,
-    )
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer.")) == "$sent1"
+    await _admit_edit(bot)
+    sends = len(_sent_bodies(bot))
     runner = unwrap_extracted_collaborator(bot._response_runner)
     preparing = asyncio.Event()
 
@@ -672,15 +647,14 @@ async def test_an_interrupted_regeneration_of_an_older_answer_leaves_that_answer
             typing_indicator=_noop_typing,
         ),
     ):
-        response = asyncio.create_task(runner.generate_response(_regeneration(answer_event_id="$older")))
+        response = asyncio.create_task(runner.generate_response(_regeneration(answer_event_id="$sent1")))
         await asyncio.wait_for(preparing.wait(), timeout=5)
         response.cancel()
         with suppress(asyncio.CancelledError):
             await response
 
-    assert _sent_bodies(bot) == []
-    reply = await bot._reply_runtime.store.replies.for_event("$older")
-    assert reply is not None
+    assert len(_sent_bodies(bot)) == sends
+    reply = await _reply(bot)
     assert reply.current_span_id is None
     spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
     # Its sources wait for the retry, which regenerates with the same rollback.
@@ -1071,36 +1045,6 @@ async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.CANCELLED
     assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
-
-
-async def test_a_stop_on_the_new_reply_of_a_regeneration_stops_it(tmp_path: Path) -> None:
-    """A regeneration of a reply that ended gone answers in a new reply; a Stop on that reply stops it."""
-    bot = await _streaming_bot(tmp_path)
-    hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
-    apply = hooks._apply_before_response
-
-    async def suppressed(**kwargs: object) -> ResponseDraft:
-        draft = await apply(**kwargs)  # type: ignore[arg-type]
-        draft.suppress = True
-        return draft
-
-    with patch.object(hooks, "_apply_before_response", new=suppressed):
-        await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden."))
-    gone = await _reply(bot)
-    assert gone.state is rl.ReplyState.GONE
-    await _admit_edit(bot)
-    response, _streaming = await _blocked_stream(bot, request=_regeneration(answer_event_id="$sent1"))
-    regenerated = await bot._reply_runtime.store.replies.for_sources(("$edit",))
-    assert regenerated is not None
-    assert regenerated.reply_id != gone.reply_id
-    assert regenerated.event_id is not None
-
-    assert await bot._user_stop_reconciler.finalize(regenerated.event_id, 9, room_id=_target().room_id)
-
-    await asyncio.wait_for(response, timeout=5)
-    stopped = await bot._reply_runtime.store.replies.load(regenerated.reply_id)
-    assert stopped is not None
-    assert stopped.state is rl.ReplyState.CANCELLED
 
 
 def _stop_reaction(reacts_to: str) -> MagicMock:

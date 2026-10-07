@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent, replies
 from mindroom.event_journal.replies import ClaimLookup, ReplyRowRequest
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
@@ -40,8 +40,38 @@ def _runtime(
         generation="gen-test",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=complete_turn or AsyncMock(),
-        clean_up_superseded=lambda _continuation: None,
     )
+
+
+async def seed_finished_reply(
+    principal: PrincipalStore,
+    event_id: str,
+    *,
+    sources: rl.SpanSources,
+    room_id: str,
+    thread_id: str | None,
+    entity_name: str = "agent",
+) -> rl.Reply:
+    """Record a finished answer shown as ``event_id``, as a completed reply leaves it, for an edit to regenerate."""
+    now_ns = time.time_ns()
+    request = rl.ClaimRequest(
+        span_id=uuid4().hex,
+        delivery_id=event_id,
+        sources=sources,
+        bot_generation="gen-seed",
+        now_ns=now_ns,
+        new_reply_id=uuid4().hex,
+        entity_name=entity_name,
+        room_id=room_id,
+        thread_id=thread_id,
+        membership_epoch=await principal.membership_epoch(room_id),
+        empty_presentation=encode_presentation(Presentation()),
+    )
+    reply = rl._new_reply(request, state=rl.ReplyState.COMPLETED, event_id=event_id)
+    span = rl._end(rl._new_span(request, reply, rl.SpanKind.TURN), rl.SpanOutcome.COMPLETED, now_ns)
+    transition = rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply, spans=(span,))
+    await principal._backend.write(lambda transaction: replies.apply(transaction, principal._principal_id, transition))
+    return reply
 
 
 @asynccontextmanager
@@ -57,7 +87,6 @@ async def reply_span(
     show_tool_calls: bool = True,
     placeholder_event_id: str | None = None,
     regenerated_event_id: str | None = None,
-    edit_receipt_order: int | None = None,
     prepared_edit: TurnRecord | None = None,
     runtime: ReplyRuntime | None = None,
 ) -> AsyncIterator[SpanHandle]:
@@ -85,12 +114,14 @@ async def reply_span(
     if runtime is None:
         runtime = _runtime(principal, entity_name=entity_name)
     await runtime.take_ownership()
-    if regenerated_event_id is not None:
-        await runtime.adopt_historical_answer(
+    if regenerated_event_id is not None and await principal.replies.for_event(regenerated_event_id) is None:
+        await seed_finished_reply(
+            principal,
             regenerated_event_id,
             sources=rl.SpanSources(pending=(), logical=logical_source_event_ids or (source_event_id,)),
             room_id=room_id,
             thread_id=thread_id,
+            entity_name=entity_name,
         )
     async with runtime.span_scope() as slot:
         handle = await runtime.claim(
@@ -104,7 +135,6 @@ async def reply_span(
             placeholder=placeholder,
             show_tool_calls=show_tool_calls,
             driving_edit_id=None if regenerated_event_id is None else source_event_id,
-            edit_receipt_order=edit_receipt_order,
             existing_event_id=regenerated_event_id,
             prepared_edit=prepared_edit,
         )
@@ -167,7 +197,6 @@ async def final_in_span(
         logical_source_event_ids=sources.logical_source_event_ids,
         placeholder_event_id=None if regenerated is not None else request.existing_event_id,
         regenerated_event_id=regenerated,
-        edit_receipt_order=sources.edit_receipt_order,
         prepared_edit=prepared_edit,
         runtime=runtime,
     ):
@@ -246,7 +275,6 @@ def response_span(
         logical_source_event_ids=request.sources.logical_source_event_ids,
         placeholder_event_id=None if regenerated is not None else placeholder_event_id,
         regenerated_event_id=regenerated,
-        edit_receipt_order=request.sources.edit_receipt_order,
         prepared_edit=request.prepared_edit_record,
         show_tool_calls=show_tool_calls,
     )

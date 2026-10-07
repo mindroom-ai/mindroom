@@ -70,7 +70,6 @@ from .projection import (
     discard_delivery_event,
     drop_refetched_message,
     install_refetched_revision,
-    is_tombstoned,
     project,
     tombstoned_event_ids,
 )
@@ -482,12 +481,6 @@ class PrincipalStore:
             ),
         )
 
-    async def is_event_redacted(self, *, room_id: str, event_id: str) -> bool:
-        """Read exact projection tombstone authority for this principal."""
-        return await self._backend.read(
-            lambda transaction: is_tombstoned(transaction, self._principal_id, room_id, event_id),
-        )
-
     async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
         """Read recorded context tombstones in one transaction and one offload."""
         return await self._backend.read(
@@ -515,6 +508,26 @@ class PrincipalStore:
                 thread_id=thread_id,
                 limit=limit,
                 before=before,
+            ),
+        )
+
+    async def later_message_exists(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        source_event_ids: tuple[str, ...],
+        excluded_senders: frozenset[str],
+    ) -> bool:
+        """Return whether someone outside ``excluded_senders`` wrote in the conversation after these sources."""
+        return await self._backend.read(
+            lambda transaction: reads.later_message_exists(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                source_event_ids=source_event_ids,
+                excluded_senders=excluded_senders,
             ),
         )
 

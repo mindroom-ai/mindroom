@@ -28,10 +28,9 @@ def test_response_source_values_are_validated_and_immutable() -> None:
         pending_event_ids=("$revision",),
         logical_source_event_ids=("$source",),
         discovery_event_ids=("$alias",),
-        edit_receipt_order=7,
     )
     with pytest.raises(FrozenInstanceError):
-        response_sources.edit_receipt_order = 8
+        response_sources.pending_event_ids = ("$other",)
     with pytest.raises(ValueError, match="pending_event_ids must not be empty"):
         ResponseSources(pending_event_ids=(), logical_source_event_ids=("$source",))
     with pytest.raises(ValueError, match="logical_source_event_ids must not be empty"):
@@ -40,12 +39,6 @@ def test_response_source_values_are_validated_and_immutable() -> None:
         ResponseSources(
             pending_event_ids=("$revision", "$revision"),
             logical_source_event_ids=("$source",),
-        )
-    with pytest.raises(ValueError, match="positive integer"):
-        ResponseSources(
-            pending_event_ids=("$revision",),
-            logical_source_event_ids=("$source",),
-            edit_receipt_order=0,
         )
 
 
@@ -62,7 +55,6 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
         sources=ResponseSources(
             pending_event_ids=("$edit",),
             logical_source_event_ids=("$source",),
-            edit_receipt_order=7,
         ),
         prepared_edit_record=TurnRecord.create(
             ["$source"],

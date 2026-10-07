@@ -9,12 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.event_journal import (
+    DeliveryStage,
     EventJournalStore,
     legacy_response_attempts,
     postgres_backend,
     sqlite_backend,
 )
-from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from mindroom.event_journal.approvals import StoredApprovalCard
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
@@ -108,7 +108,6 @@ async def test_a_continuation_keeps_the_identity_its_context_held(legacy_databas
         assert approval.source_event_ids == ("$edit",)
         assert approval.sources.logical_source_event_ids == ("$source", "$second")
         assert approval.sources.discovery_event_ids == ("$alias",)
-        assert approval.sources.edit_receipt_order == 1
 
 
 @pytest.mark.asyncio
@@ -215,13 +214,27 @@ async def test_an_unclassified_continuation_settles_its_adopted_sources(legacy_d
     """A continuation whose entity never classified its reply settles the sources its adopted identity names."""
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(
-        f"UPDATE approval_continuations SET state = 'failing', failure_reason = '{SUPERSEDED_FAILURE_REASON}' "  # noqa: S608
-        "WHERE approval_id = 'approval'",
+        "UPDATE approval_continuations SET state = 'failing', failure_reason = 'expired' WHERE approval_id = 'approval'",
     )
     store = legacy_database.open()
     try:
         principal = store.principal("@bot:example.org")
         assert await principal.is_pending("$first")
+        # Its failure note reached Matrix, so its settlement may finish it.
+        assert await principal.enqueue_matrix_delivery(
+            delivery_id="$first",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:example.org",
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "Approval expired."},
+        )
+        assert await principal.claim_matrix_delivery(delivery_id="$first", stage=DeliveryStage.FINAL)
+        await principal.acknowledge_matrix_delivery(
+            delivery_id="$first",
+            stage=DeliveryStage.FINAL,
+            event_id="$note",
+            delivered_projections=(),
+        )
         assert await principal.finish_approval_continuation("approval") is not None
         assert await principal.approval_continuation("approval") is None
         assert not await principal.is_pending("$first")

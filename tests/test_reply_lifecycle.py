@@ -176,70 +176,44 @@ def test_regeneration_of_a_completed_reply_stores_its_rollback() -> None:
     assert claimed.rollback.presentation == "answer"
 
 
-def test_regeneration_settles_an_older_stop() -> None:
-    """An edit newer than a Stop applies it as settled."""
-    reply, span = _turn()
-    reply, span = _ended(reply, span, SpanOutcome.CANCELLED)
-    reply = replace(reply, state=ReplyState.CANCELLED, stop_receipt_order=5)
-    transition = rl.claim(
-        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
-        _context(reply, span, edit_receipt_order=7),
-    )
-    assert transition.reply is not None
-    assert transition.reply.stop_applied_receipt_order == 5
-
-
-def test_regeneration_of_a_paused_reply_supersedes_its_approval() -> None:
-    """Decision 1: the claim fences the approval for cleanup that publishes nothing."""
-    reply, span = _turn()
-    reply, span = _ended(reply, span, SpanOutcome.PAUSED)
-    reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1")
-    transition = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
-    # The superseding fence is what ends the hold; the store reads the reply free of it.
-    assert FenceApproval("approval-1", "superseded") in transition.effects
-    assert WakeApproval("approval-1") in transition.effects
-    assert transition.reply is not None
-    assert transition.reply.state is ReplyState.ACTIVE
-
-
-def test_regeneration_of_a_gone_reply_creates_a_new_one() -> None:
-    """A detached reply is not reused; the edit gets a fresh reply."""
-    reply, span = _turn()
-    reply, span = _ended(reply, span, SpanOutcome.SUPPRESSED)
-    reply = replace(reply, state=ReplyState.GONE)
-    transition = rl.claim(
-        _request("span-2", delivery_id="$edit", driving_edit_id="$edit", new_reply_id="reply-2"),
-        _context(reply, span),
-    )
-    assert transition.reply is not None
-    assert transition.reply.reply_id == "reply-2"
-
-
-def test_an_answer_older_than_the_records_is_adopted_as_a_finished_reply() -> None:
-    """The adopted reply is completed on its event, and an edit regenerates it like any answer."""
-    adopted = rl.historical_answer(_request(sources=SpanSources(pending=(), logical=("$source",))), event_id="$answer")
-    assert adopted.reply is not None
-    assert adopted.reply.state is ReplyState.COMPLETED
-    assert adopted.reply.event_id == "$answer"
-    assert adopted.reply.current_span_id is None
-    assert adopted.effects == ()
-    (span,) = adopted.spans
-    assert span.outcome is SpanOutcome.COMPLETED
-    assert adopted.reply.last_span_id == span.span_id
-    regeneration = rl.claim(
-        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
-        _context(adopted.reply, span),
-    )
-    assert regeneration.claimed is not None
-    assert regeneration.claimed.rollback is not None
-    assert regeneration.claimed.rollback.state is ReplyState.COMPLETED
-
-
 def test_a_regeneration_with_no_reply_runs_nothing() -> None:
     """The regenerator regenerates only a reply it found, so no claim creates a reply to regenerate."""
     transition = rl.claim(_request(delivery_id="$edit", driving_edit_id="$edit"), _context())
     assert transition.claimed is None
     assert transition.unmodeled is not None
+
+
+@pytest.mark.parametrize("held", ["paused", "gone"])
+def test_an_edit_of_a_held_or_gone_reply_runs_nothing(held: str) -> None:
+    """An approval holds its reply, and a reply that is gone shows nothing to regenerate."""
+    if held == "paused":
+        reply, span, transition = _paused()
+        span = _span_after(transition, span.span_id)
+    else:
+        reply, span = _turn()
+        reply, span = _ended(reply, span, SpanOutcome.SUPPRESSED)
+        reply = replace(reply, state=ReplyState.GONE)
+    edit = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert edit.outcome is Outcome.DUPLICATE
+    assert edit.claimed is None
+    assert edit.effects == ()
+
+
+def test_an_edit_of_a_reply_waiting_for_its_replay_regenerates_without_a_rollback() -> None:
+    """The regeneration answers the interrupted turn; nothing unfinished is ever restored."""
+    reply, span = _turn()
+    released = rl.release(replace(reply, event_id="$reply", placeholder_only=False), span, now_ns=NOW)
+    assert released.reply is not None
+    waiting = _span_after(released, span.span_id)
+    edit_sources = SpanSources(pending=("$edit",), logical=("$source",))
+    edit = rl.claim(
+        _request("span-2", delivery_id="$edit", driving_edit_id="$edit", sources=edit_sources),
+        _context(released.reply, waiting),
+    )
+    assert edit.claimed is not None
+    assert edit.claimed.kind is SpanKind.REGENERATION
+    assert edit.claimed.rollback is None
+    assert edit.claimed.sources.pending == ("$edit",)
 
 
 def test_regeneration_rerun_keeps_its_rollback() -> None:
@@ -483,7 +457,7 @@ def test_finish_with_a_stop_committed_meanwhile_recomputes() -> None:
     """A payload rendered before a Stop committed is refused; the re-render is cancelled."""
     reply, span = _turn()
     write = _write(reply, ReplyState.COMPLETED)
-    stopped = rl.stop(reply, span, StopFacts(receipt_order=9, newer_edit=False, span_live=True), now_ns=NOW)
+    stopped = rl.stop(reply, span, StopFacts(receipt_order=9, span_live=True), now_ns=NOW)
     assert stopped.reply is not None
     assert rl.finish(stopped.reply, span, write, now_ns=NOW).outcome is Outcome.RECOMPUTE
     assert rl._expected_terminal_state(stopped.reply, ReplyState.COMPLETED) is ReplyState.CANCELLED
@@ -500,7 +474,7 @@ def test_failure_rendered_at_a_stops_revision_recomputes() -> None:
     """A stream error rendered after the span learned the Stop's revision renders again, cancelled."""
     reply, span = _turn()
     reply = replace(reply, event_id="$reply")
-    stopped = rl.stop(reply, span, StopFacts(receipt_order=9, newer_edit=False, span_live=True), now_ns=NOW)
+    stopped = rl.stop(reply, span, StopFacts(receipt_order=9, span_live=True), now_ns=NOW)
     assert stopped.reply is not None
     failed = _write(stopped.reply, ReplyState.FAILED)
     assert rl.fail(stopped.reply, span, failed, phase="delivery", now_ns=NOW).outcome is Outcome.RECOMPUTE
@@ -535,7 +509,7 @@ def test_approval_resume_finish_leaves_settlement_to_the_continuation() -> None:
 def test_stopped_cancels_with_the_shown_content() -> None:
     """A Stop reaching the running span ends it cancelled with a terminal row."""
     reply, span = _turn()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=3, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=3, span_live=True), now_ns=NOW)
     assert stop.effects == (CancelSpan(span.span_id, by_stop=True),)
     assert stop.reply is not None
     transition = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
@@ -552,34 +526,13 @@ def test_stopped_regeneration_before_its_first_acknowledged_write_restores_silen
     regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
     assert regen.reply is not None
     assert regen.claimed is not None
-    stop = rl.stop(regen.reply, regen.claimed, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(regen.reply, regen.claimed, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     transition = rl.stopped(stop.reply, regen.claimed, None, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.COMPLETED
     assert transition.reply.presentation == "old"
     assert transition.row is None
-    assert _span_after(transition, "span-2").outcome is SpanOutcome.RESTORED
-
-
-def test_a_regeneration_that_showed_nothing_over_a_paused_answer_fails_it_with_the_interrupted_note() -> None:
-    """Consent is never restored: the paused answer comes back failed, owing the interrupted note."""
-    reply, span = _turn()
-    reply, span = _ended(reply, span, SpanOutcome.PAUSED)
-    reply = replace(reply, state=ReplyState.PAUSED, approval_id="approval-1", presentation="paused", event_id="$reply")
-    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
-    assert regen.claimed is not None
-    assert regen.claimed.rollback is not None
-    assert regen.claimed.rollback.state is ReplyState.PAUSED
-    # The supersession ended the hold; the store reads the reply free of it.
-    regenerating = replace(regen.reply, approval_id=None)
-
-    transition = rl.dispatch_failed(regenerating, regen.claimed, error_text="setup failed", now_ns=NOW)
-
-    assert transition.reply is not None
-    assert transition.reply.state is ReplyState.FAILED
-    assert transition.reply.presentation == "paused"
-    assert transition.reply.owed_write == rl.OwedWrite("span-2", "interrupted")
     assert _span_after(transition, "span-2").outcome is SpanOutcome.RESTORED
 
 
@@ -596,7 +549,7 @@ def _regenerating() -> tuple[Reply, Span]:
 def test_stop_after_a_regenerations_progress_edit_landed_cancels_instead_of_restoring() -> None:
     """The terminal write's confirmation of a landed edit means the room no longer shows the old answer."""
     reply, span = _regenerating()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     write = replace(
         _write(stop.reply, ReplyState.CANCELLED, shown="new partial"),
@@ -646,62 +599,10 @@ def _progress(reply: Reply, span: Span, shown: str = "new partial") -> Reply:
     return ahead.reply
 
 
-def _interrupted_turn_regenerating() -> tuple[Reply, Span]:
-    """Return an edit's regeneration of a turn a retry left waiting, so its rollback is unfinished work."""
-    reply, span = _turn()
-    released = rl.release(replace(reply, event_id="$reply", placeholder_only=False), span, now_ns=NOW)
-    assert released.reply is not None
-    regen = rl.claim(
-        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
-        _context(released.reply, _span_after(released, span.span_id)),
-    )
-    assert regen.reply is not None
-    assert regen.claimed is not None
-    assert regen.claimed.rollback is not None
-    assert regen.claimed.rollback.state is ReplyState.ACTIVE
-    return regen.reply, regen.claimed
-
-
-def test_abandoning_a_regeneration_of_unfinished_work_leaves_its_turn_for_the_retry() -> None:
-    """The reply waits again for the retry it was waiting for, which answers the turn; the edit settles unanswered."""
-    reply, span = _interrupted_turn_regenerating()
-    transition = rl.dispatch_failed(reply, span, error_text="history failed", now_ns=NOW)
-    assert transition.reply is not None
-    assert transition.reply.state is ReplyState.ACTIVE
-    assert transition.reply.last_span_id == "span-1"
-    assert transition.effects == (SettleSources("span-2", answered=False),)
-
-
-def test_a_refused_answer_over_unfinished_work_fails_instead_of_restoring_it() -> None:
-    """Its sources settled answered when the row was queued, so the retry the rollback waited for can never run."""
-    reply, span = _interrupted_turn_regenerating()
-    finished = rl.finish(reply, span, _write(reply, ReplyState.COMPLETED), now_ns=NOW)
-    assert finished.reply is not None
-    assert finished.row is not None
-    refused = rl.write_failed(
-        finished.reply,
-        _span_after(finished, "span-2"),
-        rl.FailedWrite(
-            rl.WriteFacts(
-                stage=WriteStage.FINAL,
-                sequence=finished.row.sequence,
-                span_id="span-2",
-                creates_event=False,
-                placeholder_only=False,
-            ),
-            reason="too_large",
-        ),
-        now_ns=NOW,
-    )
-    assert refused.reply is not None
-    assert refused.reply.state is ReplyState.FAILED
-    assert refused.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_DELIVERY_FAILED)
-
-
 def test_a_stop_after_an_unacknowledged_progress_edit_does_not_restore() -> None:
     """A progress edit Matrix may already show counts, so the Stop ends the reply cancelled instead of restoring."""
     reply, span = _regenerating()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     transition = rl.stopped(_progress(stop.reply, span), span, None, now_ns=NOW)
     assert transition.reply is not None
@@ -716,7 +617,7 @@ def test_a_stop_with_no_span_running_restores_a_regeneration_that_wrote_nothing(
     lost = rl.owner_lost(reply, span, rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True), now_ns=NOW)
     assert lost.reply is not None
     waiting = _span_after(lost, "span-2")
-    transition = rl.stop(lost.reply, waiting, StopFacts(receipt_order=8, newer_edit=False, span_live=False), now_ns=NOW)
+    transition = rl.stop(lost.reply, waiting, StopFacts(receipt_order=8, span_live=False), now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.COMPLETED
     assert transition.reply.presentation == "old"
@@ -728,7 +629,7 @@ def test_a_stop_with_no_span_running_restores_a_regeneration_that_wrote_nothing(
 def test_a_restart_applies_a_stop_its_regeneration_never_saw_as_a_live_stop_would() -> None:
     """The Stop committed, the process died before the span saw it: the answer the regeneration never replaced stands."""
     reply, span = _regenerating()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     for pending in (True, False):
         restarted = rl.owner_lost(
@@ -743,30 +644,6 @@ def test_a_restart_applies_a_stop_its_regeneration_never_saw_as_a_live_stop_woul
         assert restarted.reply.owed_write is None
         assert not restarted.reply.unapplied_stop
         assert restarted.effects == (SettleSources("span-2"),)
-
-
-def test_an_edit_older_than_the_replys_stop_is_not_claimed() -> None:
-    """The Stop covers edits received before it, even one whose claim raced it; a newer edit regenerates."""
-    reply, span = _turn()
-    reply, span = _ended(reply, span, SpanOutcome.CANCELLED)
-    reply = replace(
-        reply,
-        state=ReplyState.CANCELLED,
-        event_id="$reply",
-        stop_receipt_order=8,
-        stop_applied_receipt_order=8,
-    )
-    older = rl.claim(
-        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
-        _context(reply, span, edit_receipt_order=5),
-    )
-    assert older.outcome is Outcome.DUPLICATE
-    assert older.claimed is None
-    newer = rl.claim(
-        _request("span-3", delivery_id="$edit-2", driving_edit_id="$edit-2"),
-        _context(reply, span, edit_receipt_order=9),
-    )
-    assert newer.claimed is not None
 
 
 def test_a_released_resumes_sources_settle_like_any_once_its_approval_is_gone() -> None:
@@ -784,65 +661,6 @@ def test_a_released_resumes_sources_settle_like_any_once_its_approval_is_gone() 
     assert SettleSources("resume", answered=False) in superseded.effects
     removed = rl.removed_entity(unheld, ended, now_ns=NOW)
     assert removed.effects == (SettleSources("resume", answered=False),)
-
-
-def test_a_stop_racing_any_regeneration_exit_never_returns_to_unfinished_work() -> None:
-    """Suppression, a dispatch failure, or sources settling without an answer honor the Stop as a stopped exit does."""
-    for exit_rule in (
-        lambda reply, span: rl.suppress(reply, span, reason="suppressed", now_ns=NOW),
-        lambda reply, span: rl.dispatch_failed(reply, span, error_text="boom", now_ns=NOW),
-        lambda reply, span: rl.sources_settled_without_reply(reply, span, now_ns=NOW),
-    ):
-        reply, span = _interrupted_turn_regenerating()
-        stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
-        assert stop.reply is not None
-        ended = exit_rule(stop.reply, span)
-        assert ended.reply is not None
-        assert ended.reply.state is ReplyState.CANCELLED, ended
-        assert not ended.reply.unapplied_stop
-
-
-def test_a_refused_cancelled_final_never_returns_to_unfinished_work() -> None:
-    """The Stop's own row refused for good fails the reply instead of restoring a turn that still waits for its retry."""
-    reply, span = _interrupted_turn_regenerating()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
-    assert stop.reply is not None
-    stopped = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
-    assert stopped.reply is not None
-    assert stopped.row is not None
-    facts = WriteFacts(
-        WriteStage.FINAL,
-        stopped.row.sequence,
-        span.span_id,
-        creates_event=False,
-        placeholder_only=False,
-    )
-    refused = rl.write_failed(
-        stopped.reply,
-        _span_after(stopped, span.span_id),
-        rl.FailedWrite(facts, "refused"),
-        now_ns=NOW,
-    )
-    assert refused.reply is not None
-    assert refused.reply.state is ReplyState.FAILED
-    assert refused.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
-
-
-def test_a_stop_never_returns_a_regeneration_to_unfinished_work() -> None:
-    """Restoring a turn that still waits for its retry would run it after the Stop: the reply ends cancelled."""
-    reply, span = _interrupted_turn_regenerating()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
-    assert stop.reply is not None
-    stopped = rl.stopped(stop.reply, span, None, now_ns=NOW)
-    assert stopped.reply is not None
-    assert stopped.reply.state is ReplyState.CANCELLED
-    assert stopped.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_CANCELLED)
-    lost = rl.owner_lost(reply, span, rl.OwnerLostFacts(active_generation="gen-next", sources_pending=True), now_ns=NOW)
-    assert lost.reply is not None
-    waiting = _span_after(lost, "span-2")
-    no_span = rl.stop(lost.reply, waiting, StopFacts(receipt_order=8, newer_edit=False, span_live=False), now_ns=NOW)
-    assert no_span.reply is not None
-    assert no_span.reply.state is ReplyState.CANCELLED
 
 
 def test_an_edit_superseding_an_unanswered_regeneration_keeps_the_original_rollback() -> None:
@@ -903,15 +721,6 @@ def test_a_refused_final_restores_only_when_nothing_before_it_was_written() -> N
     assert failed.reply.state is ReplyState.FAILED
     # The progress it showed would read as still streaming: the delivery-failed note replaces it.
     assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
-
-
-def test_deleting_sources_never_restores_unfinished_work() -> None:
-    """The deletion ended the turn an unfinished rollback would go back to, so the reply is removed."""
-    reply, span = _interrupted_turn_regenerating()
-    transition = rl.sources_deleted(reply, span, now_ns=NOW)
-    assert transition.reply is not None
-    assert transition.reply.state is ReplyState.GONE
-    assert transition.reply.redaction_pending == ("$reply",)
 
 
 def test_stopped_without_a_recorded_stop_ends_the_reply_unmodeled() -> None:
@@ -980,7 +789,7 @@ def test_failure_after_the_terminal_row_is_a_duplicate() -> None:
 def test_failure_with_an_unapplied_stop_cancels() -> None:
     """A Stop takes precedence over an error."""
     reply, span = _turn()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=2, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=2, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     cancelled = rl.fail(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), phase="delivery", now_ns=NOW)
     assert cancelled.reply is not None
@@ -1001,7 +810,7 @@ def test_an_exit_that_rendered_nothing_still_honors_a_recorded_stop(
 ) -> None:
     """A Stop outranks a retry: the reply ends cancelled, its sources settle, and it owes the cancel note."""
     reply, span = _turn()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=2, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=2, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     transition = exit_without_write(stop.reply, span)
     assert transition.reply is not None
@@ -1045,7 +854,7 @@ def test_suppressing_after_visible_progress_ends_what_it_showed() -> None:
     assert suppressed.reply is not None
     assert suppressed.reply.state is ReplyState.CANCELLED
     assert suppressed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
-    stop = rl.stop(shown, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(shown, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     stopped = rl.suppress(stop.reply, span, reason="suppressed", now_ns=NOW)
     assert stopped.reply is not None
@@ -1215,7 +1024,7 @@ def test_a_resume_that_waited_in_place_stays_stoppable_through_its_approval() ->
     stop = rl.stop(
         resumed.reply,
         resume.claimed,
-        StopFacts(receipt_order=9, newer_edit=False, span_live=True),
+        StopFacts(receipt_order=9, span_live=True),
         now_ns=NOW,
     )
     assert stop.effects == (
@@ -1228,7 +1037,7 @@ def test_a_resume_that_waited_in_place_stays_stoppable_through_its_approval() ->
 def test_pause_with_an_unapplied_stop_defers_to_the_stop_path() -> None:
     """A Stop recorded before the pause wins."""
     reply, span = _turn()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=1, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=1, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     transition = rl.pause(
         stop.reply,
@@ -1243,7 +1052,7 @@ def test_pause_with_an_unapplied_stop_defers_to_the_stop_path() -> None:
 def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
     """A Stop on a paused reply requests approval failure; the settlement ends the reply."""
     reply, _span, _transition = _paused()
-    stop = rl.stop(reply, None, StopFacts(receipt_order=4, newer_edit=False, span_live=False), now_ns=NOW)
+    stop = rl.stop(reply, None, StopFacts(receipt_order=4, span_live=False), now_ns=NOW)
     assert stop.effects == (FenceApproval("approval-1", "cancelled_by_user"), WakeApproval("approval-1"))
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.PAUSED
@@ -1264,7 +1073,7 @@ def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
 def test_stop_on_an_in_place_wait_also_cancels_the_waiting_span() -> None:
     """A response-local wait's span is cancelled and its cards expire through the approval wake."""
     reply, span, _transition = _paused(in_place=True)
-    stop = rl.stop(reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=4, span_live=True), now_ns=NOW)
     assert CancelSpan(span.span_id, by_stop=True) in stop.effects
     assert FenceApproval("approval-1", "cancelled_by_user") in stop.effects
     assert WakeApproval("approval-1") in stop.effects
@@ -1273,7 +1082,7 @@ def test_stop_on_an_in_place_wait_also_cancels_the_waiting_span() -> None:
 def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
     """The cancelled wait shows the note, but the continuation's settlement, which its wake runs, settles the sources."""
     reply, span, _transition = _paused(in_place=True)
-    stop = rl.stop(reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(receipt_order=4, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     stopped = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
     assert stopped.reply is not None
@@ -1313,52 +1122,6 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
     assert rl.SettleSources(regeneration.claimed.span_id) in answer.effects
 
 
-def test_an_edit_waits_for_the_approval_a_stopped_wait_left_settling() -> None:
-    """The stopped wait's approval still holds the reply until its settlement ends it, so an edit's claim waits."""
-    reply, span, _transition = _paused(in_place=True)
-    stop = rl.stop(reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
-    assert stop.reply is not None
-    stopped = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
-    assert stopped.reply is not None
-    assert stopped.reply.approval_id == "approval-1"
-    regeneration = rl.claim(
-        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
-        _context(stopped.reply, _span_after(stopped, span.span_id)),
-    )
-    assert regeneration.outcome is Outcome.DEFERRED
-    assert regeneration.claimed is None
-    # Once the approval's finish deleted it, the same claim regenerates the reply.
-    freed = rl.claim(
-        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
-        _context(_held(stopped.reply, None), _span_after(stopped, span.span_id)),
-    )
-    assert freed.claimed is not None
-    assert freed.claimed.kind is SpanKind.REGENERATION
-
-
-def test_an_edit_waits_for_an_approval_a_stop_left_settling() -> None:
-    """B1: after a Stop ended the resume, the claim defers instead of taking the reply from its settling approval."""
-    reply, span, _transition = _paused()
-    resume = rl.claim(_request("resume", delivery_id="$source", approval_id="approval-1"), _context(reply, span))
-    assert resume.reply is not None
-    assert resume.claimed is not None
-    stop = rl.stop(
-        resume.reply,
-        resume.claimed,
-        StopFacts(receipt_order=2, newer_edit=False, span_live=True),
-        now_ns=NOW,
-    )
-    assert stop.reply is not None
-    exited = rl.stopped(stop.reply, resume.claimed, None, now_ns=NOW)
-    assert exited.reply is not None
-    edit = rl.claim(
-        _request("span-3", delivery_id="$edit", driving_edit_id="$edit"),
-        _context(exited.reply, _span_after(exited, "resume")),
-    )
-    assert edit.outcome is Outcome.DEFERRED
-    assert edit.claimed is None
-
-
 def test_a_wait_in_place_keeps_its_stop_button_until_its_span_ends() -> None:
     """The waiting span still runs, so the button stays through the wait and goes when the span ends."""
     reply, span = _turn()
@@ -1378,7 +1141,7 @@ def test_a_wait_in_place_keeps_its_stop_button_until_its_span_ends() -> None:
     resumed = rl.resumed_in_place(waiting.reply, span, approval_id="approval-1", now_ns=NOW)
     assert resumed.reply is not None
     assert resumed.reply.stop_button_event_id == "$button"
-    stop = rl.stop(waiting.reply, span, StopFacts(receipt_order=4, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(waiting.reply, span, StopFacts(receipt_order=4, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     ended = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
     assert ended.reply is not None
@@ -1462,7 +1225,7 @@ def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> No
     )
     assert note.reply is not None
     assert note.reply.state is ReplyState.FAILED
-    stop = rl.stop(note.reply, ended, StopFacts(receipt_order=9, newer_edit=False, span_live=False), now_ns=NOW)
+    stop = rl.stop(note.reply, ended, StopFacts(receipt_order=9, span_live=False), now_ns=NOW)
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.FAILED
     assert not stop.effects
@@ -1492,14 +1255,14 @@ def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None
     first = rl.stop(
         resume.reply,
         resume.claimed,
-        StopFacts(receipt_order=4, newer_edit=False, span_live=True),
+        StopFacts(receipt_order=4, span_live=True),
         now_ns=NOW,
     )
     assert first.reply is not None
     cancelled = rl.stopped(first.reply, resume.claimed, None, now_ns=NOW)
     assert cancelled.reply is not None
     ended = _span_after(cancelled, resume.claimed.span_id)
-    again = rl.stop(cancelled.reply, ended, StopFacts(receipt_order=6, newer_edit=False, span_live=False), now_ns=NOW)
+    again = rl.stop(cancelled.reply, ended, StopFacts(receipt_order=6, span_live=False), now_ns=NOW)
     assert again.effects == (FenceApproval("approval-1", "cancelled_by_user"), WakeApproval("approval-1"))
     assert again.reply is not None
     assert again.reply.state is ReplyState.ACTIVE
@@ -1638,7 +1401,7 @@ def test_stop_without_a_live_span_cancels_directly_and_owes_a_note() -> None:
     """An ownerless Stop settles the last span and owes the cancel note."""
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.RELEASED)
-    stop = rl.stop(reply, None, StopFacts(receipt_order=6, newer_edit=False, span_live=False), now_ns=NOW)
+    stop = rl.stop(reply, None, StopFacts(receipt_order=6, span_live=False), now_ns=NOW)
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.CANCELLED
     assert stop.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_CANCELLED)
@@ -1658,17 +1421,13 @@ def test_stop_without_a_live_span_cancels_directly_and_owes_a_note() -> None:
 
 
 def test_stop_guards() -> None:
-    """Older Stops and Stops a newer edit superseded are duplicates; a terminal reply keeps its answer."""
+    """Older Stops are duplicates; a terminal reply keeps its answer."""
     reply, span = _turn()
-    assert rl.stop(reply, span, StopFacts(1, newer_edit=True, span_live=True), now_ns=NOW).outcome is Outcome.DUPLICATE
-    first = rl.stop(reply, span, StopFacts(5, newer_edit=False, span_live=True), now_ns=NOW)
+    first = rl.stop(reply, span, StopFacts(5, span_live=True), now_ns=NOW)
     assert first.reply is not None
-    assert (
-        rl.stop(first.reply, span, StopFacts(4, newer_edit=False, span_live=True), now_ns=NOW).outcome
-        is Outcome.DUPLICATE
-    )
+    assert rl.stop(first.reply, span, StopFacts(4, span_live=True), now_ns=NOW).outcome is Outcome.DUPLICATE
     completed = replace(reply, state=ReplyState.COMPLETED, current_span_id=None)
-    terminal = rl.stop(completed, None, StopFacts(9, newer_edit=False, span_live=False), now_ns=NOW)
+    terminal = rl.stop(completed, None, StopFacts(9, span_live=False), now_ns=NOW)
     assert terminal.reply is not None
     assert terminal.reply.state is ReplyState.COMPLETED
     assert not terminal.reply.unapplied_stop
@@ -1808,7 +1567,7 @@ def test_a_regeneration_a_restart_lost_after_it_wrote_keeps_what_it_showed() -> 
     assert failed.reply.state is ReplyState.ACTIVE
     assert failed.effects == ()
     # A Stop ends it cancelled, below what the room shows.
-    stop = rl.stop(rerun.reply, rerun.claimed, StopFacts(9, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(rerun.reply, rerun.claimed, StopFacts(9, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     cancelled = rl.stopped(stop.reply, rerun.claimed, None, now_ns=NOW)
     assert cancelled.reply is not None
@@ -1973,7 +1732,7 @@ def test_owner_lost_fails_settled_orphans_with_a_restart_note() -> None:
 def test_owner_lost_applies_an_unapplied_stop() -> None:
     """A Stop the old instance never applied cancels the reply at startup."""
     reply, span = _turn()
-    stop = rl.stop(reply, span, StopFacts(2, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(reply, span, StopFacts(2, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     stale = replace(span, bot_generation=OLD_GEN)
     transition = rl.owner_lost(
@@ -2126,7 +1885,7 @@ def test_a_restart_leaves_a_span_approved_in_place_to_its_approval() -> None:
     reply, span, _transition = _paused(in_place=True)
     approved = rl.resumed_in_place(reply, span, approval_id="approval-1", now_ns=NOW)
     assert approved.reply is not None
-    stop = rl.stop(approved.reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    stop = rl.stop(approved.reply, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     restarted = rl.owner_lost(
         stop.reply,
@@ -2174,7 +1933,7 @@ def test_releasing_an_approval_a_stop_covers_ends_the_reply_instead_of_replaying
     stop = rl.stop(
         resume.reply,
         resume.claimed,
-        StopFacts(receipt_order=8, newer_edit=False, span_live=False),
+        StopFacts(receipt_order=8, span_live=False),
         now_ns=NOW,
     )
     assert stop.reply is not None
@@ -2362,7 +2121,7 @@ def test_stop_after_restart_during_an_approval_resume_fences_the_approval() -> N
     assert resume.reply is not None
     assert resume.claimed is not None
     stale_resume = replace(resume.claimed, bot_generation=OLD_GEN)
-    stop = rl.stop(resume.reply, stale_resume, StopFacts(3, newer_edit=False, span_live=False), now_ns=NOW)
+    stop = rl.stop(resume.reply, stale_resume, StopFacts(3, span_live=False), now_ns=NOW)
     assert stop.effects == (FenceApproval("approval-1", "cancelled_by_user"), WakeApproval("approval-1"))
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.ACTIVE
@@ -2375,7 +2134,7 @@ def test_direct_stop_ends_a_span_nobody_runs() -> None:
     created = rl.interactive_acknowledgement(_request("ack-span"), shown="ack")
     assert created.reply is not None
     ack = created.spans[0]
-    stop = rl.stop(created.reply, ack, StopFacts(2, newer_edit=False, span_live=False), now_ns=NOW)
+    stop = rl.stop(created.reply, ack, StopFacts(2, span_live=False), now_ns=NOW)
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.CANCELLED
     assert _span_after(stop, "ack-span").outcome is SpanOutcome.CANCELLED
@@ -2427,22 +2186,6 @@ def test_superseded_span_whose_sources_settle_ends_the_reply() -> None:
     orphan = rl.owner_lost(reply, span, rl.OwnerLostFacts(active_generation=GEN, sources_pending=False), now_ns=NOW)
     assert orphan.reply is not None
     assert orphan.reply.state is ReplyState.FAILED
-
-
-def test_restoring_an_active_reply_returns_it_to_its_waiting_span() -> None:
-    """A regeneration of a reply waiting for a retry, rolled back, leaves that retry claimable."""
-    reply, span = _turn()
-    reply, span = _ended(replace(reply, event_id="$reply"), span, SpanOutcome.RELEASED)
-    regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
-    assert regen.reply is not None
-    assert regen.claimed is not None
-    suppressed = rl.suppress(regen.reply, regen.claimed, reason="suppressed", now_ns=NOW)
-    assert suppressed.reply is not None
-    assert suppressed.reply.state is ReplyState.ACTIVE
-    assert suppressed.reply.last_span_id == span.span_id
-    retry = rl.claim(_request("span-3"), _context(suppressed.reply, span))
-    assert retry.claimed is not None
-    assert retry.claimed.kind is SpanKind.REPLAY
 
 
 def test_a_regeneration_whose_model_fails_before_it_shows_anything_is_retried() -> None:

@@ -46,7 +46,6 @@ class _LegacyIdentity(TypedDict):
     pending_event_ids: tuple[str, ...]
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
-    edit_receipt_order: int | None
     show_tool_calls: bool
     prepared_edit_record: TurnRecord | None
 
@@ -99,7 +98,6 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
         "response_event_id": str(attempt["response_event_id"]),
         "logical_source_event_ids": [str(child["event_id"]) for child in children if child["source_kind"] == "logical"],
         "discovery_event_ids": [str(child["event_id"]) for child in children if child["source_kind"] == "discovery"],
-        "edit_receipt_order": None if attempt["edit_receipt_order"] is None else int(attempt["edit_receipt_order"]),
     }
 
 
@@ -209,7 +207,6 @@ def _context_identity(entity_name: str, pending: list[str], context: Mapping[str
             "response_event_id": response_event_id,
             "logical_source_event_ids": pending,
             "discovery_event_ids": [],
-            "edit_receipt_order": None,
         }
     if not isinstance(raw, dict):
         raise _identity_error()
@@ -233,7 +230,6 @@ def _context_identity(entity_name: str, pending: list[str], context: Mapping[str
         "response_event_id": response_event_id,
         "logical_source_event_ids": _event_ids(stored.get("source_event_ids")),
         "discovery_event_ids": _event_ids(stored.get("discovery_event_ids", [])),
-        "edit_receipt_order": edit_receipt_order,
     }
 
 
@@ -347,7 +343,6 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _Lega
         "pending_event_ids": tuple(_event_ids(identity.get("pending_event_ids"))),
         "logical_source_event_ids": tuple(_event_ids(identity.get("logical_source_event_ids"))),
         "discovery_event_ids": tuple(_event_ids(identity.get("discovery_event_ids", []))),
-        "edit_receipt_order": cast("int | None", identity.get("edit_receipt_order")),
         "show_tool_calls": _required_bool(context.get("show_tool_calls")),
         "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
     }

@@ -6071,7 +6071,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         await admit_room_event(journal.principal("agent@alice"), "!room:example", "$edit")
         await store.mark_source_redacted("$edit", room_id="!room:example")
         # Runtime exact-event invalidation establishes the expectation independently of the harness.
-        assert store.is_revision_redacted("$edit")
+        assert store._is_revision_redacted("$edit")
     finally:
         await journal.close()
 

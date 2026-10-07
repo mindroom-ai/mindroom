@@ -99,7 +99,6 @@ async def store_main_continuation(store: PrincipalStore, continuation: ApprovalC
                 "pending_event_ids": list(continuation.source_event_ids),
                 "logical_source_event_ids": list(continuation.sources.logical_source_event_ids),
                 "discovery_event_ids": list(continuation.sources.discovery_event_ids),
-                "edit_receipt_order": continuation.sources.edit_receipt_order,
             },
         }
         transaction.execute(

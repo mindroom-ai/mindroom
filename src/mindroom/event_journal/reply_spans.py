@@ -25,7 +25,6 @@ def _rollback_json(rollback: Rollback | None) -> str | None:
             "presentation": rollback.presentation,
             "frozen_display": rollback.frozen_display,
             "state": rollback.state.value,
-            "last_span_id": rollback.last_span_id,
             "possibly_shown": rollback.possibly_shown,
             "possibly_shown_seq": rollback.possibly_shown_seq,
         },
@@ -51,7 +50,6 @@ def _rollback(stored: str | None) -> Rollback | None:
         presentation=presentation,
         frozen_display=frozen_display if isinstance(frozen_display, str) else None,
         state=ReplyState(data["state"]),
-        last_span_id=last_span_id if isinstance((last_span_id := data.get("last_span_id")), str) else None,
         possibly_shown=shown if isinstance((shown := data.get("possibly_shown")), str) else None,
         possibly_shown_seq=shown_seq if isinstance((shown_seq := data.get("possibly_shown_seq")), int) else None,
     )

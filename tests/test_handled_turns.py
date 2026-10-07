@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import constants
 from mindroom.event_journal.store import TurnRecordStore
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -785,15 +784,6 @@ async def test_source_event_revisions_persist_across_restart_and_run_recovery(
 
     assert reloaded is not None
     assert reloaded.source_event_revisions == revisions
-
-    run_metadata = TurnRecordCodec.to_run_metadata(record)
-    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = "$second"
-    run_metadata[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = "$response"
-    recovered = TurnRecordCodec.from_run_metadata(run_metadata)
-
-    assert recovered is not None
-    assert recovered.source_event_revisions == revisions
-    assert recovered.requester_id == "@user:example.com"
 
 
 @pytest.mark.asyncio

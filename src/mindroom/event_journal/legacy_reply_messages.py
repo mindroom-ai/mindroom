@@ -296,9 +296,5 @@ def _paused_reply(
         presentation=shown,
         now_ns=now_ns,
         event_id=continuation.response_event_id,
-        # A regeneration's reply keeps the order of the edit it answers, which an older Stop then misses.
-        edit_receipt_order=(
-            continuation.sources.edit_receipt_order if paused.kind is rl.SpanKind.REGENERATION else None
-        ),
     )
     return _Adoption(approval_id=continuation.approval_id, reply=reply, spans=(paused,))

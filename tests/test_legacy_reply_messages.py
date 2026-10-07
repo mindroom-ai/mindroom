@@ -296,7 +296,7 @@ async def test_a_stored_superseded_approval_is_discarded_at_adoption(journal_sto
 
 
 async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store: EventJournalStore) -> None:
-    """A paused regeneration main left still answers the edit it selected once its reply is adopted."""
+    """A paused regeneration main left keeps the edit it selected once its reply is adopted."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
@@ -309,7 +309,7 @@ async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store:
     )
     paused = replace(
         _continuation("waiting"),
-        sources=ResponseSources(("$source",), ("$source",), edit_receipt_order=20),
+        sources=ResponseSources(("$source",), ("$source",)),
         prepared_edit_record=selected,
     )
     await _main_continuation(principal, paused)
@@ -319,10 +319,3 @@ async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store:
     assert adopted is not None
     assert adopted.span_id is not None
     assert adopted.prepared_edit_record == selected
-    assert adopted.sources.edit_receipt_order == 20
-    # A Stop received before the edit misses its regeneration and leaves the approval alone.
-    stop = await principal.replies.record_stop("$reply", 10)
-    assert stop is not None
-    assert stop.transition.outcome is rl.Outcome.DUPLICATE
-    assert stop.post_commit == ()
-    assert (await principal.approval_continuation("approval-1")) == adopted

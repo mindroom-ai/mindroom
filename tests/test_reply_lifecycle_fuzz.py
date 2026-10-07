@@ -340,7 +340,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             interactive_span=None,
             durable_write_debt=reply is not None and self._unresolved_rows(),
             active_generation=self.generation,
-            edit_receipt_order=None if edit is None else self.model.edit_orders[edit],
         )
         transition = rl.claim(request, context)
         if transition.outcome is Outcome.DEFERRED and edit is not None and edit not in self.model.deferred:
@@ -456,7 +455,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 # Its source settled meanwhile; the source gate turns the retry away.
                 self.model.deferred.remove(edit)
                 continue
-            if rl.claim_blocked(reply, durable_write_debt=self._unresolved_rows(), driving_edit=True):
+            if rl.claim_blocked(reply, durable_write_debt=self._unresolved_rows()):
                 return
             self.model.deferred.remove(edit)
             if reply.current_span_id is not None:
@@ -1050,8 +1049,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self._current() or self._last(),
             StopFacts(
                 receipt_order=receipt,
-                # As the store decides it: the edit the reply's regeneration answers outranks an older Stop.
-                newer_edit=(reply.edit_receipt_order or 0) > receipt,
                 span_live=live is not None,
             ),
             now_ns=self._now(),
@@ -1529,23 +1526,6 @@ def test_a_refused_answer_of_a_regeneration_approved_in_place_still_commits_its_
     assert reply is not None
     assert reply.state is ReplyState.FAILED
     assert machine.model.consumed == {"$edit-1"}
-
-
-def test_an_abandoned_regeneration_of_unfinished_work_leaves_its_turn_for_the_retry() -> None:
-    """I16 on a regeneration that failed before writing over a partial reply a retry waits to finish."""
-    machine = ReplyLifecycleMachine()
-    machine.start_turn()
-    machine.enqueue_initial(placeholder=False)
-    machine.acknowledge_row()
-    machine.release(superseded=False)
-    machine.regenerate()
-    machine.dispatch_failure()
-    machine.a_turn_waiting_for_its_replay_is_unanswered()
-    reply = machine.model.reply
-    assert reply is not None
-    assert reply.state is ReplyState.ACTIVE
-    assert not machine.model.turn_answered
-    machine.teardown()
 
 
 @pytest.mark.timeout(300)

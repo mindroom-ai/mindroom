@@ -73,6 +73,7 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.event_journal import (
     AdmissionResult,
     ConversationPage,
@@ -95,7 +96,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
+from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -2517,17 +2518,58 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
     return rebuilt
 
 
+async def finish_edit_regenerations(bot: RuntimeBot) -> None:
+    """Wait for the regenerations edits started off the room's lane, as a test checks their effects."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await asyncio.gather(*tuple(runner._inbox_response_tasks), return_exceptions=True)
+
+
+def journal_edit_regenerator_deps(bot: RuntimeBot, principal: PrincipalStore) -> dict[str, object]:
+    """Return the edit regenerator collaborators that read ``principal``, for a test that moved the bot's replies there."""
+
+    async def later_human_message(record: TurnRecord) -> bool:
+        target = record.conversation_target
+        assert target is not None
+        return await principal.later_message_exists(
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            source_event_ids=record.source_event_ids,
+            excluded_senders=persisted_bot_user_ids(bot.runtime_paths),
+        )
+
+    return {
+        "start_regeneration": bot._start_regeneration,
+        "reply_for_sources": principal.replies.for_sources,
+        "later_human_message": later_human_message,
+    }
+
+
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
     install_runtime_journal_support(bot)
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
-    rebuilt_changes = {
-        name: value for name, value in changes.items() if name in regenerator_field_names or name == "logger"
-    }
-    if "logger" in rebuilt_changes:
-        logger = rebuilt_changes.pop("logger")
-        rebuilt_changes["get_logger"] = lambda logger=logger: logger
+    store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
+    unknown = set(changes) - regenerator_field_names - store_field_names - {"generate_response"}
+    assert not unknown, f"not an edit regenerator or turn store collaborator: {sorted(unknown)}"
+    rebuilt_changes = {name: value for name, value in changes.items() if name in regenerator_field_names}
+    if "generate_response" in changes:
+        generate_response = cast("Callable[[ResponseRequest], Awaitable[object]]", changes["generate_response"])
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+
+        def start_regeneration(request: ResponseRequest) -> asyncio.Task[None]:
+            async def regenerate() -> None:
+                await generate_response(request)
+
+            return runner.track_inbox_response(
+                regenerate(),
+                name=f"edit_regeneration:{request.correlation_id}",
+                room_id=request.response_envelope.target.room_id,
+                recovery_proof_ready=lambda: True,
+                source_event_ids=request.sources.pending_event_ids,
+            )
+
+        rebuilt_changes["start_regeneration"] = start_regeneration
     if "receipt_order" not in rebuilt_changes:
         receipt_orders = count(1)
 
@@ -2535,7 +2577,6 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
             return next(receipt_orders)
 
         rebuilt_changes["receipt_order"] = next_receipt_order
-    store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:
         replace_turn_store_deps(bot, **store_changes)

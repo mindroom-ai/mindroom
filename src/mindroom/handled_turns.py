@@ -69,22 +69,14 @@ __all__ = [
     "SourceEventRevision",
     "TurnRecord",
     "TurnRecordCodec",
-    "answer_event_id_of_run",
     "canonicalize_turn_record",
     "merge_edit_facts",
     "resolve_turn_record",
 ]
 
-_TURN_RECORD_SCHEMA_VERSION = 1
-
 
 class TurnRecordCodec:
     """Encode the canonical record into its two intentional physical projections."""
-
-    @staticmethod
-    def schema_version() -> int:
-        """Return the persisted schema version emitted by this codec."""
-        return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
     def _to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901, PLR0912
@@ -216,93 +208,24 @@ class TurnRecordCodec:
         return restore_legacy_revision_replay(turn_record, record)
 
     @staticmethod
-    def to_run_metadata(record: TurnRecord) -> dict[str, object]:  # noqa: C901
-        """Project one record into the recoverable subset stored with an Agno run."""
+    def to_run_metadata(record: TurnRecord) -> dict[str, object]:
+        """Project the record's sources, prompts, and revisions that history and request logs read from an Agno run."""
         if not record.source_event_ids:
             return {}
         metadata: dict[str, object] = {
-            constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
             constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(record.source_event_ids),
         }
         if record.discovery_event_ids:
             metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] = list(record.discovery_event_ids)
-        if record.redacted_source_event_ids:
-            metadata[constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY] = list(
-                record.redacted_source_event_ids,
-            )
         if record.source_event_prompts is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(record.source_event_prompts)
         if record.source_event_revisions is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY] = {
                 event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
             }
-        if record.source_event_metadata is not None:
-            metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
-                event_id: source_metadata._to_record()
-                for event_id, source_metadata in record.source_event_metadata.items()
-            }
-        if record.response_owner is not None:
-            metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = record.response_owner
         if record.requester_id is not None:
             metadata["requester_id"] = record.requester_id
-        if record.history_scope is not None:
-            metadata[constants.MATRIX_HISTORY_SCOPE_METADATA_KEY] = record.history_scope.to_metadata()
-        if record.conversation_target is not None:
-            metadata[constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY] = record.conversation_target.to_metadata()
         return metadata
-
-    @staticmethod
-    def from_run_metadata(metadata: Mapping[str, object]) -> TurnRecord | None:
-        """Parse current Agno metadata, using response linkage as evidence that the turn was answered.
-
-        The answer's event stays with the history: reply records own it, and
-        ``answer_event_id_of_run`` reads it for answers older than their retention.
-        """
-        if metadata.get(constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY) != TurnRecordCodec.schema_version():
-            return None
-        anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
-        if not isinstance(anchor_event_id, str) or not anchor_event_id:
-            return None
-        raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        raw_discovery_event_ids = metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
-        raw_redacted_source_event_ids = metadata.get(
-            constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY,
-        )
-        source_event_ids = (
-            canonical_source_event_ids(raw_source_event_ids)
-            if isinstance(raw_source_event_ids, list)
-            else (anchor_event_id,)
-        ) or (anchor_event_id,)
-        answered = answer_event_id_of_run(metadata) is not None
-        return TurnRecord.create(
-            source_event_ids,
-            discovery_event_ids=(
-                canonical_source_event_ids(raw_discovery_event_ids) if isinstance(raw_discovery_event_ids, list) else ()
-            ),
-            redacted_source_event_ids=(
-                canonical_source_event_ids(raw_redacted_source_event_ids)
-                if isinstance(raw_redacted_source_event_ids, list)
-                else ()
-            ),
-            anchor_event_id=anchor_event_id,
-            completed=answered,
-            source_event_prompts=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)),
-            source_event_revisions=_mapping_or_none(
-                metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY),
-            ),
-            source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
-            response_owner=canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
-            requester_id=canonical_optional_string(metadata.get("requester_id")),
-            history_scope=HistoryScope.from_metadata(metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY)),
-            conversation_target=MessageTarget.from_metadata(
-                metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
-            ),
-        )
-
-
-def answer_event_id_of_run(metadata: Mapping[str, object]) -> str | None:
-    """Return the Matrix event that shows one history run's answer."""
-    return canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
 
 
 @dataclass(frozen=True)

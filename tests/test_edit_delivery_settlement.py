@@ -22,12 +22,17 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
+from mindroom.reply_lifecycle import SpanSources
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import canonicalize_turn_record
-from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import (
+    journal_edit_regenerator_deps,
+    patch_response_runner_module,
+    unwrap_extracted_collaborator,
+)
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import final_in_span
+from tests.reply_span_helpers import final_in_span, seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTests
 from tests.test_response_delivery_gateway import _gateway, _identity
@@ -130,9 +135,15 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=1),
-        generate_response=runner.generate_response,
-        reply_for_sources=principal.replies.for_sources,
-        adopt_historical_answer=runner.deps.replies.adopt_historical_answer,
+        **journal_edit_regenerator_deps(bot, principal),
+    )
+    await seed_finished_reply(
+        principal,
+        answer_id,
+        sources=SpanSources(pending=(), logical=(source_id,)),
+        room_id=room_id,
+        thread_id=None,
+        entity_name="general",
     )
     effects_started = asyncio.Event()
     never_finish = asyncio.Event()
@@ -169,14 +180,13 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             apply_post_response_effects=post_response,
         ),
     ):
-        task = asyncio.create_task(
-            regenerator.handle_message_edit(
-                nio.MatrixRoom(room_id, bot.matrix_id.full_id),
-                event,
-                EventInfo.from_event(event.source),
-                "@user:localhost",
-            ),
+        assert await regenerator.handle_message_edit(
+            nio.MatrixRoom(room_id, bot.matrix_id.full_id),
+            event,
+            EventInfo.from_event(event.source),
+            "@user:localhost",
         )
+        (task,) = runner._inbox_response_tasks
         try:
             async with asyncio.timeout(10):
                 await effects_started.wait()
@@ -289,7 +299,7 @@ async def test_stale_ledger_write_cannot_erase_consumption_before_publication(
                     response_text="answer",
                     identity=replace(
                         _identity("$edit"),
-                        sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1),
+                        sources=ResponseSources(("$edit",), ("$source",)),
                     ),
                     tool_trace=None,
                     extra_content=None,
@@ -381,7 +391,7 @@ async def test_edit_delivery_process_boundaries(
         target=target,
         existing_event_id="$answer",
         response_text="generated answer",
-        identity=replace(_identity("$edit"), sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1)),
+        identity=replace(_identity("$edit"), sources=ResponseSources(("$edit",), ("$source",))),
         tool_trace=None,
         extra_content=None,
     )
@@ -501,7 +511,7 @@ async def test_edit_consumption_preserves_intervening_authority(
                 response_text="answer",
                 identity=replace(
                     _identity("$edit"),
-                    sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1),
+                    sources=ResponseSources(("$edit",), ("$source",)),
                 ),
                 tool_trace=None,
                 extra_content=None,

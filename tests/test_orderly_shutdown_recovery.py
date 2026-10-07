@@ -36,7 +36,6 @@ from tests.test_edit_regenerator import (
     NEW_RESPONSE_EVENT_ID,
     ORIGINAL_EVENT_ID,
     USER_ID,
-    _acknowledge_test_edit,
     _edit_event,
     _harness,
     _turn_record,
@@ -88,7 +87,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store, agent_name=AGENT_NAME)
     await store.record_responded_turn(_turn_record(source_event_prompts={ORIGINAL_EVENT_ID: "original"}))
-    harness = _harness(tmp_path, turn_record=None)
+    harness = _harness(tmp_path, turn_record=None, journal_store=journal_store)
     started = asyncio.Event()
     attempt = ResponseAttemptRunner(
         ResponseAttemptDeps(
@@ -117,11 +116,17 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
         )
         return None if cancelled else result
 
-    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store, generate_response=generate)
+    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store)
+    harness.generate_response.side_effect = generate
 
     async def callback(room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
-        await harness.regenerator.handle_message_edit(room, event, EventInfo.from_event(event.source), USER_ID)
-        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        handed_off = await harness.regenerator.handle_message_edit(
+            room,
+            event,
+            EventInfo.from_event(event.source),
+            USER_ID,
+        )
+        return TurnDispatchOutcome.DEFERRED if handed_off else TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     dispatcher = _dispatcher(principal, callback)
     bot = _bot(tmp_path / "bot")
@@ -133,19 +138,25 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     dispatcher.start()
     await asyncio.wait_for(started.wait(), timeout=2)
     await bot.stop(shutdown_intent=shutdown_intent)
+    # The process ends with it the regeneration running off the room's lane.
+    for regeneration in harness.regenerations:
+        regeneration.cancel()
+    await asyncio.gather(*harness.regenerations, return_exceptions=True)
 
     assert await principal.is_pending(EDIT_EVENT_ID)
     interrupted = store.get_turn_record(ORIGINAL_EVENT_ID)
     assert interrupted is not None
     assert not interrupted.source_event_revisions
 
-    async def recover(request: ResponseRequest) -> str:
-        await _acknowledge_test_edit(tmp_path, request, store, journal_store=journal_store)
+    async def recover(_request: ResponseRequest) -> str:
+        # Its answer's span settles the edit it answered.
+        await principal.settle(EDIT_EVENT_ID)
         return NEW_RESPONSE_EVENT_ID
 
-    harness.regenerator.deps = replace(harness.regenerator.deps, generate_response=recover)
+    harness.generate_response.side_effect = recover
     recovered = _dispatcher(principal, callback)
     assert await recovered.drain_once() == 1
+    await asyncio.gather(*harness.regenerations)
     _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store, agent_name=AGENT_NAME)
     recovered_record = reopened.get_turn_record(ORIGINAL_EVENT_ID)

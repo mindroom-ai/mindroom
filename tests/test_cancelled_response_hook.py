@@ -47,6 +47,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.reply_lifecycle import SpanSources
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
@@ -55,6 +56,7 @@ from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    finish_edit_regenerations,
     ignore_final_delivery_handoff,
     install_runtime_journal_support,
     make_matrix_client_mock,
@@ -66,7 +68,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
-from tests.reply_span_helpers import reply_span
+from tests.reply_span_helpers import reply_span, seed_finished_reply
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -461,6 +463,14 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         history_scope=HistoryScope(kind="team", scope_id="team_bot"),
         conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
     )
+    await seed_finished_reply(
+        bot.journal_principal(),
+        "$response",
+        sources=SpanSources(pending=(), logical=("$original",)),
+        room_id="!room:localhost",
+        thread_id=None,
+        entity_name="team_bot",
+    )
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_team_bot:localhost")
     edit_event = MagicMock()
     edit_event.event_id = "$edit"
@@ -518,6 +528,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
             event_info,
             requester_user_id="@user:localhost",
         )
+        await finish_edit_regenerations(bot)
 
     mock_emit.assert_awaited_once()
 

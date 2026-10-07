@@ -50,7 +50,6 @@ from mindroom.entity_resolution import current_internal_sender_ids, entity_ident
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.event_journal import (
     INTERRUPTED_FAILURE_REASON,
-    SUPERSEDED_FAILURE_REASON,
     ApprovalAdvance,
     ApprovalContinuation,
     ApprovalMemoryTurn,
@@ -165,7 +164,7 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_origin import SenderKind
-from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
+from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
@@ -643,9 +642,7 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    prepare_source_turn: (
-        Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool | EditPreparation]] | None
-    ) = None
+    prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool]] | None = None
     # Runs once the turn claimed its reply, before the response is prepared: an edit prunes the history it
     # replaces only then, so a Stop that refuses the claim leaves that history whole.
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
@@ -3369,7 +3366,6 @@ class ResponseRunner:
             placeholder=TEAM_PLACEHOLDER if history_scope.kind == "team" else AGENT_PLACEHOLDER,
             show_tool_calls=self._show_tool_calls(),
             driving_edit_id=request.response_envelope.source_event_id if regeneration else None,
-            edit_receipt_order=request.sources.edit_receipt_order if regeneration else None,
             existing_event_id=request.existing_event_id,
             interactive_span_id=request.interactive_span_id,
             prepared_edit=request.prepared_edit_record,
@@ -3489,12 +3485,6 @@ class ResponseRunner:
             locked_operation=ownership_disappeared,
             signal_queued_message=False,
         )
-
-    async def settle_superseded_approval(self, continuation: ApprovalContinuation) -> None:
-        """Expire a superseded approval's cards and finish it without a note, outside any conversation lock."""
-        if not await self._approval_responses.settle_failure(continuation, SUPERSEDED_FAILURE_REASON):
-            # Its source worker retries what did not settle.
-            self.deps.retry_approval_sources(continuation.room_id, tuple(continuation.source_event_ids))
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
         """Transfer one durable continuation out of the journal lane and into response ownership."""
@@ -4016,20 +4006,6 @@ class ResponseRunner:
             else False
         )
         handle = current_span()
-        if preparation is EditPreparation.REBUILD:
-            if handle is not None and not handle.exited:
-                confirms = handle.unconfirmed_progress
-                await self.deps.delivery_gateway.end_reply_span(
-                    handle,
-                    lambda reply, span: rl.release(
-                        reply,
-                        span,
-                        now_ns=time.time_ns(),
-                        outcome=rl.SpanOutcome.SUPERSEDED,
-                        confirms=confirms,
-                    ),
-                )
-            return None
         if preparation:
             self.deps.logger.info(
                 "response_suppressed_for_terminal_source",

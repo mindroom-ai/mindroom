@@ -10,14 +10,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
-from mindroom.reply_lifecycle import SpanKind
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import membership_state, outbox, reply_messages, reply_spans, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .legacy_response_attempts import legacy_identity
-from .models import SUPERSEDED_FAILURE_REASON, DeliveryStage
+from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -320,7 +319,6 @@ class _PausedReply:
     pending_event_ids: tuple[str, ...]
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
-    edit_receipt_order: int | None
     show_tool_calls: bool
     prepared_edit_record: TurnRecord | None
 
@@ -357,7 +355,6 @@ def _paused_reply(
         pending_event_ids=span.sources.pending,
         logical_source_event_ids=span.sources.logical,
         discovery_event_ids=span.sources.discovery,
-        edit_receipt_order=reply.edit_receipt_order if span.kind is SpanKind.REGENERATION else None,
         show_tool_calls=_shows_tool_calls(reply.presentation),
         prepared_edit_record=(
             None
@@ -387,7 +384,6 @@ def _from_rows(
         identity.pending_event_ids,
         identity.logical_source_event_ids,
         identity.discovery_event_ids,
-        identity.edit_receipt_order,
     )
     calls = tuple(
         ApprovalCall(
@@ -871,15 +867,13 @@ def fence(
 ) -> ApprovalContinuation | None:
     """Fence a continuation for failure on behalf of its reply, in whatever state it holds.
 
-    A Stop on a paused reply and an edit superseding it fence the approval in
-    their own transaction; a frozen successful FINAL still wins. Supersession
-    also replaces a failure still settling: the regeneration owns the reply, so
-    the old approval's cleanup publishes nothing.
+    A Stop on a paused reply fences the approval in its own transaction; a
+    frozen successful FINAL still wins.
     """
     current = get(transaction, principal_id, approval_id=approval_id)
     if current is None or answer_frozen(transaction, principal_id, current):
         return None
-    states = (*_FENCEABLE, "failing") if reason == SUPERSEDED_FAILURE_REASON else _FENCEABLE
+    states = _FENCEABLE
     placeholders = ", ".join("?" for _ in states)
     updated = transaction.fetchone(
         f"""
@@ -894,7 +888,7 @@ def fence(
 
 
 def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str) -> ApprovalContinuation | None:
-    """Lock a paused run that may end: after terminal FINAL delivery, proven failed-response deletion, or supersession.
+    """Lock a paused run that may end: after terminal FINAL delivery or proven failed-response deletion.
 
     The caller applies the finish to the reply it paused while the run still
     holds that reply, then deletes the run with ``delete``.
@@ -902,9 +896,6 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return None
-    if continuation.state == "failing" and continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
-        # An edit regenerates the reply; the old approval publishes nothing.
-        return continuation
     delivered = transaction.fetchone(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox

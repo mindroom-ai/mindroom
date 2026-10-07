@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal.approval_continuations import SUPERSEDED_FAILURE_REASON
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation, TurnCompleted
 from mindroom.event_journal.turn_records import encode_prepared_edit
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
@@ -191,8 +190,6 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Tells the turn ledger about a turn a reply's settlement already recorded answered.
     complete_turn: Callable[[TurnRecord], Awaitable[object]]
-    # Starts the cleanup of an approval an edit superseded, outside any conversation.
-    clean_up_superseded: Callable[[ApprovalContinuation], None]
     clock: Callable[[], int] = field(default=time.time_ns)
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
@@ -224,7 +221,6 @@ class ReplyRuntime:
         if finished is None:
             return False
         await self.run_effects(finished.post_commit)
-        self._retry_waiting_claims()
         return True
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
@@ -233,23 +229,12 @@ class ReplyRuntime:
         if released is None:
             return False
         await self.run_effects(released.post_commit)
-        self._retry_waiting_claims()
         return True
-
-    def _retry_waiting_claims(self) -> None:
-        """A claim an approval held back may run now that the run is gone."""
-        for reply_id in tuple(self._waiting_claims):
-            self.claim_may_proceed(reply_id)
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
         """Run a fenced approval's failure settlement."""
         continuation = await self.store.approval_continuation(approval_id)
         if continuation is None:
-            return
-        if continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
-            # An edit superseded it: nothing of it is shown any more, so its
-            # cleanup runs now, outside the conversation the regeneration holds.
-            self.clean_up_superseded(continuation)
             return
         # Its source worker settles it once whatever owns the source lets go of it.
         self.retry_sources(continuation.room_id, continuation.source_event_ids)
@@ -259,8 +244,6 @@ class ReplyRuntime:
         reply_id: str,
         room_id: str,
         sources: tuple[str, ...],
-        *,
-        driving_edit: bool,
     ) -> None:
         """Retry sources once what blocked their claim on the reply is gone, instead of retrying at once.
 
@@ -272,10 +255,8 @@ class ReplyRuntime:
         if reply is None or not rl.claim_blocked(
             reply,
             durable_write_debt=await self.store.replies.has_unresolved_rows(reply_id),
-            driving_edit=driving_edit,
         ):
-            # A note still owed and not yet enqueued wakes it when its row
-            # resolves; an approval's finish or release wakes it when the run is gone.
+            # A note still owed and not yet enqueued wakes it when its row resolves.
             self.claim_may_proceed(reply_id)
 
     def claim_may_proceed(self, reply_id: str) -> None:
@@ -361,7 +342,6 @@ class ReplyRuntime:
         placeholder: str = AGENT_PLACEHOLDER,
         show_tool_calls: bool = True,
         driving_edit_id: str | None = None,
-        edit_receipt_order: int | None = None,
         existing_event_id: str | None = None,
         approval_id: str | None = None,
         interactive_span_id: str | None = None,
@@ -394,7 +374,6 @@ class ReplyRuntime:
                     ClaimLookup(
                         interactive_span_id=interactive_span_id,
                         existing_event_id=existing_event_id,
-                        edit_receipt_order=edit_receipt_order,
                     ),
                 ),
             )
@@ -420,31 +399,9 @@ class ReplyRuntime:
                 transition.reply.reply_id,
                 room_id,
                 sources.pending,
-                driving_edit=driving_edit_id is not None,
             )
             return ClaimRefused.DEFERRED
         return _handle_for(self, transition.reply, transition.claimed, empty)
-
-    async def adopt_historical_answer(
-        self,
-        event_id: str,
-        *,
-        sources: rl.SpanSources,
-        room_id: str,
-        thread_id: str | None,
-    ) -> None:
-        """Give an answer older than the reply records its reply, before an edit prunes the history naming it.
-
-        Its span is keyed by the answer's event, which no edit driving a later span shares.
-        """
-        request = await self._new_request(
-            delivery_id=event_id,
-            sources=sources,
-            room_id=room_id,
-            thread_id=thread_id,
-            empty=Presentation(),
-        )
-        await self.store.replies.adopt_historical_answer(request, event_id)
 
     async def _new_request(
         self,
@@ -518,7 +475,6 @@ class ReplyRuntime:
                 transition.reply.reply_id,
                 continuation.room_id,
                 sources.pending_event_ids,
-                driving_edit=False,
             )
             return None, None
         return claimed, _handle_for(self, transition.reply, transition.claimed, empty)

@@ -32,6 +32,7 @@ from tests.ai_user_id_helpers import (
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import bind_runtime_paths, patch_response_runner_module, unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
+from tests.reply_span_helpers import seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
@@ -251,12 +252,13 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
         },
     )
 
-    # The edit regenerator adopts the prior answer before it regenerates it.
-    await bot._reply_runtime.adopt_historical_answer(
+    await seed_finished_reply(
+        bot.journal_principal(),
         "$prior_answer",
         sources=SpanSources(pending=(), logical=("$event",)),
         room_id=regen_request.room_id,
         thread_id=regen_request.thread_id,
+        entity_name=bot.agent_name,
     )
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),

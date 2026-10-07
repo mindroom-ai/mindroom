@@ -289,13 +289,7 @@ def approval_finished(
     reason = continuation.failure_reason
     disposition: rl.FailureDisposition | None = None
     if failed:
-        disposition = (
-            "cancelled_by_user"
-            if reason == "cancelled_by_user"
-            else "superseded"
-            if reason == approval_continuations.SUPERSEDED_FAILURE_REASON
-            else "failed"
-        )
+        disposition = "cancelled_by_user" if reason == "cancelled_by_user" else "failed"
     return apply(
         transaction,
         principal_id,
@@ -349,7 +343,6 @@ class ClaimLookup:
 
     interactive_span_id: str | None = None
     existing_event_id: str | None = None
-    edit_receipt_order: int | None = None
 
 
 def claim(
@@ -392,7 +385,6 @@ def claim(
         interactive_span=interactive,
         durable_write_debt=reply is not None and has_unresolved_rows(transaction, principal_id, reply.reply_id),
         active_generation=active_generation,
-        edit_receipt_order=lookup.edit_receipt_order,
     )
     if reply is None or request.driving_edit_id is not None:
         # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
@@ -400,25 +392,6 @@ def claim(
         if admitted is not None:
             request = replace(request, membership_epoch=admitted[1])
     return apply(transaction, principal_id, rl.claim(request, context))
-
-
-def _adopt_historical_answer(
-    transaction: Transaction,
-    principal_id: str,
-    request: rl.ClaimRequest,
-    event_id: str,
-) -> Reply:
-    """Give an answer older than the reply records its reply, unless one already holds its event or sources."""
-    found = reply_messages.for_event(transaction, principal_id, event_id) or reply_messages.for_sources(
-        transaction,
-        principal_id,
-        request.sources.logical,
-    )
-    if found is not None:
-        return found
-    adopted = apply(transaction, principal_id, rl.historical_answer(request, event_id=event_id)).transition.reply
-    assert adopted is not None
-    return adopted
 
 
 # ---------------------------------------------------------------------------
@@ -448,17 +421,11 @@ def _record_stop(
             span,
             rl.StopFacts(
                 receipt_order=receipt_order,
-                newer_edit=_newer_edit(reply, receipt_order),
                 span_live=_runs_here(transaction, principal_id, reply, span),
             ),
             now_ns=time.time_ns(),
         ),
     )
-
-
-def _newer_edit(reply: Reply, receipt_order: int) -> bool:
-    """Return whether a regeneration of the reply answers an edit newer than this Stop, which it then misses."""
-    return (reply.edit_receipt_order or 0) > receipt_order
 
 
 def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:
@@ -758,7 +725,6 @@ def acknowledge_row(
             current,
             rl.StopFacts(
                 receipt_order=receipt_order,
-                newer_edit=_newer_edit(bound, receipt_order),
                 span_live=_runs_here(transaction, principal_id, bound, current),
             ),
             now_ns=now_ns,
@@ -853,12 +819,6 @@ class ReplyStore:
         """Find and claim the reply one span continues."""
         return await self._backend.write(
             lambda transaction: claim(transaction, self._principal_id, request, lookup),
-        )
-
-    async def adopt_historical_answer(self, request: rl.ClaimRequest, event_id: str) -> Reply:
-        """Give an answer older than the reply records its reply, unless one already holds its event or sources."""
-        return await self._backend.write(
-            lambda transaction: _adopt_historical_answer(transaction, self._principal_id, request, event_id),
         )
 
     async def decide(
