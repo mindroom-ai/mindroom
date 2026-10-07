@@ -1355,11 +1355,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert not self.model.deferred, self.model.deferred
         reply = self.model.reply
         if reply is not None and self.model.removed:
-            # No bot remains for a removed entity: its reply ended owing nothing, and no source waits on it.
+            # No bot remains for a removed entity: its reply ended, and no source waits on it. What it still owes
+            # Matrix waits for the entity to come back.
             assert self._is_settled(reply.last_span_id), (reply, self._last())
             assert reply.terminal, reply
-            assert reply.owed_write is None, reply
-            assert not reply.redaction_pending, reply
         if reply is None or self.model.removed:
             return
         assert not self.model.rows, self.model.rows

@@ -351,11 +351,11 @@ def spans_in_room(
 
 
 def open_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
-    """Return every principal's replies not yet terminal or still owing Matrix work, with their principal."""
+    """Return every principal's replies not yet terminal, with their principal."""
     rows = transaction.fetchall(
         f"""
         SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages
-        WHERE state IN ('active', 'paused') OR redaction_pending_json IS NOT NULL OR owed_write_json IS NOT NULL
+        WHERE state IN ('active', 'paused')
         ORDER BY principal_id, created_at_ns, reply_id
         """,  # noqa: S608 - a fixed column list
     )

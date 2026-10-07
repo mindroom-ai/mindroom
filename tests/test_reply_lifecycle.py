@@ -681,27 +681,8 @@ def test_an_edit_superseding_an_unanswered_regeneration_keeps_the_original_rollb
     assert failed.reply.presentation == "old"
 
 
-def test_a_refused_final_restores_only_when_nothing_before_it_was_written() -> None:
-    """Only a FINAL Matrix refused for good is discounted; a progress edit before it may show."""
-
-    def refused_final(reply: Reply, span: Span) -> rl.Transition:
-        final = rl.finish(reply, span, _write(reply, ReplyState.COMPLETED, "new"), now_ns=NOW)
-        assert final.reply is not None
-        assert final.row is not None
-        facts = WriteFacts(
-            WriteStage.FINAL,
-            final.row.sequence,
-            span.span_id,
-            creates_event=False,
-            placeholder_only=False,
-        )
-        return rl.write_failed(
-            final.reply,
-            _span_after(final, span.span_id),
-            rl.FailedWrite(facts, "refused"),
-            now_ns=NOW,
-        )
-
+def test_a_refused_final_of_a_regeneration_ends_the_reply_failed_with_its_note() -> None:
+    """A regeneration's answer Matrix refused for good says delivery failed, over the answer it was replacing."""
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
     shown = replace(reply, state=ReplyState.COMPLETED, presentation="old", event_id="$reply")
@@ -709,18 +690,16 @@ def test_a_refused_final_restores_only_when_nothing_before_it_was_written() -> N
     claimed = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(shown, span))
     assert claimed.reply is not None
     assert claimed.claimed is not None
-    reply, span = claimed.reply, claimed.claimed
-    restored = refused_final(reply, span)
-    assert restored.reply is not None
-    assert restored.reply.state is ReplyState.COMPLETED
-    assert restored.reply.presentation == "old"
-    # What the room shows is the old answer again, which a later note or replay continues below.
-    assert (restored.reply.possibly_shown, restored.reply.possibly_shown_seq) == ("old", 1)
-    failed = refused_final(_progress(reply, span), span)
-    assert failed.reply is not None
-    assert failed.reply.state is ReplyState.FAILED
-    # The progress it showed would read as still streaming: the delivery-failed note replaces it.
-    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
+    final = rl.finish(claimed.reply, claimed.claimed, _write(claimed.reply, ReplyState.COMPLETED, "new"), now_ns=NOW)
+    assert final.reply is not None
+    assert final.row is not None
+    facts = WriteFacts(WriteStage.FINAL, final.row.sequence, "span-2", creates_event=False, placeholder_only=False)
+
+    refused = rl.write_failed(final.reply, _span_after(final, "span-2"), rl.FailedWrite(facts, "refused"), now_ns=NOW)
+
+    assert refused.reply is not None
+    assert refused.reply.state is ReplyState.FAILED
+    assert refused.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_DELIVERY_FAILED)
 
 
 def test_stopped_without_a_recorded_stop_ends_the_reply_unmodeled() -> None:
@@ -1736,19 +1715,15 @@ def test_owner_lost_leaves_approval_resumes_to_approval_recovery() -> None:
     assert transition.outcome is Outcome.DUPLICATE
 
 
-def test_terminal_write_failed_on_a_placeholder() -> None:
-    """Delivery failures on a placeholder owe the retry note; other failures remove it."""
+def test_a_refused_terminal_row_owes_the_delivery_failed_note() -> None:
+    """However Matrix refused the answer, on a placeholder or as the reply's only message, the user is told."""
     reply, span = _turn()
-    on_placeholder = replace(reply, event_id="$reply", placeholder_only=True)
-    # However Matrix refused it, as for an answer too large to send, the placeholder says delivery failed.
-    delivery = rl._terminal_write_failed(on_placeholder, span, first_create=False, sequence=1, now_ns=NOW)
-    assert delivery.reply is not None
-    assert delivery.reply.state is ReplyState.FAILED
-    assert delivery.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
-    assert delivery.reply.redaction_pending == ()
-    first_create = rl._terminal_write_failed(reply, span, first_create=True, sequence=1, now_ns=NOW)
-    assert first_create.reply is not None
-    assert first_create.reply.state is ReplyState.GONE
+    for refused in (replace(reply, event_id="$reply", placeholder_only=True), reply):
+        failed = rl._terminal_write_failed(refused, span, now_ns=NOW)
+        assert failed.reply is not None
+        assert failed.reply.state is ReplyState.FAILED
+        assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
+        assert failed.reply.redaction_pending == ()
 
 
 def test_dispatch_failure_fails_the_reply_and_owes_its_error() -> None:
@@ -1777,8 +1752,8 @@ def test_removed_entity_fails_without_writing() -> None:
     assert waiting.effects == (SettleSources(span.span_id, answered=False),)
 
 
-def test_removed_entity_drops_what_an_ended_reply_still_owed() -> None:
-    """No bot remains to redact a Stop button or write a note, so the reply stops owing them and retention can go."""
+def test_removed_entity_leaves_an_ended_reply_as_it_is() -> None:
+    """An ended reply keeps what it owes Matrix, which its entity's bot writes if the entity comes back."""
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.FAILED)
     owing = replace(
@@ -1787,16 +1762,11 @@ def test_removed_entity_drops_what_an_ended_reply_still_owed() -> None:
         redaction_pending=("$button",),
         owed_write=rl.OwedWrite(span.span_id, "error"),
     )
-    transition = rl.removed_entity(owing, span, now_ns=NOW)
-    assert transition.outcome is Outcome.APPLIED
-    assert transition.reply is not None
-    assert (transition.reply.redaction_pending, transition.reply.owed_write) == ((), None)
-    assert transition.effects == ()
-    assert rl.removed_entity(transition.reply, span, now_ns=NOW).outcome is Outcome.DUPLICATE
+    assert rl.removed_entity(owing, span, now_ns=NOW).outcome is Outcome.DUPLICATE
 
 
 def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
-    """The discard ends it without writes; an owner that comes back settles it with its note instead."""
+    """The discard ends it unanswered; an owner that comes back settles it with its note instead."""
     reply, span, transition = _paused()
     removed = rl.removed_entity(reply, _span_after(transition, span.span_id), now_ns=NOW)
     assert removed.reply is not None
@@ -1815,20 +1785,6 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
     assert discarded.reply is not None
     assert discarded.reply.state is ReplyState.FAILED
     assert discarded.effects == (SettleSources(span.span_id, answered=False),)
-    # Its Stop button would wait for a bot that never comes: the discard drops it with the rest of the reply's debt.
-    buttoned = rl.approval_settled(
-        replace(removed.reply, stop_button_event_id="$button"),
-        _span_after(transition, span.span_id),
-        approval_id="approval-1",
-        paused_span_id=span.span_id,
-        result="failed",
-        disposition="failed",
-        answers_turn=False,
-        now_ns=NOW,
-    )
-    assert buttoned.reply is not None
-    assert buttoned.reply.state is ReplyState.FAILED
-    assert (buttoned.reply.stop_button_event_id, buttoned.reply.redaction_pending) == (None, ())
     # An owner that comes back first writes the approval's note and finishes it with its turn answered.
     paused = _span_after(transition, span.span_id)
     noted = rl.approval_failure_note(
@@ -1993,13 +1949,7 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
     assert final.reply is not None
     assert not final.reply.placeholder_only
     ended = _span_after(final, span.span_id)
-    failed = rl._terminal_write_failed(
-        final.reply,
-        ended,
-        first_create=False,
-        sequence=final.reply.reply_sequence,
-        now_ns=NOW,
-    )
+    failed = rl._terminal_write_failed(final.reply, ended, now_ns=NOW)
     assert failed.reply is not None
     # The progress stays its event's content, never redacted as a placeholder; the note ends it.
     assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)

@@ -402,24 +402,16 @@ def _wrote_anything(reply: Reply, span: Span) -> bool:
     return reply.possibly_shown_seq is not None and reply.possibly_shown_seq > span.base_sequence
 
 
-def _kept_answer(
-    reply: Reply,
-    span: Span,
-    *,
-    before_sequence: int | None = None,
-) -> Rollback | None:
+def _kept_answer(reply: Reply, span: Span) -> Rollback | None:
     """Return the answer a regeneration abandoned now leaves as the room shows it, if it leaves one.
 
     Only when it recorded no write Matrix may show: an unacknowledged write
-    may have landed, so it counts. ``before_sequence`` counts only the writes
-    before a row Matrix refused for good. A regeneration claimed again after
-    an attempt that wrote carries no rollback.
+    may have landed, so it counts. A regeneration claimed again after an
+    attempt that wrote carries no rollback.
     """
     rollback = span.rollback
     if span.kind is not SpanKind.REGENERATION or rollback is None:
         return None
-    if before_sequence is not None:
-        return rollback if before_sequence - 1 <= span.base_sequence else None
     return None if _wrote_anything(reply, span) else rollback
 
 
@@ -870,13 +862,7 @@ def write_failed(reply: Reply, span: Span, failure: FailedWrite, *, now_ns: int)
     """Apply a permanent row failure."""
     write = failure.write
     if write.stage is WriteStage.FINAL:
-        return _terminal_write_failed(
-            reply,
-            span,
-            first_create=reply.event_id is None,
-            sequence=write.sequence,
-            now_ns=now_ns,
-        )
+        return _terminal_write_failed(reply, span, now_ns=now_ns)
     if (
         reply.state is ReplyState.PAUSED
         and reply.approval_id is not None
@@ -921,19 +907,11 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     )
 
 
-def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, sequence: int, now_ns: int) -> Transition:
-    """A span's terminal row failed for good after the span ended; its outcome stays."""
+def _terminal_write_failed(reply: Reply, span: Span, *, now_ns: int) -> Transition:
+    """A span's terminal row failed for good after the span ended: the reply says its delivery failed."""
     if span.span_id != reply.last_span_id:
         # A later span claims the reply only after this row resolved, so this is not its row.
         return replace(_unchanged(Outcome.STALE, reply), unmodeled="refused_row_of_an_older_span")
-    if first_create:
-        return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.GONE, now_ns))
-    # Its sources settled answered when the row was queued, so no retry of unfinished work can follow:
-    # it restores only a finished answer.
-    kept = None if reply.placeholder_only else _kept_answer(reply, span, before_sequence=sequence)
-    if kept is not None:
-        return _restored(reply, span, kept, now_ns)
-    # What the reply shows, its placeholder or its progress, would read as unfinished: it says delivery failed instead.
     owed = OwedWrite(span.span_id, _NOTE_DELIVERY_FAILED)
     return Transition(
         outcome=Outcome.APPLIED,
@@ -1297,13 +1275,6 @@ def approval_settled(
         now_ns=now_ns,
     )
     settle = SettleSources(paused_span_id, answered=answers_turn)
-    ended = decided.reply
-    if not answers_turn and decided.outcome is not Outcome.STALE and ended is not None and ended.terminal:
-        # No owner is left, as for a removed entity or one that permanently failed to start: the reply ends
-        # owing Matrix nothing, as one no approval held does, and an owner that comes back redacts nothing.
-        dropped = _without_matrix_work(ended, now_ns)
-        if replace(dropped, updated_at_ns=ended.updated_at_ns) != ended:
-            decided = replace(decided, outcome=Outcome.APPLIED, reply=dropped)
     return replace(decided, effects=(settle, *decided.effects))
 
 
@@ -1776,13 +1747,11 @@ def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
 
     ``span`` is the reply's current span, or its last one when none runs. Its
     sources settle unanswered, unless an approval holds the reply: its
-    settlement ends the reply and settles them. A reply that already ended
-    drops what it still owed Matrix.
+    settlement ends the reply and settles them. Whatever the reply still owes
+    Matrix waits for its entity's bot, should the entity come back.
     """
     if reply.terminal:
-        if reply.owed_write is None and not reply.redaction_pending and reply.stop_button_event_id is None:
-            return _unchanged(Outcome.DUPLICATE, reply)
-        return Transition(outcome=Outcome.APPLIED, reply=_without_matrix_work(reply, now_ns))
+        return _unchanged(Outcome.DUPLICATE, reply)
     spans: tuple[Span, ...] = ()
     updated = reply
     if span.span_id == reply.current_span_id and not span.ended:
@@ -1791,18 +1760,13 @@ def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     if reply.approval_id is not None:
         # Its approval ends it: discarded while the entity stays gone, or settled by an owner that comes back.
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=spans)
-    # No bot remains to answer, write, or redact anything for this entity.
+    # No bot remains to answer anything for this entity.
     return Transition(
         outcome=Outcome.APPLIED,
-        reply=_without_matrix_work(_set_state(_stop_applied(updated), ReplyState.FAILED, now_ns), now_ns),
+        reply=_set_state(_stop_applied(updated), ReplyState.FAILED, now_ns),
         spans=spans,
         effects=_settle_sources(reply, span, answered=False),
     )
-
-
-def _without_matrix_work(reply: Reply, now_ns: int) -> Reply:
-    """Drop what a removed entity's reply still owed Matrix: no bot remains to write or redact it."""
-    return _touch(reply, now_ns, owed_write=None, redaction_pending=(), stop_button_event_id=None)
 
 
 def owed_write_refused(reply: Reply, owed: OwedWrite, *, now_ns: int) -> Transition:
