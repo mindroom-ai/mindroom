@@ -536,9 +536,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             ),
         )
         if row.intent.stage is WriteStage.FINAL:
+            # The approval runtime finishes an approval whose FINAL this resolved in a later transaction,
+            # so claims woken now can still meet the reply it holds.
             self.model.finals[row.delivery_id] = "acknowledged"
-            # The delivery that resolves an approval's FINAL finishes that approval.
-            self._settle_approvals()
         self._retry_deferred()
 
     @precondition(lambda self: self._bot() and bool(self.model.rows))
@@ -591,8 +591,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             assert restored.state is expected, (restored, span)
             assert (restored.possibly_shown_seq or 0) <= span.base_sequence, (restored, span)
         if row.intent.stage is WriteStage.FINAL:
+            # As for an acknowledgement, the approval runtime settles the approval later.
             self.model.finals[row.delivery_id] = "refused"
-            self._settle_approvals()
         if row.intent.stage is WriteStage.INITIAL:
             # A refused create also fails the reply's edit rows waiting on it.
             self.model.rows = [waiting for waiting in self.model.rows if waiting.intent.stage is not WriteStage.EDIT]

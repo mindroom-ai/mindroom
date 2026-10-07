@@ -1544,7 +1544,7 @@ def test_permanently_failed_pause_row_fences_the_approval() -> None:
 
 
 def test_approval_settlement_guards() -> None:
-    """Approval events from another approval are stale; superseded failures never touch the reply."""
+    """Approval events from another approval are stale; a superseded approval no longer holds the reply, so it is too."""
     reply, _span, _transition = _paused()
     other = rl.approval_settled(
         reply,
@@ -1558,7 +1558,7 @@ def test_approval_settlement_guards() -> None:
     )
     assert other.outcome is Outcome.STALE
     superseded = rl.approval_settled(
-        reply,
+        _held(reply, None),
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
@@ -1567,7 +1567,7 @@ def test_approval_settlement_guards() -> None:
         answers_turn=True,
         now_ns=NOW,
     )
-    assert superseded.outcome is Outcome.DUPLICATE
+    assert superseded.outcome is Outcome.STALE
     # A finish settles what its pause held whatever the reply does; only a completed run consumes its edit.
     assert other.effects == superseded.effects == (SettleSources("span-1", consumes_edit=False),)
     # The span that ran the approved work says whether it answered: completed consumes the edit, failed does not.

@@ -307,8 +307,8 @@ def _prepared_edit(raw: object) -> TurnRecord | None:
 # context; it stays so when its entity never starts again, such as an entity removed from the configuration.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages settle a continuation's
 # sources through its paused span's SettleSources.
-# Handling: no bot of its entity runs to answer it, so only its discard reaches it, and its adopted pending sources
-# settle unanswered.
+# Handling: no bot of its entity runs to answer it, so its discard, or the recovery of a FINAL it already resolved,
+# finishes it, and its adopted pending sources settle unanswered.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_unclassified_continuation_settles_its_adopted_sources.
 def settle_unclassified(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> None:
     """Settle the sources an unclassified continuation adopted, leaving its turn unanswered."""

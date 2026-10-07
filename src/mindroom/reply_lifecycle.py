@@ -1385,7 +1385,8 @@ def approval_settled(
     settle = SettleSources(paused_span_id, consumes_edit=answers_turn and completed, answered=answers_turn)
     ended = decided.reply
     if not answers_turn and decided.outcome is not Outcome.STALE and ended is not None and ended.terminal:
-        # No owner is left: the reply ends owing Matrix nothing, as one no approval held does.
+        # No owner is left, as for a removed entity or one that permanently failed to start: the reply ends
+        # owing Matrix nothing, as one no approval held does, and an owner that comes back redacts nothing.
         dropped = _without_matrix_work(ended, now_ns)
         if replace(dropped, updated_at_ns=ended.updated_at_ns) != ended:
             decided = replace(decided, outcome=Outcome.APPLIED, reply=dropped)
@@ -1425,9 +1426,7 @@ def _approval_failed(
     disposition: FailureDisposition | None,
     now_ns: int,
 ) -> Transition:
-    """End the reply a failed continuation held; a superseded one leaves it to the regeneration."""
-    if disposition == "superseded":
-        return _unchanged(Outcome.DUPLICATE, reply)
+    """End the reply a failed continuation held; a superseded one no longer holds it, so it never gets here."""
     resume = last_span if last_span is not None and last_span.kind is SpanKind.APPROVAL_RESUME else None
     # A resume an older instance left current runs nowhere: the failure ends it.
     orphaned = (

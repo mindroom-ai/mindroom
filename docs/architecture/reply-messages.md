@@ -116,6 +116,7 @@ A bot instance that another took over writes nothing more: its claims and every 
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
 Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit, which records the reply and the span it cancelled; the bot then cancels exactly that span and redacts what the reply showed, while a reply an approval holds and a written answer are kept, including the finished answer an edit was regenerating before the regeneration showed anything.
 An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes, and their sources settle unanswered; a reply an approval holds is left to that approval, whose discard ends it, or whose owner settles it on coming back.
+A removed entity's reply that already ended, and one its approval's discard ends, drop the notes and redactions they still owed Matrix, since no bot remains to deliver them.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
 
 ## Invariants
@@ -139,8 +140,9 @@ The handled-turn retention pass deletes finished replies that owe nothing, with 
 - I12. A regeneration that recorded a write Matrix may show never restores its rollback.
 - I13. At most one continuation that is not superseded names a reply's spans.
 - I14. An abandoned regeneration that recorded a write Matrix may show leaves a terminal row, an owed note, or an owed redaction; a create still in flight is redacted once acknowledged.
-- I15. Once a finished reply owes nothing, its latest write that may show ends it and Matrix took it, unless Matrix refused a note, which is not resent, or the bot left the room.
+- I15. Once a finished reply owes nothing, its latest write that may show ends it and Matrix took it, unless Matrix refused a note, which is not resent, the bot left the room, or the entity was removed.
+- I16. A reply waiting to replay its original source has not had its turn recorded answered, which would suppress that replay.
 
-`tests/test_reply_lifecycle_fuzz.py` checks I1 and I4 through I15 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, and dropped replays.
+`tests/test_reply_lifecycle_fuzz.py` checks I1 and I4 through I16 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, and dropped replays.
 It keeps continuations as rows the hold is derived from, defers edit claims through the shared blocking predicate, and ends every run by draining every owner.
 The unit tests cover stale and retired spans and the remaining rules.
