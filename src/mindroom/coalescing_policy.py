@@ -68,7 +68,9 @@ def pending_events_sent_together(earlier: PendingEvent, later: PendingEvent, *, 
     """
     earlier_ms = normalize_timestamp_ms(earlier.event.server_timestamp)
     later_ms = normalize_timestamp_ms(later.event.server_timestamp)
-    return earlier_ms is not None and later_ms is not None and abs(later_ms - earlier_ms) <= window_seconds * 1000
+    return (
+        earlier_ms is not None and later_ms is not None and abs(later_ms - earlier_ms) <= round(window_seconds * 1000)
+    )
 
 
 def source_or_event_allows_room_scope_batching(

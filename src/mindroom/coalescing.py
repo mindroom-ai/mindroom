@@ -919,8 +919,8 @@ class CoalescingGate:
 
         A thread, or a room treated as one conversation, batches its whole front run.
         Otherwise each room-level message starts its own conversation, so only a
-        burst its sender sent within the debounce window, and that holds voice or
-        media, shares a turn.
+        burst whose messages were each sent within the debounce window of the
+        previous one, and that holds voice or media, shares a turn.
         """
         if key.thread_id is not None or (
             self._room_scope_is_single_conversation is not None and self._room_scope_is_single_conversation(key.room_id)

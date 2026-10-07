@@ -809,13 +809,14 @@ async def test_thread_backlog_still_combines_messages_sent_far_apart() -> None:
     [
         (1_000, [["$voice:localhost", "$text:localhost"]]),
         (1_001, [["$voice:localhost"], ["$text:localhost"]]),
+        (-500, [["$voice:localhost", "$text:localhost"]]),
     ],
 )
 async def test_room_level_send_burst_window_includes_its_boundary(
     send_gap_ms: int,
     expected_batches: list[list[str]],
 ) -> None:
-    """Room-level messages sent exactly one debounce window apart still share a burst."""
+    """Room-level messages sent up to one debounce window apart, in either order, share a burst."""
     gate, batches = _recording_gate(1.0)
     key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
@@ -824,6 +825,24 @@ async def test_room_level_send_burst_window_includes_its_boundary(
     await _wait_for(lambda: _dispatched_source_count(batches) == 2)
 
     assert [list(batch.handled_turn.source_event_ids) for batch in batches] == expected_batches
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_room_level_message_without_send_time_keeps_its_own_turn() -> None:
+    """A room-level message whose send time is unknown is never proven to share a burst."""
+    gate, batches = _recording_gate(1.0)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+    text = _pending(_text_event("$text:localhost", "test", 1_000_000))
+
+    await _admit_ready(gate, key, _voice_pending("$voice:localhost", "voice transcript", 1_000_000))
+    await _admit_ready(gate, key, replace(text, event=replace(text.event, server_timestamp=None)))
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$voice:localhost"],
+        ["$text:localhost"],
+    ]
     await gate.drain_all()
 
 
