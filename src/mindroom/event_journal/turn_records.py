@@ -194,9 +194,7 @@ def settle_turn(
 ) -> TurnRecord | None:
     """Settle the sources an AI reply answers and record their turn answered, in one transaction.
 
-    A reply rule's ``SettleSources`` comes here, and so does the finish of a
-    continuation an earlier release left that reply classification never
-    named a span for.
+    A reply rule's ``SettleSources`` is its only caller.
     """
     journal.settle_many(transaction, principal_id, pending)
     return _complete_turn(transaction, agent_name, logical_event_ids=logical, prepared_edit=prepared_edit)

@@ -9,6 +9,7 @@ orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
@@ -106,7 +107,7 @@ from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from mindroom.reply_scope import current_span
+from mindroom.reply_scope import SpanHandle, current_span
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
@@ -151,6 +152,7 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingPresentation,
     StreamingResponse,
+    UnfinishedStreamedReply,
 )
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import _TeamStreamPresentation
@@ -1915,6 +1917,30 @@ async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
 
     settle_failure.assert_awaited_once_with(continuation, failure_reason)
     restart_recovery.assert_not_awaited()
+
+
+def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(tmp_path: Path) -> None:
+    """The replayed turn learns which tools of the stopped attempt finished and which may still have been running."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    finished = ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1")
+    running = ToolTraceEntry(type="tool_call_started", tool_name="report", args_preview='{"pages": 3}')
+    shown = "🤝 **Team Response** (General, Helper):\n\nHalf of the report\n\n\n*No team consensus - showing individual responses only*"
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REPLAY),
+        resumed=UnfinishedStreamedReply(visible_text=shown, tool_trace=(finished, running)),
+    )
+
+    replayed = runner._with_recorded_interrupted_attempt(
+        _plain_request(_target(), source_event_id="$source"),
+        cast("SpanHandle", handle),
+    )
+
+    account = html.unescape(replayed.model_prompt or "")
+    assert "Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; " in account
+    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in account
+    assert 'The `report` tool was still running with input preview "{\\"pages\\": 3}"' in account
+    assert "Team Response" not in account
+    assert "No team consensus" not in account
 
 
 @pytest.mark.asyncio

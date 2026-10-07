@@ -1185,13 +1185,16 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
             await response
 
 
-async def _restarted_after_partial(tmp_path: Path) -> tuple[AgentBot, asyncio.Task[str | None]]:
-    """Stop an instance while its reply shows ``Partial``; return the instance that took its replies over."""
+async def _restarted_after_partial(
+    tmp_path: Path,
+    shown_text: str | None = "Partial",
+) -> tuple[AgentBot, asyncio.Task[str | None]]:
+    """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over."""
     old = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(old)
+    response, _streaming = await _blocked_stream(old, shown_text)
 
     async def shown() -> None:
-        while "Partial" not in _sent_bodies(old):  # noqa: ASYNC110
+        while (shown_text or "Thinking") not in "".join(_sent_bodies(old)):  # noqa: ASYNC110
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(shown(), timeout=5)
@@ -1230,6 +1233,37 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         assert "Partial" in account
         assert _sent_bodies(restarted)[-1] == f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
         assert not await restarted._reply_runtime.store.is_pending("$event")
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+async def test_a_replay_of_an_attempt_that_showed_only_its_placeholder_is_warned_its_work_is_unknown(
+    tmp_path: Path,
+) -> None:
+    """Nothing shown is not proof nothing was done: the replayed turn is warned before repeating side effects."""
+    restarted, response = await _restarted_after_partial(tmp_path, None)
+    prompts: list[str] = []
+
+    async def answer(*_args: object, **kwargs: object) -> str:
+        prompts.append(html.unescape(str(kwargs["model_prompt"])))
+        return "The complete report."
+
+    runner = unwrap_extracted_collaborator(restarted._response_runner)
+    try:
+        with patch_response_runner_module(
+            ai_response=AsyncMock(side_effect=answer),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        (prompt,) = prompts
+        account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
+        assert account.startswith("A previous attempt at replying to the current message was interrupted")
+        assert "what that attempt did is unknown" in account
+        assert _sent_bodies(restarted)[-1] == "The complete report."
     finally:
         response.cancel()
         with suppress(asyncio.CancelledError):
