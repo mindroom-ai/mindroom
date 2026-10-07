@@ -138,6 +138,7 @@ def api_address() -> Iterator[None]:
 
 
 _ISOLATED_GATEWAY = {
+    "MINDROOM_SCRIPT_GATEWAY_PORT": "8767",
     "MINDROOM_SCRIPT_GATEWAY_URL": "http://mindroom-script-gateway:8767/api/script-gateway",
     "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
 }
@@ -205,14 +206,22 @@ def test_worker_shells_without_a_known_address_or_key_list_every_fix(tmp_path: P
 
 
 @pytest.mark.usefixtures("api_address")
-def test_worker_shells_use_the_script_gateway_only_when_it_is_attested_isolated(tmp_path: Path) -> None:
-    """A gateway URL without the isolation attestation may point at the general API, so it is not used."""
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        {**_ISOLATED_GATEWAY, "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "false"},
+        {**_ISOLATED_GATEWAY, "MINDROOM_SCRIPT_GATEWAY_PORT": ""},
+        {**_ISOLATED_GATEWAY, "MINDROOM_SCRIPT_GATEWAY_URL": "https://proxy.example/prefix/api/script-gateway"},
+    ],
+    ids=["not-attested", "no-gateway-listener", "proxy-path-prefix"],
+)
+def test_worker_shells_use_only_this_primarys_isolated_gateway_listener(
+    tmp_path: Path,
+    gateway: dict[str, str],
+) -> None:
+    """A gateway URL that may not reach the gateway-only listener's CLI routes is not used."""
     config = _runtime_context(tmp_path).config
-    paths = _worker_paths(
-        tmp_path,
-        MINDROOM_WORKER_BACKEND="kubernetes",
-        MINDROOM_SCRIPT_GATEWAY_URL=_ISOLATED_GATEWAY["MINDROOM_SCRIPT_GATEWAY_URL"],
-    )
+    paths = _worker_paths(tmp_path, MINDROOM_WORKER_BACKEND="kubernetes", **gateway)
 
     problems = minimal_shell_problems(config, paths, "helper")
 

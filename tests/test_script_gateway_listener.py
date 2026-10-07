@@ -156,6 +156,21 @@ async def test_listener_serves_only_worker_capability_routes(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_listener_refuses_agent_cli_calls_without_a_bound_registry(tmp_path: Path) -> None:
+    """A listener started without the orchestrator's registry fails closed for every grant."""
+    port, listener = _listener(tmp_path)
+
+    async with listener, httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+        response = await client.post(
+            f"{_AGENT_CLI_PREFIX}/operations",
+            headers={"Authorization": "Bearer grant"},
+            json={"operation": "tools.list"},
+        )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_listener_closes_when_its_owner_is_cancelled_while_serving(tmp_path: Path) -> None:
     """Cancelling the owning task closes the listener and its open connections before cancellation propagates."""
     port, listener = _listener(tmp_path)
