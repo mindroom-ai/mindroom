@@ -3770,3 +3770,24 @@ async def test_superseding_the_replay_of_an_ended_reply_leaves_its_sources_to_th
         await gateway.end_reply_span(handle, lambda reply, span: rl.departed(reply, span, now_ns=1))
     assert await alice.is_pending("$cause")
     assert await gateway.supersede_replay(("$cause",)) is None
+
+
+@pytest.mark.asyncio
+async def test_a_late_bound_reply_edit_is_found_by_what_it_sent(tmp_path: Path, alice: PrincipalStore) -> None:
+    """A reply edit gets its edit envelope only when claimed; an earlier device's copy is matched by that envelope."""
+    await alice.enqueue_matrix_delivery(
+        delivery_id="turn-1",
+        stage=DeliveryStage.FINAL,
+        room_id=_ROOM_ID,
+        thread_id=None,
+        payload={"msgtype": "m.text", "body": "answer"},
+    )
+    row = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+    assert row is not None
+    claimed = replace(row, reply_id="reply-1", edits_event_id="$reply")
+    find = AsyncMock(return_value="$earlier-copy")
+    with patch("mindroom.delivery_gateway.find_outbox_delivery_event_id_via_room_messages", find):
+        assert await _gateway(tmp_path, alice)._delivered_under_a_previous_device(claimed) == "$earlier-copy"
+    sent = find.await_args.kwargs["delivery_content"]
+    assert sent["m.new_content"]["body"] == "answer"
+    assert sent["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$reply"}

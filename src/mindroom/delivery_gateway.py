@@ -1072,7 +1072,8 @@ class DeliveryGateway:
             claimed.room_id,
             delivery_sender=response_sender,
             source_event_ids=(),
-            delivery_content=claimed.payload,
+            # What the row sent, including the edit envelope a late-bound reply edit gets when claimed.
+            delivery_content=_reply_row_wire_content(claimed),
             delivery_event_type=claimed.event_type,
         )
         if event_id is not None:
