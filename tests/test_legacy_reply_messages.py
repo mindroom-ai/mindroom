@@ -548,13 +548,25 @@ async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store:
         response_owner=ENTITY,
         conversation_target=MessageTarget.resolve(ROOM, None, "$source"),
     )
-    await _main_continuation(principal, replace(_continuation("waiting"), prepared_edit_record=selected))
+    paused = replace(
+        _continuation("waiting"),
+        sources=ResponseSources(("$source",), ("$source",), edit_receipt_order=20),
+        prepared_edit_record=selected,
+    )
+    await _main_continuation(principal, paused)
 
     await _adopt(principal)
     adopted = await principal.approval_continuation("approval-1")
     assert adopted is not None
     assert adopted.span_id is not None
     assert adopted.prepared_edit_record == selected
+    assert adopted.sources.edit_receipt_order == 20
+    # A Stop received before the edit misses its regeneration and leaves the approval alone.
+    stop = await principal.replies.record_stop("$reply", 10)
+    assert stop is not None
+    assert stop.transition.outcome is rl.Outcome.DUPLICATE
+    assert stop.post_commit == ()
+    assert (await principal.approval_continuation("approval-1")) == adopted
 
 
 async def test_a_claimed_team_resume_keeps_its_document_instead_of_a_read(journal_store: EventJournalStore) -> None:

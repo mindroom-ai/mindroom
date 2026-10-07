@@ -519,6 +519,10 @@ def _paused_reply(
         presentation=shown,
         now_ns=now_ns,
         event_id=continuation.response_event_id,
+        # A regeneration's reply keeps the order of the edit it answers, which an older Stop then misses.
+        edit_receipt_order=(
+            continuation.sources.edit_receipt_order if paused.kind is rl.SpanKind.REGENERATION else None
+        ),
         # A resumed approval may have streamed past its pause, which only Matrix
         # shows. A team's resume restores its stored document instead, which a
         # read of rendered text would lose.
