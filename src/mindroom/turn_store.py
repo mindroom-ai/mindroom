@@ -18,6 +18,7 @@ from mindroom.handled_turns import (
     HandledTurnLedger,
     TurnRecord,
     TurnRecordCodec,
+    answer_event_id_of_run,
     same_turn_identity,
 )
 from mindroom.history.storage import remove_history_of_redacted_events, remove_run_by_event_id
@@ -67,6 +68,14 @@ class _LoadPersistedTurnRequest:
     thread_id: str | None
     original_event_id: str
     requester_user_id: str
+
+
+@dataclass(frozen=True)
+class _PersistedTurn:
+    """The newest history run of one turn: its recovered record and the event that shows its answer."""
+
+    record: TurnRecord
+    answer_event_id: str | None
 
 
 @dataclass(frozen=True)
@@ -971,14 +980,14 @@ class TurnStore:
             reason="edited",
         )
 
-    def _latest_matching_persisted_turn_record(
+    def _latest_matching_persisted_turn(
         self,
         runs: list[RunOutput | TeamRunOutput] | None,
         *,
         original_event_id: str,
-    ) -> tuple[tuple[int | float, int], TurnRecord] | None:
-        """Return the newest persisted turn record in one session matching the edit target."""
-        newest_match: tuple[tuple[int | float, int], TurnRecord] | None = None
+    ) -> tuple[tuple[int | float, int], _PersistedTurn] | None:
+        """Return the newest persisted turn in one session matching the edit target."""
+        newest_match: tuple[tuple[int | float, int], _PersistedTurn] | None = None
         for run_index, run in enumerate(runs or []):
             if not isinstance(run, (RunOutput, TeamRunOutput)):
                 continue
@@ -999,14 +1008,47 @@ class TurnStore:
             )
             sort_key = (run_created_at, run_index)
             if newest_match is None or sort_key > newest_match[0]:
-                newest_match = (sort_key, canonicalize_turn_record(turn_record, timestamp=float(run_created_at)))
+                newest_match = (
+                    sort_key,
+                    _PersistedTurn(
+                        canonicalize_turn_record(turn_record, timestamp=float(run_created_at)),
+                        answer_event_id_of_run(run.metadata),
+                    ),
+                )
         return newest_match
 
-    def _load_persisted_turn_record(
-        self,
-        request: _LoadPersistedTurnRequest,
-    ) -> TurnRecord | None:
+    def _load_persisted_turn_record(self, request: _LoadPersistedTurnRequest) -> TurnRecord | None:
         """Load the newest matching recovery record across thread and room sessions."""
+        persisted = self._load_persisted_turn(request)
+        return None if persisted is None else persisted.record
+
+    async def history_answer_event_id(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        thread_id: str | None,
+        original_event_id: str,
+        requester_user_id: str,
+    ) -> str | None:
+        """Return the event that shows a turn's answer as its history run recorded it.
+
+        Reply records own a live answer; the history keeps it past their
+        retention, which is the only place an edit to an older turn finds it.
+        """
+        if not self.deps.state_writer.supports_run_recovery():
+            return None
+        persisted = self._load_persisted_turn(
+            _LoadPersistedTurnRequest(
+                room=room,
+                thread_id=thread_id,
+                original_event_id=original_event_id,
+                requester_user_id=requester_user_id,
+            ),
+        )
+        return None if persisted is None else persisted.answer_event_id
+
+    def _load_persisted_turn(self, request: _LoadPersistedTurnRequest) -> _PersistedTurn | None:
+        """Load the newest matching history run across thread and room sessions."""
         history_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(history_scope)
         session_contexts = [
@@ -1014,7 +1056,7 @@ class TurnStore:
             (None, create_session_id(request.room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
-        newest_match: TurnRecord | None = None
+        newest_match: _PersistedTurn | None = None
         newest_sort_key: tuple[int | float, int] | None = None
         for candidate_thread_id, session_id in session_contexts:
             if session_id in checked_session_ids:
@@ -1040,15 +1082,15 @@ class TurnStore:
                 )
                 if session is None:
                     continue
-                session_match = self._latest_matching_persisted_turn_record(
+                session_match = self._latest_matching_persisted_turn(
                     session.runs,
                     original_event_id=request.original_event_id,
                 )
                 if session_match is not None:
-                    session_sort_key, turn_record = session_match
+                    session_sort_key, persisted = session_match
                     if newest_sort_key is None or session_sort_key > newest_sort_key:
                         newest_sort_key = session_sort_key
-                        newest_match = turn_record
+                        newest_match = persisted
             finally:
                 storage.close()
         return newest_match

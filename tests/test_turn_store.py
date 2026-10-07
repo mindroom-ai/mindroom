@@ -38,6 +38,7 @@ from mindroom.handled_turns import (
     TurnRecord,
     TurnRecordCodec,
     _reset_handled_turn_ledger_runtime,
+    answer_event_id_of_run,
 )
 from mindroom.history import archive
 from mindroom.history.storage import (
@@ -2028,7 +2029,7 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
         ["$first", "$anchor"],
         discovery_event_ids=["$selection"],
         redacted_source_event_ids=["$first"],
-        response_event_id="$response",
+        completed=True,
         source_event_prompts={"$first": "first", "$anchor": "anchor"},
         source_event_metadata={
             "$first": SourceEventMetadata(sender="@alice:example.org", timestamp_ms=1_774_019_700_000),
@@ -2052,7 +2053,9 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
     assert metadata[constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY] == TurnRecordCodec.schema_version()
     assert metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == ["$selection"]
     assert metadata[constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY] == ["$first"]
+    # The run's answer makes the turn answered; the event that shows it stays with the run.
     assert parsed == turn_record
+    assert answer_event_id_of_run(metadata) == "$response"
 
 
 def test_turn_record_codec_preserves_physical_source_ownership_when_alias_id_collides() -> None:

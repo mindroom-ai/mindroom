@@ -222,6 +222,7 @@ def _harness(
     turn_store.get_turn_record.side_effect = lambda _event_id: current_turn_record[0]
     turn_store.register_edit_revision.side_effect = lambda event_id, _revision: turn_store.get_turn_record(event_id)
     turn_store.is_revision_redacted.return_value = False
+    turn_store.history_answer_event_id.return_value = None
 
     def record_turn(record: TurnRecord) -> None:
         current_turn_record[0] = record

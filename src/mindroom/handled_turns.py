@@ -252,7 +252,11 @@ class TurnRecordCodec:
 
     @staticmethod
     def from_run_metadata(metadata: Mapping[str, object]) -> TurnRecord | None:
-        """Parse current Agno metadata, using response linkage as terminal-delivery evidence."""
+        """Parse current Agno metadata, using response linkage as evidence that the turn was answered.
+
+        The answer's event stays with the history: reply records own it, and
+        ``answer_event_id_of_run`` reads it for answers older than their retention.
+        """
         if metadata.get(constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY) != TurnRecordCodec.schema_version():
             return None
         anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
@@ -268,7 +272,7 @@ class TurnRecordCodec:
             if isinstance(raw_source_event_ids, list)
             else (anchor_event_id,)
         ) or (anchor_event_id,)
-        response_event_id = canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
+        answered = answer_event_id_of_run(metadata) is not None
         return TurnRecord.create(
             source_event_ids,
             discovery_event_ids=(
@@ -280,8 +284,7 @@ class TurnRecordCodec:
                 else ()
             ),
             anchor_event_id=anchor_event_id,
-            response_event_id=response_event_id,
-            completed=response_event_id is not None,
+            completed=answered,
             source_event_prompts=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)),
             source_event_revisions=_mapping_or_none(
                 metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY),
@@ -294,6 +297,11 @@ class TurnRecordCodec:
                 metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
             ),
         )
+
+
+def answer_event_id_of_run(metadata: Mapping[str, object]) -> str | None:
+    """Return the Matrix event that shows one history run's answer."""
+    return canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
 
 
 @dataclass(frozen=True)

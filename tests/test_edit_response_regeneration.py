@@ -2383,9 +2383,17 @@ async def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
             original_event_id="$first:example.com",
             requester_user_id="@user:example.com",
         )
+        answer = await bot._turn_store.history_answer_event_id(
+            room=room,
+            thread_id=None,
+            original_event_id="$first:example.com",
+            requester_user_id="@user:example.com",
+        )
 
     assert loaded_turn is not None
-    assert loaded_turn.response_event_id == "$response-new:example.com"
+    assert loaded_turn.completed
+    assert loaded_turn.response_event_id is None
+    assert answer == "$response-new:example.com"
     assert loaded_turn.source_event_prompts == {
         "$first:example.com": "first new",
         "$primary:example.com": "primary new",
@@ -2581,7 +2589,8 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_interrupted_
     request = mock_generate_response.call_args.args[0]
     assert request.existing_event_id == "$partial-response:example.com"
     assert request.response_envelope.target.reply_to_event_id == "$original:example.com"
-    assert _response_event_id(bot, "$original:example.com") == "$partial-response:example.com"
+    # The history run names that answer; the repaired turn holds only that it was answered.
+    assert _response_event_id(bot, "$original:example.com") is None
     repaired = bot._turn_store.get_turn_record("$original:example.com")
     assert repaired is not None
     assert repaired.response_owner == "test_agent"
@@ -3238,7 +3247,7 @@ async def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tm
     with patch.object(
         bot._conversation_state_writer,
         "create_storage",
-        side_effect=[threaded_storage, room_storage],
+        side_effect=[threaded_storage, room_storage, threaded_storage, room_storage],
     ):
         loaded_turn = await bot._turn_store.load_turn(
             room=room,
@@ -3246,9 +3255,16 @@ async def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tm
             original_event_id="$first:example.com",
             requester_user_id="@user:example.com",
         )
+        answer = await bot._turn_store.history_answer_event_id(
+            room=room,
+            thread_id="$thread:example.com",
+            original_event_id="$first:example.com",
+            requester_user_id="@user:example.com",
+        )
 
     assert loaded_turn is not None
-    assert loaded_turn.response_event_id == "$response-room:example.com"
+    assert loaded_turn.response_event_id is None
+    assert answer == "$response-room:example.com"
     assert loaded_turn.timestamp == 2
     assert loaded_turn.source_event_prompts == {
         "$first:example.com": "first room",
@@ -3367,7 +3383,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
 async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_run_metadata(
     tmp_path: Path,
 ) -> None:
-    """Persisted run response context recovers a missing ledger row for an answer recorded before reply records."""
+    """A turn the ledger no longer holds is recovered from its history run, which names the answer to regenerate."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -3517,7 +3533,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     assert persisted_metadata is not None
     assert persisted_metadata["matrix_response_event_id"] == "$response:example.com"
 
-    # The answer predates reply records, so only the recovered turn names it.
+    # The reply records no longer hold the answer, so only its history run names it.
     mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
     replace_edit_regenerator_deps(
         bot,
@@ -3576,8 +3592,12 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                 conversation_target=conversation_target,
             ),
         }
-        assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
-        assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
+        # The history run names the answer it regenerates; the recovered turn holds only that it was answered.
+        assert request.existing_event_id == "$response:example.com"
+        recovered = bot._turn_store.get_turn_record("$first:example.com")
+        assert recovered is not None
+        assert recovered.completed
+        assert recovered.response_event_id is None
         turn_record = bot._turn_store.get_turn_record("$primary:example.com")
         assert turn_record is not None
         assert turn_record.conversation_target == conversation_target

@@ -109,7 +109,6 @@ def _answer_to_regenerate(record: TurnRecord, reply: Reply | None) -> tuple[str 
     # Handling: the edit regenerates that event as a historical answer; a Stop that release kept on the turn record is
     # not read, as no reply holds it.
     # Coverage: tests/test_edit_response_regeneration.py::test_handle_message_edit_uses_journal_response_event_id_after_restart,
-    # tests/test_edit_response_regeneration.py::test_handle_message_edit_recovers_missing_ledger_row_from_persisted_run_metadata,
     # tests/test_reply_records_turns.py::test_regenerating_an_answer_older_than_the_records_adopts_it.
     return record.response_event_id, None
 
@@ -318,10 +317,16 @@ class EditRegenerator:
             or record.response_owner != self.deps.agent_name
         ):
             return None, None, {}
-        answer_event_id, stop_cutoff = _answer_to_regenerate(
-            record,
-            await self.deps.reply_for_sources(record.source_event_ids),
-        )
+        reply = await self.deps.reply_for_sources(record.source_event_ids)
+        answer_event_id, stop_cutoff = _answer_to_regenerate(record, reply)
+        if answer_event_id is None and reply is None:
+            # An answer older than the reply records' retention is named only by its history run.
+            answer_event_id = await self.deps.turn_store.history_answer_event_id(
+                room=room,
+                thread_id=latest.context.thread_id,
+                original_event_id=latest.original_event_id,
+                requester_user_id=latest.envelope.requester_id,
+            )
         if answer_event_id is None:
             return None, None, {}
         revisions = dict(record.source_event_revisions or {})
