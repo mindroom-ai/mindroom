@@ -16,8 +16,7 @@ from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
 
-from mindroom.agno_compat_claude import SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE
-from mindroom.claude_prompt_cache import TOOL_SEARCH_TOOL_TYPE
+from mindroom.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, TOOL_SEARCH_TOOL_TYPE
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 from mindroom.vertex_claude_compat import (

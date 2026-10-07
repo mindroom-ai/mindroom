@@ -69,9 +69,6 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.agno_compat_claude import (
     BEDROCK_MAX_INLINE_MEDIA_BYTES,
     MAX_INLINE_MEDIA_BYTES,
-    TOOL_SEARCH_RESULT_BLOCK_TYPE,
-    TOOL_SEARCH_TOOL_NAME,
-    as_dict,
     request_kwargs_with_leading_tool_results,
     request_kwargs_with_replay_safe_tool_search_results,
     request_kwargs_with_supported_inline_media,
@@ -79,6 +76,12 @@ from mindroom.agno_compat_claude import (
 )
 from mindroom.agno_compat_model_hooks import install_client_factories
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.claude_wire_blocks import (
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_NAME,
+    TOOL_SEARCH_TOOL_TYPE,
+    as_dict,
+)
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.logging_config import get_logger
@@ -102,7 +105,6 @@ MAX_CACHE_MARKERS = 4
 MESSAGE_RUNG_COUNT = 2
 _MARKABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "document", "image"})
 
-TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 
 

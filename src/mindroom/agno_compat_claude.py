@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from mindroom.claude_wire_blocks import (
+    SERVER_TOOL_USE_BLOCK_TYPE,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_NAME,
+    as_dict,
+)
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 
 if TYPE_CHECKING:
@@ -286,11 +292,6 @@ def _is_tool_result_block(block: object) -> bool:
     return block_dict is not None and block_dict.get("type") == "tool_result"
 
 
-def as_dict(value: object) -> dict[str, Any] | None:
-    """Return the value as a string-keyed dict when possible."""
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
-
-
 def _cited_text_block(block: object) -> dict[str, Any] | None:
     block_dict = as_dict(block)
     if block_dict is None or block_dict.get("type") != "text" or "citations" not in block_dict:
@@ -298,9 +299,6 @@ def _cited_text_block(block: object) -> dict[str, Any] | None:
     return block_dict
 
 
-TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
-SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"
-TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
 # The request schema for replayed tool-search results accepts only these keys
 # (ToolSearchToolResultBlockParam); response blocks additionally carry
 # citations/parsed_output/text, which the API rejects as extra inputs.
