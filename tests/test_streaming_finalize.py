@@ -634,7 +634,6 @@ async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recov
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!room:localhost", None, "$reply"),
                     existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_text="final answer",
                     identity=ResponseIdentity(
                         response_kind="ai",
@@ -1096,7 +1095,6 @@ async def test_hook_failure_cleanup_propagates_restart_cancellation(
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
                     existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_text="answer",
                     identity=ResponseIdentity(
                         response_kind="ai",

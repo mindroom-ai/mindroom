@@ -174,7 +174,6 @@ from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
-    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryStage,
     EditTextRequest,
@@ -774,11 +773,9 @@ class PostLockRequestPreparationError(RuntimeError):
         self,
         message: str = "Post-lock request preparation failed",
         *,
-        placeholder_event_id: str | None = None,
         reply_owned: bool = False,
     ) -> None:
         super().__init__(message)
-        self.placeholder_event_id = placeholder_event_id
         # The reply's records already own the visible failure notice.
         self.reply_owned = reply_owned
 
@@ -822,8 +819,7 @@ class _ShownPause:
 class _EarlyPlaceholderState:
     """Track an early placeholder until normal response settlement takes ownership."""
 
-    placeholder_event_id: str | None = None
-    request: ResponseRequest | None = None
+    placeholder_sent: bool = False
     settlement_started: bool = False
 
 
@@ -916,22 +912,18 @@ def _post_lock_error(
     *,
     reply_owned: bool,
 ) -> Exception:
-    """Return the error a locked response failed with, naming the early placeholder it showed, if any.
+    """Return the error a locked response failed with, as a dispatch failure once it showed an early placeholder.
 
-    Retries and errors already naming their placeholder are returned as they are.
+    Retries and errors the reply already owns are returned as they are.
     """
-    already_linked = isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
     if (
         isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
-        or early_placeholder.placeholder_event_id is None
+        or not early_placeholder.placeholder_sent
         or early_placeholder.settlement_started
-        or already_linked
+        or (isinstance(error, PostLockRequestPreparationError) and error.reply_owned)
     ):
         return error
-    mapped = PostLockRequestPreparationError(
-        placeholder_event_id=early_placeholder.placeholder_event_id,
-        reply_owned=reply_owned,
-    )
+    mapped = PostLockRequestPreparationError(reply_owned=reply_owned)
     mapped.__cause__ = (
         error.__cause__
         if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
@@ -1964,7 +1956,6 @@ class ResponseRunner:
                     FinalDeliveryRequest(
                         target=target,
                         existing_event_id=claimed.response_event_id,
-                        existing_event_is_placeholder=False,
                         response_text=result.response_text,
                         identity=identity,
                         tool_trace=visible_tool_trace if show_tool_calls else None,
@@ -2672,9 +2663,6 @@ class ResponseRunner:
         exc: asyncio.CancelledError,
         *,
         message_id: str | None,
-        delivery_target: MessageTarget,
-        existing_event_is_placeholder: bool,
-        response_identity: ResponseIdentity,
         restart_message: str,
         user_stop_message: str,
         interrupted_message: str,
@@ -2690,15 +2678,7 @@ class ResponseRunner:
             interrupted_message=interrupted_message,
         )
         if message_id:
-            return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
-                CancelledVisibleNoteRequest(
-                    target=delivery_target,
-                    event_id=message_id,
-                    existing_event_is_placeholder=existing_event_is_placeholder,
-                    cancel_source=cancel_source,
-                    identity=response_identity,
-                ),
-            )
+            return self.deps.delivery_gateway.cancelled_outcome(message_id, cancel_source)
         return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
             terminal_status="cancelled",
             failure_reason=cancel_failure_reason(cancel_source),
@@ -2978,7 +2958,6 @@ class ResponseRunner:
                     span_slot=span_slot,
                     resolved_target=resolved_target,
                     early_placeholder=early_placeholder,
-                    response_kind=response_kind,
                     locked_operation=locked_operation,
                     signal_queued_message=signal_queued_message,
                     acknowledge_deferred=acknowledge_deferred,
@@ -3001,7 +2980,6 @@ class ResponseRunner:
         span_slot: SpanSlot | None,
         resolved_target: MessageTarget,
         early_placeholder: _EarlyPlaceholderState,
-        response_kind: str,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
         signal_queued_message: bool,
         acknowledge_deferred: Callable[[str, str], Awaitable[None]],
@@ -3012,7 +2990,6 @@ class ResponseRunner:
                 request,
                 resolved_target=resolved_target,
                 early_placeholder=early_placeholder,
-                response_kind=response_kind,
                 locked_operation=locked_operation,
                 signal_queued_message=signal_queued_message,
                 acknowledge_deferred=acknowledge_deferred,
@@ -3024,12 +3001,8 @@ class ResponseRunner:
             # this covers what raises outside it.
             await self._exit_unended_span(handle, error, target=resolved_target)
             if handle is not None and isinstance(error, PostLockRequestPreparationError) and not error.reply_owned:
-                # The span's exit ended the reply with this error; the turn records the event that shows it.
-                reply = await handle.runtime.store.replies.load(handle.reply_id)
-                raise PostLockRequestPreparationError(
-                    placeholder_event_id=None if reply is None else reply.event_id,
-                    reply_owned=True,
-                ) from error.__cause__ or error
+                # The span's exit ended the reply with this error, which its records now own.
+                raise PostLockRequestPreparationError(reply_owned=True) from error.__cause__ or error
             raise
         handle = None if span_slot is None else span_slot.handle
         if handle is not None and not handle.exited:
@@ -3053,7 +3026,6 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
         early_placeholder: _EarlyPlaceholderState,
-        response_kind: str,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
         signal_queued_message: bool,
         acknowledge_deferred: Callable[[str, str], Awaitable[None]],
@@ -3088,20 +3060,6 @@ class ResponseRunner:
                     and not _is_silent_schedule_response(request)
                 ),
             )
-        except asyncio.CancelledError as error:
-            if current_task_is_process_shutdown():
-                raise
-            if (
-                early_placeholder.placeholder_event_id is not None
-                and not early_placeholder.settlement_started
-                and not span_claimed()
-            ):
-                await self._finalize_early_placeholder_cancellation(
-                    early_placeholder,
-                    error,
-                    response_kind=response_kind,
-                )
-            raise
         except Exception as error:
             mapped = _post_lock_error(error, early_placeholder, reply_owned=span_claimed())
             if mapped is error:
@@ -3605,35 +3563,6 @@ class ResponseRunner:
             else await self._approval_responses.settle_failure(failing, reason)
         )
         return failing.response_event_id if settled else None
-
-    async def _finalize_early_placeholder_cancellation(
-        self,
-        state: _EarlyPlaceholderState,
-        error: asyncio.CancelledError,
-        *,
-        response_kind: str,
-    ) -> None:
-        """Best-effort terminalize an early placeholder before attempt settlement starts."""
-        request = state.request
-        event_id = state.placeholder_event_id
-        assert request is not None
-        assert event_id is not None
-        try:
-            await self.deps.delivery_gateway.deliver_cancelled_visible_note(
-                CancelledVisibleNoteRequest(
-                    target=request.response_envelope.target,
-                    event_id=event_id,
-                    existing_event_is_placeholder=True,
-                    cancel_source=classify_cancel_source(error),
-                    identity=self._response_identity(request, response_kind=response_kind),
-                ),
-            )
-        except Exception:
-            self.deps.logger.exception(
-                "Failed to finalize early placeholder after cancellation",
-                event_id=event_id,
-                response_kind=response_kind,
-            )
 
     def _request_with_locked_target(
         self,
@@ -4155,8 +4084,7 @@ class ResponseRunner:
                 ),
             )
             if placeholder_event_id is not None:
-                placeholder_state.placeholder_event_id = placeholder_event_id
-                placeholder_state.request = request
+                placeholder_state.placeholder_sent = True
                 request = replace(
                     request,
                     existing_event_id=placeholder_event_id,
@@ -4681,7 +4609,6 @@ class ResponseRunner:
                         FinalDeliveryRequest(
                             target=resolved_target,
                             existing_event_id=message_id,
-                            existing_event_is_placeholder=_replaceable_placeholder(request),
                             response_text=reason,
                             identity=response_identity,
                             tool_trace=None,
@@ -5050,9 +4977,6 @@ class ResponseRunner:
                         await self._settle_blocking_cancellation(
                             exc,
                             message_id=message_id,
-                            delivery_target=delivery_target,
-                            existing_event_is_placeholder=_replaceable_placeholder(delivery_request),
-                            response_identity=response_identity,
                             restart_message="Team non-streaming response interrupted by sync restart",
                             user_stop_message="Team non-streaming response cancelled by user",
                             interrupted_message="Team non-streaming response interrupted — traceback for diagnosis",
@@ -5068,7 +4992,6 @@ class ResponseRunner:
                             consumes_edit=request.prepared_edit_record is not None
                             and team_turn_recorder.outcome == "completed",
                             existing_event_id=message_id,
-                            existing_event_is_placeholder=_replaceable_placeholder(delivery_request),
                             response_text=response_text,
                             identity=response_identity,
                             tool_trace=None,
@@ -5622,9 +5545,6 @@ class ResponseRunner:
                 await self._settle_blocking_cancellation(
                     exc,
                     message_id=request.existing_event_id,
-                    delivery_target=runtime.resolved_target,
-                    existing_event_is_placeholder=_replaceable_placeholder(request),
-                    response_identity=response_identity,
                     restart_message="Non-streaming response interrupted by sync restart",
                     user_stop_message="Non-streaming response cancelled by user",
                     interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
@@ -5651,7 +5571,6 @@ class ResponseRunner:
                     target=runtime.resolved_target,
                     consumes_edit=request.prepared_edit_record is not None and turn_recorder.outcome == "completed",
                     existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=_replaceable_placeholder(request),
                     response_text=generation.response_text,
                     identity=response_identity,
                     tool_trace=generation.tool_trace if runtime.show_tool_calls else None,

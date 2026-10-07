@@ -802,7 +802,6 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!room:localhost", None, "$event"),
                     existing_event_id=existing_event_id,
-                    existing_event_is_placeholder=False,
                     response_text="visible response",
                     identity=ResponseIdentity(
                         response_kind="ai",
@@ -967,7 +966,6 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             FinalDeliveryRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
                 response_text="suppressed",
                 identity=ResponseIdentity(
                     response_kind="ai",
@@ -1050,7 +1048,6 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             FinalDeliveryRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
                 response_text="suppressed",
                 identity=ResponseIdentity(
                     response_kind="ai",

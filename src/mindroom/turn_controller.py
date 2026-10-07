@@ -2066,7 +2066,6 @@ class TurnController:
                     target=dispatch.target,
                     error=failure,
                     handled_turn=handled_turn,
-                    existing_event_id=error.placeholder_event_id,
                 )
                 if response_event_id is None:
                     # Nothing answered the turn, so it stays pending for a retry.

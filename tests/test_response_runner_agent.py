@@ -1378,7 +1378,6 @@ class TestAgentBot(AgentBotTestBase):
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
                     existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_text="Handled",
                     identity=ResponseIdentity(
                         response_kind="ai",
@@ -1450,7 +1449,6 @@ class TestAgentBot(AgentBotTestBase):
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
                     existing_event_id="$existing",
-                    existing_event_is_placeholder=False,
                     response_text="Handled",
                     identity=ResponseIdentity(
                         response_kind="ai",

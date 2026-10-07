@@ -543,21 +543,9 @@ class FinalDeliveryRequest:  # noqa: D101
     identity: ResponseIdentity
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
-    existing_event_is_placeholder: bool = False
     skip_mentions: bool = False
     # Set when this answer completes a regeneration, which consumes the edit its span selected.
     consumes_edit: bool = False
-
-
-@dataclass(frozen=True)
-class CancelledVisibleNoteRequest:
-    """Parameters for one terminal cancellation-note edit."""
-
-    target: MessageTarget
-    event_id: str
-    existing_event_is_placeholder: bool
-    cancel_source: Literal["user_stop", "sync_restart", "interrupted"]
-    identity: ResponseIdentity
 
 
 @dataclass(frozen=True)
@@ -764,6 +752,21 @@ class DeliveryGateway:
             terminal_status=terminal_status,
             event_id=None,
             failure_reason=failure_reason,
+        )
+
+    def cancelled_outcome(
+        self,
+        event_id: str,
+        cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
+    ) -> FinalDeliveryOutcome:
+        """Report a cancellation of a visible reply, whose span's exit writes the note through its records."""
+        _cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=cancel_source)
+        return FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=event_id,
+            cancel_source=cancel_source,
+            failure_reason=cancel_failure_reason(cancel_source),
+            extra_content={constants.STREAM_STATUS_KEY: stream_status},
         )
 
     def cancelled_terminal_outcome(
@@ -2092,20 +2095,6 @@ class DeliveryGateway:
             extra_content=draft.extra_content,
         )
 
-    async def deliver_cancelled_visible_note(
-        self,
-        request: CancelledVisibleNoteRequest,
-    ) -> FinalDeliveryOutcome:
-        """Report a cancellation, which the reply span's exit writes through the reply's records."""
-        _cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
-        return FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id=request.event_id,
-            cancel_source=request.cancel_source,
-            failure_reason=cancel_failure_reason(request.cancel_source),
-            extra_content={constants.STREAM_STATUS_KEY: stream_status},
-        )
-
     async def _send_compaction_lifecycle_start(
         self,
         *,
@@ -2896,15 +2885,12 @@ class DeliveryGateway:
                 "placeholder_only",
             }:
                 existing_event_id = request.existing_event_id
-                existing_event_is_placeholder = request.existing_event_is_placeholder
                 if stream_outcome.visible_body_state == "placeholder_only":
                     existing_event_id = streamed_event_id
-                    existing_event_is_placeholder = True
                 return await self.deliver_final(
                     FinalDeliveryRequest(
                         target=request.target,
                         existing_event_id=existing_event_id,
-                        existing_event_is_placeholder=existing_event_is_placeholder,
                         response_text=stream_outcome.canonical_final_body_candidate,
                         consumes_edit=request.consumes_edit,
                         identity=request.identity,

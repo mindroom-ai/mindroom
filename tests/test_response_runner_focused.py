@@ -2520,17 +2520,12 @@ async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fail
         await asyncio.Event().wait()
         return False
 
-    cancelled_note = AsyncMock(side_effect=RuntimeError("Matrix unavailable"))
     with (
         patch(
             "mindroom.delivery_gateway.DeliveryGateway.send_text",
             new=AsyncMock(return_value="$placeholder"),
         ),
         patch_response_runner_module(should_use_streaming=AsyncMock(side_effect=blocked_streaming_check)),
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.deliver_cancelled_visible_note",
-            new=cancelled_note,
-        ),
     ):
         response = asyncio.create_task(coordinator.generate_response(_plain_request(_target())))
         await asyncio.wait_for(setup_started.wait(), timeout=1.0)
@@ -2538,8 +2533,7 @@ async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fail
         with pytest.raises(asyncio.CancelledError, match="sync_restart"):
             await response
 
-    # The reply's records own the early placeholder; main's direct note is not used.
-    cancelled_note.assert_not_awaited()
+    # The reply's records own the early placeholder.
     replies = bot._reply_runtime.store.replies
     reply = await replies.for_sources(("$event",))
     assert reply is not None
@@ -2626,7 +2620,7 @@ async def test_early_placeholder_failure_preserves_non_preparation_error_cause(t
         _target: MessageTarget,
         early_placeholder: response_runner._EarlyPlaceholderState,
     ) -> str | None:
-        early_placeholder.placeholder_event_id = "$placeholder"
+        early_placeholder.placeholder_sent = True
         raise proximate_error
 
     with pytest.raises(PostLockRequestPreparationError) as exc_info:
@@ -2636,7 +2630,6 @@ async def test_early_placeholder_failure_preserves_non_preparation_error_cause(t
             locked_operation=fail_after_placeholder,
         )
 
-    assert exc_info.value.placeholder_event_id == "$placeholder"
     assert exc_info.value.__cause__ is proximate_error
     assert exc_info.value.__cause__.__cause__ is underlying_error
 
