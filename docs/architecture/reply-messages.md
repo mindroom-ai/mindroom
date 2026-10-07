@@ -95,6 +95,8 @@ A reply is held by the continuation that names one of its spans and is not fence
 While held, a Stop fences the approval, a deletion keeps the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
 A continuation finishes once a FINAL at its first source was acknowledged or refused for good, or once an edit superseded it.
 Its finish, release, or discard applies the reply rule while the continuation still exists and deletes the continuation in the same transaction.
+A release hands the run's sources back to replay, unless a Stop is recorded: the reply then ends cancelled instead of replaying what the user stopped.
+A restart leaves a reply an approval holds to approval recovery, including a span approved in place that an older instance ran.
 
 ## Abandoned regenerations
 
@@ -112,7 +114,7 @@ A replay that a newer message from the same requester supersedes settles its sou
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
 Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit, which records the reply and the span it cancelled; the bot then cancels exactly that span and redacts what the reply showed, while a reply an approval holds and a written answer are kept, including the finished answer an edit was regenerating before the regeneration showed anything.
-An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes, and their sources settle unanswered unless an approval holds them.
+An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes, and their sources settle unanswered; a reply an approval holds is left to that approval, whose discard ends it, or whose owner settles it on coming back.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
 
 ## Invariants

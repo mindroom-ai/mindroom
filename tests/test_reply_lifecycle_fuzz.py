@@ -111,6 +111,8 @@ class _Model:
     removed: bool = False
     # Logical sources the user deleted: no settlement answers their turn.
     deleted: set[str] = field(default_factory=set)
+    # Edits a completed answer consumed, as the turn ledger commits them.
+    consumed: set[str] = field(default_factory=set)
 
 
 class ReplyLifecycleMachine(RuleBasedStateMachine):
@@ -238,11 +240,12 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 settled = self.model.spans[span_id]
                 # As the store does: nothing answers a turn whose every message the user deleted.
                 answered = answered and not set(settled.sources.logical) <= self.model.deleted
-                if consumes_edit and answered:
+                if consumes_edit and answered and settled.prepared_edit is not None:
                     # S5: only an answer the reply completed consumes the edit a regeneration selected.
                     reply = self.model.reply
                     assert reply is not None
                     assert self.model.spans[reply.last_span_id].outcome is SpanOutcome.COMPLETED, reply
+                    self.model.consumed.add(settled.prepared_edit)
                 self._settle(span_id)
             case CancelSpan(span_id=span_id):
                 self.model.cancel_requested.add(span_id)
@@ -297,6 +300,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             empty_presentation="empty",
             driving_edit_id=edit,
             approval_id=None if approval is None else approval.approval_id,
+            # A regeneration carries the edit it selected, which its completed answer consumes.
+            prepared_edit=edit,
         )
         context = ClaimContext(
             reply=reply,
@@ -329,13 +334,14 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     def _held_by_any(self) -> bool:
         return any(c.paused_span_id in self.model.spans for c in self.model.continuations.values())
 
-    def _terminal_write(self, requested: ReplyState) -> TerminalWrite:
+    def _terminal_write(self, requested: ReplyState, *, consumes_edit: bool = False) -> TerminalWrite:
         reply = self.model.reply
         assert reply is not None
         return TerminalWrite(
             shown=f"shown-{reply.revision}",
             prepared_revision=reply.revision,
             state=rl._expected_terminal_state(reply, requested),
+            consumes_edit=consumes_edit,
         )
 
     def _runs_for(self, span: Span) -> _Continuation | None:
@@ -597,10 +603,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert span is not None
         if self._waiting_in_place():
             return
-        self._span_exit(
-            span,
-            rl.finish(self.model.reply, span, self._terminal_write(ReplyState.COMPLETED), now_ns=self._now()),  # type: ignore[arg-type]
-        )
+        # A run that completed asks its answer to consume the edit it selected.
+        write = self._terminal_write(ReplyState.COMPLETED, consumes_edit=True)
+        self._span_exit(span, rl.finish(self.model.reply, span, write, now_ns=self._now()))  # type: ignore[arg-type]
 
     @precondition(lambda self: self._live() is not None)
     @rule()
@@ -845,6 +850,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     def _settle_approvals(self) -> None:
         for continuation in tuple(self.model.continuations.values()):
+            if continuation.state == "ready" and self.model.finals.get(continuation.delivery_id) == "refused":
+                # Matrix refused the answer for good: the runtime settles the run as a failure.
+                continuation.state = "failing"
+                continuation.disposition = "failed"
             if continuation.state == "failing" and not continuation.superseded:
                 self._write_failure_note(continuation)
             if self._may_finish(continuation):
@@ -957,6 +966,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 continue
             final = self.model.finals.get(continuation.delivery_id)
             if final is not None:
+                if final == "refused":
+                    # Recovery settles a refused answer as a failure.
+                    continuation.state = "failing"
+                    continuation.disposition = "failed"
                 if final in {"acknowledged", "refused"}:
                     self._finish_approval(continuation, owner_available=True)
             elif span is not None and span.outcome in _UNANSWERED_OUTCOMES - {SpanOutcome.RELEASED}:
@@ -1051,7 +1064,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert reply is not None
         last = self.model.spans[reply.last_span_id]
         self._settle(last.span_id)
-        self._apply(rl.sources_settled_without_reply(reply, last, now_ns=self._now()))
+        transition = self._apply(rl.sources_settled_without_reply(reply, last, now_ns=self._now()))
+        assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
 
     @precondition(
         lambda self: (
@@ -1091,7 +1105,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert reply is not None
         last = self.model.spans[reply.last_span_id]
         self._settle(last.span_id)
-        self._apply(rl.replay_dropped(reply, last, sources_pending=False, now_ns=self._now()))
+        transition = self._apply(rl.replay_dropped(reply, last, sources_pending=False, now_ns=self._now()))
+        assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
 
     @precondition(
         lambda self: (
@@ -1272,6 +1287,14 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             if span.outcome in rl._SOURCES_PENDING_OUTCOMES:
                 continue
             assert self._is_settled(span.span_id), span
+            if (
+                span.kind is SpanKind.REGENERATION
+                and span.outcome is SpanOutcome.COMPLETED
+                and span.prepared_edit is not None
+                and "$source" not in self.model.deleted
+            ):
+                # S5: a regeneration that completed its answer consumed the edit it selected.
+                assert span.prepared_edit in self.model.consumed, span
 
     def _drain_step(self) -> bool:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Move one owner forward; return whether anything was left to move."""
