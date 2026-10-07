@@ -248,7 +248,7 @@ class SettleSources:
     span_id: str
     # Whether the span's answer consumes the selected edit its regeneration carries.
     consumes_edit: bool = False
-    # False when the sources were deleted: they settle, and their turn stays unanswered.
+    # False when nothing answered the sources, deleted or terminal without an answer: their turn stays unanswered.
     answered: bool = True
 
 
@@ -374,7 +374,7 @@ def _stop_applied(reply: Reply) -> Reply:
     return replace(reply, stop_applied_receipt_order=reply.stop_receipt_order)
 
 
-def _settle_sources(reply: Reply, span: Span) -> tuple[Effect, ...]:
+def _settle_sources(reply: Reply, span: Span, *, answered: bool = True) -> tuple[Effect, ...]:
     """Settle a span's sources when it ends, unless an approval continuation owns them.
 
     A resume's sources are its continuation's, and so are those of a span
@@ -383,7 +383,7 @@ def _settle_sources(reply: Reply, span: Span) -> tuple[Effect, ...]:
     """
     if span.kind is SpanKind.APPROVAL_RESUME or reply.approval_id is not None:
         return ()
-    return (SettleSources(span.span_id),)
+    return (SettleSources(span.span_id, answered=answered),)
 
 
 def _next_sequence(reply: Reply) -> tuple[Reply, int]:
@@ -1619,7 +1619,7 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
 
 
 def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> Transition:
-    """The span's sources became terminal without an answer; the rule settles them."""
+    """The span's sources became terminal without an answer; the rule settles them and leaves their turn unanswered."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     # A selection's first span waits, unended, for its claim to make it current.
@@ -1627,7 +1627,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     if not (span.span_id == reply.current_span_id or span.outcome in _SOURCES_PENDING_OUTCOMES or awaiting_claim):
         return _unchanged(Outcome.STALE, reply)
     spans: tuple[Span, ...] = ()
-    effects = _settle_sources(reply, span)
+    effects = _settle_sources(reply, span, answered=False)
     updated = _clear_current(reply, span.span_id)
     if not span.ended:
         spans = (_end(span, SpanOutcome.SUPPRESSED, now_ns),)

@@ -1174,6 +1174,16 @@ async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue
     """Ingress settling the source a restart left for replay ends the reply in that commit; nothing replays it."""
     principal = journal_store.principal(PRINCIPAL)
     await _claimed(principal)
+    pending = TurnRecord.create(["$source"], completed=False)
+    await journal_store.backend.write(
+        lambda tx: turn_records.write_record(
+            tx,
+            "agent",
+            index_event_ids=pending.indexed_event_ids,
+            anchor_event_id="$source",
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
+        ),
+    )
     await principal.replies.write_generation("gen-2", now_ns=70)
     assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
     waiting = await principal.replies.load("reply-1")
@@ -1186,6 +1196,10 @@ async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue
     # It never showed an event, so it leaves nothing behind.
     assert ended.state is ReplyState.GONE
     assert await principal.settle("$source") == ()
+    # Nothing answered the turn.
+    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
+    assert record is not None
+    assert not record.completed
 
 
 async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_store: EventJournalStore) -> None:

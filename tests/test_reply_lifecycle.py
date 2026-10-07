@@ -1427,7 +1427,7 @@ def test_a_superseded_replay_ends_the_interrupted_reply_and_settles_its_sources(
     assert superseded.outcome is Outcome.APPLIED
     assert superseded.reply is not None
     assert superseded.reply.state is ReplyState.FAILED
-    assert superseded.effects == (SettleSources(span.span_id),)
+    assert superseded.effects == (SettleSources(span.span_id, answered=False),)
     placeholder = rl.replay_superseded(
         replace(reply, placeholder_only=True),
         span,
@@ -1436,7 +1436,7 @@ def test_a_superseded_replay_ends_the_interrupted_reply_and_settles_its_sources(
     )
     assert placeholder.reply is not None
     assert placeholder.reply.state is ReplyState.GONE
-    assert placeholder.effects == (SettleSources(span.span_id),)
+    assert placeholder.effects == (SettleSources(span.span_id, answered=False),)
 
 
 def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
@@ -1472,7 +1472,7 @@ def test_a_dropped_replay_ends_the_reply_its_earlier_span_left() -> None:
     assert dropped.reply.state is ReplyState.FAILED
     assert dropped.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
     # Settling again is idempotent, and it is what records the turn answered.
-    assert dropped.effects == (SettleSources(span.span_id),)
+    assert dropped.effects == (SettleSources(span.span_id, answered=False),)
     # A placeholder is removed, unless an edit Matrix has not confirmed may show more.
     unconfirmed = replace(reply, placeholder_only=True, possibly_shown_seq=3, confirmed_seq=2)
     shown = rl.replay_dropped(unconfirmed, span, sources_pending=False, now_ns=NOW)
