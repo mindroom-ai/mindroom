@@ -540,11 +540,20 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 now_ns=self._now(),
             ),
         )
-        if restorable and span.rollback is not None and span.rollback.state is not ReplyState.PAUSED:
-            # I11: only the refused FINAL was written, so the answer it would replace stands.
+        # The Stop's own refused row restores only a finished answer.
+        finished_only = span.outcome is SpanOutcome.CANCELLED
+        if (
+            restorable
+            and span.rollback is not None
+            and not (finished_only and span.rollback.state not in rl._TERMINAL_STATES)
+        ):
+            # I11: only the refused FINAL was written, so the answer it would replace stands as the room shows it;
+            # a paused one does not get its approval back.
             restored = self.model.reply
             assert restored is not None
-            assert restored.state is span.rollback.state, (restored, span)
+            expected = ReplyState.FAILED if span.rollback.state is ReplyState.PAUSED else span.rollback.state
+            assert restored.state is expected, (restored, span)
+            assert (restored.possibly_shown_seq or 0) <= span.base_sequence, (restored, span)
         if row.intent.stage is WriteStage.FINAL:
             self.model.finals[row.delivery_id] = "refused"
             self._settle_approvals()

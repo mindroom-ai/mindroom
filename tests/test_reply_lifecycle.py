@@ -795,11 +795,20 @@ def test_a_refused_final_restores_only_when_nothing_before_it_was_written() -> N
             now_ns=NOW,
         )
 
-    reply, span = _regenerating()
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
+    shown = replace(reply, state=ReplyState.COMPLETED, presentation="old", event_id="$reply")
+    shown = replace(shown, possibly_shown="old", possibly_shown_seq=1, reply_sequence=1, confirmed_seq=1)
+    claimed = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(shown, span))
+    assert claimed.reply is not None
+    assert claimed.claimed is not None
+    reply, span = claimed.reply, claimed.claimed
     restored = refused_final(reply, span)
     assert restored.reply is not None
     assert restored.reply.state is ReplyState.COMPLETED
     assert restored.reply.presentation == "old"
+    # What the room shows is the old answer again, which a later note or replay continues below.
+    assert (restored.reply.possibly_shown, restored.reply.possibly_shown_seq) == ("old", 1)
     failed = refused_final(_progress(reply, span), span)
     assert failed.reply is not None
     assert failed.reply.state is ReplyState.FAILED

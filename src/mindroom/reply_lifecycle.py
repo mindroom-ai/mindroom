@@ -140,6 +140,9 @@ class Rollback:
     state: ReplyState
     # The span an active reply was waiting to continue (a retry or replay).
     last_span_id: str | None = None
+    # What the room may show before the regeneration wrote, and that write's sequence.
+    possibly_shown: str | None = None
+    possibly_shown_seq: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,7 +487,12 @@ def _restore(reply: Reply, span: Span, now_ns: int) -> Reply:
     if rollback is None:
         msg = f"Span {span.span_id} has no rollback snapshot"
         raise _invalid(msg)
-    restored = _stop_applied(_clear_current(reply, span.span_id))
+    # A row Matrix refused for good shows nothing: the room shows what it did before the regeneration.
+    restored = replace(
+        _stop_applied(_clear_current(reply, span.span_id)),
+        possibly_shown=rollback.possibly_shown,
+        possibly_shown_seq=rollback.possibly_shown_seq,
+    )
     if rollback.state is ReplyState.PAUSED:
         return _set_state(
             restored,
@@ -624,6 +632,8 @@ def _rollback_of(reply: Reply) -> Rollback:
         frozen_display=reply.frozen_display,
         state=reply.state,
         last_span_id=reply.last_span_id if reply.state is ReplyState.ACTIVE else None,
+        possibly_shown=reply.possibly_shown,
+        possibly_shown_seq=reply.possibly_shown_seq,
     )
 
 
