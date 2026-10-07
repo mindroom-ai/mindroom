@@ -1499,8 +1499,7 @@ async def test_hard_delete_uninstalls_every_instance_and_cancels_billing_before_
 
     _claimable(platform)
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs:
+    with _cleanup_with_other_tasks_stubbed():
         run = await run_cleanup_job()
 
     assert order == ["cancel sub_stripe_1", "uninstall 7"]
@@ -1519,16 +1518,14 @@ async def test_failed_auth_user_deletion_is_retried_by_the_next_run(platform: Pl
     _claimable(platform)
     platform.db.auth.admin.error = RuntimeError("auth unavailable")
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs:
+    with _cleanup_with_other_tasks_stubbed():
         failed = await run_cleanup_job()
     # The account row, and with it the login, survives the failure, so the next run finds the account again.
     assert platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] is not None
     assert failed["summary"]["accounts"]["errors"] == [f"account {ACCOUNT_ID}: auth unavailable"]
 
     platform.db.auth.admin.error = None
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs:
+    with _cleanup_with_other_tasks_stubbed():
         retried = await run_cleanup_job()
 
     assert platform.db.auth.admin.deleted_users == [ACCOUNT_ID]
@@ -1544,8 +1541,7 @@ async def test_failed_teardown_keeps_the_account_rows_for_the_next_run(platform:
     platform.uninstall.side_effect = HTTPException(status_code=500, detail="Failed to uninstall instance: timeout")
     _claimable(platform)
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs:
+    with _cleanup_with_other_tasks_stubbed():
         run = await run_cleanup_job()
 
     assert [name for name, _params in platform.db.rpc_calls] == ["claim_account_hard_delete"]
@@ -1562,8 +1558,7 @@ async def test_account_the_database_does_not_let_cleanup_claim_is_not_torn_down(
     platform.db.tables["instances"].append(_instance("stopped"))
     platform.db.rpc_results["claim_account_hard_delete"] = False
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs:
+    with _cleanup_with_other_tasks_stubbed():
         run = await run_cleanup_job()
 
     platform.uninstall.assert_not_awaited()
@@ -1577,8 +1572,7 @@ async def test_account_inside_its_grace_period_is_not_torn_down(platform: Platfo
     platform.db.tables["subscriptions"].append(_subscription("cancelled"))
     platform.db.tables["instances"].append(_instance("stopped"))
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs:
+    with _cleanup_with_other_tasks_stubbed():
         await run_cleanup_job()
 
     platform.uninstall.assert_not_awaited()
@@ -1994,8 +1988,7 @@ async def test_nightly_run_sets_billing_of_accounts_inside_their_grace_period_to
     platform.db.tables["subscriptions"].append(_subscription("active"))
     _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active"), _stripe_sub("sub_unpaid", "incomplete"))
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs:
+    with _cleanup_with_other_tasks_stubbed():
         run = await run_cleanup_job()
 
     platform.stripe.Subscription.modify.assert_called_once_with(
@@ -2041,8 +2034,7 @@ async def test_nightly_billing_change_leaves_an_account_restored_meanwhile_bille
 
     platform.stripe.Subscription.modify.side_effect = modify
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, patch.object(platform.db, "table", side_effect=restore_after_listing):
+    with _cleanup_with_other_tasks_stubbed(), patch.object(platform.db, "table", side_effect=restore_after_listing):
         await run_cleanup_job()
 
     ends = call("sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"})
@@ -2418,9 +2410,8 @@ async def test_nightly_cleanup_pages_through_every_pending_account(platform: Pla
         seen.append(account_id)
         return []
 
-    audit_logs = _cleanup_with_other_tasks_stubbed()
     with (
-        audit_logs,
+        _cleanup_with_other_tasks_stubbed(),
         patch("backend.tasks.cleanup._PAGE_SIZE", 1),
         patch("backend.tasks.cleanup.end_account_billing_at_period_end", side_effect=record),
         patch("backend.tasks.cleanup.cancel_unpaid_subscriptions", AsyncMock()),
