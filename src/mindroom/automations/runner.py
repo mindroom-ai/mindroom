@@ -1,10 +1,11 @@
 """Run each agent's enabled automations on their cron schedules.
 
-At a due time the automation's check runs off the event loop; when it passes, the agent posts the automation's prompt
-in its room as a hook-dispatched message, like a todo poke, so the agent answers it with a normal visible run.
-When that run's response is final, or after an hour without one, the verify step runs and its notice is posted in the
-prompt's thread.
-Nothing is persisted: the cron cadence is the cooldown, and a restart only skips the occurrence it missed.
+At a due time the automation's check runs off the event loop; when it returns a prompt, the agent posts it in its
+room as a hook-dispatched message, like a todo poke, so the agent answers it with a normal visible run.
+When that run's response is final, or after an hour without one, the prompt's continuation runs off the loop and
+returns the next prompt or the notice that ends the chain.
+An automation does not fire again until its chain ends.
+The runner persists nothing: the cron cadence is the cooldown, and a restart only skips the occurrence it missed.
 """
 
 from __future__ import annotations
@@ -17,9 +18,12 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
-from mindroom.automations.prompt_curation import curation_notice, curation_prompt, plan_curation, verify_curation
+from mindroom.automations.memory_consolidation import check_consolidation
+from mindroom.automations.prompt_curation import check_curation
+from mindroom.automations.steps import Ask, Done
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import ORIGINAL_SENDER_KEY, SCHEDULED_MODEL_KEY
+from mindroom.config.automations import PromptCurationAutomation
+from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
@@ -28,27 +32,27 @@ from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_threa
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from mindroom.automations.prompt_curation import CurationPlan
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.automations import PromptCurationAutomation
+    from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
-_SOURCE_HOOK = "prompt_curation"
-_VERIFY_FALLBACK = timedelta(hours=1)
+_RUN_FALLBACK = timedelta(hours=1)
 _MAX_SLEEP_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
-class _PendingVerify:
+class _PendingRun:
     """A posted prompt whose run has not ended yet."""
 
     key: str
+    agent_name: str
+    settings: Automation
     room_id: str
     thread_id: str
-    plan: CurationPlan
+    ask: Ask
     deadline: datetime
 
 
@@ -66,17 +70,25 @@ def _room_id(config: Config, runtime_paths: RuntimePaths, agent_name: str, room:
     return room_id if room_id.startswith("!") else None
 
 
+def _check(config: Config, runtime_paths: RuntimePaths, agent_name: str, automation: Automation) -> Ask | None:
+    """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
+    if isinstance(automation, PromptCurationAutomation):
+        return check_curation(config, runtime_paths, agent_name, automation)
+    return check_consolidation(config, runtime_paths, agent_name, automation)
+
+
 @dataclass
 class AutomationRunner:
-    """Own the automation schedule loop, the prompts it posts, and the verify steps that follow them."""
+    """Own the automation schedule loop, the prompts it posts, and the steps that follow their runs."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
     # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
     _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
-    _firing: set[str] = field(default_factory=set, init=False)
-    _pending: dict[str, _PendingVerify] = field(default_factory=dict, init=False)
+    # Automations from their check until their chain ends.
+    _active: set[str] = field(default_factory=set, init=False)
+    _pending: dict[str, _PendingRun] = field(default_factory=dict, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
 
@@ -86,20 +98,20 @@ class AutomationRunner:
             self._task = asyncio.create_task(self._run(), name="automation_runner")
 
     async def stop(self) -> None:
-        """Stop the schedule loop; prompts already posted keep their snapshots until the process exits."""
+        """Stop the schedule loop; prompts already posted keep their state until the process exits."""
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
     def response_finished(self, source_event_ids: Sequence[str]) -> None:
-        """Verify an automation prompt once the response it started is final."""
+        """Continue an automation once the response its prompt started is final."""
         for event_id in source_event_ids:
             if (pending := self._pending.pop(event_id, None)) is not None:
-                self._start_verify(pending)
+                self._continue(pending, timed_out=False)
 
     async def _tick(self, now: datetime) -> None:
-        """Fire every automation that is due at ``now`` and verify prompts whose run never reported back."""
+        """Fire every automation that is due at ``now`` and continue prompts whose run never reported back."""
         config = self.config_provider()
         if config is None:
             return
@@ -112,9 +124,9 @@ class AutomationRunner:
                 scheduled, due = self._next_due.get(key, (("", ""), now))
                 if scheduled != schedule:
                     self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
-                elif due <= now and not self._busy(key):
+                elif due <= now and key not in self._active:
                     self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
-                    self._firing.add(key)
+                    self._active.add(key)
                     create_background_task(
                         self._fire(config, agent_name, automation, key, now),
                         name=f"automation:{key}",
@@ -124,27 +136,26 @@ class AutomationRunner:
         for event_id, pending in list(self._pending.items()):
             if pending.deadline <= now:
                 del self._pending[event_id]
-                self._start_verify(pending)
+                self._continue(pending, timed_out=True)
 
-    def _start_verify(self, pending: _PendingVerify) -> None:
-        # The automation is free again, so a run held while the last prompt was pending may be due now.
+    def _continue(self, pending: _PendingRun, *, timed_out: bool) -> None:
+        create_background_task(self._advance(pending, timed_out), name=f"automation_step:{pending.key}")
+
+    def _release(self, key: str) -> None:
+        self._active.discard(key)
+        # The automation is free again, so a run held while its chain was active may be due now.
         self._wake.set()
-        create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
-
-    def _busy(self, key: str) -> bool:
-        """Return whether this automation is checking or waiting on its last prompt's run."""
-        return key in self._firing or any(pending.key == key for pending in self._pending.values())
 
     async def _run(self) -> None:
         while True:
             now = datetime.now(UTC)
-            # Cleared before ticking, so a verify the tick starts still wakes the next pass.
+            # Cleared before ticking, so a chain the tick ends still wakes the next pass.
             self._wake.clear()
             await self._tick(now)
             deadlines = [due for _schedule, due in self._next_due.values()] + [
                 p.deadline for p in self._pending.values()
             ]
-            # A held automation keeps its past due time; starting its last prompt's verify wakes the loop instead.
+            # A held automation keeps its past due time; ending its chain wakes the loop instead.
             sleep = min([_MAX_SLEEP_SECONDS, *((d - now).total_seconds() for d in deadlines if d > now)])
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=max(sleep, 1.0))
@@ -155,14 +166,12 @@ class AutomationRunner:
         self,
         config: Config,
         agent_name: str,
-        automation: PromptCurationAutomation,
+        automation: Automation,
         key: str,
         now: datetime,
     ) -> None:
+        posted = False
         try:
-            plan = await asyncio.to_thread(plan_curation, config, self.runtime_paths, agent_name, automation)
-            if plan is None:
-                return
             room_id = _room_id(config, self.runtime_paths, agent_name, automation.room)
             if room_id is None:
                 logger.warning("Automation has no room to post in", agent=agent_name, automation=automation.name)
@@ -171,86 +180,140 @@ class AutomationRunner:
             if bot is None:
                 logger.warning("Automation agent is not running", agent=agent_name, automation=automation.name)
                 return
-            event_id = await self._post_mention(config, bot, room_id, plan, curation_prompt(config, plan), None)
-            if event_id is not None:
-                self._pending[event_id] = _PendingVerify(key, room_id, event_id, plan, now + _VERIFY_FALLBACK)
-                self._wake.set()
-                logger.info(
-                    "Automation prompt posted",
-                    agent=agent_name,
-                    automation=automation.name,
-                    # A field named only "tokens" is redacted as a credential.
-                    file_tokens=plan.measured_tokens,
-                    target_tokens=plan.upper_tokens,
-                    floor_tokens=plan.floor_tokens,
+            try:
+                step = await asyncio.to_thread(_check, config, self.runtime_paths, agent_name, automation)
+            except (OSError, ValueError) as exc:
+                logger.warning("Automation check failed", agent=agent_name, automation=automation.name, error=str(exc))
+                await bot._hook_send_message(
+                    room_id,
+                    f"⚠️ The {automation.name} automation could not run: {exc}",
+                    None,
+                    automation.name,
                 )
-        except (OSError, ValueError) as exc:
-            logger.warning("Automation check failed", agent=agent_name, automation=automation.name, error=str(exc))
+                return
+            if step is not None:
+                posted = await self._post(config, bot, key, agent_name, automation, room_id, None, step, now)
         finally:
-            self._firing.discard(key)
+            if not posted:
+                self._release(key)
 
-    async def _verify(self, pending: _PendingVerify) -> None:
-        plan = pending.plan
-        result = await asyncio.to_thread(verify_curation, plan)
-        logger.info(
-            "Automation verified",
-            agent=plan.agent_name,
-            automation=plan.settings.name,
-            changed=result.changed,
-            findings=list(result.findings),
-            tokens_before=plan.measured_tokens,
-            tokens_after=result.tokens_after,
+    async def _advance(self, pending: _PendingRun, timed_out: bool) -> None:
+        """Run the continuation of a prompt whose run ended, then post its next prompt or its notice."""
+        posted = False
+        try:
+            config = self.config_provider()
+            bot = self.bot_provider(pending.agent_name)
+            if pending.ask.then is None or config is None or bot is None:
+                return
+            name = pending.settings.name
+            try:
+                step = await asyncio.to_thread(pending.ask.then, config, pending.thread_id, timed_out)
+            except (OSError, ValueError) as exc:
+                logger.warning("Automation step failed", agent=pending.agent_name, automation=name, error=str(exc))
+                await bot._hook_send_message(
+                    pending.room_id,
+                    f"⚠️ The {name} automation could not finish: {exc}",
+                    pending.thread_id,
+                    name,
+                )
+                return
+            if isinstance(step, Done):
+                if step.notice is not None:
+                    await bot._hook_send_message(pending.room_id, step.notice, pending.thread_id, name)
+                for thread_id in step.resolve:
+                    await self._resolve_thread(bot, pending, thread_id)
+                return
+            posted = await self._post(
+                config,
+                bot,
+                pending.key,
+                pending.agent_name,
+                pending.settings,
+                pending.room_id,
+                pending.thread_id,
+                step,
+                datetime.now(UTC),
+            )
+        finally:
+            if not posted:
+                self._release(pending.key)
+
+    async def _post(
+        self,
+        config: Config,
+        bot: AgentBot | TeamBot,
+        key: str,
+        agent_name: str,
+        settings: Automation,
+        room_id: str,
+        thread_id: str | None,
+        ask: Ask,
+        now: datetime,
+    ) -> bool:
+        """Post ``ask`` and wait for its run; return whether it was posted."""
+        target_thread = None if ask.new_thread else thread_id
+        event_id = await self._post_mention(config, bot, agent_name, settings, room_id, ask, target_thread)
+        if event_id is None:
+            return False
+        self._pending[event_id] = _PendingRun(
+            key=key,
+            agent_name=agent_name,
+            settings=settings,
+            room_id=room_id,
+            thread_id=event_id if target_thread is None else target_thread,
+            ask=ask,
+            deadline=now + _RUN_FALLBACK,
         )
-        config = self.config_provider()
-        bot = self.bot_provider(plan.agent_name)
-        if config is None or bot is None:
-            return
-        notice = curation_notice(config, plan, result)
-        if not result.findings:
-            await bot._hook_send_message(pending.room_id, notice, pending.thread_id, _SOURCE_HOOK)
-            if result.changed:
-                await self._resolve_thread(bot, pending)
-            return
-        # A re-check asks the agent once, like the prompt itself; its answer is not verified again.
-        await self._post_mention(config, bot, pending.room_id, plan, notice, pending.thread_id)
+        self._wake.set()
+        if ask.on_posted is not None:
+            try:
+                await asyncio.to_thread(ask.on_posted, event_id)
+            except (OSError, ValueError) as exc:
+                logger.warning("Automation could not record its prompt", agent=agent_name, error=str(exc))
+        logger.info("Automation prompt posted", agent=agent_name, automation=settings.name, new_thread=ask.new_thread)
+        return True
 
-    async def _resolve_thread(self, bot: AgentBot | TeamBot, pending: _PendingVerify) -> None:
-        """Mark the thread of a run that stayed within the bounds as resolved; a re-check thread stays open."""
+    async def _resolve_thread(self, bot: AgentBot | TeamBot, pending: _PendingRun, thread_id: str) -> None:
+        """Mark a finished chain's thread as resolved."""
         if bot.client is None:
             return
         try:
             await set_thread_tag(
                 bot.client,
                 pending.room_id,
-                pending.thread_id,
+                thread_id,
                 RESOLVED_THREAD_TAG,
                 set_by=bot.client.user_id,
             )
         except ThreadTagsError as exc:
-            logger.warning("Automation could not resolve its thread", agent=pending.plan.agent_name, error=str(exc))
+            logger.warning("Automation could not resolve its thread", agent=pending.agent_name, error=str(exc))
 
     async def _post_mention(
         self,
         config: Config,
         bot: AgentBot | TeamBot,
+        agent_name: str,
+        settings: Automation,
         room_id: str,
-        plan: CurationPlan,
-        text: str,
+        ask: Ask,
         thread_id: str | None,
     ) -> str | None:
-        """Post ``text`` mentioning the agent so it answers with a normal run, and return the event ID."""
-        extra_content: dict[str, str] = {}
+        """Post the prompt mentioning the agent so it answers with a normal run, and return the event ID."""
+        extra_content: dict[str, str | bool] = {}
         # Like a todo poke without a human requester, the message runs as MindRoom's internal user.
         if (original_sender := mindroom_user_id(config, self.runtime_paths)) is not None:
             extra_content[ORIGINAL_SENDER_KEY] = original_sender
-        if plan.settings.model is not None:
-            extra_content[SCHEDULED_MODEL_KEY] = plan.settings.model
+        if settings.model is not None:
+            extra_content[SCHEDULED_MODEL_KEY] = settings.model
+        # The prompt owns its thread, or answers in its chain's thread, and the session that goes with it, even for an
+        # agent in room thread mode.
+        extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
         return await bot._hook_send_message(
             room_id,
             # Only a mentioned agent answers a message in a room with other responders.
-            f"@{plan.agent_name} {text}",
+            f"@{agent_name} {ask.text}",
             thread_id,
-            _SOURCE_HOOK,
+            settings.name,
             extra_content or None,
             trigger_dispatch=True,
         )

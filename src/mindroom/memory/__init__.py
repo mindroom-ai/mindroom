@@ -1,6 +1,6 @@
 """Memory management for MindRoom agents and teams."""
 
-from mindroom.memory._file_backend import read_scope_memory_files
+from mindroom.memory._file_backend import read_scope_memory_files, refresh_agent_memory_search
 from mindroom.memory._prompting import strip_user_turn_time_prefix
 from mindroom.memory._shared import MemoryResult
 from mindroom.memory.auto_flush import (
@@ -37,6 +37,7 @@ __all__ = [
     "list_all_agent_memories",
     "mark_auto_flush_dirty_session",
     "read_scope_memory_files",
+    "refresh_agent_memory_search",
     "reprioritize_auto_flush_sessions",
     "search_agent_memories",
     "store_conversation_memory",

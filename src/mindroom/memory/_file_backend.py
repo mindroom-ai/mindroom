@@ -509,17 +509,40 @@ def _schedule_agent_semantic_refresh(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
+    _schedule_semantic_refresh_at(
+        agent_name,
+        scope_user_id,
+        _scope_dir(scope_user_id, resolution, config, create=False),
+        config,
+        runtime_paths,
+        execution_identity,
+    )
+
+
+def _schedule_semantic_refresh_at(
+    agent_name: str,
+    scope_user_id: str,
+    root: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> None:
     search_config = config.resolve_entity(agent_name).memory_search
     if search_config.mode != "semantic":
         return
     schedule_semantic_file_memory_refresh(
         scope_user_id=scope_user_id,
-        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        root=root,
         config=config,
         runtime_paths=runtime_paths,
         search_config=search_config,
         execution_identity=execution_identity,
     )
+
+
+def refresh_agent_memory_search(agent_name: str, root: Path, config: Config, runtime_paths: RuntimePaths) -> None:
+    """Re-index a shared agent's file memory at ``root`` after its files changed outside the memory tool."""
+    _schedule_semantic_refresh_at(agent_name, agent_scope_user_id(agent_name), root, config, runtime_paths, None)
 
 
 def _schedule_scope_semantic_refresh(

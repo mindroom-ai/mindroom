@@ -11,10 +11,13 @@ Files are read through no-follow descriptor walks, because worker code writes th
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from mindroom.automations.steps import Ask, Done
 from mindroom.config.automations import MAX_FILE_SHRINK
+from mindroom.logging_config import get_logger
 from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -28,13 +31,15 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
+logger = get_logger(__name__)
+
 _ENTRYPOINT = "MEMORY.md"
 _MEMORY_DIR_PREFIX = "memory/"
 _MAX_FILE_BYTES = 1 << 20
 
 
 @dataclass(frozen=True)
-class CurationPlan:
+class _CurationPlan:
     """What one prompt asked for, and the files as they were when it was posted."""
 
     agent_name: str
@@ -92,12 +97,12 @@ def _curated_paths(config: Config, agent_name: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def plan_curation(
+def _plan_curation(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
     settings: PromptCurationAutomation,
-) -> CurationPlan | None:
+) -> _CurationPlan | None:
     """Return the plan for a due prompt, or None while the files are within the trigger.
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
@@ -113,7 +118,7 @@ def plan_curation(
     measured = sum(curated.values())
     if measured <= settings.trigger_tokens:
         return None
-    return CurationPlan(
+    return _CurationPlan(
         agent_name=agent_name,
         root=root,
         settings=settings,
@@ -125,7 +130,7 @@ def plan_curation(
     )
 
 
-def curation_prompt(config: Config, plan: CurationPlan) -> str:
+def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
     """Render the visible prompt that asks the agent for this plan's cut."""
     return config.render_prompt(
         "PROMPT_CURATION_PROMPT_TEMPLATE",
@@ -147,7 +152,7 @@ def _read_after_run(root: Path, path: str) -> bytes | None | OSError | ValueErro
 
 
 def _findings(
-    plan: CurationPlan,
+    plan: _CurationPlan,
     after_run: Mapping[str, bytes | None | OSError | ValueError],
 ) -> tuple[int, list[str]]:
     """Return the curated files' total after the run and what looks outside the plan's bounds."""
@@ -181,7 +186,7 @@ def _findings(
     return total, findings
 
 
-def _content_loss(plan: CurationPlan, curated_tokens: int) -> str | None:
+def _content_loss(plan: _CurationPlan, curated_tokens: int) -> str | None:
     """Describe memory content deleted rather than moved beyond the allowance, or return None."""
     lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + _memory_dir_tokens(plan.root, plan.snapshot))
     if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
@@ -189,7 +194,7 @@ def _content_loss(plan: CurationPlan, curated_tokens: int) -> str | None:
     return f"about {lost} tokens of memory were deleted rather than moved to memory/ (at most {max_loss})"
 
 
-def verify_curation(plan: CurationPlan) -> _CurationResult:
+def _verify_curation(plan: _CurationPlan) -> _CurationResult:
     """Measure the files after the run and describe anything outside the plan's bounds, without writing them."""
     after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
     if all(after_run[path] == payload for path, payload in plan.snapshot.items()):
@@ -200,10 +205,49 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
     return _CurationResult(tokens_after=tokens_after, changed=True, findings=tuple(findings))
 
 
-def curation_notice(config: Config, plan: CurationPlan, result: _CurationResult) -> str:
+def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResult) -> str:
     """Return the message posted in the prompt's thread once verify ran; findings ask the agent to re-check."""
     if result.findings:
         return config.render_prompt("PROMPT_CURATION_RECHECK_TEMPLATE", findings="; ".join(result.findings))
     if not result.changed:
         return f"Prompt maintenance changed nothing; the files stay at {plan.measured_tokens} tokens."
     return f"✅ Prompt files condensed from {plan.measured_tokens} to {result.tokens_after} tokens."
+
+
+def check_curation(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    settings: PromptCurationAutomation,
+) -> Ask | None:
+    """Return the prompt asking for a cut, or None while the files are within the trigger."""
+    plan = _plan_curation(config, runtime_paths, agent_name, settings)
+    if plan is None:
+        return None
+    logger.info(
+        "Prompt curation asks for a cut",
+        agent=agent_name,
+        # A field named only "tokens" is redacted as a credential.
+        file_tokens=plan.measured_tokens,
+        target_tokens=plan.upper_tokens,
+        floor_tokens=plan.floor_tokens,
+    )
+    return Ask(_curation_prompt(config, plan), new_thread=True, then=partial(_after_curation, plan))
+
+
+def _after_curation(plan: _CurationPlan, config: Config, thread_id: str, _timed_out: bool) -> Ask | Done:
+    result = _verify_curation(plan)
+    logger.info(
+        "Prompt curation verified",
+        agent=plan.agent_name,
+        changed=result.changed,
+        findings=list(result.findings),
+        tokens_before=plan.measured_tokens,
+        tokens_after=result.tokens_after,
+    )
+    notice = _curation_notice(config, plan, result)
+    if result.findings:
+        # A re-check asks the agent once, like the prompt itself; its answer is not verified again.
+        return Ask(notice, new_thread=False)
+    # A run that stayed within the bounds resolves its thread; an unchanged run leaves it open.
+    return Done(notice, resolve=(thread_id,) if result.changed else ())

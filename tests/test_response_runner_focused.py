@@ -10179,3 +10179,26 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
         PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=count),
     )
     assert calls == (["run-1"] if succeeded else [])
+
+
+@pytest.mark.parametrize(
+    ("hook_source", "flushed"),
+    [(None, True), ("memory_consolidation", False), ("prompt_curation", False)],
+)
+def test_a_built_in_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
+    """A maintenance turn, such as an unreviewed memory proposal, never reaches auto-flush; other turns do."""
+    runner = ResponseRunner(deps=MagicMock())
+    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "file"
+
+    with patch("mindroom.response_runner.mark_auto_flush_dirty_session") as mark_dirty:
+        runner._memory_persistence(
+            agent_name="mind",
+            session_id="session",
+            execution_identity=MagicMock(),
+            prompt="Consolidate memory",
+            thread_history=(),
+            user_id=None,
+            hook_source=hook_source,
+        )()
+
+    assert mark_dirty.called is flushed

@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.automations.prompt_curation import (
-    CurationPlan,
-    curation_notice,
-    curation_prompt,
-    plan_curation,
-    verify_curation,
+    _curation_notice,
+    _curation_prompt,
+    _CurationPlan,
+    _plan_curation,
+    _verify_curation,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.automations import PromptCurationAutomation
@@ -53,10 +53,10 @@ def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAu
     return config, automation, root
 
 
-def _plan(tmp_path: Path, **settings: object) -> tuple[CurationPlan, Config, Path]:
+def _plan(tmp_path: Path, **settings: object) -> tuple[_CurationPlan, Config, Path]:
     config, automation, root = _setup(tmp_path, **settings)
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, paths, "mind", automation)
     assert plan is not None
     return plan, config, root
 
@@ -71,7 +71,7 @@ def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:
     (root / "MEMORY.md").write_text("# Memory\n- Prefers terse replies.\n", encoding="utf-8")
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
-    assert plan_curation(config, paths, "mind", automation) is None
+    assert _plan_curation(config, paths, "mind", automation) is None
 
 
 def test_the_plan_covers_memory_and_every_context_file_with_a_gradual_band(tmp_path: Path) -> None:
@@ -95,7 +95,7 @@ def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) ->
     """The visible prompt names every file, the band, the per-file cap, committing first, and the re-check."""
     plan, config, _root = _plan(tmp_path)
 
-    prompt = curation_prompt(config, plan)
+    prompt = _curation_prompt(config, plan)
 
     assert "total 1292 tokens, over the 1000-token limit" in prompt
     assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
@@ -109,10 +109,12 @@ def test_an_untouched_workspace_is_reported_unchanged(tmp_path: Path) -> None:
     """A run that edits nothing gets a plain notice."""
     plan, config, _root = _plan(tmp_path)
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert (result.changed, result.findings) == (False, ())
-    assert curation_notice(config, plan, result) == "Prompt maintenance changed nothing; the files stay at 1292 tokens."
+    assert (
+        _curation_notice(config, plan, result) == "Prompt maintenance changed nothing; the files stay at 1292 tokens."
+    )
 
 
 def test_moving_a_section_into_memory_within_bounds_is_accepted(tmp_path: Path) -> None:
@@ -121,10 +123,10 @@ def test_moving_a_section_into_memory_within_bounds_is_accepted(tmp_path: Path) 
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert (result.changed, result.findings) == (True, ())
-    assert curation_notice(config, plan, result) == "✅ Prompt files condensed from 1292 to 1139 tokens."
+    assert _curation_notice(config, plan, result) == "✅ Prompt files condensed from 1292 to 1139 tokens."
 
 
 def _over_cut(root: Path) -> None:
@@ -180,11 +182,11 @@ def test_a_run_that_misses_the_bounds_is_asked_to_recheck_and_left_as_is(
     change(root)
     after = _snapshot(root)
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert finding in result.findings
     assert _snapshot(root) == after
-    notice = curation_notice(config, plan, result)
+    notice = _curation_notice(config, plan, result)
     assert notice.startswith("⚠️ Prompt maintenance needs a re-check: ")
     assert finding in notice
     assert "Compare your change with the commit you made before it" in notice
@@ -196,7 +198,7 @@ def test_an_unreadable_file_is_the_only_finding(tmp_path: Path, change: Callable
     plan, _config, root = _plan(tmp_path)
     change(root)
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert len(result.findings) == 1
     assert result.findings[0].startswith("MEMORY.md ")
@@ -209,7 +211,7 @@ def test_a_fact_another_conversation_writes_during_the_run_is_kept(tmp_path: Pat
     with (root / "MEMORY.md").open("a", encoding="utf-8") as memory:
         memory.write("- Dentist on Friday.\n")
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert result.findings
     assert (root / "MEMORY.md").read_text().endswith("- Dentist on Friday.\n")
@@ -225,17 +227,17 @@ def test_a_planted_link_stops_the_check(tmp_path: Path) -> None:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
     with pytest.raises((OSError, ValueError)):
-        plan_curation(config, paths, "mind", automation)
+        _plan_curation(config, paths, "mind", automation)
 
 
 ARCHIVE = "# Projects\n" + "Archived project detail. " * 80 + "\n"
 
 
-def _plan_with_archive(tmp_path: Path) -> tuple[CurationPlan, Path]:
+def _plan_with_archive(tmp_path: Path) -> tuple[_CurationPlan, Path]:
     config, automation, root = _setup(tmp_path)
     (root / "memory" / "projects.md").write_text(ARCHIVE, encoding="utf-8")
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, paths, "mind", automation)
     assert plan is not None
     return plan, root
 
@@ -247,7 +249,7 @@ def test_deleting_archived_memory_while_cutting_is_reported(tmp_path: Path) -> N
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert any("deleted rather than moved" in finding for finding in result.findings)
     assert not (root / "memory" / "projects.md").exists()
@@ -259,7 +261,7 @@ def test_deleting_archived_memory_with_the_prompt_files_untouched_is_reported(tm
     (root / "memory" / "projects.md").unlink()
     after = _snapshot(root)
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert not result.changed
     assert len(result.findings) == 1
@@ -272,11 +274,11 @@ def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_p
     config, automation, root = _setup(tmp_path)
     (root / "memory" / "big.md").write_text("Old detail.\n" * 100_000, encoding="utf-8")
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, paths, "mind", automation)
     assert plan is not None
     _delete_without_moving(root)
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert "about 161 tokens of memory were deleted rather than moved to memory/ (at most 65)" in result.findings
 
@@ -289,12 +291,12 @@ def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
     (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     config.agents["mind"].context_files = ["memory/context.md"]
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, paths, "mind", automation)
     assert plan is not None
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "memory" / "context.md").write_text(context.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert (result.changed, result.findings) == (True, ())
 
@@ -305,6 +307,6 @@ def test_reorganizing_an_archive_without_losing_content_is_accepted(tmp_path: Pa
     (root / "memory" / "projects.md").write_text(SECTIONS[3] + ARCHIVE, encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
-    result = verify_curation(plan)
+    result = _verify_curation(plan)
 
     assert (result.changed, result.findings) == (True, ())
