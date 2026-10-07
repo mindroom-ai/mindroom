@@ -257,11 +257,23 @@ INSERT INTO matrix_delivery_outbox (
 """
 
 
+@pytest.mark.parametrize("failing", [False, True])
 @pytest.mark.asyncio
-async def test_an_approval_a_newer_answer_replaced_is_superseded(legacy_database: _LegacyDatabase) -> None:
-    """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it."""
+async def test_an_approval_a_newer_answer_replaced_is_superseded(
+    legacy_database: _LegacyDatabase,
+    *,
+    failing: bool,
+) -> None:
+    """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it.
+
+    One that already failed is superseded too, so its failure is never published over the newer answer.
+    """
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(_NEWER_ANSWER)
+    if failing:
+        legacy_database.execute(
+            "UPDATE approval_continuations SET state = 'failing', failure_reason = 'expired' WHERE approval_id = 'approval'",
+        )
     store = legacy_database.open()
     try:
         principal = store.principal("@bot:example.org")
@@ -275,6 +287,7 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(legacy_database
         assert reply is not None
         assert reply.state is ReplyState.COMPLETED
         assert reply.approval_id is None
+        assert await principal.replies.span(reply.last_span_id) is not None
         assert await principal.finish_approval_continuation("approval") is not None
         assert not await principal.is_pending("$first")
     finally:

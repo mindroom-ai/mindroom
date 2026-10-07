@@ -233,7 +233,7 @@ def upgrade_continuation_identity(
                 stored,
             )
             claimed = row["state"] == "claimed"
-            if attempts and row["state"] != "failing" and _replaced(transaction, principal_id, pending[0]):
+            if attempts and _replaced(transaction, principal_id, pending[0]):
                 transaction.execute(
                     """UPDATE approval_continuations SET state = 'failing', failure_reason = ?, runtime_generation = NULL
                     WHERE principal_id = ? AND approval_id = ?""",

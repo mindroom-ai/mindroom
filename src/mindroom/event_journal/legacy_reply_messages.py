@@ -182,7 +182,8 @@ def classify(
         if adoption.reply.event_id in replaced:
             # The newer edit's answer is still in flight: its reply keeps the approvals it superseded.
             superseded = replaced.pop(adoption.reply.event_id)
-            adoption = _with_replaced_approvals(adoption, superseded, now_ns)
+            pauses = _superseded_pauses(adoption.reply.reply_id, superseded, now_ns)
+            adoption = _with_replaced_approvals(adoption, superseded, pauses)
         adoptions.append(adoption)
         adopted.add(delivery_id)
         adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
@@ -303,12 +304,12 @@ def _superseded_pauses(
 def _with_replaced_approvals(
     adoption: _Adoption,
     superseded: tuple[ApprovalContinuation, ...],
-    now_ns: int,
+    pauses: tuple[rl.Span, ...],
 ) -> _Adoption:
     """Keep the pauses of approvals a newer answer replaced on that answer's reply, and run their cleanup."""
     return replace(
         adoption,
-        superseded=_superseded_pauses(adoption.reply.reply_id, superseded, now_ns),
+        superseded=pauses,
         effects=(*adoption.effects, *(rl.WakeApproval(older.approval_id) for older in superseded)),
     )
 
@@ -338,7 +339,7 @@ def _replaced_reply(
         now_ns=now_ns,
         event_id=event_id,
     )
-    return _with_replaced_approvals(_Adoption(reply=reply, spans=()), superseded, now_ns)
+    return _with_replaced_approvals(_Adoption(reply=reply, spans=()), superseded, pauses)
 
 
 def _reply(
