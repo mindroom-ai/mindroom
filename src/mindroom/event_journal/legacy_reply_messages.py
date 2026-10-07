@@ -147,7 +147,6 @@ def classify(
     *,
     entity_name: str,
     presentations: LegacyPresentations,
-    show_tool_calls: bool,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
     """Give each reply an earlier release left in flight a record, once per principal; return what to run after commit."""
@@ -161,18 +160,7 @@ def classify(
     # event its original turn's rows created, and that event is adopted once.
     adopted_events: set[str] = set()
     for continuation, superseded in _newest_continuations(transaction, principal_id, entity_name):
-        # LEGACY_COMPAT: Approval continuations without frozen tool-call visibility.
-        # Legacy format: a continuation context without show_tool_calls, which v2026.8.84 and earlier wrote.
-        # Last legacy release: v2026.8.84; replacement: v2026.8.85 froze visibility in the context, and the
-        # unreleased durable reply messages keep it in the paused reply's presentation.
-        # Handling: the adopted reply shows tool calls as the entity's current policy says.
-        # Coverage: tests/test_legacy_reply_messages.py::test_an_unfrozen_approval_adopts_the_current_tool_call_visibility.
-        visible = (
-            continuation
-            if continuation.show_tool_calls_is_frozen
-            else replace(continuation, show_tool_calls=show_tool_calls, show_tool_calls_is_frozen=True)
-        )
-        adoption = _paused_reply(transaction, principal_id, visible, entity_name, presentations, now_ns)
+        adoption = _paused_reply(transaction, principal_id, continuation, entity_name, presentations, now_ns)
         adoption = replace(
             adoption,
             superseded=tuple(

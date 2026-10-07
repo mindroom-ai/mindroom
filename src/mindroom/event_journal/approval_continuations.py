@@ -200,7 +200,6 @@ class ApprovalContinuation:
     state: ApprovalContinuationState
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     show_tool_calls: bool = True
-    show_tool_calls_is_frozen: bool = True
     execution_identity: dict[str, object] = field(default_factory=dict)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
@@ -326,7 +325,6 @@ class _PausedReply:
     discovery_event_ids: tuple[str, ...]
     edit_receipt_order: int | None
     show_tool_calls: bool
-    show_tool_calls_is_frozen: bool
     prepared_edit_record: TurnRecord | None
     # A claim an earlier release left running, until reply classification names its span.
     claimed: bool
@@ -366,7 +364,6 @@ def _paused_reply(
         discovery_event_ids=span.sources.discovery,
         edit_receipt_order=reply.edit_receipt_order if span.kind is SpanKind.REGENERATION else None,
         show_tool_calls=_shows_tool_calls(reply.presentation),
-        show_tool_calls_is_frozen=True,
         prepared_edit_record=(
             None
             if span.prepared_edit is None
@@ -434,7 +431,6 @@ def _from_rows(
             stored.get("delegation_storage_bindings", {}),
         ),
         show_tool_calls=identity.show_tool_calls,
-        show_tool_calls_is_frozen=identity.show_tool_calls_is_frozen,
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),

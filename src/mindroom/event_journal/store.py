@@ -1744,7 +1744,6 @@ class PrincipalStore:
         *,
         entity_name: str,
         presentations: legacy_reply_messages.LegacyPresentations,
-        show_tool_calls: bool,
         now_ns: int,
     ) -> tuple[AppliedTransition, ...]:
         """Give the replies an earlier release left in flight records, once per principal."""
@@ -1754,7 +1753,6 @@ class PrincipalStore:
                 self._principal_id,
                 entity_name=entity_name,
                 presentations=presentations,
-                show_tool_calls=show_tool_calls,
                 now_ns=now_ns,
             ),
         )

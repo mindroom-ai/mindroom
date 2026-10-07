@@ -193,9 +193,6 @@ class ReplyRuntime:
     # Starts the cleanup of an approval an edit superseded, outside any conversation.
     clean_up_superseded: Callable[[ApprovalContinuation], None]
     clock: Callable[[], int] = field(default=time.time_ns)
-    # The entity's tool-call visibility now, which a paused reply adopted from
-    # before frozen visibility shows.
-    show_tool_calls: Callable[[], bool] = field(default=lambda: True)
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited for a reply's earlier writes, by reply.
@@ -307,7 +304,6 @@ class ReplyRuntime:
         adopted = await self.store.adopt_legacy_replies(
             entity_name=self.entity_name,
             presentations=LEGACY_PRESENTATIONS,
-            show_tool_calls=self.show_tool_calls(),
             now_ns=self.clock(),
         )
         for applied in (*adopted, *await self.store.replies.owner_lost(self.generation, now_ns=self.clock())):

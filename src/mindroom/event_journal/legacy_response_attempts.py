@@ -53,7 +53,6 @@ class _LegacyIdentity(TypedDict):
     discovery_event_ids: tuple[str, ...]
     edit_receipt_order: int | None
     show_tool_calls: bool
-    show_tool_calls_is_frozen: bool
     prepared_edit_record: TurnRecord | None
     # The earlier release had claimed it: the instance that stopped left its resume running.
     claimed: bool
@@ -231,9 +230,8 @@ def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, obj
     """
     if continuation.span_id is not None:
         return {}
-    visibility = {"show_tool_calls": continuation.show_tool_calls} if continuation.show_tool_calls_is_frozen else {}
     return {
-        **visibility,
+        "show_tool_calls": continuation.show_tool_calls,
         "prepared_edit_record": (
             None
             if continuation.prepared_edit_record is None
@@ -270,7 +268,6 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _Lega
         "discovery_event_ids": tuple(_event_ids(identity.get("discovery_event_ids", []))),
         "edit_receipt_order": cast("int | None", identity.get("edit_receipt_order")),
         "show_tool_calls": context.get("show_tool_calls", True) is not False,
-        "show_tool_calls_is_frozen": "show_tool_calls" in context,
         "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
         "claimed": identity.get("claimed") is True,
     }
