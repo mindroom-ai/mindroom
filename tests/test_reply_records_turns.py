@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from contextlib import suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -21,6 +22,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnStore
@@ -1177,6 +1179,86 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
         assert _sent_bodies(restarted)[-1] == "Partial\n\n**[Response cancelled by user]**"
         assert [call.args[1] for call in restarted.client.room_redact.await_args_list] == [left.stop_button_event_id]
         assert not await restarted._reply_runtime.store.is_pending("$event")
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+async def _restarted_after_partial(tmp_path: Path) -> tuple[AgentBot, asyncio.Task[str | None]]:
+    """Stop an instance while its reply shows ``Partial``; return the instance that took its replies over."""
+    old = await _streaming_bot(tmp_path)
+    response, _streaming = await _blocked_stream(old)
+
+    async def shown() -> None:
+        while "Partial" not in _sent_bodies(old):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(shown(), timeout=5)
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._reply_runtime.start()
+    return restarted, response
+
+
+async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_model(tmp_path: Path) -> None:
+    """The stopped text stays above the continuation, and the replayed turn is told what that attempt showed."""
+    restarted, response = await _restarted_after_partial(tmp_path)
+    prompts: list[str] = []
+
+    async def stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+        prompts.append(html.unescape(str(kwargs["model_prompt"])))
+        yield "The complete report."
+
+    async def answer(*_args: object, **kwargs: object) -> str:
+        prompts.append(html.unescape(str(kwargs["model_prompt"])))
+        return "The complete report."
+
+    runner = unwrap_extracted_collaborator(restarted._response_runner)
+    try:
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            ai_response=AsyncMock(side_effect=answer),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        (prompt,) = prompts
+        account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
+        assert account.startswith("Your reply to the current message was interrupted by a restart before it finished.")
+        assert "Partial" in account
+        assert _sent_bodies(restarted)[-1] == f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+        assert not await restarted._reply_runtime.store.is_pending("$event")
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+async def test_a_replay_that_fails_before_it_streams_keeps_what_the_restart_stopped(tmp_path: Path) -> None:
+    """A continuation that fails before it shows anything ends the stopped text with its note, never redacting it."""
+    restarted, response = await _restarted_after_partial(tmp_path)
+
+    def failing(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        msg = "model unavailable"
+        raise RuntimeError(msg)
+
+    runner = unwrap_extracted_collaborator(restarted._response_runner)
+    try:
+        with (
+            patch_response_runner_module(
+                stream_agent_response=failing,
+                ai_response=AsyncMock(side_effect=RuntimeError("model unavailable")),
+                should_use_streaming=AsyncMock(return_value=False),
+                typing_indicator=_noop_typing,
+            ),
+            suppress(RuntimeError),
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        restarted.client.room_redact.assert_not_awaited()
+        assert _sent_bodies(restarted)[-1] == f"Partial\n\n{format_stream_error_note('model unavailable')}"
     finally:
         response.cancel()
         with suppress(asyncio.CancelledError):
