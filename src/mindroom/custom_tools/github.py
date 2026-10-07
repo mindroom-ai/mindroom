@@ -62,12 +62,11 @@ _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE = "GitHub request failed"
 # Fixed hints stand in for provider-controlled error text, which never reaches the agent.
 _GITHUB_PROVIDER_STATUS_HINTS = {
-    401: "the configured GitHub access token was rejected",
     403: "this GitHub connection lacks permission for the request, or GitHub rate-limited it",
-    404: "the repository, ref, or path does not exist, or this GitHub connection cannot access it",
-    409: "the request conflicts with the current repository state",
-    422: "GitHub rejected the request parameters or search query",
-    429: "GitHub rate-limited the request; retry later",
+    404: (
+        "the requested repository, ref, path, issue, or other resource does not exist, "
+        "or this GitHub connection cannot access it"
+    ),
 }
 
 
@@ -83,8 +82,6 @@ def _github_provider_error_result(status_code: int | None) -> str:
         return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
     message = f"{_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE} with HTTP {status_code}"
     hint = _GITHUB_PROVIDER_STATUS_HINTS.get(status_code)
-    if hint is None and status_code >= 500:
-        hint = "GitHub had a server error; retry later"
     if hint is not None:
         message = f"{message}: {hint}"
     return json.dumps({"error": message})

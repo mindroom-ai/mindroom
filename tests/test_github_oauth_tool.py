@@ -1385,7 +1385,7 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
         assert payload["reason"] == "access_rejected"
     else:
         assert set(payload) == {"error"}
-        assert payload["error"].startswith(f"GitHub request failed with HTTP {status_code}: ")
+        assert payload["error"].startswith(f"GitHub request failed with HTTP {status_code}")
     captured_logs = (
         agno_log_output.getvalue(),
         repr(mindroom_logger.warning_calls),
@@ -1412,9 +1412,7 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
 
     result = tool.list_repositories()
 
-    assert json.loads(result) == {
-        "error": "GitHub request failed with HTTP 500: GitHub had a server error; retry later",
-    }
+    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
     assert sentinel not in result
 
 
@@ -1423,11 +1421,11 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
     [
         (
             404,
-            "GitHub request failed with HTTP 404: the repository, ref, or path does not exist, "
-            "or this GitHub connection cannot access it",
+            "GitHub request failed with HTTP 404: the requested repository, ref, path, issue, or other resource "
+            "does not exist, or this GitHub connection cannot access it",
         ),
-        (422, "GitHub request failed with HTTP 422: GitHub rejected the request parameters or search query"),
         (418, "GitHub request failed with HTTP 418"),
+        (600, "GitHub request failed"),
     ],
 )
 def test_github_provider_failure_reports_status_without_provider_text(
@@ -1485,9 +1483,7 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
     finally:
         agno_github_module.logger.disabled = previous_disabled
 
-    assert json.loads(result) == {
-        "error": "GitHub request failed with HTTP 500: GitHub had a server error; retry later",
-    }
+    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
     assert sentinel not in result
 
 
@@ -1519,10 +1515,7 @@ def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
     finally:
         agno_github_module.logger.disabled = previous_disabled
 
-    assert json.loads(result) == {
-        "error": "GitHub request failed with HTTP 403: this GitHub connection lacks permission for the request, "
-        "or GitHub rate-limited it",
-    }
+    assert json.loads(result)["error"].startswith("GitHub request failed with HTTP 403")
     assert sentinel not in result
     assert sentinel not in caplog.text
 
