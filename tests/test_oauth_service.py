@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import multiprocessing
 import shutil
 import sqlite3
@@ -24,7 +25,7 @@ from mindroom.credentials import (
     get_runtime_credentials_manager,
     scoped_credentials_path,
 )
-from mindroom.oauth import credential_lifecycle, credential_store, reset_execution
+from mindroom.oauth import credential_lifecycle, credential_store, providers, reset_execution
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBindingParseError,
     oauth_credential_binding,
@@ -51,7 +52,13 @@ from mindroom.oauth.providers import (
 )
 from mindroom.oauth.service import OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
+from tests.oauth_test_utils import (
+    DelayedTokenEndpointOutcome,
+    corrupt_oauth_credential_payload,
+    publish_oauth_credentials,
+    rotated_token_response,
+    serve_token_endpoint,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -1365,6 +1372,21 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
             {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
             id="google-requests-timeout",
         ),
+        pytest.param(
+            json.JSONDecodeError("secret-transport-detail", "secret-response-body", 0),
+            {"transport_error_category": "invalid_response", "transport_error_type": "JSONDecodeError"},
+            id="non-json-response",
+        ),
+        pytest.param(
+            UnicodeDecodeError("utf-8", b"secret-response-body", 0, 1, "secret-transport-detail"),
+            {"transport_error_category": "invalid_response", "transport_error_type": "UnicodeDecodeError"},
+            id="non-utf8-response",
+        ),
+        pytest.param(
+            TimeoutError("secret-transport-detail"),
+            {"transport_error_category": "timeout", "transport_error_type": "TimeoutError"},
+            id="refresh-deadline",
+        ),
     ],
 )
 async def test_refresh_failure_logs_safe_transport_cause(
@@ -1398,6 +1420,77 @@ async def test_refresh_failure_logs_safe_transport_cause(
     assert expected_diagnostics.items() <= diagnostics.items()
     assert "secret-" not in repr(logger.warning_calls)
     _assert_no_token_values_logged(logger)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("repeat_seconds", "expected_grants"),
+    [
+        pytest.param(0.4, 2, id="repeat-succeeds"),
+        pytest.param(1.5, 3, id="repeat-exceeds-deadline"),
+    ],
+)
+async def test_repeat_after_lost_refresh_response_releases_lock_before_waiting_caller_gives_up(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repeat_seconds: float,
+    expected_grants: int,
+) -> None:
+    """Scaled 1:10: a full read timeout plus the repeat must still let a same-credential lock waiter succeed."""
+    scale = 0.1
+    monkeypatch.setattr(
+        credential_store,
+        "_LOCK_WAIT_TIMEOUT_SECONDS",
+        credential_store._LOCK_WAIT_TIMEOUT_SECONDS * scale,
+    )
+    monkeypatch.setattr(providers, "_REFRESH_GRANT_DEADLINE_SECONDS", providers._REFRESH_GRANT_DEADLINE_SECONDS * scale)
+    monkeypatch.setattr(providers, "_REFRESH_REPEAT_MIN_SECONDS", providers._REFRESH_REPEAT_MIN_SECONDS * scale)
+    first_attempt = DelayedTokenEndpointOutcome(
+        providers._DEFAULT_AUTHORIZE_TIMEOUT_SECONDS * scale,
+        lambda request: httpx.ReadTimeout("timed out", request=request),
+    )
+    first_request = threading.Event()
+    presented = serve_token_endpoint(
+        monkeypatch,
+        [
+            first_attempt,
+            DelayedTokenEndpointOutcome(repeat_seconds, rotated_token_response()),
+            rotated_token_response(),
+        ],
+        request_received=first_request,
+    )
+    provider = OAuthProvider(
+        id="demo_provider",
+        display_name="Demo Provider",
+        authorization_url="https://oauth.example.test/authorize",
+        token_url=_FakeOAuthProvider.token_url,
+        scopes=(),
+        credential_service="demo_oauth",
+        client_config_services=("demo_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+        allow_empty_scopes=True,
+    )
+    context = _context(tmp_path, cast("_FakeOAuthProvider", provider))
+    original = _credentials(ACCESS_0, CHAIN_0, expires_at=1.0)
+    _save(context, original)
+
+    first = asyncio.create_task(refresh_oauth_credentials_with_result(context))
+    await asyncio.to_thread(first_request.wait)
+    waiting = asyncio.create_task(refresh_oauth_credentials_with_result(context))
+    first_outcome, waiting_result = await asyncio.gather(first, waiting, return_exceptions=True)
+
+    assert isinstance(waiting_result, credential_lifecycle.OAuthCredentialsRefreshResult)
+    assert waiting_result.credentials is not None
+    assert waiting_result.credentials["refresh_token"] == "rotated-refresh-token"  # noqa: S105
+    assert _load(context) == waiting_result.credentials
+    if expected_grants == 2:
+        assert isinstance(first_outcome, credential_lifecycle.OAuthCredentialsRefreshResult)
+        assert first_outcome.credentials == waiting_result.credentials
+        assert waiting_result.refreshed is False
+    else:
+        assert type(first_outcome) is OAuthProviderError
+        assert waiting_result.refreshed is True
+    assert presented == [CHAIN_0] * expected_grants
 
 
 def test_refresh_failure_diagnostics_ignore_unrecognized_cyclic_causes() -> None:
