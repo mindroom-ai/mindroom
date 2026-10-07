@@ -38,10 +38,24 @@ def _owning_module(name: str, declared: set[str]) -> str | None:
     return max(candidates, key=len) if candidates else None
 
 
+def _type_checking_imports(tree: ast.Module) -> set[ast.AST]:
+    """Return imports under `if TYPE_CHECKING:`, which this repository's Tach setup ignores."""
+    return {
+        child
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+        for child in ast.walk(node)
+        if isinstance(child, (ast.Import, ast.ImportFrom))
+    }
+
+
 def _module_aliases(tree: ast.Module, interfaced: set[str]) -> dict[str, str]:
-    """Map local names bound to interfaced modules to those modules."""
+    """Map local names bound to interfaced modules at runtime to those modules."""
     aliases: dict[str, str] = {}
+    type_only = _type_checking_imports(tree)
     for node in ast.walk(tree):
+        if node in type_only:
+            continue
         if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             for alias in node.names:
                 target = f"{node.module}.{alias.name}"
@@ -92,3 +106,14 @@ def _attribute_violations() -> list[str]:
 def test_module_attribute_access_uses_exposed_interface_members() -> None:
     """Every `module.attr` reach into an interfaced Tach module names a member its interface exposes."""
     assert _attribute_violations() == []
+
+
+def test_type_checking_imports_are_not_tracked() -> None:
+    """Type-only imports stay unchecked, as Tach in this repository ignores them."""
+    tree = ast.parse(
+        "from typing import TYPE_CHECKING\n"
+        "from mindroom import ai\n"
+        "if TYPE_CHECKING:\n"
+        "    from mindroom import model_loading\n",
+    )
+    assert _module_aliases(tree, {"mindroom.ai", "mindroom.model_loading"}) == {"ai": "mindroom.ai"}
