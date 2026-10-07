@@ -123,12 +123,15 @@ async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legac
     assert approval.source_event_ids == ("$first",)
     assert legacy_database.query(_table_query(legacy_database.postgres, "approval_continuation_sources")) == []
     # Its entity moved too: the paused reply names it once classified.
-    assert legacy_database.query(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_name = 'approval_continuations' AND column_name = 'entity_name'"
-        if legacy_database.postgres
-        else "SELECT name FROM pragma_table_info('approval_continuations') WHERE name = 'entity_name'",
-    ) == []
+    assert (
+        legacy_database.query(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'approval_continuations' AND column_name = 'entity_name'"
+            if legacy_database.postgres
+            else "SELECT name FROM pragma_table_info('approval_continuations') WHERE name = 'entity_name'",
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio

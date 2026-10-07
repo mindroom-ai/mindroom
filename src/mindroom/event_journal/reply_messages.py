@@ -20,7 +20,6 @@ from mindroom.reply_lifecycle import (
 from . import reply_spans
 
 if TYPE_CHECKING:
-
     from mindroom.reply_lifecycle import Span, Transition
 
     from .backend import Row, Transaction

@@ -7421,9 +7421,7 @@ class TestApprovalContinuations:
             backend=_PausingBackend(
                 rival_stores.first.backend,
                 pause_after_continuation_read,
-                statement_matches=lambda sql: (
-                    "SELECT principal_id, state, generation, failure_reason" in sql
-                ),
+                statement_matches=lambda sql: "SELECT principal_id, state, generation, failure_reason" in sql,
             ),
         ).principal("router@shared")
         decision = asyncio.create_task(
