@@ -1,7 +1,9 @@
-"""The automation runner: cron timing, the visible prompt it posts, and the verify step that follows the run."""
+"""The automation runner: cron timing, the prompts it posts, and the steps that follow their runs."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -11,12 +13,14 @@ import pytest
 
 from mindroom.automations import runner as runner_module
 from mindroom.automations.runner import AutomationRunner
+from mindroom.automations.steps import Ask, Done
+from mindroom.automations.threads import automation_threads
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
-from mindroom.config.automations import PromptCurationAutomation
+from mindroom.config.automations import DreamingAutomation, PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
+from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
 
@@ -113,8 +117,10 @@ async def test_a_due_check_posts_a_visible_prompt_that_the_agent_answers(tmp_pat
     assert prompt["source_hook"] == "prompt_curation"
     assert prompt["trigger_dispatch"] is True
     assert prompt["body"].startswith("@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts")
-    # No internal user is provisioned in this runtime, so no original sender is attached.
-    assert prompt["extra_content"] is None
+    # No internal user is provisioned in this runtime, so no original sender is attached; the prompt owns its thread.
+    assert prompt["extra_content"] == {PER_FIRE_THREAD_ROOT_KEY: True}
+    # The thread is recorded as an automation's, so no automation reads its export back as a conversation.
+    assert automation_threads(_paths) == {"$event1"}
 
 
 @pytest.mark.asyncio
@@ -126,7 +132,10 @@ async def test_the_internal_user_is_the_prompts_requester(tmp_path: Path) -> Non
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
 
-    assert bot.sent[0]["extra_content"] == {ORIGINAL_SENDER_KEY: "@mindroom_user:example.test"}
+    assert bot.sent[0]["extra_content"] == {
+        ORIGINAL_SENDER_KEY: "@mindroom_user:example.test",
+        PER_FIRE_THREAD_ROOT_KEY: True,
+    }
 
 
 @pytest.mark.asyncio
@@ -198,7 +207,10 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
     assert recheck["body"].startswith("@mind ⚠️ Prompt maintenance needs a re-check: MEMORY.md shrank 100%")
     assert recheck["thread_id"] == "$event1"
     assert recheck["trigger_dispatch"] is True
-    assert recheck["extra_content"] == {ORIGINAL_SENDER_KEY: "@mindroom_user:example.test"}
+    assert recheck["extra_content"] == {
+        ORIGINAL_SENDER_KEY: "@mindroom_user:example.test",
+        PER_FIRE_THREAD_ROOT_KEY: True,
+    }
 
 
 async def _finish_run(runner: AutomationRunner, config: Config, paths: RuntimePaths, memory: str | None) -> None:
@@ -269,7 +281,9 @@ async def test_a_configured_model_runs_the_prompt_and_its_recheck(tmp_path: Path
     runner.response_finished(["$event1"])
     assert await wait_for_background_tasks(5)
 
-    assert [message["extra_content"] for message in bot.sent] == [{SCHEDULED_MODEL_KEY: "large"}] * 2
+    assert [message["extra_content"] for message in bot.sent] == [
+        {SCHEDULED_MODEL_KEY: "large", PER_FIRE_THREAD_ROOT_KEY: True},
+    ] * 2
     assert [message["trigger_dispatch"] for message in bot.sent] == [True, True]
 
 
@@ -305,17 +319,18 @@ async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_the_automation_is_free_once_its_last_run_is_final(tmp_path: Path) -> None:
-    """Verify only reads the files, so a due prompt need not wait for it to finish."""
+async def test_the_automation_is_free_once_its_chain_ends(tmp_path: Path) -> None:
+    """The automation stays busy through the step after its run, and is free once that step ends the chain."""
     _config, _paths, runner, _bot = _setup(tmp_path)
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
-    assert runner._busy("mind:prompt_curation")
+    assert "mind" in runner._active
 
     runner.response_finished(["$event1"])
-
-    assert not runner._busy("mind:prompt_curation")
+    assert "mind" in runner._active
     assert await wait_for_background_tasks(5)
+
+    assert "mind" not in runner._active
 
 
 @pytest.mark.asyncio
@@ -350,3 +365,154 @@ async def test_disabling_an_automation_on_reload_stops_it(tmp_path: Path) -> Non
     await _tick(runner, DAY_LATER)
 
     assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_check_that_cannot_read_its_files_posts_a_visible_notice(tmp_path: Path) -> None:
+    """A failed check tells the room instead of only logging, and ends the chain."""
+    _config, _paths, runner, bot = _setup(tmp_path)
+    await _tick(runner, NOON)
+
+    with patch.object(runner_module, "check_curation", side_effect=ValueError("MEMORY.md is not valid UTF-8")):
+        await _tick(runner, DAY_LATER)
+
+    (notice,) = bot.sent
+    assert notice["body"] == "⚠️ The prompt_curation automation could not run: MEMORY.md is not valid UTF-8"
+    assert notice["thread_id"] is None
+    assert notice["trigger_dispatch"] is False
+    assert "mind" not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_fails_posts_a_notice_in_its_thread_and_ends_the_chain(tmp_path: Path) -> None:
+    """A continuation that raises is reported in the prompt's thread, without mentioning the agent."""
+    _config, _paths, runner, bot = _setup(tmp_path)
+
+    def broken_step(_config: Config, _thread_id: str, _timed_out: bool) -> Done:
+        msg = "memory/ is a link"
+        raise OSError(msg)
+
+    with patch.object(
+        runner_module,
+        "check_curation",
+        return_value=Ask("Do the work", new_thread=True, then=broken_step),
+    ):
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+    runner.response_finished(["$event1"])
+    assert await wait_for_background_tasks(5)
+
+    assert [(message["body"], message["thread_id"]) for message in bot.sent] == [
+        ("@mind Do the work", None),
+        ("⚠️ The prompt_curation automation could not finish: memory/ is a link", "$event1"),
+    ]
+    assert "mind" not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_listed_thread(tmp_path: Path) -> None:
+    """A chain can move to a fresh thread, and its final step resolves the threads it names and runs work on the loop."""
+    _config, _paths, runner, bot = _setup(tmp_path)
+    loops: list[object] = []
+    finish = Done("All done", resolve=("$event1", "$event2"), on_loop=lambda: loops.append(asyncio.get_running_loop()))
+    review = Ask("Review it", new_thread=True, then=lambda _config, _thread, _timed_out: finish)
+    first = Ask("Draft it", new_thread=True, then=lambda _config, _thread, _timed_out: review)
+
+    with (
+        patch.object(runner_module, "check_curation", return_value=first),
+        patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag,
+    ):
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+        runner.response_finished(["$event1"])
+        assert await wait_for_background_tasks(5)
+        runner.response_finished(["$event2"])
+        assert await wait_for_background_tasks(5)
+
+    assert [(message["body"], message["thread_id"]) for message in bot.sent] == [
+        ("@mind Draft it", None),
+        ("@mind Review it", None),
+        ("All done", "$event2"),
+    ]
+    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    assert loops == [asyncio.get_running_loop()]
+
+
+@pytest.mark.asyncio
+async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: Path) -> None:
+    """The dream and review each get a thread of their own, both are recorded as the automation's, and approval applies."""
+    agent = AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        rooms=[ROOM],
+        automations=[DreamingAutomation()],
+    )
+    config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    assert root is not None
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "people.md").write_text("- Sam lives in Delft.\n", encoding="utf-8")
+    (root / "thread_exports" / "room").mkdir(parents=True)
+    (root / "thread_exports" / "room" / "thread.yaml").write_text(
+        "messages: [Sam moved to Utrecht]\n",
+        encoding="utf-8",
+    )
+    bot = _Bot()
+    runner = AutomationRunner(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
+    )
+
+    with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+        (run_dir,) = (root / ".mindroom/dreaming/runs").iterdir()
+        (run_dir / "staging/memory/people.md").write_text("- Sam lives in Utrecht.\n", encoding="utf-8")
+        (run_dir / "report.md").write_text("Moved Sam.\nDREAM: DONE\n", encoding="utf-8")
+        runner.response_finished(["$event1"])
+        assert await wait_for_background_tasks(5)
+        (run_dir / "verdict.md").write_text("Checked.\nVERDICT: APPROVE\n", encoding="utf-8")
+        runner.response_finished(["$event2"])
+        assert await wait_for_background_tasks(5)
+
+    dream, review, notice = bot.sent
+    assert dream["body"].startswith("@mind 🌙 Dreaming: reconcile your memory")
+    assert review["body"].startswith("@mind 🔍 Dreaming review:")
+    assert notice["body"] == "✅ Dreaming applied the reviewed proposal (files written: 1, removed: 0)."
+    assert [message["thread_id"] for message in bot.sent] == [None, None, "$event2"]
+    assert (root / "memory" / "people.md").read_text(encoding="utf-8") == "- Sam lives in Utrecht.\n"
+    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    threads = json.loads((tmp_path / "tracking/automations/threads.json").read_text(encoding="utf-8"))
+    assert threads == ["$event1", "$event2"]
+    assert "mind" not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
+    """A curation due during a dreaming chain waits for it, since each changes what the other measures."""
+    config, paths, runner, bot = _setup(tmp_path)
+    config.agents["mind"].automations = [
+        DreamingAutomation(cron="0 4 * * *"),
+        PromptCurationAutomation(trigger_tokens=1_000),
+    ]
+    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    assert root is not None
+    (root / "thread_exports" / "room").mkdir(parents=True)
+    (root / "thread_exports" / "room" / "thread.yaml").write_text("messages: [hello]\n", encoding="utf-8")
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    (dream,) = bot.sent
+    assert dream["body"].startswith("@mind 🌙 Dreaming")
+
+    (run_dir,) = (root / ".mindroom/dreaming/runs").iterdir()
+    (run_dir / "report.md").write_text("Nothing to change.\nDREAM: DONE\n", encoding="utf-8")
+    with patch.object(runner_module, "set_thread_tag", new=AsyncMock()):
+        runner.response_finished(["$event1"])
+        assert await wait_for_background_tasks(5)
+    await _tick(runner, DAY_LATER + timedelta(minutes=1))
+
+    assert bot.sent[1]["body"].startswith("Dreaming changed nothing")
+    assert bot.sent[2]["body"].startswith("@mind 🧹 Prompt maintenance")

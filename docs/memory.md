@@ -217,7 +217,7 @@ Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not 
 
 In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](knowledge.md#storage)).
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
-Writes through the `memory` tool and auto-flush refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
+Writes through the `memory` tool, auto-flush, and an applied [dreaming](scheduling.md#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 ```yaml
@@ -247,6 +247,8 @@ It applies only to agents whose effective backend is `file`.
 3. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts.
 4. When the model answers with the `no_reply_token`, nothing is written.
 5. Results are appended to `memory/YYYY-MM-DD.md`.
+
+Turns that [built-in automations](scheduling.md#built-in-automations) start are not auto-flushed.
 
 ```yaml
 memory:
@@ -291,6 +293,22 @@ agents:
   mind:
     memory_backend: file
     automations: [prompt_curation]
+```
+
+## Dreaming
+
+Facts in `memory/` go stale when a later conversation corrects them.
+Enable the [`dreaming`](scheduling.md#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+```yaml
+memory:
+  auto_flush:
+    enabled: true           # writes the daily notes dreaming reviews
+agents:
+  mind:
+    memory_backend: file
+    thread_exports: true    # also reviews threaded conversations
+    automations: [dreaming]
 ```
 
 ## [`memory`]

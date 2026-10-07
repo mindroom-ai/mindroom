@@ -14,17 +14,43 @@ _CRON_FIELDS = 5
 MAX_FILE_SHRINK = 0.25
 
 
-class PromptCurationAutomation(BaseModel):
-    """Daily check that asks the agent to condense its always-loaded prompt files once they grow too large."""
+class _ScheduledAutomation(BaseModel):
+    """Fields every built-in shares: when it checks, where it posts, and which model answers."""
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Literal["prompt_curation"] = Field(default="prompt_curation", description="Built-in automation name")
-    cron: str = Field(default="0 4 * * *", description="When to check, in the configured timezone")
+    cron: str
     room: str | None = Field(
         default=None,
         description="Room alias or ID for the prompt; defaults to the agent's first configured room",
     )
+    model: str | None = Field(
+        default=None,
+        description="Model for the prompt's runs, a key of models; defaults to the agent's own model",
+    )
+
+    @field_validator("cron")
+    @classmethod
+    def validate_cron(cls, value: str) -> str:
+        """Reject expressions that are not five fields or can never fire, such as February 31."""
+        # why-lazy: croniter stays out of the config import surface.
+        from croniter import croniter  # noqa: PLC0415
+
+        try:
+            if len(value.split()) != _CRON_FIELDS:
+                raise ValueError(value)  # noqa: TRY301 - one message for every invalid form
+            croniter(value, datetime.now(UTC)).get_next(datetime)
+        except ValueError as exc:
+            msg = f"Automation cron must be a five-field expression that can fire: {value!r}"
+            raise ValueError(msg) from exc
+        return value
+
+
+class PromptCurationAutomation(_ScheduledAutomation):
+    """Daily check that asks the agent to condense its always-loaded prompt files once they grow too large."""
+
+    name: Literal["prompt_curation"] = Field(default="prompt_curation", description="Built-in automation name")
+    cron: str = Field(default="0 4 * * *", description="When to check, in the configured timezone")
     trigger_tokens: int = Field(
         default=50_000,
         ge=1,
@@ -51,26 +77,6 @@ class PromptCurationAutomation(BaseModel):
             "size, before verify asks for a re-check; detail should move to memory/ instead of being deleted"
         ),
     )
-    model: str | None = Field(
-        default=None,
-        description="Model for the prompt's runs, a key of models; defaults to the agent's own model",
-    )
-
-    @field_validator("cron")
-    @classmethod
-    def validate_cron(cls, value: str) -> str:
-        """Reject expressions that are not five fields or can never fire, such as February 31."""
-        # why-lazy: croniter stays out of the config import surface.
-        from croniter import croniter  # noqa: PLC0415
-
-        try:
-            if len(value.split()) != _CRON_FIELDS:
-                raise ValueError(value)  # noqa: TRY301 - one message for every invalid form
-            croniter(value, datetime.now(UTC)).get_next(datetime)
-        except ValueError as exc:
-            msg = f"Automation cron must be a five-field expression that can fire: {value!r}"
-            raise ValueError(msg) from exc
-        return value
 
     @model_validator(mode="after")
     def validate_reductions(self) -> Self:
@@ -81,6 +87,23 @@ class PromptCurationAutomation(BaseModel):
         return self
 
 
+class DreamingAutomation(_ScheduledAutomation):
+    """Nightly reconciliation of memory/ with new conversations and daily notes."""
+
+    name: Literal["dreaming"] = Field(
+        default="dreaming",
+        description="Built-in automation name",
+    )
+    cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
+
+
+Automation = Annotated[PromptCurationAutomation | DreamingAutomation, Field(discriminator="name")]
+# Every automation message carries its automation's name as its hook source, so the turns it starts can be recognized.
+AUTOMATION_NAMES = frozenset(
+    model.model_fields["name"].default for model in (PromptCurationAutomation, DreamingAutomation)
+)
+
+
 def _normalize_automation_entries(values: object) -> object:
     """Accept a bare built-in name as shorthand for that built-in with its defaults."""
     if not isinstance(values, list):
@@ -88,7 +111,7 @@ def _normalize_automation_entries(values: object) -> object:
     return [{"name": value} if isinstance(value, str) else value for value in values]
 
 
-def _validate_unique_automations(values: list[PromptCurationAutomation]) -> list[PromptCurationAutomation]:
+def _validate_unique_automations(values: list[Automation]) -> list[Automation]:
     """Allow each built-in at most once per agent."""
     if duplicates := duplicate_items([automation.name for automation in values]):
         msg = f"Duplicate automations are not allowed: {', '.join(duplicates)}"
@@ -97,7 +120,7 @@ def _validate_unique_automations(values: list[PromptCurationAutomation]) -> list
 
 
 AutomationList = Annotated[
-    list[PromptCurationAutomation],
+    list[Automation],
     BeforeValidator(_normalize_automation_entries),
     AfterValidator(_validate_unique_automations),
 ]

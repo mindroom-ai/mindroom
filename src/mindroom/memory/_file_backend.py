@@ -345,18 +345,15 @@ def _require_rewritable(memory_file: _ScopeMemoryFile) -> None:
         raise ValueError(msg)
 
 
-def _write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
-    """Publish one memory file descriptor-relative, never through a planted entry."""
+def write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
+    """Publish one memory file descriptor-relative, never through a planted entry, keeping its permissions."""
     with (
         open_directory_within_root(scope_path) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
     ):
-        atomic_write_bytes_at(
-            directory_fd,
-            relative_path.name,
-            payload,
-            file_mode=existing_file_mode(directory_fd, relative_path.name),
-        )
+        mode = existing_file_mode(directory_fd, relative_path.name)
+        # A new file is readable like a hand-written one, not left at the temp file's 0o600.
+        atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=0o644 if mode is None else mode)
 
 
 def _append_scope_markdown_line(scope_path: Path, relative_path: Path, line: str, *, initial_text: bytes) -> None:
@@ -509,17 +506,40 @@ def _schedule_agent_semantic_refresh(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
+    _schedule_semantic_refresh_at(
+        agent_name,
+        scope_user_id,
+        _scope_dir(scope_user_id, resolution, config, create=False),
+        config,
+        runtime_paths,
+        execution_identity,
+    )
+
+
+def _schedule_semantic_refresh_at(
+    agent_name: str,
+    scope_user_id: str,
+    root: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> None:
     search_config = config.resolve_entity(agent_name).memory_search
     if search_config.mode != "semantic":
         return
     schedule_semantic_file_memory_refresh(
         scope_user_id=scope_user_id,
-        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        root=root,
         config=config,
         runtime_paths=runtime_paths,
         search_config=search_config,
         execution_identity=execution_identity,
     )
+
+
+def refresh_agent_memory_search(agent_name: str, root: Path, config: Config, runtime_paths: RuntimePaths) -> None:
+    """Re-index a shared agent's file memory at ``root`` after its files changed outside the memory tool."""
+    _schedule_semantic_refresh_at(agent_name, agent_scope_user_id(agent_name), root, config, runtime_paths, None)
 
 
 def _schedule_scope_semantic_refresh(
@@ -764,7 +784,7 @@ def _replace_scope_memory_entry(
 
     _require_rewritable(memory_file)
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    _write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
+    write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
     return True
 
 
@@ -790,7 +810,7 @@ def _replace_scope_path_memory_entry(
             f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
         )
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    _write_scope_markdown_file(
+    write_scope_markdown_file(
         scope_path,
         Path(path_memory_line.memory_file.relative_path),
         _memory_lines_payload(lines),

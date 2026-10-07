@@ -217,7 +217,7 @@ pip_install_package("rich")
 `coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`.
-`grep()` and `find_files()` skip hidden and gitignored paths, though `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
+`grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
 

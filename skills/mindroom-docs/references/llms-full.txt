@@ -3124,7 +3124,7 @@ Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not 
 
 In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
-Writes through the `memory` tool and auto-flush refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
+Writes through the `memory` tool, auto-flush, and an applied [dreaming](https://docs.mindroom.chat/scheduling/#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 ```yaml
@@ -3154,6 +3154,8 @@ It applies only to agents whose effective backend is `file`.
 3. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts.
 4. When the model answers with the `no_reply_token`, nothing is written.
 5. Results are appended to `memory/YYYY-MM-DD.md`.
+
+Turns that [built-in automations](https://docs.mindroom.chat/scheduling/#built-in-automations) start are not auto-flushed.
 
 ```yaml
 memory:
@@ -3198,6 +3200,22 @@ agents:
   mind:
     memory_backend: file
     automations: [prompt_curation]
+```
+
+## Dreaming
+
+Facts in `memory/` go stale when a later conversation corrects them.
+Enable the [`dreaming`](https://docs.mindroom.chat/scheduling/#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+```yaml
+memory:
+  auto_flush:
+    enabled: true           # writes the daily notes dreaming reviews
+agents:
+  mind:
+    memory_backend: file
+    thread_exports: true    # also reviews threaded conversations
+    automations: [dreaming]
 ```
 
 ## [`memory`]
@@ -4221,18 +4239,21 @@ agents:
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
+      - dreaming
 ```
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
 - `cron` is a five-field expression in the configured [timezone](#timezone).
-- `room` is a room alias or ID; it defaults to the agent's first configured room, and each prompt starts a new thread.
+- `room` is a room alias or ID; it defaults to the agent's first configured room.
+- Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
-- An automation does not post again while its previous prompt awaits verify.
-- A restart skips an occurrence it missed, and prompts posted before the restart get no verify notice.
+- When the response to a prompt is final, or after an hour without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
+- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- A check that cannot read what it checks posts a warning in the room.
+- A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
 For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](https://docs.mindroom.chat/hooks/#event-notes), which can suppress a fire or rewrite its message.
 
@@ -4266,6 +4287,32 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 | `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
+
+### `dreaming`
+
+`dreaming` keeps the agent's `memory/` files current: each night it reconciles them with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+1. It runs only when a [thread export](https://docs.mindroom.chat/thread-exports/) or a daily note from before today is new or changed since its last run, so a night without new threaded messages in the agent's rooms and without new daily notes costs nothing.
+2. The agent proposes changes in a copy of `memory/`: it updates facts that later evidence corrects, marks superseded lines instead of deleting them, files new durable facts such as decisions, preferences, and stable settings in topic files with their source and date, records conflicting sources with both versions, and removes duplicates.
+   It leaves transient tasks in the daily notes and never removes or doubts a fact only because newer notes do not mention it.
+3. A second run, in a thread of its own, reviews the proposal against its sources and approves or rejects it.
+4. MindRoom applies an approved proposal and marks both threads resolved.
+
+MindRoom never changes `MEMORY.md`, context files, or today's daily note; the agent suggests changes to them in its report.
+When the review rejects a proposal, a run stops unfinished or changes a file it may not, or memory changed during the run, nothing is applied; the next run, once a new thread export or daily note arrives, retries the same inputs and starts from any proposal that reached review and its review.
+A run handles at most 40 inputs; the rest wait for later runs.
+Turning the automation or thread exports on starts from conversations and notes of the last seven days instead of reviewing the older archive.
+Each run keeps its agenda and report, and a run that reached review also its patch and verdict, in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least; undo an applied run with `git apply -R .mindroom/dreaming/runs/<run>/proposal.patch` from the workspace root.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `15 3 * * *` | When to check |
+| `room` | first configured room | Where both prompts are posted |
+| `model` | the agent's model | A key of `models` to run both prompts with |
+
+`dreaming` needs `memory_backend: file` and something to work from: [auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](https://docs.mindroom.chat/thread-exports/) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
+It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
 
 # Chat Commands
 
@@ -8397,7 +8444,7 @@ pip_install_package("rich")
 `coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`.
-`grep()` and `find_files()` skip hidden and gitignored paths, though `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
+`grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
 
@@ -13706,9 +13753,11 @@ Kubernetes mounts such knowledge read-only, because kubelet follows links inside
 ### Workspace files the primary reads and writes
 
 The primary treats everything inside a mounted workspace as worker-controlled.
-Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, and the files `prompt_curation` measures, are reached through `path_confinement` descriptors walked from the workspace root.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, and the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `dreaming` reads, are reached through `path_confinement` descriptors walked from the workspace root.
 Those descriptors refuse links, never write to a file that has another hard link, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
+`dreaming` writes each run's agenda, staging copy of `memory/`, and patch under `.mindroom/dreaming/runs/`, and removes a run's staging when the run ends and run directories beyond the newest 30 through descriptor-relative deletes that never follow a link.
+It writes an approved proposal into `memory/` from bytes worker code staged, which gives the agent nothing it could not write itself; it writes only Markdown under `memory/` other than today's daily note and context files, and keeps its progress below `tracking/`, outside the workspace.
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
@@ -13727,6 +13776,8 @@ Reads of worker-controlled files are capped per surface.
 |---|---|---|
 | Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
 | `prompt_curation` snapshots of `MEMORY.md` and context files | 1 MiB per file | Refused, so the check is skipped with a warning or verify reports the file as unreadable |
+| `dreaming` memory files, staging copies, reports, and verdicts | 1 MiB per file | A memory file is left out of the run, a staged file stops the run, and a report or verdict counts as missing, so the run stops or the proposal is rejected |
+| `dreaming` thread-export `index.json` | 8 MiB per room | Ignored, so that room's conversations are aged by file modification time |
 | Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |

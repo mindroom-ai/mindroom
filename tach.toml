@@ -2716,6 +2716,7 @@ depends_on = [
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
+    "mindroom.config.automations",
     "mindroom.runtime_resolution",
     "mindroom.ai_runtime",
     "mindroom.mid_turn",
@@ -5729,11 +5730,13 @@ expose = [
     "list_all_agent_memories",
     "mark_auto_flush_dirty_session",
     "read_scope_memory_files",
+    "refresh_agent_memory_search",
     "reprioritize_auto_flush_sessions",
     "search_agent_memories",
     "store_conversation_memory",
     "strip_user_turn_time_prefix",
     "update_agent_memory",
+    "write_scope_markdown_file",
 ]
 from = ["mindroom.memory"]
 
@@ -7980,18 +7983,58 @@ visibility = ["mindroom.config.agent"]
 [[modules]]
 path = "mindroom.config.automations"
 depends_on = ["mindroom.config.validation"]
-visibility = ["mindroom.automations.prompt_curation", "mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
+visibility = [
+    "mindroom.automations.prompt_curation",
+    "mindroom.automations.runner",
+    "mindroom.config.agent",
+    "mindroom.config.main",
+    "mindroom.config.models",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.automations.threads"
+depends_on = ["mindroom.constants", "mindroom.path_confinement"]
+visibility = ["mindroom.automations.dreaming", "mindroom.automations.runner"]
+
+[[modules]]
+path = "mindroom.automations.steps"
+depends_on = []
+visibility = ["mindroom.automations.dreaming", "mindroom.automations.prompt_curation", "mindroom.automations.runner"]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
-depends_on = ["mindroom.config.automations", "mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
+depends_on = [
+    "mindroom.automations.steps",
+    "mindroom.config.automations",
+    "mindroom.logging_config",
+    "mindroom.memory",
+    "mindroom.path_confinement",
+    "mindroom.runtime_resolution",
+]
+visibility = ["mindroom.automations.runner"]
+
+[[modules]]
+path = "mindroom.automations.dreaming"
+depends_on = [
+    "mindroom.automations.steps",
+    "mindroom.automations.threads",
+    "mindroom.logging_config",
+    "mindroom.memory",
+    "mindroom.path_confinement",
+    "mindroom.runtime_resolution",
+]
 visibility = ["mindroom.automations.runner"]
 
 [[modules]]
 path = "mindroom.automations.runner"
 depends_on = [
+    "mindroom.automations.dreaming",
     "mindroom.automations.prompt_curation",
+    "mindroom.automations.steps",
+    "mindroom.automations.threads",
     "mindroom.background_tasks",
+    "mindroom.config.automations",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
