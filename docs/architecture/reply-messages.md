@@ -26,18 +26,19 @@ Every fact about an AI reply has one owner and one writer; other stores hold onl
 
 | Store | Owns |
 |---|---|
-| Reply records (`reply_messages`, `reply_spans`, `reply_span_sources`) | Everything about an AI reply: its event, state, presentation and tool-call visibility, the Stop and whether it applied, the edit order a regeneration answers, each span's sources and their settlement, redactions including deleted sources, the approval it waits on, the bot instance and outcome of the span that claims that approval, and a regeneration's selected edit. |
+| Reply records (`reply_messages`, `reply_spans`, `reply_span_sources`) | Everything about an AI reply: its event, state, presentation and tool-call visibility, the Stop and whether it applied, the edit order a regeneration answers, each span's sources and their settlement, redactions including deleted sources, the bot instance and outcome of the span that claims an approval, and a regeneration's selected edit. |
 | Turn ledger (`turn_records`) | User-message and turn facts: sources, aliases, prompts, revisions, tombstones, requester, history scope, conversation target, voice and command checkpoints, `completed` ("this agent answered this message", agent-scoped across re-logins), and `response_event_id` for turns that are not AI replies, such as commands, rejections, router notices, and a dispatch failure's notice sent before any reply existed. |
 | Journal | Whether each event is pending or settled: the work queue of one Matrix identity. |
 | Agent history (Agno session runs) | The conversation the model sees, with each run's sources and the event that shows its answer, which outlives the reply records' retention: an edit to an older turn finds the answer it regenerates there and nowhere else. |
 | Outbox (`matrix_delivery_outbox`) | Transport for every Matrix write: key, room, thread, membership epoch, transaction id, frozen payload, continuation segments, edit target, attempt, device, acknowledgement, permanent failure, fence, and for a reply row its owner (`reply_id`, `span_id`, `reply_sequence`), with no reply meaning. |
-| Approval run (`approval_continuations`, calls, cards, grants) | Consent and the Agno payload: the approval id, the span whose pause created it (`span_id`), the span that claims it (`claim_span_id`), generation, calls and decisions, publication lease, `waiting`, `ready`, or `failing`, failure text, and the run snapshot. Its room, thread, event, entity, held sources, visibility, and selected edit are read from that paused span and its reply. |
+| Approval run (`approval_continuations`, calls, cards, grants) | Consent and the Agno payload: the approval id, the span whose pause created it (`span_id`), the span that claims it (`claim_span_id`), generation, calls and decisions, publication lease, `waiting`, `ready`, or `failing`, failure text, and the run snapshot. Its room, thread, event, entity, held sources, visibility, and selected edit are read from that paused span and its reply, and the hold on that reply is read from it. |
 
 ## Records
 
 A reply (`reply_messages`) is one visible message in one room, with its event id once Matrix created it.
 Its state is `active`, `paused` (waiting for an approval decision), or terminal: `completed`, `cancelled`, `failed`, or `gone` (removed from the room, or never shown).
-It holds the canonical presentation, the possibly-shown presentation of its latest write with that write's sequence, the confirmed sequence Matrix acknowledged, a frozen display when a final transform reshaped the answer, the Stop it recorded and whether it was applied, the Stop button's event id, redactions it still owes, a note it owes but has not enqueued, and the approval that holds it.
+It holds the canonical presentation, the possibly-shown presentation of its latest write with that write's sequence, the confirmed sequence Matrix acknowledged, a frozen display when a final transform reshaped the answer, the Stop it recorded and whether it was applied, the Stop button's event id, redactions it still owes, and a note it owes but has not enqueued.
+The approval that holds it is read with it from the continuations and never written to it.
 
 A span (`reply_spans`, `reply_span_sources`) is one execution that writes a reply: `turn`, `replay`, `regeneration`, or `approval_resume`.
 It records its delivery id, the journal sources it answers, the bot generation that claimed it, the reply's write sequence at claim, a rollback snapshot for regenerations, and its outcome once it ends: `completed`, `cancelled`, `failed`, `paused`, `released`, `superseded`, `lost`, `suppressed`, or `restored` (a regeneration that put the old answer back).
@@ -62,10 +63,10 @@ Callers render a payload from the reply's revision before the transaction; a rul
 A claim runs under the conversation lock after the turn's first source gate and finds the reply through the span's sources, its bound event, or an interactive selection's acknowledgement:
 
 - No reply: create one in `active` with a `turn` span; a regeneration always finds one, since the edit regenerator adopts an answer the records never saw as a `completed` reply before it prunes the history that names it.
-- An edit whose driving edit differs from the last span's: a `regeneration` span with a rollback snapshot; a paused reply's approval is fenced `superseded` and cleaned up outside the conversation lock.
+- An edit whose driving edit differs from the last span's: a `regeneration` span with a rollback snapshot, or the rollback of the regeneration it replaces when that one never answered; an approval still waiting for its decision is fenced `superseded` and cleaned up outside the conversation lock.
 - An edit the last span already answered (a sync restart's retry): `duplicate`, nothing runs.
 - A last span ended `released`, `lost`, or `superseded`: a `replay`, or the same regeneration re-run.
-- Unresolved durable writes, an owed note, or a pending legacy read: `deferred`; the resolution retries the sources.
+- Unresolved durable writes, an owed note, a pending legacy read, or for an edit an approval past its decision that holds the reply: `deferred`; the resolution, or that approval's finish, retries the sources.
 
 ## Writes
 
@@ -89,6 +90,19 @@ A resume claims an `approval_resume` span of the paused reply and names it as th
 A claimed continuation stays `ready` and reads as claimed by the bot instance of the span its claim names; a further pause clears the claim.
 A failure or Stop fences the continuation; its settlement writes the note and finishes the reply in the continuation's finish.
 A response-local CLI approval waits in place: its span stays current through the wait, and once approved it runs for that approval as a resume does, so the continuation's finish or failure settles the sources and ends the reply.
+
+A reply is held by the continuation that names one of its spans and is not fenced `superseded`; the store derives the hold when it loads the reply, so no rule writes it.
+While held, a Stop fences the approval, a deletion keeps the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
+A continuation finishes once a FINAL at its first source was acknowledged or refused for good, or once an edit superseded it.
+Its finish, release, or discard applies the reply rule while the continuation still exists and deletes the continuation in the same transaction.
+
+## Abandoned regenerations
+
+A regeneration abandoned without an answer or a retry restores the answer it was replacing only when it recorded no write Matrix may show, counting unacknowledged writes.
+A FINAL Matrix refused for good counts only the writes before it.
+A Stop or a deletion restores only a finished answer, since restoring unfinished work would run its retry after them.
+A restored paused answer ends `failed` with the interrupted note, since consent is never restored.
+Otherwise the exit's terminal row, an owed note, or an owed redaction brings Matrix to match the records; a suppressed answer keeps what it showed and owes the interrupted note, or the cancelled note after a Stop.
 
 ## Lifetime
 
@@ -116,5 +130,13 @@ The handled-turn retention pass deletes finished replies that owe nothing, with 
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
 - I-S3. The outbox commits nothing outside transport for a row with `reply_id`.
 - I-S4. A continuation names its reply through its paused span and holds no reply or source fact of its own.
+- I9. Every unfinished continuation has an owner that moves it: draining every owner leaves no continuation, owed write, or deferred claim.
+- I10. Retention never forgets a reply whose spans a continuation names.
+- I11. An abandoned regeneration that recorded no write Matrix may show restores its rollback, as the rules in Abandoned regenerations allow.
+- I12. A regeneration that recorded a write Matrix may show never restores its rollback.
+- I13. At most one continuation that is not superseded names a reply's spans.
+- I14. An abandoned regeneration that recorded a write Matrix may show leaves a terminal row, an owed note, or an owed redaction; a create still in flight is redacted once acknowledged.
 
-`tests/test_reply_lifecycle_fuzz.py` checks that at most one span is current and I4 through I8 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approvals, deletions, departures, supersessions, and dropped replays, from the spans that run; the unit tests cover stale and retired spans and the remaining rules.
+`tests/test_reply_lifecycle_fuzz.py` checks I1 and I4 through I14 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, and dropped replays.
+It keeps continuations as rows the hold is derived from, defers edit claims through the shared blocking predicate, and ends every run by draining every owner.
+The unit tests cover stale and retired spans and the remaining rules.
