@@ -4051,6 +4051,61 @@ def test_runtime_chart_opt_out_skips_generated_api_key(backend: str) -> None:
     assert "envFrom" not in mindroom_container
 
 
+@pytest.mark.parametrize("backend", ["static_runner", "kubernetes"])
+def test_runtime_chart_existing_api_key_secret_replaces_generated_key(backend: str) -> None:
+    """An existing Secret gives the primary a key that offline renders cannot rotate, and only the primary reads it."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        f"workers.backend={backend}",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "apiAuth.existingSecret=operator-api",
+        "apiAuth.key=primary-key",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    mindroom_container = _container(deployment, "mindroom")
+
+    assert not any(doc["kind"] == "Secret" and doc["metadata"]["name"] == "mindroom-runtime-api-key" for doc in docs)
+    assert "envFrom" not in mindroom_container
+    assert _env_by_name(mindroom_container)["MINDROOM_API_KEY"] == {
+        "name": "MINDROOM_API_KEY",
+        "valueFrom": {"secretKeyRef": {"name": "operator-api", "key": "primary-key"}},
+    }
+    for container in deployment["spec"]["template"]["spec"]["containers"]:
+        if container["name"] != "mindroom":
+            assert "MINDROOM_API_KEY" not in _env_by_name(container)
+
+
+@pytest.mark.parametrize(
+    ("set_args", "error"),
+    [
+        (
+            ("apiAuth.allowUnauthenticatedPrimary=true",),
+            "apiAuth.existingSecret cannot be set when apiAuth.allowUnauthenticatedPrimary=true",
+        ),
+        (("apiAuth.key=",), "apiAuth.key is required when apiAuth.existingSecret is set"),
+        (
+            ("env.extra[0].name=MINDROOM_API_KEY", "env.extra[0].value=duplicate"),
+            "apiAuth.existingSecret and env.extra both set MINDROOM_API_KEY; remove one of them",
+        ),
+    ],
+)
+def test_runtime_chart_rejects_conflicting_existing_api_key_secret(set_args: tuple[str, ...], error: str) -> None:
+    """An existing API key Secret must be the primary's only key source."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "apiAuth.existingSecret=operator-api",
+        *set_args,
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert error in completed.stderr
+
+
 def test_runtime_chart_dedicated_workers_skip_static_runner_storage() -> None:
     """Dedicated workers need neither the sidecar nor its storage preparation."""
     pod_spec = _resource(_render_runtime_chart(), "Deployment", "mindroom-runtime")["spec"]["template"]["spec"]

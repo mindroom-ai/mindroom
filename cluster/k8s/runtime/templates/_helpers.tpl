@@ -249,6 +249,11 @@ image digest and the selected image directory. root is the directory the transpo
 {{- end -}}
 {{- end -}}
 
+{{- /* Whether the chart generates the primary's MINDROOM_API_KEY in the <fullname>-api-key Secret. */ -}}
+{{- define "mindroom-runtime.generatesApiKey" -}}
+{{- if not (or .Values.apiAuth.allowUnauthenticatedPrimary .Values.apiAuth.existingSecret) -}}true{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerNamespace" -}}
 {{- default .Release.Namespace .Values.workers.kubernetes.namespace -}}
 {{- end -}}
