@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import unicodedata
 from dataclasses import dataclass
+from glob import has_magic
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -491,7 +492,10 @@ def _find_files_in(
         return f"Error: Invalid glob pattern '{pattern}': {e}"
 
     filter_root = base_dir if restrict_to_base_dir else search_path
-    filtered = _filter_hidden_and_ignored(candidates, filter_root)
+    # A dot directory named in `path` or in the pattern's literal prefix was asked for, so only dot paths below it hide.
+    parts = Path(pattern).parts
+    named = parts[: next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))]
+    filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
     matches: list[str] = []
     for candidate in filtered:
         try:
@@ -741,8 +745,9 @@ class CodingTools(Toolkit):
 
         Returns:
             List of matching file paths, one per line.
-            Hidden files/directories and gitignored files are automatically
-            excluded from results.
+            Hidden files/directories below the searched directory and gitignored
+            files are automatically excluded from results; a hidden directory
+            named in path or in the pattern's leading directories is searched.
 
         """
         try:
@@ -1027,9 +1032,10 @@ def _grep_file(
     return match_count
 
 
-def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Path]:
-    """Filter out hidden files (dotfiles) and gitignored files."""
+def _filter_hidden_and_ignored(files: list[Path], search_path: Path, visible_root: Path | None = None) -> list[Path]:
+    """Filter out files outside ``search_path``, gitignored files, and dotfiles below ``visible_root``."""
     search_root = search_path.resolve()
+    hidden_root = search_path if visible_root is None else visible_root
     visible: list[Path] = []
     for filepath in files:
         if not is_within_base_dir(filepath, search_root):
@@ -1037,7 +1043,7 @@ def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Pat
         if not filepath.is_file():
             continue
         try:
-            rel = filepath.relative_to(search_path)
+            rel = filepath.relative_to(hidden_root)
         except ValueError:
             rel = filepath.resolve()
         if any(part.startswith(".") for part in rel.parts):
