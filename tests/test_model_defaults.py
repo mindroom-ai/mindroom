@@ -230,7 +230,7 @@ def test_sonnet_presets_use_current_generation() -> None:
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id == "anthropic/claude-sonnet-5.5"
     assert model_defaults.SAAS_MODEL_PRESETS["sonnet"].id == "anthropic/claude-sonnet-5.5"
     assert bedrock_alternatives["sonnet"].id == "anthropic.claude-sonnet-5-5"
-    assert bedrock_alternatives["haiku"].id == "anthropic.claude-haiku-4-5"
+    assert bedrock_alternatives["haiku"].id == "anthropic.claude-haiku-5-5"
     assert "claude-sonnet-5" not in {
         model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id,

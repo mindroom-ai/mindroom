@@ -44,7 +44,7 @@ models:
 
   anthropic:
     provider: "anthropic"
-    id: "claude-haiku-4-5"
+    id: "claude-haiku-5-5"
 
   ollama:
     provider: "ollama"

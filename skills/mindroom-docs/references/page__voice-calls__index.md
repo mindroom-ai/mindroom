@@ -153,7 +153,7 @@ models:
     id: claude-opus-5-5
   call_fast:
     provider: anthropic
-    id: claude-haiku-4-5
+    id: claude-haiku-5-5
 
 agents:
   assistant:
