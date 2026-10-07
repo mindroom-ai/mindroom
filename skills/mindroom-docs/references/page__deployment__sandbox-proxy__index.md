@@ -215,7 +215,7 @@ See [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/#de
 
 Dedicated workers mount no config and resolve agents from the [live config snapshot](#live-config-snapshots).
 They never receive the credentials-encryption key, so tool settings reach them only through [credential leases](#credential-leases).
-Worker pods can reach the primary API over the pod network, so the runtime chart gives the primary a generated `MINDROOM_API_KEY` that workers never receive, unless the explicit opt-out is configured.
+Worker pods can reach the primary API over the pod network, so the runtime chart gives the primary a generated (or `apiAuth.existingSecret`) `MINDROOM_API_KEY` that workers never receive, unless the explicit opt-out is configured.
 
 ### Keeping worker versions matched
 

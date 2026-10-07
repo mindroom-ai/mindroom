@@ -12,7 +12,7 @@
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
 {{- $bootstrap := include "mindroom-runtime.bootstrapBundle" . | fromJson -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
-{{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
+{{- $generatesApiKey := include "mindroom-runtime.generatesApiKey" . -}}
 {{- $envFrom := include "mindroom-runtime.keyedList" (dict "value" .Values.env.envFrom "path" "env.envFrom") | fromJsonArray -}}
 {{- $stateInitDirs := include "mindroom-runtime.stateStorageInitDirs" . -}}
 apiVersion: apps/v1
@@ -430,6 +430,13 @@ spec:
             {{- if .Values.matrix.appserviceToken.existingSecret }}
             - name: MATRIX_APPSERVICE_TOKEN_FILE
               value: {{ printf "/etc/mindroom/matrix-appservice/%s" .Values.matrix.appserviceToken.key | quote }}
+            {{- end }}
+            {{- if .Values.apiAuth.existingSecret }}
+            - name: MINDROOM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiAuth.existingSecret }}
+                  key: {{ .Values.apiAuth.key }}
             {{- end }}
             {{- range $entry := .Values.providerCredentials }}
             - name: {{ include "mindroom-runtime.providerCredentialEnvName" (list $ $entry) }}
