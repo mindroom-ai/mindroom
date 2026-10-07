@@ -89,7 +89,7 @@ runtime:
   timezone: ""
   timing: false
 
-# Optional listener serving only /api/script-gateway to background scripts on dedicated Kubernetes workers.
+# Optional listener serving only /api/script-gateway and the capability-authenticated /api/agent-cli routes to dedicated Kubernetes workers.
 # Requires workers.backend=kubernetes and the chart's worker egress NetworkPolicy; see "Background Script Gateway" in the README.
 scriptGateway:
   enabled: false

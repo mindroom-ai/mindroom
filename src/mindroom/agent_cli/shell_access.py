@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 __all__ = ["agent_cli_shell_env", "minimal_shell_problems"]
 
 _PRIMARY_URL_ENV = "MINDROOM_AGENT_CLI_PRIMARY_URL"
+_GATEWAY_URL_ENV = "MINDROOM_SCRIPT_GATEWAY_URL"
 # Run the CLI with this interpreter wherever the installer put console scripts; `-P` keeps a
 # `mindroom` directory in the shell's working directory from shadowing the installed package.
 _LAUNCHER = (
@@ -90,12 +91,22 @@ def _loopback(host: str) -> bool:
 def _worker_primary_url(runtime_paths: RuntimePaths) -> str | None:
     """Return the MindRoom API origin as reached from inside a worker, when it is known.
 
-    An explicit setting wins; otherwise the running API's address is used, through the
+    An explicit setting wins. Next comes the origin of an isolated script gateway served
+    by this primary's gateway-only listener, which also serves the CLI routes to workers
+    kept off the general API. Otherwise the running API's address is used, through the
     Docker host alias when it listens on every interface. Raises ValueError for a
-    malformed explicit setting.
+    malformed setting.
     """
     if configured := runtime_paths.env_value(_PRIMARY_URL_ENV):
         return _safe_origin(configured)
+    gateway = urlsplit((runtime_paths.env_value(_GATEWAY_URL_ENV) or "").strip())
+    if (
+        runtime_paths.env_flag("MINDROOM_SCRIPT_GATEWAY_ISOLATED")
+        and runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_PORT")
+        # A path prefix means a proxy in front of the listener, which may not route the CLI routes.
+        and gateway.path.rstrip("/") == "/api/script-gateway"
+    ):
+        return _safe_origin(f"{gateway.scheme}://{gateway.netloc}")
     api_address = get_api_server_address()
     if api_address is None or _loopback(api_address.host):
         return None

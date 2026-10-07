@@ -767,6 +767,7 @@ class TestAgentBot(AgentBotTestBase):
             active_runs=AsyncMock(return_value=[]),
         )
         runtime_paths = self._runtime_paths(tmp_path)
+        agent_cli_registry = MagicMock()
 
         with (
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
@@ -783,6 +784,7 @@ class TestAgentBot(AgentBotTestBase):
                 runtime_paths,
                 script_runtime=script_runtime,
                 shutdown_requested=shutdown_requested,
+                agent_cli_registry=agent_cli_registry,
             )
 
         bind_script_runtime.assert_called_once_with(
@@ -798,6 +800,7 @@ class TestAgentBot(AgentBotTestBase):
             host="127.0.0.1",
             broker=script_runtime.broker,
             log_level="INFO",
+            agent_cli_registry=agent_cli_registry,
         )
 
     @pytest.mark.asyncio
