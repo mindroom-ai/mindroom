@@ -66,8 +66,11 @@ class _Continuation:
     """One approval_continuations row: the span whose pause created it, and how far it got."""
 
     approval_id: str
+    # The span whose first pause created it, which the store keeps as it advances.
     paused_span_id: str
     delivery_id: str
+    # The span whose latest pause waits for a decision.
+    waiting_span_id: str = ""
     generation: int = 0
     claim_span_id: str | None = None
     state: str = "waiting"  # waiting, ready, failing
@@ -204,6 +207,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if span.outcome is SpanOutcome.RESTORED:
             # I12: never back to the rollback once a write that may show was recorded.
             assert not wrote, (before, span)
+            # A Stop never lets unfinished work the regeneration replaced run again.
+            assert not before.unapplied_stop or span.rollback.state in rl._TERMINAL_STATES, (before, span)
             return
         after = self.model.reply
         assert after is not None
@@ -231,14 +236,12 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         match effect:
             case SettleSources(span_id=span_id, consumes_edit=consumes_edit, answered=answered):
                 settled = self.model.spans[span_id]
-                if answered:
-                    # S6: a turn whose every source the user deleted is never answered.
-                    assert not set(settled.sources.logical) <= self.model.deleted, settled
-                if consumes_edit:
+                # As the store does: nothing answers a turn whose every message the user deleted.
+                answered = answered and not set(settled.sources.logical) <= self.model.deleted
+                if consumes_edit and answered:
                     # S5: only an answer the reply completed consumes the edit a regeneration selected.
                     reply = self.model.reply
                     assert reply is not None
-                    assert answered, effect
                     assert self.model.spans[reply.last_span_id].outcome is SpanOutcome.COMPLETED, reply
                 self._settle(span_id)
             case CancelSpan(span_id=span_id):
@@ -378,7 +381,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         lambda self: (
             self._bot()
             and self.model.reply is not None
-            and self.model.reply.current_span_id is None
+            # The regenerator regenerates only an answer with an event.
+            and self.model.reply.event_id is not None
+            # A span this instance runs holds the conversation; one an older instance left is retired by the claim.
+            and (self._current() is None or self._current().bot_generation != self.generation)
             and "$source" not in self.model.deleted
         ),
     )
@@ -745,14 +751,19 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             assert reply.unapplied_stop
             return
         if runs_for is not None:
-            # The run advances: the next pause names this span, and the continuation waits again.
-            runs_for.paused_span_id = span.span_id
+            # The run advances and waits again; it still names the span whose pause created it.
+            runs_for.waiting_span_id = span.span_id
             runs_for.generation += 1
             runs_for.claim_span_id = None
             runs_for.state = "waiting"
         else:
             approval_id = self._next("approval")
-            self.model.continuations[approval_id] = _Continuation(approval_id, span.span_id, span.delivery_id)
+            self.model.continuations[approval_id] = _Continuation(
+                approval_id,
+                span.span_id,
+                span.delivery_id,
+                waiting_span_id=span.span_id,
+            )
         self._apply(transition)
 
     @precondition(
@@ -810,7 +821,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             if reply is None or reply.approval_id != continuation.approval_id or reply.state is not ReplyState.PAUSED:
                 continue
             current = self._live()
-            if current is not None and current.span_id == continuation.paused_span_id:
+            if current is not None and current.span_id == continuation.waiting_span_id:
                 transition = self._apply(
                     rl.resumed_in_place(reply, current, approval_id=continuation.approval_id, now_ns=self._now()),
                 )
@@ -845,7 +856,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if reply is None or continuation.delivery_id in self.model.finals:
             return
         current = self._current()
-        if current is not None and current.span_id in {continuation.paused_span_id, continuation.claim_span_id}:
+        runs = {continuation.paused_span_id, continuation.waiting_span_id, continuation.claim_span_id}
+        if current is not None and current.span_id in runs:
             if current.bot_generation != self.generation:
                 self._apply(rl.span_left_behind(reply, current, active_generation=self.generation, now_ns=self._now()))
             elif current.span_id in self.model.cancel_requested and reply.unapplied_stop:
@@ -884,9 +896,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         """Apply the finish to the reply while the continuation still holds it, then delete the continuation."""
         reply = self.model.reply
         assert reply is not None
-        paused = self.model.spans[continuation.paused_span_id]
-        # The store's choice: no owner left to answer, or every source deleted, leaves the turn unanswered.
-        answers_turn = owner_available and not set(paused.sources.logical) <= self.model.deleted
+        # No owner left to answer leaves the turn unanswered.
+        answers_turn = owner_available
         transition = self._apply(
             rl.approval_settled(
                 reply,
@@ -1015,8 +1026,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self._apply(rl.departed(self.model.reply, self._current(), now_ns=self._now()))  # type: ignore[arg-type]
         self.model.rows = [row for row in self.model.rows if row.intent.stage is not WriteStage.EDIT]
         for continuation in tuple(self.model.continuations.values()):
-            self._settle(continuation.paused_span_id)
             del self.model.continuations[continuation.approval_id]
+        # The departure settles every pending turn event of the room, unanswered.
+        for span_id in self.model.spans:
+            self._settle(span_id)
         self._derive_hold()
         self.model.deferred.clear()
 
@@ -1246,8 +1259,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert not self.model.continuations, self.model.continuations
         assert not self.model.deferred, self.model.deferred
         reply = self.model.reply
+        if reply is not None and self.model.removed:
+            # A removed entity's reply keeps what it owes for a bot that may come back, but no source waits on it.
+            assert self._is_settled(reply.last_span_id), (reply, self._last())
         if reply is None or self.model.removed:
-            # A removed entity's reply keeps what it owes for a bot that may come back.
             return
         assert not self.model.rows, self.model.rows
         assert reply.owed_write is None, reply

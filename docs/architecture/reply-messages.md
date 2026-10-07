@@ -63,10 +63,10 @@ Callers render a payload from the reply's revision before the transaction; a rul
 A claim runs under the conversation lock after the turn's first source gate and finds the reply through the span's sources, its bound event, or an interactive selection's acknowledgement:
 
 - No reply: create one in `active` with a `turn` span; a regeneration always finds one, since the edit regenerator adopts an answer the records never saw as a `completed` reply before it prunes the history that names it.
-- An edit whose driving edit differs from the last span's: a `regeneration` span with a rollback snapshot, or the rollback of the regeneration it replaces when that one never answered; an approval still waiting for its decision is fenced `superseded` and cleaned up outside the conversation lock.
+- An edit whose driving edit differs from the last span's: a `regeneration` span with a rollback snapshot, or the rollback of the regeneration it replaces when that one never answered; an approval that paused the reply with no span running for it is fenced `superseded` and cleaned up outside the conversation lock.
 - An edit the last span already answered (a sync restart's retry): `duplicate`, nothing runs.
 - A last span ended `released`, `lost`, or `superseded`: a `replay`, or the same regeneration re-run.
-- Unresolved durable writes, an owed note, a pending legacy read, or for an edit an approval past its decision that holds the reply: `deferred`; the resolution, or that approval's finish, retries the sources.
+- Unresolved durable writes, an owed note, a pending legacy read, or for an edit an approval that holds the reply while or after a span runs for it: `deferred`; the resolution, or that approval's finish or release, retries the sources.
 
 ## Writes
 
