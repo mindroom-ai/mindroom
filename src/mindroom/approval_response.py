@@ -512,16 +512,7 @@ class ApprovalResponseCoordinator:
         delivery = await self.final_delivery(continuation, recover=recover)
         if delivery is None or delivery.permanently_failed:
             return None
-        if delivery.span_id is None:
-            # LEGACY_COMPAT: Approval answers frozen before reply records, marked successful by their result.
-            # Legacy format: an acknowledged FINAL row without reply_id whose result_json an approval resume's
-            # completed answer filled, while a failure note's row has none.
-            # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages read success
-            # from the outcome of the reply span that wrote the row.
-            # Handling: such a row is successful when it has a result, as it was.
-            # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
-            return delivery if delivery.result is not None else None
-        span = await self.store.replies.span(delivery.span_id)
+        span = None if delivery.span_id is None else await self.store.replies.span(delivery.span_id)
         return delivery if span is not None and span.outcome is SpanOutcome.COMPLETED else None
 
     async def final_delivery(

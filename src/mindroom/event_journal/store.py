@@ -1758,37 +1758,13 @@ class PrincipalStore:
         presentations: legacy_reply_messages.LegacyPresentations,
         now_ns: int,
     ) -> tuple[AppliedTransition, ...]:
-        """Give the replies an earlier release left in flight records, once per principal."""
+        """Give the replies an earlier release left paused records, once per principal."""
         return await self._backend.write(
             lambda transaction: legacy_reply_messages.classify(
                 transaction,
                 self._principal_id,
                 entity_name=entity_name,
                 presentations=presentations,
-                now_ns=now_ns,
-            ),
-        )
-
-    async def legacy_reply_reads(self) -> tuple[tuple[rl.Reply, rl.Span], ...]:
-        """Return earlier-release replies waiting for what only their Matrix event shows."""
-        return await self._backend.read(
-            lambda transaction: legacy_reply_messages.pending_reads(transaction, self._principal_id),
-        )
-
-    async def finish_legacy_reply_read(
-        self,
-        reply_id: str,
-        read: rl.LegacyRead,
-        *,
-        now_ns: int,
-    ) -> AppliedTransition | None:
-        """Record what an earlier-release reply's event showed, releasing whatever waited for it."""
-        return await self._backend.write(
-            lambda transaction: legacy_reply_messages.read_done(
-                transaction,
-                self._principal_id,
-                reply_id=reply_id,
-                read=read,
                 now_ns=now_ns,
             ),
         )
@@ -1994,13 +1970,8 @@ def _settled_approval(
     applied = replies.approval_finished(transaction, principal_id, continuation, owner_available=owner_available)
     if applied is not None:
         return applied.post_commit
-    completed = legacy_response_attempts.settle_unclassified(
-        transaction,
-        principal_id,
-        continuation,
-        answered=owner_available,
-    )
-    return () if completed is None else (replies.TurnCompleted(completed),)
+    legacy_response_attempts.settle_unclassified(transaction, principal_id, continuation)
+    return ()
 
 
 class _ReplyRowRefusedError(Exception):

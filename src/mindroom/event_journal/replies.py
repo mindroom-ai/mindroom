@@ -392,7 +392,7 @@ def claim(
     return apply(transaction, principal_id, rl.claim(request, context))
 
 
-def adopt_historical_answer(
+def _adopt_historical_answer(
     transaction: Transaction,
     principal_id: str,
     request: rl.ClaimRequest,
@@ -544,9 +544,6 @@ def _owner_lost(
     """
     applied: list[AppliedTransition] = []
     for found in reply_messages.in_states(transaction, principal_id, (rl.ReplyState.ACTIVE, rl.ReplyState.PAUSED)):
-        if found.legacy_pending is not None:
-            # Its legacy read decides what it showed first.
-            continue
         reply = reply_messages.lock(transaction, principal_id, found.reply_id)
         last = reply_spans.load(transaction, principal_id, found.last_span_id)
         assert reply is not None
@@ -851,7 +848,7 @@ class ReplyStore:
     async def adopt_historical_answer(self, request: rl.ClaimRequest, event_id: str) -> Reply:
         """Give an answer older than the reply records its reply, unless one already holds its event or sources."""
         return await self._backend.write(
-            lambda transaction: adopt_historical_answer(transaction, self._principal_id, request, event_id),
+            lambda transaction: _adopt_historical_answer(transaction, self._principal_id, request, event_id),
         )
 
     async def decide(

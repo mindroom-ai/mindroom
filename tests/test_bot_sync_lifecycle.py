@@ -229,17 +229,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         async def close_client() -> None:
             order.append("client")
 
-        adopt_legacy = bot._reply_runtime.adopt_legacy
-        warm = bot._turn_store.warm
-
-        async def adopt() -> tuple[object, ...]:
-            order.append("adopt")
-            return await adopt_legacy()
-
-        async def load_ledger() -> None:
-            order.append("warm")
-            await warm()
-
         session.close.side_effect = close_session
         client.close.side_effect = close_client
         with (
@@ -247,14 +236,11 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 "mindroom.bot.login_agent_owned_session",
                 AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
             ),
-            patch.object(bot._reply_runtime, "adopt_legacy", adopt),
-            patch.object(bot._turn_store, "warm", load_ledger),
             patch.object(bot._response_runner, "recover_approval_final", AsyncMock(side_effect=recover)),
         ):
             assert await bot.recover_approval_final("approval")
 
-        # Earlier-release replies are adopted before loading the ledger rewrites their turn records, as at start.
-        assert order == ["adopt", "warm", "final", "session", "client"]
+        assert order == ["final", "session", "client"]
         assert bot.client is None
         assert bot._ingestion_session is None
         assert bot._sending_device_id is None

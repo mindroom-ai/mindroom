@@ -282,15 +282,9 @@ async def _cancel_pending_responses(
     return pending
 
 
-def _terminal_status_of_span(span: rl.Span | None) -> Literal["completed", "cancelled", "error"]:
+def _terminal_status_of_span(span: rl.Span) -> Literal["completed", "cancelled", "error"]:
     """Return the status a frozen approval FINAL reports, from the span that wrote it."""
-    # LEGACY_COMPAT: Approval answers frozen before reply records, reported as completed.
-    # Legacy format: an acknowledged FINAL row without span_id from an approval resume.
-    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record the outcome of the
-    # span that wrote each FINAL.
-    # Handling: such a row reports completed, as it did.
-    # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
-    if span is None or span.outcome is rl.SpanOutcome.COMPLETED:
+    if span.outcome is rl.SpanOutcome.COMPLETED:
         return "completed"
     return "cancelled" if span.outcome is rl.SpanOutcome.CANCELLED else "error"
 
@@ -2200,24 +2194,12 @@ class ResponseRunner:
         semantic = cast("dict[str, object]", delivery.result) if isinstance(delivery.result, dict) else {}
         interactive_metadata = InteractiveMetadata.from_metadata(semantic.get("interactive"))
         reply = None if delivery.reply_id is None else await self.deps.replies.store.replies.load(delivery.reply_id)
-        body: object
-        if reply is not None:
-            # What the FINAL showed: the final transform's display when it reshaped the answer.
-            body, _trace = render_body(decode_presentation(reply.frozen_display or reply.presentation))
-        else:
-            # LEGACY_COMPAT: Approval answers frozen before reply records, with their body in the result.
-            # Legacy format: an acknowledged FINAL row without reply_id whose result_json holds the body the
-            # completed approval resume showed.
-            # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages read the body
-            # from the presentation of the reply the row answered.
-            # Handling: the result's body, else the payload's, restores the answer's visible body.
-            # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.
-            body = semantic.get("body")
-            if not isinstance(body, str):
-                body = visible.get("body")
-        if not isinstance(body, str):
-            body = "Tool approval continuation completed"
         span = None if delivery.span_id is None else await self.deps.replies.store.replies.span(delivery.span_id)
+        if reply is None or span is None:
+            msg = "Approval final delivery has no reply records"
+            raise RuntimeError(msg)
+        # What the FINAL showed: the final transform's display when it reshaped the answer.
+        body, _trace = render_body(decode_presentation(reply.frozen_display or reply.presentation))
         return FinalDeliveryOutcome(
             # A frozen FINAL may be the failure or cancellation its span ended with.
             terminal_status=_terminal_status_of_span(span),

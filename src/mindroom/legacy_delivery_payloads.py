@@ -79,29 +79,3 @@ def without_inline_final_result(content: dict[str, Any]) -> dict[str, Any]:
             sanitized_replacement.pop(DURABLE_FINAL_OUTCOME_KEY, None)
         sanitized["m.new_content"] = sanitized_replacement
     return sanitized
-
-
-# LEGACY_COMPAT: Regeneration answers queued before reply records, carrying their selected edit.
-# Legacy format: a FINAL row with no reply_id, keyed by the edit event, whose result_json holds the regeneration's
-# prepared_edit_record.
-# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages keep the selected edit
-# on the regeneration span and commit it when the answer settles its sources.
-# Handling: reply classification makes an owed row the next write of the reply it edits, on a regeneration span
-# carrying that edit, which it commits as a regeneration's terminal row does now, and a newer edit waits for the row's
-# delivery; a row that reply already wrote past, or one beside a reply still in flight, is retired unsent and
-# commits nothing.
-# Coverage: tests/test_legacy_reply_messages.py::test_edit_answers_still_in_flight_are_written_by_their_reply,
-# tests/test_legacy_reply_messages.py::test_an_edit_answer_queued_before_a_delivered_one_is_superseded,
-# tests/test_legacy_reply_messages.py::test_an_edit_answer_queued_before_an_approval_of_the_same_reply_is_superseded.
-def legacy_prepared_edit(result: Mapping[str, object] | None) -> tuple[str, dict[str, object]] | None:
-    """Return the selected edit an earlier release's regeneration FINAL carries, with the source it is stored under."""
-    prepared = (result or {}).get("prepared_edit_record")
-    if prepared is None:
-        return None
-    assert isinstance(prepared, dict), "Corrupt prepared edit record"
-    stored = cast("dict[str, object]", prepared)
-    sources = stored.get("source_event_ids")
-    assert isinstance(sources, list), "Corrupt prepared edit sources"
-    assert sources, "Empty prepared edit sources"
-    assert isinstance(sources[0], str), "Corrupt prepared edit source"
-    return sources[0], stored

@@ -1,59 +1,32 @@
-"""Replies an earlier release started before durable reply records, adopted once per principal.
+"""Replies an earlier release left paused for approval, adopted once per principal.
 
-An earlier release kept what an in-flight reply was in four places: its turn record, its
-``INITIAL`` and ``FINAL`` outbox rows, its approval continuation, and the
-Matrix event itself. The first start with reply records reads the first three
-here, from the database only, and gives every reply that still has work a
-record; what only Matrix knows is read after the room syncs
-(``legacy_pending``) by ``mindroom.legacy_reply_messages``.
+An upgrade runs while no reply is in flight, so what an earlier release can
+leave for reply records is an approval continuation waiting for its decision,
+or one a newer edit's delivered answer replaced. The first start with reply
+records gives each such reply a record, from the database only.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.handled_turns import TurnRecordCodec
-from mindroom.legacy_delivery_payloads import legacy_prepared_edit
 
-from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
-from .membership_state import claim_membership_epoch
-from .models import SUPERSEDED_FAILURE_REASON, DeliveryStage
-from .projection import is_tombstoned
-from .replies import AppliedTransition, adopt_historical_answer, apply, row_facts
+from . import approval_continuations, journal, reply_messages, turn_records
+from .models import SUPERSEDED_FAILURE_REASON
+from .replies import AppliedTransition, apply
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-    from mindroom.turn_record import TurnRecord
+    from collections.abc import Callable
 
     from .approval_continuations import ApprovalContinuation
     from .backend import Transaction
-    from .models import MatrixDelivery
 
 # The generation of spans an earlier release ran: never active, so nothing they left is live.
 _LEGACY_GENERATION = "legacy"
-
-# What the wire status of an earlier release's answer says its reply ended as.
-_STATE_BY_STATUS = {
-    "completed": rl.ReplyState.COMPLETED,
-    "cancelled": rl.ReplyState.CANCELLED,
-    "error": rl.ReplyState.FAILED,
-    "interrupted": rl.ReplyState.FAILED,
-}
-_OUTCOME_BY_STATE = {
-    rl.ReplyState.COMPLETED: rl.SpanOutcome.COMPLETED,
-    rl.ReplyState.CANCELLED: rl.SpanOutcome.CANCELLED,
-    rl.ReplyState.FAILED: rl.SpanOutcome.FAILED,
-}
-# A stream an earlier release ended by direct edit, its sources settled, needs
-# its event read only when that release's stale-stream cleanup, which looked
-# at streams edited in the last six hours, could still have reached it. One
-# started a day ago is history.
-_HISTORICAL_STREAM_NS = 24 * 60 * 60 * 1_000_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,8 +70,6 @@ class LegacyPresentations:
     empty: Callable[[bool], str]
     # What a paused approval showed, from what its continuation stored, as the named span's answer.
     paused: Callable[[ApprovalContinuation, LegacyPausedAnswer, str], str]
-    # What a frozen answer row of an earlier release shows, as the named span's answer.
-    answered: Callable[[MatrixDelivery, str], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,16 +78,11 @@ class _Adoption:
 
     reply: rl.Reply
     spans: tuple[rl.Span, ...]
-    # The earlier release's row the reply now owns, given reply identity so its acknowledgement binds the reply.
-    row: MatrixDelivery | None = None
-    row_placeholder_only: bool = False
     # The continuation whose pause the reply's first span is.
     approval_id: str | None = None
-    # The resume an earlier release's claim left running, which claims the continuation.
-    claim_span_id: str | None = None
     # The pauses of older continuations of the same reply, which a newer one superseded.
     superseded: tuple[rl.Span, ...] = ()
-    # What the adoption decided in its transaction, as a terminal row's rule does.
+    # What the adoption decided in its transaction: the cleanup of approvals a newer answer replaced.
     effects: tuple[rl.Effect, ...] = ()
 
 
@@ -129,24 +95,15 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
     return row is not None
 
 
-# LEGACY_COMPAT: In-flight agent and team replies without reply records.
-# Legacy format: approval continuations, INITIAL and FINAL outbox rows without reply_id, and pending turn records that
-# earlier releases wrote for replies before reply_messages existed; the selected principal has no reply_legacy_classifications row.
+# LEGACY_COMPAT: Approval-paused agent and team replies without reply records.
+# Legacy format: approval continuations an earlier release left before reply_messages existed, for a principal with no
+# reply_legacy_classifications row.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record every reply in
-# reply_messages and reply_spans and give its outbox rows reply identity.
-# Handling: once per principal at bot start, before owner_lost, records are created from the database only: a paused
-# reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources;
-# approvals a newer edit's answer replaced keep theirs on that answer's reply, finished unless its rows are in flight,
-# and their cleanup runs), the
-# state a frozen unacknowledged FINAL implies with its sources settled and its turn answered, each owed regeneration
-# FINAL keyed by its edit as the next write of the reply of the answer it edits, in queue order, or retired as
-# superseded, consuming no edit, when that reply already wrote past it or is still in flight, a lost
-# span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
-# its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; a
-# Stop is kept on the reply it names, adopting a finished answer's reply when nothing in flight held it, even for a Stop
-# that release settled, so an edit admitted before it stays covered. A coalesced turn is adopted once, under whichever source keyed its
-# rows, and an adopted INITIAL, owed or acknowledged, becomes the reply's first row. What only Matrix knows is marked
-# legacy_pending and read after the room syncs.
+# reply_messages and reply_spans.
+# Handling: once per principal at bot start, before owner_lost, the newest continuation of each reply pauses it; older
+# ones are superseded and keep their pauses on that reply to hold their sources until their cleanup settles them.
+# Approvals a newer edit's delivered answer replaced keep their pauses on that answer's reply, which is finished, and
+# their cleanup runs. An upgrade runs while no reply is in flight, so nothing else is adopted.
 # Coverage: tests/test_legacy_reply_messages.py.
 def classify(
     transaction: Transaction,
@@ -156,55 +113,19 @@ def classify(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> tuple[AppliedTransition, ...]:
-    """Give each reply an earlier release left in flight a record, once per principal; return what to run after commit."""
+    """Give each reply an earlier release left paused a record, once per principal; return what to run after commit."""
     if _classified(transaction, principal_id):
         return ()
     adoptions: list[_Adoption] = []
-    adopted: set[str] = set()
-    # A coalesced turn's rows are keyed by its last source; every source it answers is taken.
-    adopted_sources: set[str] = set()
-    # One Matrix event is one reply: an edit's newer approval pauses the
-    # event its original turn's rows created, and that event is adopted once.
-    adopted_events: set[str] = set()
-    # Replies a newer edit's answer replaced, which only superseded approvals still name.
-    replaced: dict[str, tuple[ApprovalContinuation, ...]] = {}
     for event_id, continuation, superseded in _newest_continuations(transaction, principal_id, entity_name):
         if continuation is None:
-            replaced[event_id] = superseded
+            adoptions.append(
+                _replaced_reply(transaction, principal_id, event_id, superseded, entity_name, presentations, now_ns),
+            )
             continue
         adoption = _paused_reply(transaction, principal_id, continuation, entity_name, presentations, now_ns)
-        adoption = replace(adoption, superseded=_superseded_pauses(adoption.reply.reply_id, superseded, now_ns))
-        adoptions.append(adoption)
-        adopted.update(span.delivery_id for span in adoption.spans)
-        adopted_sources.update(source for span in adoption.spans for source in span.sources.logical)
-        adopted_events.add(continuation.response_event_id)
-    for delivery_id in _unowned_row_delivery_ids(transaction, principal_id):
-        if delivery_id in adopted:
-            continue
-        found = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
-        if found is None or found.reply.event_id in adopted_events:
-            continue
-        adopted.add(delivery_id)
-        adopted_sources.update(source for span in found.spans for source in span.sources.logical)
-        adoption = _rows_beside_replaced(found, replaced, now_ns)
-        if adoption is None:
-            continue
-        adoptions.append(adoption)
-        if adoption.reply.event_id is not None:
-            adopted_events.add(adoption.reply.event_id)
-    for event_id, superseded in replaced.items():
-        adoption = _replaced_reply(transaction, principal_id, event_id, superseded, entity_name, presentations, now_ns)
-        adoptions.append(adoption)
-        adopted_sources.update(source for span in adoption.superseded for source in span.sources.logical)
-    adoptions.extend(
-        _stream_created_reply(transaction, principal_id, record, entity_name, presentations, now_ns)
-        for record in _pending_turns(transaction, principal_id, entity_name)
-        if adopted_sources.isdisjoint(record.source_event_ids)
-    )
-    answered = _answered_turns(transaction, entity_name)
+        adoptions.append(replace(adoption, superseded=_superseded_pauses(adoption.reply.reply_id, superseded, now_ns)))
     applied = [_write(transaction, principal_id, adoption) for adoption in adoptions]
-    applied.extend(_edit_answers(transaction, principal_id, answered, entity_name, presentations, now_ns))
-    applied.extend(_keep_stops(transaction, principal_id, answered, entity_name, presentations, now_ns))
     transaction.execute(
         "INSERT INTO reply_legacy_classifications (principal_id, classified_at_ns) VALUES (?, ?)",
         (principal_id, now_ns),
@@ -234,50 +155,12 @@ def _write(transaction: Transaction, principal_id: str, adoption: _Adoption) -> 
             (span.span_id, principal_id, span.approval_id),
         )
     if adoption.approval_id is not None:
-        # The continuation names the span that paused its reply and any resume that claims it, as one paused now does.
+        # The continuation names the span that paused its reply, as one paused now does.
         transaction.execute(
-            """UPDATE approval_continuations SET span_id = ?, claim_span_id = ?
-            WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL""",
-            (adoption.spans[0].span_id, adoption.claim_span_id, principal_id, adoption.approval_id),
-        )
-    if adoption.row is not None:
-        # The reply's first write: its acknowledgement binds the reply, a permanent refusal fails it.
-        _own_row(
-            transaction,
-            principal_id,
-            adoption.row,
-            adoption.reply,
-            sequence=1,
-            placeholder_only=adoption.row_placeholder_only,
+            "UPDATE approval_continuations SET span_id = ? WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL",
+            (adoption.spans[0].span_id, principal_id, adoption.approval_id),
         )
     return applied
-
-
-def _own_row(
-    transaction: Transaction,
-    principal_id: str,
-    row: MatrixDelivery,
-    reply: rl.Reply,
-    *,
-    sequence: int,
-    placeholder_only: bool,
-) -> None:
-    """Give an earlier release's row the reply identity of the write it is, on the reply's last span."""
-    transaction.execute(
-        """
-        UPDATE matrix_delivery_outbox SET reply_id = ?, span_id = ?, reply_sequence = ?, reply_row_json = ?
-        WHERE principal_id = ? AND delivery_id = ? AND stage = ? AND reply_id IS NULL
-        """,
-        (
-            reply.reply_id,
-            reply.last_span_id,
-            sequence,
-            json.dumps(row_facts(placeholder_only=placeholder_only, new_text=None)),
-            principal_id,
-            row.delivery_id,
-            row.stage.value,
-        ),
-    )
 
 
 def _newest_continuations(
@@ -336,29 +219,6 @@ def _with_replaced_approvals(
         adoption,
         superseded=pauses,
         effects=(*adoption.effects, *(rl.WakeApproval(older.approval_id) for older in superseded)),
-    )
-
-
-def _rows_beside_replaced(
-    adoption: _Adoption,
-    replaced: dict[str, tuple[ApprovalContinuation, ...]],
-    now_ns: int,
-) -> _Adoption | None:
-    """Return the rows' reply, or nothing for rows of a turn whose reply a newer edit's answer replaced.
-
-    That answer, adopted by ``_replaced_reply``, stands. When its own FINAL is
-    still in flight, its reply keeps the approvals it superseded instead.
-    """
-    event_id = adoption.reply.event_id
-    if event_id not in replaced:
-        return adoption
-    if adoption.row is None or adoption.row.stage is not DeliveryStage.FINAL:
-        return None
-    superseded = replaced.pop(event_id)
-    return _with_replaced_approvals(
-        adoption,
-        superseded,
-        _superseded_pauses(adoption.reply.reply_id, superseded, now_ns),
     )
 
 
@@ -469,24 +329,6 @@ def _span(
     )
 
 
-def _final_state(final: MatrixDelivery) -> rl.ReplyState:
-    content: object = final.payload.get("m.new_content", final.payload)
-    status = (
-        cast("Mapping[str, object]", content).get("io.mindroom.stream_status") if isinstance(content, dict) else None
-    )
-    return _STATE_BY_STATUS.get(str(status), rl.ReplyState.COMPLETED)
-
-
-def _owed_final(final: MatrixDelivery | None) -> bool:
-    """Return whether an earlier release's FINAL is still to be delivered."""
-    return (
-        final is not None
-        and final.acknowledged_event_id is None
-        and not final.retired
-        and final.permanent_failure_reason is None
-    )
-
-
 def _pause_span(reply_id: str, continuation: ApprovalContinuation, outcome: rl.SpanOutcome, now_ns: int) -> rl.Span:
     """Return the span whose pause created ``continuation``, holding its sources as one paused now does."""
     sources = continuation.sources
@@ -519,16 +361,9 @@ def _paused_reply(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> _Adoption:
-    """A continuation pauses its reply; a claimed one has its resume left running by the instance that stopped."""
+    """A continuation pauses its reply, which its approval runtime then resumes or settles."""
     reply_id = _new_id()
-    # A claimed resume was running when the earlier release stopped, and so was
-    # one its shutdown marked interrupted for the next instance to hand back.
-    resumed = continuation.state == "claimed" or (
-        continuation.state == "failing"
-        and continuation.failure_reason == approval_continuations.INTERRUPTED_FAILURE_REASON
-    )
     paused = _pause_span(reply_id, continuation, rl.SpanOutcome.PAUSED, now_ns)
-    delivery_id = paused.delivery_id
     shown = presentations.paused(
         continuation,
         _legacy_paused_answer(transaction, principal_id, continuation.approval_id),
@@ -549,653 +384,5 @@ def _paused_reply(
         edit_receipt_order=(
             continuation.sources.edit_receipt_order if paused.kind is rl.SpanKind.REGENERATION else None
         ),
-        # A resumed approval may have streamed past its pause, which only Matrix
-        # shows. A team's resume restores its stored document instead, which a
-        # read of rendered text would lose.
-        legacy_pending=(rl.LegacyPending.PRESENTATION_READ if resumed and continuation.entity_kind != "team" else None),
     )
-    if not resumed:
-        return _Adoption(approval_id=continuation.approval_id, reply=reply, spans=(paused,))
-    final = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL)
-    resume = _span(
-        reply_id,
-        kind=rl.SpanKind.APPROVAL_RESUME,
-        delivery_id=delivery_id,
-        sources=paused.sources,
-        # Claimed after the pause it resumes.
-        now_ns=now_ns + 1,
-        outcome=None,
-        approval_id=continuation.approval_id,
-    )
-    claim_span_id = resume.span_id if continuation.state == "claimed" else None
-    if final is not None and (final.acknowledged_event_id is not None or _owed_final(final)):
-        # The resume froze its answer: the reply ends as that row says, and
-        # Frozen-final recovery still finishes the continuation.
-        state = _final_state(final)
-        ended = replace(resume, outcome=_OUTCOME_BY_STATE[state], ended_at_ns=now_ns)
-        shown = presentations.answered(final, ended.span_id)
-        owed = _owed_final(final)
-        answered = replace(
-            reply,
-            state=state,
-            last_span_id=ended.span_id,
-            presentation=shown,
-            possibly_shown=shown,
-            possibly_shown_seq=1 if owed else None,
-            reply_sequence=1 if owed else 0,
-            legacy_pending=None,
-        )
-        return _Adoption(
-            approval_id=continuation.approval_id,
-            reply=answered,
-            spans=(paused, ended),
-            row=final if owed else None,
-            claim_span_id=claim_span_id,
-        )
-    # Approval recovery owns a resume a stopped instance left running.
-    running = replace(reply, state=rl.ReplyState.ACTIVE, current_span_id=resume.span_id, last_span_id=resume.span_id)
-    return _Adoption(
-        approval_id=continuation.approval_id,
-        reply=running,
-        spans=(paused, resume),
-        claim_span_id=claim_span_id,
-    )
-
-
-def _unowned_row_delivery_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
-    rows = transaction.fetchall(
-        """
-        SELECT DISTINCT delivery_id FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND reply_id IS NULL AND stage IN ('initial', 'final')
-        ORDER BY delivery_id
-        """,
-        (principal_id,),
-    )
-    return tuple(str(row["delivery_id"]) for row in rows)
-
-
-def _turn(transaction: Transaction, entity_name: str, event_id: str) -> TurnRecord | None:
-    """Return the agent or team turn an event belongs to; command and echo turns have no history scope."""
-    record = turn_records.load_record(transaction, entity_name, event_id)
-    return None if record is None or record.history_scope is None else record
-
-
-def _any_pending(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> bool:
-    return any(journal.is_pending(transaction, principal_id, event_id) for event_id in event_ids)
-
-
-def _turn_sources(transaction: Transaction, principal_id: str, record: TurnRecord) -> rl.SpanSources:
-    return rl.SpanSources(
-        pending=tuple(
-            event_id for event_id in record.source_event_ids if journal.is_pending(transaction, principal_id, event_id)
-        ),
-        logical=record.source_event_ids,
-        discovery=record.discovery_event_ids,
-    )
-
-
-def _reply_of_rows(
-    transaction: Transaction,
-    principal_id: str,
-    delivery_id: str,
-    entity_name: str,
-    presentations: LegacyPresentations,
-    now_ns: int,
-) -> _Adoption | None:
-    """The reply that an earlier release's INITIAL and FINAL rows of one turn imply, first match wins."""
-    record = _turn(transaction, entity_name, delivery_id)
-    if record is None or record.conversation_target is None:
-        return None
-    initial = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-    final = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL)
-    reply_id = _new_id()
-    sources = _turn_sources(transaction, principal_id, record)
-    target = record.conversation_target
-    team = record.history_scope is not None and record.history_scope.kind == "team"
-    base = {
-        "entity_name": entity_name,
-        "room_id": target.room_id,
-        "thread_id": target.resolved_thread_id,
-        "now_ns": now_ns,
-    }
-    if final is not None and _owed_final(final):
-        state = _final_state(final)
-        span = _span(
-            reply_id,
-            kind=rl.SpanKind.TURN,
-            delivery_id=delivery_id,
-            sources=sources,
-            now_ns=now_ns,
-            outcome=_OUTCOME_BY_STATE[state],
-        )
-        shown = presentations.answered(final, span.span_id)
-        reply = _reply(
-            transaction,
-            principal_id,
-            state=state,
-            span=span,
-            presentation=shown,
-            membership_epoch=final.membership_epoch,
-            event_id=final.edits_event_id,
-            possibly_shown=shown,
-            possibly_shown_seq=1,
-            reply_sequence=1,
-            **base,  # type: ignore[arg-type]
-        )
-        # The answer is enqueued, so its turn is answered, as a terminal row records now.
-        return _Adoption(reply=reply, spans=(span,), row=final, effects=(rl.SettleSources(span.span_id),))
-    if initial is None or final is not None or initial.retired:
-        # Answered, or retired by a departure or a deleted source: their existing owners finish it.
-        return None
-    if all(
-        source in record.redacted_source_event_ids or is_tombstoned(transaction, principal_id, target.room_id, source)
-        for source in record.source_event_ids
-    ):
-        return _deleted_source_reply(
-            transaction,
-            principal_id,
-            _span(
-                reply_id,
-                kind=rl.SpanKind.TURN,
-                delivery_id=delivery_id,
-                sources=sources,
-                now_ns=now_ns,
-                outcome=rl.SpanOutcome.CANCELLED,
-            ),
-            initial,
-            presentations.empty(team),
-            **base,  # type: ignore[arg-type]
-        )
-    stop = _turn_stop(transaction, entity_name, delivery_id)
-    stopped = stop is not None
-    # That release finished a settled Stop and shows it; its turn record turns
-    # the replay of any source it left pending away.
-    stop_settled = stop is not None and stop.settled
-    historical = initial.created_at_ns < now_ns - _HISTORICAL_STREAM_NS
-    if stop_settled or (not sources.pending and (initial.acknowledged_event_id is None or stopped or historical)):
-        return None
-    span = _span(
-        reply_id,
-        kind=rl.SpanKind.TURN,
-        delivery_id=delivery_id,
-        sources=sources,
-        now_ns=now_ns,
-        outcome=rl.SpanOutcome.LOST,
-    )
-    acknowledged = initial.acknowledged_event_id
-    owed = acknowledged is None and initial.permanent_failure_reason is None
-    # The reply owns its create, owed or shown, so a retried selection
-    # acknowledgement resolves to that row instead of writing another.
-    owns_create = owed or acknowledged is not None
-    reply = _reply(
-        transaction,
-        principal_id,
-        state=rl.ReplyState.ACTIVE,
-        span=span,
-        presentation=presentations.empty(team),
-        membership_epoch=initial.membership_epoch,
-        event_id=acknowledged,
-        placeholder_only=acknowledged is not None,
-        reply_sequence=1 if owns_create else 0,
-        confirmed_seq=1 if acknowledged is not None else None,
-        # Whether a replay continues below a shown attempt, or a stream that
-        # settled needs the restart note, only the event says.
-        legacy_pending=rl.LegacyPending.PRESENTATION_READ if acknowledged is not None else None,
-        **base,  # type: ignore[arg-type]
-    )
-    return _Adoption(reply=reply, spans=(span,), row=initial if owns_create else None, row_placeholder_only=True)
-
-
-def _deleted_source_reply(
-    transaction: Transaction,
-    principal_id: str,
-    span: rl.Span,
-    initial: MatrixDelivery,
-    presentation: str,
-    *,
-    entity_name: str,
-    room_id: str,
-    thread_id: str | None,
-    now_ns: int,
-) -> _Adoption:
-    # LEGACY_COMPAT: Placeholders of deleted requests that an earlier release still had to remove.
-    # Legacy format: a reply-less INITIAL row, neither retired nor answered by a FINAL, whose turn's sources all
-    # carry redaction tombstones; that release's deleted-INITIAL cleanup redacted its event and retired the row.
-    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages end such a reply gone,
-    # with its event pending redaction.
-    # Handling: the reply is adopted gone with its span cancelled, owing the redaction of the acknowledged event; a
-    # create still owed is redacted when it lands, as any create of a gone reply is.
-    # Coverage: tests/test_legacy_reply_messages.py::test_a_placeholder_whose_source_was_deleted_becomes_a_gone_reply_that_removes_it.
-    acknowledged = initial.acknowledged_event_id
-    reply = _reply(
-        transaction,
-        principal_id,
-        state=rl.ReplyState.GONE,
-        span=span,
-        presentation=presentation,
-        membership_epoch=initial.membership_epoch,
-        event_id=acknowledged,
-        placeholder_only=acknowledged is not None,
-        reply_sequence=1,
-        confirmed_seq=1 if acknowledged is not None else None,
-        redaction_pending=() if acknowledged is None else (acknowledged,),
-        entity_name=entity_name,
-        room_id=room_id,
-        thread_id=thread_id,
-        now_ns=now_ns,
-    )
-    return _Adoption(reply=reply, spans=(span,), row=initial, row_placeholder_only=True)
-
-
-def _pending_turns(transaction: Transaction, principal_id: str, entity_name: str) -> tuple[TurnRecord, ...]:
-    """Return incomplete agent and team turns with pending sources and no outbox row of their own."""
-    turns: dict[str, TurnRecord] = {}
-    for index_event_id, _anchor, record_json in turn_records.load_all(transaction, entity_name):
-        record = TurnRecordCodec._from_ledger_record(index_event_id, json.loads(record_json))
-        if (
-            record is None
-            or record.completed
-            or record.history_scope is None
-            or record.conversation_target is None
-            or not record.source_event_ids
-            or record.anchor_event_id in turns
-        ):
-            continue
-        if not _any_pending(transaction, principal_id, record.source_event_ids):
-            continue
-        # A coalesced turn keyed its rows by any one of its sources.
-        if any(
-            outbox.load(transaction, principal_id, delivery_id=source, stage=stage) is not None
-            for source in record.source_event_ids
-            for stage in (DeliveryStage.INITIAL, DeliveryStage.FINAL)
-        ):
-            continue
-        if reply_spans.reply_ids_for_sources(transaction, principal_id, record.source_event_ids):
-            continue
-        assert record.anchor_event_id is not None
-        turns[record.anchor_event_id] = record
-    return tuple(turns.values())
-
-
-def _stream_created_reply(
-    transaction: Transaction,
-    principal_id: str,
-    record: TurnRecord,
-    entity_name: str,
-    presentations: LegacyPresentations,
-    now_ns: int,
-) -> _Adoption:
-    """A turn whose stream created its reply without a placeholder row: the adoption scan finds the event."""
-    assert record.conversation_target is not None
-    reply_id = _new_id()
-    span = _span(
-        reply_id,
-        kind=rl.SpanKind.TURN,
-        delivery_id=record.source_event_ids[0],
-        sources=_turn_sources(transaction, principal_id, record),
-        now_ns=now_ns,
-        outcome=rl.SpanOutcome.LOST,
-    )
-    team = record.history_scope is not None and record.history_scope.kind == "team"
-    reply = _reply(
-        transaction,
-        principal_id,
-        entity_name=entity_name,
-        room_id=record.conversation_target.room_id,
-        thread_id=record.conversation_target.resolved_thread_id,
-        state=rl.ReplyState.ACTIVE,
-        span=span,
-        presentation=presentations.empty(team),
-        now_ns=now_ns,
-        legacy_pending=rl.LegacyPending.ADOPTION_SCAN,
-    )
-    return _Adoption(reply=reply, spans=(span,))
-
-
-@dataclass(frozen=True, slots=True)
-class _TurnStop:
-    """A Stop an earlier release recorded on a turn record, which current records keep on the reply."""
-
-    receipt_order: int
-    # That release delivered the Stop's note or found it superseded.
-    settled: bool
-    # An edit admitted after the Stop regenerates past it.
-    newer_edit: bool
-
-
-def _positive(value: object) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
-
-
-def _stop_of(raw: object) -> _TurnStop | None:
-    """Return the Stop a turn record an earlier release wrote holds, if any."""
-    stored = cast("Mapping[str, object]", raw) if isinstance(raw, dict) else {}
-    order = _positive(stored.get("user_stop_receipt_order"))
-    if not order:
-        return None
-    return _TurnStop(
-        receipt_order=order,
-        settled=_positive(stored.get("user_stop_settled_receipt_order")) >= order,
-        newer_edit=_positive(stored.get("latest_edit_receipt_order")) > order,
-    )
-
-
-def _turn_stop(transaction: Transaction, entity_name: str, event_id: str) -> _TurnStop | None:
-    """Return the Stop an earlier release kept on the turn record one event indexes."""
-    row = transaction.fetchone(
-        "SELECT record_json FROM turn_records WHERE agent_name = ? AND index_event_id = ?",
-        (entity_name, event_id),
-    )
-    return None if row is None else _stop_of(json.loads(str(row["record_json"])))
-
-
-def _finished_answer(
-    transaction: Transaction,
-    principal_id: str,
-    record: TurnRecord,
-    event_id: str,
-    entity_name: str,
-    presentations: LegacyPresentations,
-    now_ns: int,
-) -> rl.Reply | None:
-    """Return the reply of a turn's answer event, adopted as a finished one when nothing in flight held it."""
-    target = record.conversation_target
-    if target is None:
-        return None
-    request = rl.ClaimRequest(
-        span_id=_new_id(),
-        delivery_id=event_id,
-        sources=rl.SpanSources(pending=(), logical=record.source_event_ids, discovery=record.discovery_event_ids),
-        bot_generation=_LEGACY_GENERATION,
-        now_ns=now_ns,
-        membership_epoch=journal.current_membership_epoch(transaction, principal_id, target.room_id),
-        new_reply_id=_new_id(),
-        entity_name=entity_name,
-        room_id=target.room_id,
-        thread_id=target.resolved_thread_id,
-        empty_presentation=presentations.empty(
-            record.history_scope is not None and record.history_scope.kind == "team",
-        ),
-    )
-    return adopt_historical_answer(transaction, principal_id, request, event_id)
-
-
-def _answered_turns(
-    transaction: Transaction,
-    entity_name: str,
-) -> dict[str, tuple[TurnRecord, _TurnStop | None]]:
-    """Return the turn each earlier-release answer event names, with the Stop its record holds.
-
-    Read before any adoption answers a turn: answering rewrites the record
-    through the current codec, which keeps neither the answer event nor the
-    Stop. A Stop-bearing record wins for its event.
-    """
-    answered: dict[str, tuple[TurnRecord, _TurnStop | None]] = {}
-    for index_event_id, _anchor, record_json in turn_records.load_all(transaction, entity_name):
-        raw = json.loads(record_json)
-        record = TurnRecordCodec._from_ledger_record(index_event_id, raw)
-        if record is None or record.response_event_id is None:
-            continue
-        stop = _stop_of(raw)
-        kept = answered.get(record.response_event_id)
-        if kept is None or (kept[1] is None and stop is not None):
-            answered[record.response_event_id] = (record, stop)
-    return answered
-
-
-def _edit_answers(
-    transaction: Transaction,
-    principal_id: str,
-    answered: Mapping[str, tuple[TurnRecord, _TurnStop | None]],
-    entity_name: str,
-    presentations: LegacyPresentations,
-    now_ns: int,
-) -> tuple[AppliedTransition, ...]:
-    """Give each regeneration answer an earlier release queued to the reply of the answer it edits.
-
-    Such a row is keyed by its edit, which indexes no turn. Taken in the order
-    they were queued, one newer than everything the reply wrote, delivered
-    edits of its event included, becomes its next write, so a newer edit
-    waits for its delivery. One the reply already wrote past, or one beside a
-    reply still in flight, is superseded: it is
-    never sent, since what the reply shows now is newer. Either way its edit
-    is answered; one that is sent and completed consumes the edit it
-    selected, as a regeneration's terminal row does now. The answer it edits becomes a finished reply first
-    when nothing in flight held it; a removed reply keeps the row an ordinary
-    delivery.
-    """
-    applied: list[AppliedTransition] = []
-    for row in _edit_answer_rows(transaction, principal_id, entity_name):
-        assert row.edits_event_id is not None
-        legacy_edit = legacy_prepared_edit(row.result)
-        selected = None if legacy_edit is None else TurnRecordCodec._from_ledger_record(*legacy_edit)
-        found = reply_messages.for_event(transaction, principal_id, row.edits_event_id)
-        record = selected or answered.get(row.edits_event_id, (None, None))[0]
-        if found is None and record is not None:
-            found = _finished_answer(
-                transaction,
-                principal_id,
-                record,
-                row.edits_event_id,
-                entity_name,
-                presentations,
-                now_ns,
-            )
-        if found is None or found.state is rl.ReplyState.GONE:
-            continue
-        reply = reply_messages.lock(transaction, principal_id, found.reply_id)
-        assert reply is not None
-        superseded = not reply.terminal or row.created_at_ns < _latest_write_ns(transaction, principal_id, reply)
-        applied.append(
-            _edit_answer(transaction, principal_id, reply, row, selected, presentations, now_ns, superseded=superseded),
-        )
-    return tuple(applied)
-
-
-def _latest_write_ns(transaction: Transaction, principal_id: str, reply: rl.Reply) -> int:
-    """Return when the reply's newest write was queued.
-
-    That is a row it owns, the pause of an approval naming it, or an edit of
-    its event an earlier release already delivered.
-    """
-    row = transaction.fetchone(
-        """
-        SELECT MAX(created_at_ns) AS latest FROM (
-            SELECT created_at_ns FROM matrix_delivery_outbox WHERE principal_id = ? AND reply_id = ?
-            UNION ALL
-            SELECT created_at_ns FROM matrix_delivery_outbox
-            WHERE principal_id = ? AND reply_id IS NULL AND edits_event_id = ? AND acknowledged_event_id IS NOT NULL
-            UNION ALL
-            SELECT continuation.created_at_ns FROM approval_continuations AS continuation
-            JOIN reply_spans AS paused
-              ON paused.principal_id = continuation.principal_id AND paused.span_id = continuation.span_id
-            WHERE continuation.principal_id = ? AND paused.reply_id = ?
-        ) AS writes
-        """,
-        (principal_id, reply.reply_id, principal_id, reply.event_id, principal_id, reply.reply_id),
-    )
-    return 0 if row is None or row["latest"] is None else int(row["latest"])
-
-
-def _edit_answer_rows(transaction: Transaction, principal_id: str, entity_name: str) -> tuple[MatrixDelivery, ...]:
-    """Return the owed FINAL rows an earlier release keyed by an edit, in the order it queued them."""
-    rows = transaction.fetchall(
-        """
-        SELECT delivery_id FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND reply_id IS NULL AND stage = 'final' AND edits_event_id IS NOT NULL
-        ORDER BY created_at_ns, delivery_id
-        """,
-        (principal_id,),
-    )
-    finals = (
-        outbox.load(transaction, principal_id, delivery_id=str(row["delivery_id"]), stage=DeliveryStage.FINAL)
-        for row in rows
-    )
-    return tuple(
-        final
-        for final in finals
-        if final is not None
-        and _owed_final(final)
-        and turn_records.load_record(transaction, entity_name, final.delivery_id) is None
-    )
-
-
-def _edit_answer(
-    transaction: Transaction,
-    principal_id: str,
-    reply: rl.Reply,
-    row: MatrixDelivery,
-    selected: TurnRecord | None,
-    presentations: LegacyPresentations,
-    now_ns: int,
-    *,
-    superseded: bool,
-) -> AppliedTransition:
-    """Record one queued regeneration answer on a regeneration span of its edit: the reply's next write, or superseded."""
-    last = reply_spans.load(transaction, principal_id, reply.last_span_id)
-    assert last is not None
-    state = _final_state(row)
-    sequence = reply.reply_sequence + 1
-    span = replace(
-        _span(
-            reply.reply_id,
-            kind=rl.SpanKind.REGENERATION,
-            delivery_id=row.delivery_id,
-            sources=rl.SpanSources(
-                pending=(row.delivery_id,) if journal.is_pending(transaction, principal_id, row.delivery_id) else (),
-                logical=last.sources.logical if selected is None else selected.source_event_ids,
-                discovery=last.sources.discovery if selected is None else selected.discovery_event_ids,
-            ),
-            # Claimed before the writes that superseded it, or after those it follows.
-            now_ns=now_ns - 1 if superseded else now_ns + sequence,
-            outcome=rl.SpanOutcome.SUPERSEDED if superseded else _OUTCOME_BY_STATE[state],
-            prepared_edit=None if selected is None else turn_records.encode_prepared_edit(selected),
-        ),
-        base_sequence=reply.reply_sequence,
-    )
-    # Its answer was queued, so its edit is answered, as a terminal row records now; one never sent consumes nothing,
-    # as a superseded regeneration does now.
-    settle = rl.SettleSources(span.span_id, consumes_edit=selected is not None and not superseded)
-    if superseded:
-        outbox.retire(
-            transaction,
-            principal_id,
-            delivery_id=row.delivery_id,
-            stage=row.stage,
-            room_id=row.room_id,
-            membership_epoch=row.membership_epoch,
-        )
-        touched = replace(reply, updated_at_ns=now_ns)
-        return apply(
-            transaction,
-            principal_id,
-            rl.Transition(outcome=rl.Outcome.APPLIED, reply=touched, spans=(span,), effects=(settle,)),
-        )
-    shown = presentations.answered(row, span.span_id)
-    edit = journal.load(transaction, principal_id, row.delivery_id)
-    updated = replace(
-        reply,
-        state=state,
-        last_span_id=span.span_id,
-        presentation=shown,
-        frozen_display=None,
-        possibly_shown=shown,
-        possibly_shown_seq=sequence,
-        reply_sequence=sequence,
-        edit_receipt_order=max(reply.edit_receipt_order or 0, 0 if edit is None else edit.receipt_order) or None,
-        revision=reply.revision + 1,
-        updated_at_ns=now_ns,
-    )
-    applied = apply(
-        transaction,
-        principal_id,
-        rl.Transition(outcome=rl.Outcome.APPLIED, reply=updated, spans=(span,), effects=(settle,)),
-    )
-    _own_row(transaction, principal_id, row, updated, sequence=sequence, placeholder_only=False)
-    return applied
-
-
-def _keep_stops(
-    transaction: Transaction,
-    principal_id: str,
-    answered: Mapping[str, tuple[TurnRecord, _TurnStop | None]],
-    entity_name: str,
-    presentations: LegacyPresentations,
-    now_ns: int,
-) -> tuple[AppliedTransition, ...]:
-    """Keep each Stop a turn recorded on the reply it names, where an edit it covers finds it.
-
-    A turn whose answer finished had nothing in flight to adopt: its answer
-    becomes a finished reply. Every reply keeps the Stop even when that
-    release already settled it, since an edit admitted before the Stop may
-    still wait.
-    """
-    applied: list[AppliedTransition] = []
-    for event_id, (record, stop) in answered.items():
-        if stop is None:
-            continue
-        found = reply_messages.for_event(transaction, principal_id, event_id)
-        if found is None:
-            found = _finished_answer(transaction, principal_id, record, event_id, entity_name, presentations, now_ns)
-        if found is None or found.stop_receipt_order is not None:
-            continue
-        reply = reply_messages.lock(transaction, principal_id, found.reply_id)
-        span = reply_spans.load(transaction, principal_id, found.current_span_id or found.last_span_id)
-        assert reply is not None
-        facts = rl.StopFacts(receipt_order=stop.receipt_order, newer_edit=stop.newer_edit, span_live=False)
-        applied.append(apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns)))
-    return tuple(applied)
-
-
-def pending_reads(transaction: Transaction, principal_id: str) -> tuple[tuple[rl.Reply, rl.Span], ...]:
-    """Return earlier-release replies still waiting for their legacy read, with their last span."""
-    rows = transaction.fetchall(
-        "SELECT reply_id FROM reply_messages WHERE principal_id = ? AND legacy_pending IS NOT NULL ORDER BY reply_id",
-        (principal_id,),
-    )
-    pending = []
-    for row in rows:
-        reply = reply_messages.load(transaction, principal_id, str(row["reply_id"]))
-        assert reply is not None
-        last = reply_spans.load(transaction, principal_id, reply.last_span_id)
-        assert last is not None
-        pending.append((reply, last))
-    return tuple(pending)
-
-
-def read_done(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    reply_id: str,
-    read: rl.LegacyRead,
-    now_ns: int,
-) -> AppliedTransition | None:
-    """Record what one earlier-release reply's legacy read found."""
-    reply = reply_messages.lock(transaction, principal_id, reply_id)
-    if reply is None:
-        return None
-    last = reply_spans.load(transaction, principal_id, reply.last_span_id)
-    assert last is not None
-    if read.event_id is not None:
-        owner = reply_messages.for_event(transaction, principal_id, read.event_id)
-        if owner is not None and owner.reply_id != reply_id:
-            # Another reply already owns that event; this one creates its own.
-            read = rl.LegacyRead()
-    return apply(
-        transaction,
-        principal_id,
-        rl.legacy_read_done(
-            reply,
-            last,
-            read,
-            sources_pending=_any_pending(transaction, principal_id, last.sources.pending),
-            membership_current=claim_membership_epoch(
-                transaction,
-                principal_id,
-                room_id=reply.room_id,
-                expected_membership_epoch=reply.membership_epoch,
-            ),
-            now_ns=now_ns,
-        ),
-    )
+    return _Adoption(approval_id=continuation.approval_id, reply=reply, spans=(paused,))

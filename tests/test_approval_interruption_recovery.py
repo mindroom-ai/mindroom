@@ -12,17 +12,17 @@ from mindroom.approval_manager import initialize_approval_store
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import unwrap_extracted_collaborator
-from tests.legacy_reply_helpers import read_after_sync, store_main_continuation
+from tests.legacy_reply_helpers import keep_main_paused_answer, resumed_main_left_approval, store_main_continuation
 from tests.response_runner_helpers import _bot
 from tests.test_response_runner_focused import _admit_approval_source
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 
 @pytest_asyncio.fixture
-async def approval(tmp_path: Path) -> tuple[AgentBot, ApprovalContinuation]:
-    """Create real journal ownership, an acknowledged visible INITIAL, and a claim main's stopped instance left."""
+async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalContinuation]]:
+    """Create real journal ownership, an acknowledged visible INITIAL, and this runtime's claim of an adopted approval."""
     bot = _bot(tmp_path)
     initialize_approval_store(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -63,27 +63,22 @@ async def approval(tmp_path: Path) -> tuple[AgentBot, ApprovalContinuation]:
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
-        state="claimed",
+        state="ready",
     )
+    # An approved run main left; this instance adopts its paused reply and stops while resuming it.
     await store_main_continuation(store, continuation)
-    # This start adopts the reply main left running its approved resume.
-    await bot._reply_runtime.start()
-    claimed = await store.approval_continuation(continuation.approval_id)
-    assert claimed is not None
-    assert claimed.state == "claimed"
-    unique_room_send_responses(bot.client)
-    return bot, claimed
-
-
-def _visible(body: str) -> ResolvedVisibleMessage:
-    return ResolvedVisibleMessage.synthetic(
-        event_id="$waiting",
-        sender="@mindroom_general:localhost",
-        body=body,
-        timestamp=1,
-        thread_id="$thread",
-        content={"body": body, STREAM_STATUS_KEY: "streaming"},
-    )
+    await keep_main_paused_answer(store, continuation.approval_id, text="partial answer")
+    async with resumed_main_left_approval(bot, continuation) as claimed:
+        assert claimed.state == "claimed"
+    # The next instance takes the replies over and recovers the resume the stopped one left.
+    restarted = _bot(tmp_path)
+    initialize_approval_store(restarted.runtime_paths, cards=restarted.journal_principal())
+    await restarted._reply_runtime.start()
+    left = await restarted.journal_principal().approval_continuation(continuation.approval_id)
+    assert left is not None
+    assert left.state == "claimed"
+    unique_room_send_responses(restarted.client)
+    yield restarted, left
 
 
 def _sent_bodies(bot: AgentBot) -> list[dict[str, object]]:
@@ -122,20 +117,8 @@ async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: Approva
 async def test_approval_interruption_settles_in_place(approval: tuple[AgentBot, ApprovalContinuation]) -> None:
     """An active restart cancellation writes the interruption note below what the reply showed, and settles."""
     bot, claimed = approval
-    await read_after_sync(bot, _visible("partial answer"))
     await _settle(bot, claimed)
     await _assert_settled_with_interruption_note(bot, claimed, "partial answer")
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_reply_still_gets_its_interruption_note(
-    approval: tuple[AgentBot, ApprovalContinuation],
-) -> None:
-    """A read that gives up leaves what the reply showed unknown; the note still ends it."""
-    bot, claimed = approval
-    await read_after_sync(bot, None)
-    await _settle(bot, claimed)
-    await _assert_settled_with_interruption_note(bot, claimed, "")
 
 
 @pytest.mark.asyncio
@@ -144,7 +127,6 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
 ) -> None:
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
-    await read_after_sync(bot, _visible("partial answer"))
     runner = unwrap_extracted_collaborator(bot._response_runner)
     failing = await runner._approval_responses.request_failure(claimed, "sync_restart_cancelled")
     assert failing is not None
@@ -169,7 +151,6 @@ async def test_approval_settlement_after_removal_still_settles_in_place(
 ) -> None:
     """A removed lifecycle still edits its reply with the interruption note and settles."""
     bot, claimed = approval
-    await read_after_sync(bot, _visible("partial answer"))
     await _fence_bot(bot, ENTITY_REMOVED_SHUTDOWN)
     await _settle(bot, claimed)
     await _assert_settled_with_interruption_note(bot, claimed, "partial answer")

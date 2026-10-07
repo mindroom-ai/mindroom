@@ -61,7 +61,6 @@ from mindroom.hooks import (
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage as VisibleMessage
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
@@ -121,7 +120,6 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.journal_membership_helpers import admit_room_membership
-from tests.legacy_reply_helpers import main_left_reply, read_after_sync
 from tests.participation_helpers import ParticipationModel
 from tests.reply_span_helpers import reply_span, response_span
 from tests.response_attempt_helpers import install_direct_response_admission
@@ -3561,76 +3559,3 @@ class TestAdaptiveResponse(AgentBotTestBase):
         assert reply.terminal
         assert bot.client.room_send.await_count == 0
         assert bot.client.room_typing.await_count == 0
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
-    @pytest.mark.parametrize("placeholder", [False, True])
-    async def test_adaptive_recovery_finishes_owned_response_without_new_decision(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
-        placeholder: bool,
-    ) -> None:
-        """An owned event resumes approved work and retains terminal delivery ownership."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        install_direct_response_admission(bot)
-        bot.client = _make_matrix_client_mock()
-        bot.client.room_send.return_value = _room_send_response("$edit")
-        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        model = ParticipationModel(ModelResponse(content="Recovered answer"))
-        agent = Agent(model=model, name=bot.agent_name, telemetry=False)
-        monkeypatch.setattr(
-            "mindroom.ai._prepare_agent_and_prompt",
-            AsyncMock(return_value=_prepared_prompt_result(agent)),
-        )
-        monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
-        monkeypatch.setattr(ResponseRunner, "_memory_persistence", lambda *_args, **_kwargs: None)
-        source_settled: list[str] = []
-
-        async def settled() -> None:
-            source_settled.append("quiet")
-
-        # A stopped instance left the reply it owned; this start adopts it and reads what it showed.
-        await main_left_reply(
-            bot,
-            room_id="!test:localhost",
-            thread_id="$thread",
-            source="$event",
-            owner=bot.agent_name,
-            event_id="$owned",
-        )
-        shown = "Thinking..." if placeholder else "Half an answer"
-        await read_after_sync(
-            bot,
-            VisibleMessage.synthetic(
-                event_id="$owned",
-                sender=bot.matrix_id.full_id,
-                body=shown,
-                timestamp=1,
-                thread_id="$thread",
-                content={"body": shown, STREAM_STATUS_KEY: STREAM_STATUS_PENDING if placeholder else "streaming"},
-            ),
-        )
-        result = await bot._response_runner.generate_response(
-            ResponseRequest(
-                prompt="Any thoughts?",
-                sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
-                thread_history=[],
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
-                    agent_name=bot.agent_name,
-                ),
-                participation=ParticipationConfig(),
-                on_no_response_handled=settled,
-            ),
-        )
-        assert result == "$owned"
-        assert source_settled == []
-        assert len(model.requests) == 1
-        bodies = [call.kwargs["content"].get("body", "") for call in bot.client.room_send.await_args_list]
-        assert any("Recovered answer" in body for body in bodies)

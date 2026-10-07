@@ -5,32 +5,25 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
-from mindroom.history.types import HistoryScope
-from mindroom.legacy_reply_messages import LegacyReplyReads
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import ReplyState
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.response_runner import ResponseRunner
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from tests.conftest import (
-    make_relation_lookup,
     make_visible_message,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
@@ -38,17 +31,12 @@ from tests.conftest import (
 from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_room_events import (
     BOT_USER_ID,
-    NOW_MS,
-    make_message_event,
-    room_messages_response,
-    thread_reply_relation,
 )
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTestHooks
 from tests.test_response_delivery_gateway import _gateway
 from tests.test_response_redaction_recovery import _message, _redaction
-from tests.test_turn_controller_focused import _build_harness, _room_with_members, _text_event
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
@@ -86,216 +74,6 @@ def _runner_on(
             replies=replies,
         ),
     )
-
-
-@pytest.mark.parametrize("debt", ["recovered", "adopted", "unattempted", "lost_ack"])
-async def test_a_newer_requester_message_supersedes_the_recovered_reply(  # noqa: PLR0915
-    journal_store: EventJournalStore,
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-    debt: str,
-) -> None:
-    """Once its owed rows are sent, a replay a newer message superseded removes its placeholder and runs nothing."""
-    principal = journal_store.principal("agent@alice")
-    store = await _store(journal_store, agent_name="general")
-    bot = _bot(tmp_path)
-    room = _room_with_members(bot.config, "general", room_id="!room:localhost")
-    source_id, thread_id = "$original", "$root:localhost"
-    event = _text_event("original request", event_id=source_id)
-    event.source["content"]["m.relates_to"] = {"m.in_reply_to": {"event_id": "$reply-target"}}
-    target = MessageTarget.resolve(room.room_id, thread_id, source_id)
-    original = TurnRecord.create(
-        [source_id],
-        completed=False,
-        requester_id="@user:localhost",
-        conversation_target=target,
-        history_scope=HistoryScope(kind="agent", scope_id="general"),
-    )
-    await store.record_pending_turn(original)
-    dispatcher = _dispatcher(principal, AsyncMock())
-    await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
-    source = await principal.load_event(source_id)
-    assert source is not None
-    assert not source.thread_id
-    await principal.enqueue_matrix_delivery(
-        delivery_id=source_id,
-        stage=DeliveryStage.INITIAL,
-        room_id=room.room_id,
-        thread_id=thread_id,
-        payload={
-            "msgtype": "m.text",
-            "body": "Thinking...",
-            "m.relates_to": thread_reply_relation(thread_id, source_id),
-        },
-    )
-    if debt != "unattempted":
-        await principal.claim_matrix_delivery(
-            delivery_id=source_id,
-            stage=DeliveryStage.INITIAL,
-            sending_device_id="CURRENT-DEVICE",
-        )
-    # Recreate runtime before the original send's normal adoption callback.
-    _reset_handled_turn_ledger_runtime()
-    journal_store = journal_database()
-    principal = journal_store.principal("agent@alice")
-    store = await _store(journal_store, agent_name="general")
-    newer = _text_event(
-        "newer requester message",
-        event_id="$newer",
-        thread_id=thread_id,
-        origin_server_ts=2_000_000,
-    )
-    await admit_dispatch_event(dispatcher, room, newer, EventKind.MESSAGE, EventClass.ACTIONABLE)
-    history = ThreadHistoryResult(
-        [
-            make_visible_message(
-                event_id=source_id,
-                sender="@user:localhost",
-                body="original request",
-                timestamp=1_000_000,
-            ),
-            make_visible_message(
-                event_id="$newer",
-                sender="@user:localhost",
-                body="newer requester message",
-                timestamp=2_000_000,
-            ),
-        ],
-        is_full_history=True,
-    )
-    harness = _build_harness(bot.config, tmp_path, thread_history=history)
-    controller = harness.controller
-    relations = make_relation_lookup(threads={"$reply-target": thread_id})
-    controller.deps.resolver.deps = replace(controller.deps.resolver.deps, relations=relations)
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=store.publish_committed_response,
-        turn_handoff=TurnHandoff(lambda _turn: (source_id,), dispatcher.release_delivered_turn_sources),
-    )
-    gateway = replace(
-        gateway,
-        deps=replace(
-            gateway.deps,
-            agent_name="general",
-            response_hooks=_DeliveryTestHooks._hooks(),
-        ),
-    )
-    visible, sends, model_requests = {}, [], []
-
-    async def transport(*_args: object, **kwargs: object) -> nio.RoomSendResponse:
-        content = kwargs["content"]
-        sends.append(content)
-        visible[INITIAL] = content.get("m.new_content", content)["body"]
-        return nio.RoomSendResponse("$final" if "m.new_content" in content else INITIAL, room.room_id)
-
-    gateway.deps.runtime.client.room_send.side_effect = transport
-    if debt in {"recovered", "adopted"}:
-        assert (await gateway.recover_deliveries()).complete
-    elif debt == "lost_ack":
-        visible[INITIAL] = "Thinking..."
-    original_initial_id = INITIAL
-    initial = await principal.load_matrix_delivery(delivery_id=source_id, stage=DeliveryStage.INITIAL)
-    assert initial is not None
-    assert initial.acknowledged_event_id == (original_initial_id if debt in {"recovered", "adopted"} else None)
-    assert store.get_turn_record(source_id).response_event_id is None
-    if debt == "adopted":
-        await store.record_pending_turn(replace(original, response_event_id=original_initial_id))
-    runner = _runner_on(bot, gateway, principal, store)
-    runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=history)
-    # This start adopts the reply main left, then reads what its event showed.
-    await runner.deps.replies.start()
-    reads = LegacyReplyReads(
-        store=principal,
-        client=lambda: controller.deps.runtime.client,
-        response_sender=lambda: controller.deps.matrix_id.full_id,
-        trusted_sender_ids=tuple,
-        logger=MagicMock(),
-        resolved=lambda _reply_id: None,
-    )
-    placeholder = ResolvedVisibleMessage.synthetic(
-        event_id=INITIAL,
-        sender=controller.deps.matrix_id.full_id,
-        body="Thinking...",
-        timestamp=NOW_MS,
-        thread_id=thread_id,
-        content={"body": "Thinking...", STREAM_STATUS_KEY: "pending"},
-    )
-    with patch("mindroom.legacy_reply_messages.fetch_latest_visible_message", new=AsyncMock(return_value=placeholder)):
-        await reads.run()
-    # The first sync's recovery pass sends what the adopted reply still owes before its replay.
-    assert (await gateway.recover_deliveries()).complete
-
-    async def settle_ignored(sources: tuple[str, ...]) -> None:
-        for source in sources:
-            await principal.settle(source)
-
-    visible_responses = VisibleResponseReconciler(
-        replace(
-            controller.deps.visible_responses.deps,
-            turn_store=store,
-            delivery_gateway=gateway,
-            settle_ignored_sources=settle_ignored,
-        ),
-    )
-    controller.deps.runtime.client.room_messages.return_value = room_messages_response(
-        *(
-            []
-            if debt in {"unattempted", "lost_ack"}
-            else [
-                make_message_event(
-                    event_id=INITIAL,
-                    sender=controller.deps.matrix_id.full_id,
-                    body="Thinking...",
-                    timestamp_ms=NOW_MS,
-                    relates_to=thread_reply_relation(thread_id, source_id),
-                    extra_content={STREAM_STATUS_KEY: "pending"},
-                ),
-            ]
-        ),
-    )
-    controller.deps = replace(
-        controller.deps,
-        turn_store=store,
-        pending_turns=principal,
-        response_runner=runner,
-        delivery_gateway=gateway,
-        visible_responses=visible_responses,
-        relations=relations,
-        ingress=replace(controller.deps.ingress, deps=replace(controller.deps.ingress.deps, turn_store=store)),
-    )
-
-    async def model(*args: object, **kwargs: object) -> str:
-        model_requests.append((args, kwargs))
-        return "Original request finished with a substantive answer."
-
-    with (
-        turn_dispatch_recovery_scope(active=True),
-        patch_response_runner_module(
-            ai_response=AsyncMock(side_effect=model),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-            apply_post_response_effects=AsyncMock(),
-        ),
-    ):
-        await controller.handle_text_event(room, event)
-        await harness.gate.drain_all()
-        await runner.wait_for_source_owned_inbox_responses()
-    assert model_requests == []
-    assert not await principal.is_pending(source_id)
-    assert await principal.load_matrix_delivery(delivery_id=source_id, stage=DeliveryStage.FINAL) is None
-    # The reply showed only its placeholder, which goes with it.
-    superseded = await principal.replies.for_sources((source_id,))
-    assert superseded is not None
-    assert superseded.state is ReplyState.GONE
-    assert superseded.redaction_pending == ()
-    gateway.deps.redact_message_event.assert_awaited_once_with(
-        room_id=room.room_id,
-        event_id=original_initial_id,
-        reason="Reply removed",
-    )
-    assert len([content for content in sends if "m.new_content" not in content]) == 1
 
 
 @pytest.mark.parametrize("scenario", ["retry", "setup_failure", "source_deleted", "deleted_after_model"])

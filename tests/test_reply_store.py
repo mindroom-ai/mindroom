@@ -27,7 +27,6 @@ from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
     ClaimContext,
     ClaimRequest,
-    LegacyPending,
     OwedWrite,
     ReplyState,
     Rollback,
@@ -103,7 +102,6 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
         possibly_shown='{"shown":true}',
         possibly_shown_seq=4,
         confirmed_seq=3,
-        legacy_pending=LegacyPending.PRESENTATION_READ,
         placeholder_only=True,
         stop_receipt_order=9,
         stop_applied_receipt_order=8,
@@ -1722,21 +1720,6 @@ async def test_owner_lost_ends_what_an_older_instance_left_running(journal_store
     assert (await principal.replies.span("span-2")).outcome is rl.SpanOutcome.LOST  # type: ignore[union-attr]
     # Run again by the same instance, it finds nothing left to end.
     assert await principal.replies.owner_lost("gen-2", now_ns=60) == ()
-
-
-async def test_owner_lost_leaves_a_reply_waiting_for_its_legacy_read(journal_store: EventJournalStore) -> None:
-    """A main-era reply decides what it showed from its legacy read before any restart note."""
-    principal = journal_store.principal(PRINCIPAL)
-    transition = _first_claim()
-    assert transition.reply is not None
-    await _apply(
-        journal_store,
-        replace(transition, reply=replace(transition.reply, legacy_pending=LegacyPending.PRESENTATION_READ)),
-    )
-    assert await principal.replies.owner_lost("gen-2", now_ns=50) == ()
-    span = await principal.replies.span("span-1")
-    assert span is not None
-    assert span.outcome is None
 
 
 async def test_finished_replies_are_kept_as_long_as_the_ledger_keeps_their_turns() -> None:

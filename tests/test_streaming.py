@@ -52,7 +52,7 @@ from mindroom.streaming import (
     stream_progress_edits,
 )
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry, tool_trace_from_content
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
@@ -1088,7 +1088,7 @@ async def _run_resumed_stream(
 
 
 def _trace_names(content: dict[str, Any]) -> list[str]:
-    return [entry.tool_name for entry in tool_trace_from_content(content)]
+    return [str(event["tool_name"]) for event in content[_TOOL_TRACE_KEY]["events"]]
 
 
 @pytest.mark.asyncio

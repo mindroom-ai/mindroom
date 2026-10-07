@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 from mindroom.handled_turns import TurnRecordCodec
 
-from . import journal, turn_records
+from . import journal
 from .models import SUPERSEDED_FAILURE_REASON
 
 if TYPE_CHECKING:
@@ -30,17 +30,6 @@ if TYPE_CHECKING:
 # continuation is read from that copy until reply classification names its span.
 # Coverage: tests/test_legacy_continuation_identity.py.
 
-# LEGACY_COMPAT: Approval continuations that stored their claim.
-# Legacy format: approval_continuations rows in state 'claimed' with the claimant's runtime_generation; the upgrade that
-# adds span_id selects them.
-# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages keep a claimed continuation
-# ready and name the span that runs it in approval_continuations.claim_span_id.
-# Handling: the upgrade stores such a row as ready with no runtime generation and marks the claim in its adopted
-# identity, so it reads as claimed until reply classification adopts its reply with the resume the stopped instance
-# left running and names that span; the CHECK constraint of an upgraded database still admits 'claimed', which nothing
-# writes.
-# Coverage: tests/test_legacy_continuation_identity.py::test_a_claimed_continuation_keeps_its_claim_across_the_upgrade.
-
 _IDENTITY_KEY = "legacy_identity"
 
 
@@ -57,8 +46,6 @@ class _LegacyIdentity(TypedDict):
     edit_receipt_order: int | None
     show_tool_calls: bool
     prepared_edit_record: TurnRecord | None
-    # The earlier release had claimed it: the instance that stopped left its resume running.
-    claimed: bool
 
 
 _PAGE_SIZE = 128
@@ -108,19 +95,15 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
 
 # LEGACY_COMPAT: Approvals whose reply a newer edit's answer already replaced.
 # Legacy format: a continuation whose response attempt a newer attempt of the same reply, room, membership, entity, and
-# logical sources superseded with a higher edit receipt order and an answer FINAL editing the same event, queued after
-# the continuation's pause and acknowledged or still owed, while its own FINAL holds no answer; v2026.10.201 retired
-# such an approval's failure without a note once that answer was acknowledged.
+# logical sources superseded with a higher edit receipt order and an acknowledged answer FINAL editing the same event,
+# while its own FINAL holds no answer; v2026.10.201 retired such an approval's failure without a note.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages fence an approval superseded
 # when the edit's regeneration claims its reply.
-# Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows, with an
-# owed answer as its next write, and keeps the approval's pause on it until its cleanup settles the sources it holds.
+# Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows and
+# keeps the approval's pause on it until its cleanup settles the sources it holds.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded.
-def _replaced(transaction: Transaction, principal_id: str, approval_id: str, driving: str) -> bool:
-    """Return whether a newer edit's answer, acknowledged or still owed, replaced the reply this attempt paused.
-
-    A pause queued after that answer, as a resume that paused again, is newer than it and stands.
-    """
+def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool:
+    """Return whether a newer edit's acknowledged answer replaced the reply this attempt paused."""
     row = transaction.fetchone(
         """SELECT 1 AS present FROM response_attempts AS attempt
         JOIN response_attempts AS newer
@@ -133,18 +116,16 @@ def _replaced(transaction: Transaction, principal_id: str, approval_id: str, dri
           ON delivery.principal_id = newer.principal_id AND delivery.delivery_id = newer.driving_event_id
          AND delivery.room_id = newer.room_id AND delivery.membership_epoch = newer.membership_epoch
          AND delivery.edits_event_id = newer.response_event_id
-        JOIN approval_continuations AS paused
-          ON paused.principal_id = attempt.principal_id AND paused.approval_id = ?
         WHERE attempt.principal_id = ? AND attempt.driving_event_id = ? AND delivery.stage = 'final'
-          AND delivery.result_json IS NOT NULL AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
-          AND delivery.created_at_ns > paused.created_at_ns
+          AND delivery.acknowledged_event_id IS NOT NULL AND delivery.result_json IS NOT NULL
+          AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM matrix_delivery_outbox AS own
             WHERE own.principal_id = attempt.principal_id AND own.delivery_id = attempt.driving_event_id
               AND own.stage = 'final' AND own.result_json IS NOT NULL
           )
         LIMIT 1""",
-        (approval_id, principal_id, driving),
+        (principal_id, driving),
     )
     return row is not None
 
@@ -238,19 +219,16 @@ def upgrade_continuation_identity(
                 pending,
                 stored,
             )
-            claimed = row["state"] == "claimed"
-            if attempts and _replaced(transaction, principal_id, approval_id, pending[0]):
+            if attempts and _replaced(transaction, principal_id, pending[0]):
                 transaction.execute(
                     """UPDATE approval_continuations SET state = 'failing', failure_reason = ?, runtime_generation = NULL
                     WHERE principal_id = ? AND approval_id = ?""",
                     (SUPERSEDED_FAILURE_REASON, principal_id, approval_id),
                 )
-                claimed = False
             stored[_IDENTITY_KEY] = {
                 **identity,
                 "thread_id": stored.get("thread_id"),
                 "pending_event_ids": pending,
-                "claimed": claimed,
             }
             transaction.execute(
                 "UPDATE approval_continuations SET context_json = ? WHERE principal_id = ? AND approval_id = ?",
@@ -263,9 +241,6 @@ def upgrade_continuation_identity(
         if len(rows) < _PAGE_SIZE:
             break
         cursor = str(rows[-1]["principal_id"]), str(rows[-1]["approval_id"])
-    transaction.execute(
-        "UPDATE approval_continuations SET state = 'ready', runtime_generation = NULL WHERE state = 'claimed'",
-    )
     transaction.execute("DROP TABLE IF EXISTS approval_continuation_sources")
     # The paused span's reply names the entity; the scan index on the copy goes with it.
     transaction.execute("DROP INDEX IF EXISTS approval_continuations_owner_scan")
@@ -299,7 +274,6 @@ def legacy_identity_context(continuation: ApprovalContinuation) -> dict[str, obj
             "logical_source_event_ids": list(continuation.sources.logical_source_event_ids),
             "discovery_event_ids": list(continuation.sources.discovery_event_ids),
             "edit_receipt_order": continuation.sources.edit_receipt_order,
-            "claimed": continuation.state == "claimed",
         },
     }
 
@@ -322,7 +296,6 @@ def legacy_identity(context: Mapping[str, object], *, approval_id: str) -> _Lega
         "edit_receipt_order": cast("int | None", identity.get("edit_receipt_order")),
         "show_tool_calls": context.get("show_tool_calls", True) is not False,
         "prepared_edit_record": _prepared_edit(context.get("prepared_edit_record")),
-        "claimed": identity.get("claimed") is True,
     }
 
 
@@ -341,31 +314,14 @@ def _prepared_edit(raw: object) -> TurnRecord | None:
     return TurnRecordCodec._from_ledger_record(str(stored.get("anchor_event_id")), stored)
 
 
-# LEGACY_COMPAT: Finishing an adopted continuation that reply classification never named a span for.
+# LEGACY_COMPAT: Settling an adopted continuation that reply classification never named a span for.
 # Legacy format: an approval_continuations row with no span_id, whose identity the schema upgrade copied into its
 # context; it stays so when its entity never starts again, such as an entity removed from the configuration.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages settle a continuation's
 # sources through its paused span's SettleSources.
-# Handling: its adopted pending and logical sources settle and its turn is answered, consuming its adopted
-# selected edit unless it failed, as the paused span's settlement would; a discarded one leaves its turn
-# unanswered.
+# Handling: no bot of its entity runs to answer it, so only its discard reaches it, and its adopted pending sources
+# settle unanswered.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_unclassified_continuation_settles_its_adopted_sources.
-def settle_unclassified(
-    transaction: Transaction,
-    principal_id: str,
-    continuation: ApprovalContinuation,
-    *,
-    answered: bool,
-) -> TurnRecord | None:
-    """Settle the sources an unclassified continuation adopted; return the turn it answered, if any."""
-    if not answered:
-        journal.settle_many(transaction, principal_id, continuation.source_event_ids)
-        return None
-    return turn_records.settle_turn(
-        transaction,
-        principal_id,
-        continuation.entity_name,
-        pending=continuation.source_event_ids,
-        logical=continuation.sources.logical_source_event_ids,
-        prepared_edit=None if continuation.state == "failing" else continuation.prepared_edit_record,
-    )
+def settle_unclassified(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> None:
+    """Settle the sources an unclassified continuation adopted, leaving its turn unanswered."""
+    journal.settle_many(transaction, principal_id, continuation.source_event_ids)

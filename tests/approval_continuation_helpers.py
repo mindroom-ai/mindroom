@@ -9,9 +9,11 @@ from uuid import uuid4
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.approval_continuations import ApprovalAdvance
 from mindroom.event_journal.replies import ReplyRowRequest
-from mindroom.reply_presentation import Presentation, encode_presentation
+from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.event_journal import PrincipalStore
     from mindroom.event_journal.approval_continuations import ApprovalCall, ApprovalContinuation
 
@@ -109,3 +111,36 @@ async def advance_continuation(
     if enqueued is None or not enqueued.transition.applied:
         return None
     return await principal.approval_continuation(approval_id)
+
+
+async def freeze_resume_final(
+    principal: PrincipalStore,
+    claimed: ApprovalContinuation,
+    *,
+    text: str,
+    payload: Mapping[str, object],
+    result: Mapping[str, object] | None = None,
+) -> None:
+    """Freeze the completed answer a claimed resume wrote, as its span's FINAL reply row, without sending it."""
+    assert claimed.claim_span_id is not None
+    span = await principal.replies.span(claimed.claim_span_id)
+    assert span is not None
+    shown = encode_presentation(Presentation(segments=(Segment(kind="answer", text=text, span_id=span.span_id),)))
+
+    def decide(reply: rl.Reply, current: rl.Span) -> rl.Transition:
+        write = rl.TerminalWrite(shown=shown, prepared_revision=reply.revision, state=rl.ReplyState.COMPLETED)
+        return rl.finish(reply, current, write, now_ns=time.time_ns())
+
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=span.reply_id,
+            span_id=span.span_id,
+            decide=decide,
+            stage=rl.WriteStage.FINAL,
+        ),
+        room_id=claimed.room_id,
+        thread_id=claimed.thread_id,
+        payload=payload,
+        result=result,
+    )
+    assert enqueued is not None

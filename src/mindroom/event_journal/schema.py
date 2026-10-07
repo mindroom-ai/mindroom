@@ -465,7 +465,6 @@ _TABLES = (
         confirmed_seq BIGINT,
         -- Bumped by every transition that changes what a payload would hold.
         revision BIGINT NOT NULL,
-        legacy_pending TEXT CHECK (legacy_pending IN ('presentation_read', 'adoption_scan')),
         placeholder_only BOOLEAN NOT NULL,
         stop_receipt_order BIGINT,
         stop_applied_receipt_order BIGINT,
@@ -667,11 +666,6 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS reply_messages_pending_work
     ON reply_messages (principal_id, created_at_ns, reply_id)
     WHERE redaction_pending_json IS NOT NULL OR owed_write_json IS NOT NULL
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS reply_messages_legacy_pending
-    ON reply_messages (principal_id, reply_id)
-    WHERE legacy_pending IS NOT NULL
     """,
     """
     CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_reply

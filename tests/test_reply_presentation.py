@@ -28,12 +28,12 @@ from mindroom.reply_presentation import (
     with_trailing_note,
 )
 from mindroom.streaming import (
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_cancelled_response_update,
     build_restart_interrupted_body,
     format_stream_error_note,
-    unfinished_streamed_reply,
 )
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.events import ToolTraceEntry
 
 
 def _trace(name: str, *, call_id: str | None = None) -> ToolTraceEntry:
@@ -119,12 +119,8 @@ def test_restart_continuation_matches_main_and_numbers_tools_across_segments() -
 
     body, trace = render_body(resumed)
 
-    main_resumed = unfinished_streamed_reply(
-        "before\n\n🔧 `search` [1]",
-        {"io.mindroom.stream_status": "streaming", **(build_tool_trace_content([_trace("search")]) or {})},
-    )
-    assert main_resumed is not None
-    assert body == main_resumed.resumed_text + "🔧 `fetch` [2]\n\nafter"
+    # As main continued: below what the stopped attempt showed and the restart note.
+    assert body == f"before\n\n🔧 `search` [1]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n🔧 `fetch` [2]\n\nafter"
     assert [entry.tool_name for entry in trace] == ["search", "fetch"]
 
 

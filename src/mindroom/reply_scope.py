@@ -316,41 +316,26 @@ class ReplyRuntime:
         while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
             pass
 
-    async def take_ownership(self, adopted: tuple[AppliedTransition, ...] = ()) -> None:
-        """Make this bot instance the owner of its principal's replies, before it writes any of them.
-
-        Then it runs what an earlier :meth:`adopt_legacy` left to run.
-        """
+    async def take_ownership(self) -> None:
+        """Make this bot instance the owner of its principal's replies, before it writes any of them."""
         await self.store.replies.write_generation(self.generation, now_ns=self.clock())
-        for applied in adopted:
-            await self.run_effects(applied.post_commit)
 
-    async def adopt_legacy(self) -> tuple[AppliedTransition, ...]:
-        """Give the replies an earlier release left in flight records, once per principal; return what to run after.
-
-        It reads the Stop keys that release kept on turn records, so the bot
-        runs it before the turn ledger loads and rewrites them, and hands what
-        it returns to :meth:`start`.
-        """
-        return await self.store.adopt_legacy_replies(
-            entity_name=self.entity_name,
-            presentations=LEGACY_PRESENTATIONS,
-            now_ns=self.clock(),
-        )
-
-    async def start(self, adopted: tuple[AppliedTransition, ...] = ()) -> None:
+    async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
-        Runs before journal replay: replies an earlier release left in flight
-        get records first (``adopted`` is what an earlier :meth:`adopt_legacy`
-        left to run), replay claims continue the replies whose sources are
+        Runs before journal replay: replies an earlier release left paused get
+        records first, replay claims continue the replies whose sources are
         still pending, and the notes this owes are delivered by the outbox
         recovery after each room syncs.
         """
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
-        adopted = (*adopted, *await self.adopt_legacy())
+        adopted = await self.store.adopt_legacy_replies(
+            entity_name=self.entity_name,
+            presentations=LEGACY_PRESENTATIONS,
+            now_ns=self.clock(),
+        )
         for applied in (*adopted, *await self.store.replies.owner_lost(self.generation, now_ns=self.clock())):
             await self.run_effects(applied.post_commit)
 

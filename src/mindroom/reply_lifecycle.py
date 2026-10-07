@@ -90,20 +90,6 @@ class WriteStage(StrEnum):
     EDIT = "edit"
 
 
-# LEGACY_COMPAT: Replies adopted from an earlier release whose event only Matrix can read.
-# Legacy format: a reply adoption created for an earlier release's in-flight work, marked with this pending read.
-# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record every write ahead of
-# sending it, so no reply is adopted with a pending read.
-# Handling: claims and owed notes defer while it is set (``claim``, ``flush_owed_write``), replays wait for it
-# (``replay_dropped``), and ``legacy_read_done`` applies the read once.
-# Coverage: tests/test_legacy_reply_messages.py.
-class LegacyPending(StrEnum):
-    """A one-time Matrix read a reply adopted from an earlier release still needs."""
-
-    PRESENTATION_READ = "presentation_read"
-    ADOPTION_SCAN = "adoption_scan"
-
-
 # Note kinds are owned by ``reply_presentation``; the lifecycle names them by value.
 _NOTE_CANCELLED = "cancelled"
 _NOTE_RESTART = "restart"
@@ -209,7 +195,6 @@ class Reply:
     possibly_shown: str | None = None
     possibly_shown_seq: int | None = None
     confirmed_seq: int | None = None
-    legacy_pending: LegacyPending | None = None
     placeholder_only: bool = False
     stop_receipt_order: int | None = None
     stop_applied_receipt_order: int | None = None
@@ -356,18 +341,6 @@ def _with_redactions(reply: Reply, *event_ids: str | None) -> Reply:
 
 def _visible_event_ids(reply: Reply) -> tuple[str, ...]:
     return () if reply.event_id is None else (reply.event_id,)
-
-
-def _bound(reply: Reply, event_id: str, *, membership_current: bool) -> Reply:
-    """Bind the reply's event once it is known.
-
-    An event found after the reply was given up is removed, unless the room
-    was left, which drops everything owed to it.
-    """
-    bound = replace(reply, event_id=event_id)
-    if reply.state is ReplyState.GONE and membership_current:
-        bound = _with_redactions(bound, event_id)
-    return bound
 
 
 def _leaves_active(reply: Reply, new_state: ReplyState) -> Reply:
@@ -609,14 +582,14 @@ def _new_span(
 def claim_blocked(reply: Reply, *, durable_write_debt: bool, driving_edit: bool) -> bool:
     """Return whether a claim on the reply must wait, and retry once the reply is free.
 
-    Earlier writes still unresolved, a note still owed, or a read an earlier
-    release left would be overtaken by the new span. An edit also waits for an
+    Earlier writes still unresolved or a note still owed would be overtaken by
+    the new span. An edit also waits for an
     approval that holds the reply while a span runs for it or after that span
     ended: that run, or the settlement a Stop or failure left, ends the reply
     first. An approval that paused the reply with no span running for it does
     not hold an edit back: the edit supersedes it.
     """
-    if durable_write_debt or reply.owed_write is not None or reply.legacy_pending is not None:
+    if durable_write_debt or reply.owed_write is not None:
         return True
     waiting_for_decision = reply.state is ReplyState.PAUSED and reply.current_span_id is None
     return driving_edit and reply.approval_id is not None and not waiting_for_decision
@@ -918,7 +891,11 @@ def write_acknowledged(
             msg = f"Reply {reply.reply_id} is bound to {reply.event_id}, not {event_id}"
             raise _invalid(msg)
         if reply.event_id is None:
-            updated = _bound(updated, event_id, membership_current=membership_current)
+            updated = replace(updated, event_id=event_id)
+            if reply.state is ReplyState.GONE and membership_current:
+                # Created after the reply was given up: the late event is removed,
+                # unless the room was left, which drops everything owed to it.
+                updated = _with_redactions(updated, event_id)
     if updated.confirmed_seq is None or write.sequence > updated.confirmed_seq:
         updated = replace(updated, confirmed_seq=write.sequence)
         if write.sequence >= (updated.possibly_shown_seq or 0):
@@ -993,16 +970,10 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
 
 def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, sequence: int, now_ns: int) -> Transition:
     """A span's terminal row failed for good after the span ended; its outcome stays."""
-    # LEGACY_COMPAT: Two writes of one reply an earlier release queued.
-    # Legacy format: reply classification adopted several owed FINAL rows of one reply, each on its own span, so a row
-    # whose span is not the reply's last can be refused; at runtime a later span claims a reply only after its earlier
-    # rows resolved.
-    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages queue one reply's writes
-    # in order and defer a claim until they resolve.
-    # Handling: the later write decides the reply, which the refusal leaves unchanged.
-    # Coverage: tests/test_legacy_reply_messages.py::test_an_earlier_queued_edit_answer_refused_for_good_leaves_the_later_one_deciding.
     if span.span_id != reply.last_span_id:
-        return _unchanged(Outcome.DUPLICATE, reply)
+        # A later span claimed the reply only after this row resolved, so this cannot be its row.
+        msg = f"Terminal row of span {span.span_id} failed after span {reply.last_span_id} claimed the reply"
+        raise _invalid(msg)
     if first_create:
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.GONE, now_ns))
     if reply.placeholder_only:
@@ -1635,10 +1606,6 @@ def flush_owed_write(
     owed = reply.owed_write
     if owed is None:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if reply.legacy_pending is not None:
-        # What a reply an earlier release left showed is still being read; a
-        # note rendered now would replace it. The read's resolution flushes it.
-        return _unchanged(Outcome.DEFERRED, reply)
     recompute = _check_revision(reply, prepared_revision)
     if recompute is not None:
         return recompute
@@ -1737,17 +1704,12 @@ def replay_dropped(reply: Reply, last: Span, *, sources_pending: bool, now_ns: i
     """The sources a reply waits to replay settled without a turn, as ingress settles one it will not answer.
 
     Nothing replays them any more, so the reply ends as its earlier span left
-    it. A reply a span runs, or with sources still pending, keeps waiting; a
-    pending legacy read or an approval ends its reply instead.
+    it. A reply a span runs, or with sources still pending, keeps waiting; an
+    approval ends its reply instead.
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if (
-        sources_pending
-        or reply.legacy_pending is not None
-        or reply.current_span_id is not None
-        or reply.approval_id is not None
-    ):
+    if sources_pending or reply.current_span_id is not None or reply.approval_id is not None:
         return _unchanged(Outcome.DEFERRED, reply)
     return sources_settled_without_reply(reply, last, now_ns=now_ns)
 
@@ -1894,73 +1856,6 @@ def _ended_by_restart(reply: Reply, updated: Reply, last: Span, ended: tuple[Spa
         reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed),
         spans=ended,
     )
-
-
-# LEGACY_COMPAT: Applying what an earlier-release reply's event showed, read once its room synced.
-# Legacy format: a reply adopted with legacy_pending, and the read the post-sync reader in legacy_reply_messages.py
-# built from its event's body, wire status, and timestamp.
-# Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record every write ahead of
-# sending it, so no reply needs a read.
-# Handling: ``legacy_read_done`` binds what the event showed once; a stream that release stopped after its sources
-# settled ends as its wire status says, else failed, with the restart note when it was recent enough for that
-# release's startup cleanup. It composes the lifecycle's state rules, so it stays beside them.
-# Coverage: tests/test_legacy_reply_messages.py.
-@dataclass(frozen=True, slots=True)
-class LegacyRead:
-    """What reading an earlier-release reply's event found, once its room synced."""
-
-    # What the event showed, encoded; ``None`` when the read found nothing or gave up.
-    shown: str | None = None
-    # The event an adoption scan found for a reply its stream created directly.
-    event_id: str | None = None
-    # The event's wire status says the reply already ended, and how.
-    ended_as: ReplyState | None = None
-    # The event was still streaming within the stale-stream window earlier releases used.
-    recent: bool = False
-    # The event shows only the placeholder, so a later removal may redact it.
-    placeholder_only: bool = False
-
-
-def legacy_read_done(
-    reply: Reply,
-    last: Span,
-    read: LegacyRead,
-    *,
-    sources_pending: bool,
-    membership_current: bool,
-    now_ns: int,
-) -> Transition:
-    """Record what an earlier-release reply showed; a stream an earlier release stopped after its sources settled ends here.
-
-    That stream gets the restart note when it was still streaming within
-    the stale-stream window, as that release's startup cleanup gave it; otherwise
-    the reply keeps what its event shows. Replies with pending sources or an
-    approval keep their owners: the replay claim and the approval runtime,
-    which waited for this read.
-    """
-    if reply.legacy_pending is None:
-        return _unchanged(Outcome.DUPLICATE, reply)
-    # What the event shows decides whether a later removal may redact it; a
-    # read that found or knew nothing never claims it showed only the placeholder.
-    updated = replace(reply, legacy_pending=None, placeholder_only=read.placeholder_only)
-    if reply.event_id is None and read.event_id is not None:
-        updated = _bound(updated, read.event_id, membership_current=membership_current)
-    if read.shown is not None:
-        updated = replace(updated, presentation=read.shown, possibly_shown=read.shown)
-    updated = _bump(updated, now_ns)
-    stopped_after_settling = (
-        reply.state is ReplyState.ACTIVE
-        and reply.current_span_id is None
-        and reply.approval_id is None
-        and last.outcome is SpanOutcome.LOST
-        and not sources_pending
-    )
-    if not stopped_after_settling:
-        return Transition(outcome=Outcome.APPLIED, reply=updated)
-    if read.ended_as is not None:
-        return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, read.ended_as, now_ns))
-    owed = OwedWrite(last.span_id, _NOTE_RESTART) if read.recent else None
-    return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed))
 
 
 def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:

@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.event_journal import (
-    DeliveryStage,
     EventJournalStore,
     legacy_response_attempts,
     postgres_backend,
@@ -147,30 +146,6 @@ async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legac
     )
 
 
-@pytest.mark.asyncio
-async def test_a_claimed_continuation_keeps_its_claim_across_the_upgrade(legacy_database: _LegacyDatabase) -> None:
-    """A claim v2026.10.201 stored on the continuation reads as claimed by no running instance until classification."""
-    legacy_database.execute(_ATTEMPT_OWNER)
-    legacy_database.execute(
-        "UPDATE approval_continuations SET state = 'claimed', runtime_generation = 'old-runtime' "
-        "WHERE approval_id = 'approval'",
-    )
-    for _ in range(2):
-        store = legacy_database.open()
-        try:
-            approval = await store.principal("@bot:example.org").approval_continuation("approval")
-            pending = await store.principal("@bot:example.org").pending(runtime_generation="new-runtime")
-        finally:
-            await store.close()
-        assert approval is not None
-        assert (approval.state, approval.runtime_generation, approval.claim_span_id) == ("claimed", None, None)
-        # Recovery owns a claim the stopped instance left.
-        assert [event.event_id for event in pending] == ["$first"]
-    assert legacy_database.query(
-        "SELECT state, runtime_generation FROM approval_continuations WHERE approval_id = 'approval'",
-    ) == [("ready", None)]
-
-
 def test_the_adoption_pages_through_every_continuation(
     legacy_database: _LegacyDatabase,
     monkeypatch: pytest.MonkeyPatch,
@@ -292,7 +267,6 @@ INSERT INTO matrix_delivery_outbox (
 """  # noqa: S608
 
 
-@pytest.mark.parametrize("delivered", [True, False])
 @pytest.mark.parametrize("with_turn_rows", [False, True])
 @pytest.mark.parametrize("failing", [False, True])
 @pytest.mark.asyncio
@@ -301,20 +275,14 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
     *,
     failing: bool,
     with_turn_rows: bool,
-    delivered: bool,
 ) -> None:
     """The regenerated answer stands: the approval is superseded, never shown again, and its cleanup settles it.
 
     One that already failed is superseded too, so its failure is never published over the newer answer, and the
-    placeholder row of the turn it paused does not make that turn look in flight. An answer still owed is the
-    reply's next write.
+    placeholder row of the turn it paused does not make that turn look in flight.
     """
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(_NEWER_ANSWER)
-    if not delivered:
-        legacy_database.execute(
-            "UPDATE matrix_delivery_outbox SET acknowledged_event_id = NULL WHERE delivery_id = '$edit'",
-        )
     if with_turn_rows:
         legacy_database.execute(_paused_turn_rows())
     if failing:
@@ -334,49 +302,12 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
         assert reply is not None
         assert reply.state is ReplyState.COMPLETED
         assert reply.approval_id is None
-        spans = [(span.kind, span.outcome, span.delivery_id) for span in await principal.replies.spans(reply.reply_id)]
-        # The answer the newer edit delivered is the reply's own span, so a later edit rolls back to it; one still owed
-        # is the reply's next write.
-        answer = (SpanKind.TURN, SpanOutcome.COMPLETED, "$answer")
-        owed = (SpanKind.REGENERATION, SpanOutcome.COMPLETED, "$edit")
-        expected = [answer] if delivered else [answer, owed]
-        assert spans[-len(expected) :] == expected
-        row = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
-        assert row is not None
-        assert row.reply_id == (None if delivered else reply.reply_id)
+        answer = await principal.replies.span(reply.last_span_id)
+        assert answer is not None
+        # The answer the newer edit delivered is the reply's own span, so a later edit rolls back to it.
+        assert (answer.kind, answer.outcome, answer.delivery_id) == (SpanKind.TURN, SpanOutcome.COMPLETED, "$answer")
         assert await principal.finish_approval_continuation("approval") is not None
         assert not await principal.is_pending("$first")
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_an_approval_paused_after_an_owed_newer_answer_stands(legacy_database: _LegacyDatabase) -> None:
-    """A resume that paused again after the edit's answer was queued is newer than it: the approval keeps the reply.
-
-    The older answer, never sent, is retired beside the paused reply.
-    """
-    legacy_database.execute(_ATTEMPT_OWNER)
-    legacy_database.execute(_NEWER_ANSWER)
-    legacy_database.execute(
-        "UPDATE matrix_delivery_outbox SET acknowledged_event_id = NULL WHERE delivery_id = '$edit'",
-    )
-    legacy_database.execute("UPDATE approval_continuations SET created_at_ns = 3 WHERE approval_id = 'approval'")
-    store = legacy_database.open()
-    try:
-        principal = store.principal("@bot:example.org")
-        approval = await principal.approval_continuation("approval")
-        assert approval is not None
-        assert approval.state == "waiting"
-        await principal.replies.write_generation("gen-new", now_ns=10)
-        await principal.adopt_legacy_replies(entity_name="bot", presentations=LEGACY_PRESENTATIONS, now_ns=10)
-        reply = await principal.replies.for_event("$answer")
-        assert reply is not None
-        assert reply.state is ReplyState.PAUSED
-        assert reply.approval_id == "approval"
-        stale = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
-        assert stale is not None
-        assert stale.retired
     finally:
         await store.close()
 

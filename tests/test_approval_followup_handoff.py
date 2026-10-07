@@ -129,7 +129,7 @@ async def _seed_ready_continuation(bot: AgentBot) -> ApprovalContinuation:
     """Store a ready continuation without reply records, as main left one, and let the bot's start adopt it."""
     continuation = _ready_continuation()
     assert await paused_for_approval(bot.journal_principal(), continuation) == continuation
-    await adopt_main_left_approval(bot, continuation)
+    await adopt_main_left_approval(bot)
     return continuation
 
 

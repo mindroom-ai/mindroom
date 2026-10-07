@@ -24,7 +24,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -116,7 +116,6 @@ from .journal_dispatch import (
     JournalDispatcher,
 )
 from .knowledge.utils import KnowledgeAccessSupport
-from .legacy_reply_messages import LegacyReplyReads
 from .logging_config import get_logger
 from .managed_avatars import entity_avatar_path
 from .matrix.avatar import set_user_avatar_from_file, user_has_avatar
@@ -177,7 +176,6 @@ if TYPE_CHECKING:
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, ApprovalContinuation, IngestionRecordAdmission
     from mindroom.event_journal.models import ResponseRecoveryState
-    from mindroom.event_journal.replies import AppliedTransition
     from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
@@ -823,14 +821,6 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
             ),
-        )
-        self._legacy_reply_reads = LegacyReplyReads(
-            store=self._journal_store.principal(self._journal_principal_id),
-            client=self._delivery_gateway.ready_client,
-            response_sender=lambda: runtime_matrix_id.full_id,
-            trusted_sender_ids=lambda: current_internal_sender_ids(self.config, self.runtime_paths),
-            logger=self.logger,
-            resolved=self._reply_row_resolved,
         )
         self._visible_responses = VisibleResponseReconciler(
             VisibleResponseReconcilerDeps(
@@ -1558,8 +1548,6 @@ class AgentBot:
         onto the same event.
         """
         try:
-            # Replies an earlier release left in flight learn what they showed before anything owed for them is sent.
-            await self._legacy_reply_reads.run()
             # A deletion history recovery learned ended replies too: their spans stop and what they owe follows.
             self._replies_ended(await self._reply_runtime.deletions_ended())
             outcome = await self._delivery_gateway.recover_deliveries()
@@ -1890,12 +1878,10 @@ class AgentBot:
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
             await self._set_avatar_if_available()
-            # Earlier-release replies are adopted before loading the ledger rewrites the turn records they read.
-            adopted = await self._reply_runtime.adopt_legacy()
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
             # This bot instance now owns its replies; spans of earlier instances can no longer write.
-            await self._reply_runtime.start(adopted)
+            await self._reply_runtime.start()
             client = self.client
             assert client is not None
 
@@ -1945,31 +1931,28 @@ class AgentBot:
             await self._close_owned_matrix_after_start_failure()
             raise
 
-    async def _open_approval_recovery_client(self) -> tuple[AppliedTransition, ...]:
-        """Open only the original Matrix sender needed to recover a frozen FINAL; return what reply adoption left."""
+    async def _open_approval_recovery_client(self) -> None:
+        """Open only the original Matrix sender needed to recover a frozen FINAL."""
         if self.client is not None:
-            return ()
+            return
         client = await self._open_owned_matrix_client()
         self._sending_device_id = client.device_id or None
         try:
             self._runtime_view.mark_runtime_started()
-            # As at start, earlier-release replies are adopted before loading the ledger rewrites their turn records.
-            adopted = await self._reply_runtime.adopt_legacy()
             await self._turn_store.warm()
         except BaseException:
             self._sending_device_id = None
             await self._close_owned_matrix_after_start_failure()
             raise
-        return adopted
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""
         opened_recovery_client = self.client is None
         try:
             if opened_recovery_client:
-                adopted = await self._open_approval_recovery_client()
+                await self._open_approval_recovery_client()
                 # A recovery-only bot is its own instance for the replies it finishes.
-                await self._reply_runtime.take_ownership(adopted)
+                await self._reply_runtime.take_ownership()
             return await self._response_runner.recover_approval_final(approval_id)
         finally:
             if opened_recovery_client:

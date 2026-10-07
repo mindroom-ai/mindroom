@@ -17,7 +17,6 @@ from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
-    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -53,7 +52,6 @@ from mindroom.tool_system.events import (
     is_visible_tool_marker_line,
     remap_visible_tool_marker_indices,
     tool_markers_match_trace,
-    tool_trace_from_content,
 )
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
@@ -108,7 +106,6 @@ __all__ = [
     "stream_progress_edits",
     "strip_matching_visible_tool_markers",
     "strip_visible_tool_markers",
-    "unfinished_streamed_reply",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
@@ -345,22 +342,6 @@ class UnfinishedStreamedReply:
     def resumed_text(self) -> str:
         """Return the text a continuation streams below: what was shown, then the restart note."""
         return f"{build_restart_interrupted_body(self.visible_text)}\n\n"
-
-
-def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> UnfinishedStreamedReply | None:
-    """Read back the work a stopped stream left visible, or ``None`` when it left none.
-
-    ``body`` is the canonical visible body. Placeholder text shows nothing the
-    turn did, so only a tool trace beside it is carried forward.
-    """
-    # An approved run a restart stopped before its first edit still shows its approval pause.
-    if content.get(STREAM_STATUS_KEY) not in {*_IN_PROGRESS_STREAM_STATUSES, STREAM_STATUS_APPROVAL_PENDING}:
-        return None
-    visible_text = clean_partial_reply_text(body)
-    tool_trace = tuple(tool_trace_from_content(content))
-    if not visible_text and not tool_trace:
-        return None
-    return UnfinishedStreamedReply(visible_text=visible_text, tool_trace=tool_trace)
 
 
 @dataclass(frozen=True)

@@ -1527,26 +1527,6 @@ def test_stop_without_a_live_span_cancels_directly_and_owes_a_note() -> None:
     assert flushed.reply.owed_write is None
 
 
-def test_a_note_owed_by_a_reply_still_being_read_waits_for_the_read() -> None:
-    """A note rendered before an earlier release's reply is read back would replace what it showed."""
-    reply, span = _turn()
-    reply, span = _ended(reply, span, SpanOutcome.RELEASED)
-    stop = rl.stop(reply, None, StopFacts(receipt_order=6, newer_edit=False, span_live=False), now_ns=NOW)
-    assert stop.reply is not None
-    reading = replace(stop.reply, legacy_pending=rl.LegacyPending.PRESENTATION_READ)
-    deferred = rl.flush_owed_write(
-        reading,
-        span,
-        shown="cancelled",
-        prepared_revision=reading.revision,
-        span_has_final=False,
-        now_ns=NOW,
-    )
-    assert deferred.outcome is Outcome.DEFERRED
-    assert deferred.row is None
-    assert deferred.reply == reading
-
-
 def test_stop_guards() -> None:
     """Older Stops and Stops a newer edit superseded are duplicates; a terminal reply keeps its answer."""
     reply, span = _turn()
@@ -1828,15 +1808,9 @@ def test_a_dropped_replay_ends_the_reply_its_earlier_span_left() -> None:
     kept = (
         rl.replay_dropped(reply, span, sources_pending=True, now_ns=NOW),
         rl.replay_dropped(replace(reply, approval_id="approval-1"), span, sources_pending=False, now_ns=NOW),
-        rl.replay_dropped(
-            replace(reply, legacy_pending=rl.LegacyPending.PRESENTATION_READ),
-            span,
-            sources_pending=False,
-            now_ns=NOW,
-        ),
         rl.replay_dropped(replace(reply, current_span_id="span-2"), span, sources_pending=False, now_ns=NOW),
     )
-    assert [transition.outcome for transition in kept] == [Outcome.DEFERRED] * 4
+    assert [transition.outcome for transition in kept] == [Outcome.DEFERRED] * 3
     answered = rl.replay_dropped(replace(reply, state=ReplyState.COMPLETED), span, sources_pending=False, now_ns=NOW)
     assert answered.outcome is Outcome.DUPLICATE
 

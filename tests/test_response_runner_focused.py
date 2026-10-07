@@ -52,7 +52,6 @@ from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import (
-    DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -100,7 +99,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, fetch_latest_visible_body
+from mindroom.matrix.client_visible_messages import fetch_latest_visible_body
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
@@ -164,7 +163,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import EditPreparation
-from tests.approval_continuation_helpers import claim_continuation
+from tests.approval_continuation_helpers import claim_continuation, freeze_resume_final
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     make_matrix_client_mock,
@@ -178,7 +177,7 @@ from tests.conftest import (
 from tests.history_helpers import RecordingModel
 from tests.legacy_reply_helpers import (
     adopt_main_left_approval,
-    read_after_sync,
+    keep_main_paused_answer,
     resumed_main_left_approval,
     store_main_continuation,
 )
@@ -1687,19 +1686,11 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         expected_runtime_generation=claimed.runtime_generation,
     )
     assert failing is not None
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.FINAL,
-        room_id="!room:localhost",
-        thread_id="$thread",
-        payload={
-            "body": "* finished",
-            "m.new_content": {
-                "body": "finished",
-                DURABLE_FINAL_OUTCOME_KEY: {"body": "finished", "interactive": None},
-            },
-        },
-        edits_event_id="$waiting",
+    await freeze_resume_final(
+        store,
+        claimed,
+        text="finished",
+        payload={"body": "* finished", "m.new_content": {"body": "finished"}},
     )
     assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
     await store.acknowledge_matrix_delivery(
@@ -1945,28 +1936,21 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
-        state="claimed",
+        state="ready",
     )
+    # An approved run main left; this instance adopts its paused reply and stops while resuming it.
     await store_main_continuation(store, continuation)
-
-    # This start adopts the reply of the resume a stopped instance left running, and reads what it showed.
-    bot = runner_bot
+    await keep_main_paused_answer(store, continuation.approval_id, text="committed partial")
+    async with resumed_main_left_approval(runner_bot, continuation):
+        pass
+    # The next instance takes the replies over and settles the interrupted resume.
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    store = runner.deps.approval_store
     await bot._reply_runtime.start()
     claimed = await store.approval_continuation(continuation.approval_id)
     assert claimed is not None
-    assert claimed.state == "claimed"
     unique_room_send_responses(bot.client)
-    await read_after_sync(
-        bot,
-        ResolvedVisibleMessage.synthetic(
-            event_id="$waiting",
-            sender=bot.matrix_id.full_id,
-            body="committed partial",
-            timestamp=1,
-            thread_id="$thread",
-            content={"body": "committed partial", STREAM_STATUS_KEY: "streaming"},
-        ),
-    )
     outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$waiting",
@@ -1983,61 +1967,6 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     note = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]
     assert note["body"] == f"committed partial\n\n{INTERRUPTED_RESPONSE_NOTE}"
     assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
-
-
-@pytest.mark.parametrize("completed", [True, False])
-@pytest.mark.asyncio
-async def test_frozen_approval_final_without_reply_records_restores_its_body(
-    tmp_path: Path,
-    *,
-    completed: bool,
-) -> None:
-    """An approval answer an earlier release froze is successful when its result says so, and restores that body."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
-    await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
-        approval_id="approval-frozen",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="claimed",
-    )
-    await store_main_continuation(store, continuation)
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.FINAL,
-        room_id="!room:localhost",
-        thread_id="$thread",
-        payload={"body": "* Approved answer", "m.new_content": {"body": "Approved answer"}},
-        edits_event_id="$waiting",
-        result={"body": "Approved answer", "interactive": None} if completed else None,
-    )
-    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
-    await store.acknowledge_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.FINAL,
-        event_id="$final",
-        delivered_projections=(),
-    )
-    stored = await store.approval_continuation("approval-frozen")
-    assert stored is not None
-
-    frozen = await runner._approval_responses.successful_final_delivery(stored)
-    if not completed:
-        assert frozen is None
-        return
-    assert frozen is not None
-    restored = await runner._approval_outcome_from_delivery(frozen)
-    assert (restored.final_visible_body, restored.event_id) == ("Approved answer", "$waiting")
-    assert restored.terminal_status == "completed"
 
 
 @pytest.mark.parametrize(
@@ -2075,8 +2004,15 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
     )
     frozen = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert frozen is not None
-    with patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=outcome))):
-        restored = await runner._approval_outcome_from_delivery(replace(frozen, span_id="span-resume"))
+    reply = MagicMock(presentation=encode_presentation(Presentation(segments=(Segment(kind="answer", text="note"),))))
+    reply.frozen_display = None
+    with (
+        patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=outcome))),
+        patch.object(ReplyStore, "load", AsyncMock(return_value=reply)),
+    ):
+        restored = await runner._approval_outcome_from_delivery(
+            replace(frozen, span_id="span-resume", reply_id="reply-1"),
+        )
     assert restored.terminal_status == status
 
 
@@ -2520,7 +2456,7 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
     )
     await store_main_continuation(store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot, continuation)
+    await adopt_main_left_approval(bot)
     failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
 
     with (
@@ -2850,7 +2786,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     )
     await store_main_continuation(runner.deps.approval_store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot, continuation)
+    await adopt_main_left_approval(bot)
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
@@ -3098,7 +3034,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     )
     await store_main_continuation(runner.deps.approval_store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot, continuation)
+    await adopt_main_left_approval(bot)
     incomplete = FinalDeliveryOutcome(
         terminal_status="error",
         event_id="$waiting",
@@ -5173,13 +5109,11 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.FINAL,
-        room_id="!room:localhost",
-        thread_id="$thread",
+    await freeze_resume_final(
+        store,
+        claimed,
+        text="finished",
         payload={"body": "finished", "formatted_body": "finished"},
-        edits_event_id="$waiting",
     )
     assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
@@ -5236,11 +5170,10 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.FINAL,
-        room_id="!room:localhost",
-        thread_id="$thread",
+    await freeze_resume_final(
+        store,
+        claimed,
+        text="plain final",
         payload={
             "body": "plain fallback",
             "formatted_body": "<strong>rendered html</strong>",
@@ -5254,7 +5187,6 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
                 "options_list": [{"emoji": "✅", "label": "Yes", "value": "yes"}],
             },
         },
-        edits_event_id="$waiting",
     )
     assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
     await store.acknowledge_matrix_delivery(
@@ -5417,17 +5349,9 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     await store_main_continuation(store, continuation)
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
-        await store.enqueue_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            payload={
-                "body": "plain final",
-                "io.mindroom.final_delivery": {"body": "plain final", "interactive": None},
-            },
-            edits_event_id="$waiting",
-        )
+        current = await store.approval_continuation(continuation.approval_id)
+        assert current is not None
+        await freeze_resume_final(store, current, text="plain final", payload={"body": "plain final"})
         assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
         await store.acknowledge_matrix_delivery(
             delivery_id="$source",
@@ -5481,20 +5405,10 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     )
     await store_main_continuation(store, continuation)
     # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot, continuation)
+    await adopt_main_left_approval(bot)
 
     async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
-        await store.enqueue_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            payload={
-                "body": "plain final",
-                "io.mindroom.final_delivery": {"body": "plain final", "interactive": None},
-            },
-            edits_event_id="$waiting",
-        )
+        await freeze_resume_final(store, claimed, text="plain final", payload={"body": "plain final"})
         assert claimed.state == "claimed"
         assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
         await store.acknowledge_matrix_delivery(

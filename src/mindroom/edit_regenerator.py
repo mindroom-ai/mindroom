@@ -121,7 +121,7 @@ def _answer_to_regenerate(record: TurnRecord, reply: Reply | None) -> tuple[str 
     # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages record each AI answer and
     # its Stop on its reply.
     # Handling: the regenerator adopts that event as a finished reply before its claim, and the edit regenerates
-    # that reply; reply classification already moved a Stop that release kept on the turn record onto that reply.
+    # that reply; a Stop that release kept on the turn record covers no edit, as an upgrade leaves none pending.
     # Coverage: tests/test_edit_response_regeneration.py::test_handle_message_edit_uses_journal_response_event_id_after_restart,
     # tests/test_edit_regenerator.py::test_an_answer_older_than_the_records_is_adopted_before_history_is_pruned,
     # tests/test_reply_records_turns.py::test_regenerating_an_answer_older_than_the_records_adopts_it.

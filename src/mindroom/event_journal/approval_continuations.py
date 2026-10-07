@@ -324,8 +324,6 @@ class _PausedReply:
     edit_receipt_order: int | None
     show_tool_calls: bool
     prepared_edit_record: TurnRecord | None
-    # A claim an earlier release left running, until reply classification names its span.
-    claimed: bool
 
 
 def _shows_tool_calls(presentation: str) -> bool:
@@ -367,7 +365,6 @@ def _paused_reply(
             if span.prepared_edit is None
             else turn_records.decode_prepared_edit(span.prepared_edit, span.sources.logical[0])
         ),
-        claimed=False,
     )
 
 
@@ -385,7 +382,7 @@ def _from_rows(
     stored = cast("dict[str, Any]", context)
     identity = _paused_reply(transaction, principal_id, row, stored)
     claim_span_id = cast("str | None", row["claim_span_id"])
-    claimed = row["state"] == "ready" and (claim_span_id is not None or identity.claimed)
+    claimed = row["state"] == "ready" and claim_span_id is not None
     claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
     sources = ResponseSources(
         identity.pending_event_ids,
