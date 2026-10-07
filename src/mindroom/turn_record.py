@@ -212,15 +212,6 @@ class _CanonicalDeliveryState:
 
 
 @dataclass(frozen=True)
-class _CanonicalDispatchState:
-    """Canonical monotonic dispatch receipt orders."""
-
-    latest_edit_receipt_order: int | None
-    user_stop_receipt_order: int | None
-    user_stop_settled_receipt_order: int | None
-
-
-@dataclass(frozen=True)
 class _CanonicalCommandState:
     """Canonical command execution checkpoint."""
 
@@ -234,7 +225,6 @@ class _CanonicalContextState:
 
     response_owner: str | None
     requester_id: str | None
-    correlation_id: str | None
     history_scope: HistoryScope | None
     conversation_target: MessageTarget | None
 
@@ -255,14 +245,10 @@ class TurnRecord:
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     revision_replay: Mapping[str, RevisionReplay] | None = None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
-    latest_edit_receipt_order: int | None = None
-    user_stop_receipt_order: int | None = None
-    user_stop_settled_receipt_order: int | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
     prepared_voice_sources: Mapping[str, PreparedVoiceSource] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
-    correlation_id: str | None = None
     command_execution_started: bool = False
     command_result_text: str | None = None
     command_result_extra_content: CommandResultContent | None = None
@@ -286,14 +272,10 @@ class TurnRecord:
         source_event_revisions: Mapping[str, object] | None = None,
         revision_replay: Mapping[str, object] | None = None,
         suppressed_source_event_revisions: Mapping[str, object] | None = None,
-        latest_edit_receipt_order: int | None = None,
-        user_stop_receipt_order: int | None = None,
-        user_stop_settled_receipt_order: int | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
         prepared_voice_sources: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
-        correlation_id: str | None = None,
         command_execution_started: bool = False,
         command_result_text: str | None = None,
         command_result_extra_content: CommandResultContent | None = None,
@@ -318,16 +300,10 @@ class TurnRecord:
             visible_echo_event_id,
             visible_echo_is_fallback,
         )
-        dispatch = _canonical_dispatch_state(
-            latest_edit_receipt_order,
-            user_stop_receipt_order,
-            user_stop_settled_receipt_order,
-        )
         command = _canonical_command_state(command_execution_started, command_result_text)
         context = _canonical_context_state(
             response_owner,
             requester_id,
-            correlation_id,
             history_scope,
             conversation_target,
         )
@@ -344,14 +320,10 @@ class TurnRecord:
             source_event_revisions=source.source_event_revisions,
             revision_replay=_revision_replay_map(revision_replay) or None,
             suppressed_source_event_revisions=source.suppressed_source_event_revisions,
-            latest_edit_receipt_order=dispatch.latest_edit_receipt_order,
-            user_stop_receipt_order=dispatch.user_stop_receipt_order,
-            user_stop_settled_receipt_order=dispatch.user_stop_settled_receipt_order,
             source_event_metadata=source.source_event_metadata,
             prepared_voice_sources=source.prepared_voice_sources,
             response_owner=context.response_owner,
             requester_id=context.requester_id,
-            correlation_id=context.correlation_id,
             command_execution_started=command.command_execution_started,
             command_result_text=command.command_result_text,
             command_result_extra_content=(
@@ -440,14 +412,10 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     source_event_revisions: Mapping[str, object] | None
     revision_replay: Mapping[str, object] | None
     suppressed_source_event_revisions: Mapping[str, object] | None
-    latest_edit_receipt_order: int | None
-    user_stop_receipt_order: int | None
-    user_stop_settled_receipt_order: int | None
     source_event_metadata: Mapping[str, object] | None
     prepared_voice_sources: Mapping[str, object] | None
     response_owner: str | None
     requester_id: str | None
-    correlation_id: str | None
     command_execution_started: bool
     command_result_text: str | None
     command_result_extra_content: CommandResultContent | None
@@ -475,14 +443,10 @@ def canonicalize_turn_record(
         source_event_revisions=candidate.source_event_revisions,
         revision_replay=candidate.revision_replay,
         suppressed_source_event_revisions=candidate.suppressed_source_event_revisions,
-        latest_edit_receipt_order=candidate.latest_edit_receipt_order,
-        user_stop_receipt_order=candidate.user_stop_receipt_order,
-        user_stop_settled_receipt_order=candidate.user_stop_settled_receipt_order,
         source_event_metadata=candidate.source_event_metadata,
         prepared_voice_sources=candidate.prepared_voice_sources,
         response_owner=candidate.response_owner,
         requester_id=candidate.requester_id,
-        correlation_id=candidate.correlation_id,
         command_execution_started=candidate.command_execution_started,
         command_result_text=candidate.command_result_text,
         command_result_extra_content=candidate.command_result_extra_content,
@@ -578,20 +542,6 @@ def _canonical_delivery_state(
     )
 
 
-def _canonical_dispatch_state(
-    latest_edit: object,
-    user_stop: object,
-    settled_user_stop: object,
-) -> _CanonicalDispatchState:
-    """Return canonical monotonic dispatch receipt orders."""
-    latest_edit_order = _positive_int_or_none(latest_edit)
-    user_stop_order = _positive_int_or_none(user_stop)
-    settled_order = _positive_int_or_none(settled_user_stop)
-    if user_stop_order is None or (settled_order is not None and settled_order > user_stop_order):
-        settled_order = None
-    return _CanonicalDispatchState(latest_edit_order, user_stop_order, settled_order)
-
-
 def _canonical_command_state(started: object, result_text: object) -> _CanonicalCommandState:
     """Return a canonical command execution checkpoint."""
     canonical_result = canonical_optional_string(result_text)
@@ -601,7 +551,6 @@ def _canonical_command_state(started: object, result_text: object) -> _Canonical
 def _canonical_context_state(
     response_owner: object,
     requester_id: object,
-    correlation_id: object,
     history_scope: object,
     conversation_target: object,
 ) -> _CanonicalContextState:
@@ -609,7 +558,6 @@ def _canonical_context_state(
     return _CanonicalContextState(
         response_owner=canonical_optional_string(response_owner),
         requester_id=canonical_optional_string(requester_id),
-        correlation_id=canonical_optional_string(correlation_id),
         history_scope=history_scope if isinstance(history_scope, HistoryScope) else None,
         conversation_target=conversation_target if isinstance(conversation_target, MessageTarget) else None,
     )
@@ -649,11 +597,6 @@ def canonical_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str,
 def canonical_optional_string(value: object) -> str | None:
     """Return a non-empty string or None."""
     return value if isinstance(value, str) and value else None
-
-
-def _positive_int_or_none(value: object) -> int | None:
-    """Return one positive non-boolean integer or None."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _immutable_prompt_map(
@@ -813,11 +756,6 @@ def merge_committed_response(
             source_event_prompts=prompts,
             source_event_revisions=revisions,
             revision_replay=replay,
-            latest_edit_receipt_order=max(
-                current.latest_edit_receipt_order or 0,
-                committed.latest_edit_receipt_order or 0,
-            )
-            or None,
             timestamp=max(current.timestamp, committed.timestamp),
         ),
         tombstoned_event_ids=tombstoned_event_ids,

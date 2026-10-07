@@ -122,9 +122,11 @@ def _context_identity(entity_name: str, pending: list[str], context: Mapping[str
         raise _identity_error()
     stored = cast("dict[str, object]", raw)
     prepared = TurnRecordCodec._from_ledger_record(str(stored.get("anchor_event_id", "")), stored)
+    edit_receipt_order = stored.get("latest_edit_receipt_order")
     if (
         prepared is None
-        or prepared.latest_edit_receipt_order is None
+        or not isinstance(edit_receipt_order, int)
+        or isinstance(edit_receipt_order, bool)
         or pending[0] not in {revision[1] for revision in (prepared.source_event_revisions or {}).values()}
         or prepared.response_owner != entity_name
         or prepared.response_event_id != response_event_id
@@ -138,7 +140,7 @@ def _context_identity(entity_name: str, pending: list[str], context: Mapping[str
         "response_event_id": response_event_id,
         "logical_source_event_ids": _event_ids(stored.get("source_event_ids")),
         "discovery_event_ids": _event_ids(stored.get("discovery_event_ids", [])),
-        "edit_receipt_order": prepared.latest_edit_receipt_order,
+        "edit_receipt_order": edit_receipt_order,
     }
 
 

@@ -68,7 +68,6 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
         prepared_edit_record=TurnRecord.create(
             ["$source"],
             source_event_revisions={"$source": (20, "$edit")},
-            latest_edit_receipt_order=7,
         ),
         matrix_run_metadata={MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$settled"]},
         # A regeneration replaces the answer it names.

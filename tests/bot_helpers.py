@@ -406,7 +406,6 @@ def _agent_response_handled_turn(
     response_event_id: str | None = None,
     thread_id: str | None = None,
     requester_id: str | None = None,
-    correlation_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
 ) -> TurnRecord:
     """Return the handled-turn state persisted for one direct agent response."""
@@ -415,7 +414,6 @@ def _agent_response_handled_turn(
             [event_id],
             response_event_id=response_event_id,
             requester_id=requester_id,
-            correlation_id=correlation_id,
             source_event_prompts=source_event_prompts,
         ),
         response_owner=agent_name,

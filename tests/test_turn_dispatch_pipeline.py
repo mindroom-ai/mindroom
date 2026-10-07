@@ -1026,7 +1026,6 @@ class TestAgentBot(AgentBotTestBase):
                     visible_echo_event_id="$voice_echo",
                     visible_echo_is_fallback=False,
                     requester_id="@user:localhost",
-                    correlation_id="corr-visible-echo",
                 ),
             ),
         ]
@@ -1150,7 +1149,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     response_owner="router",
                     requester_id="@user:localhost",
-                    correlation_id="corr-router-coalesced",
                     history_scope=None,
                     conversation_target=dispatch.target,
                 ),
@@ -2559,7 +2557,6 @@ class TestAgentBot(AgentBotTestBase):
             event_id="$img_event_fail",
             response_event_id="$error",
             requester_id="@user:localhost",
-            correlation_id="$img_event_fail",
             source_event_prompts={"$img_event_fail": "[Attached image]"},
         )
         expected_handled_turn = replace(

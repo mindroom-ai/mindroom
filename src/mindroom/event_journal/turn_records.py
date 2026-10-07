@@ -118,12 +118,6 @@ def write_record(
         and current.completed
         and current.response_event_id
         and same_turn_identity(current, candidate)
-        and not (
-            candidate.response_event_id is None
-            and candidate.user_stop_receipt_order is not None
-            and candidate.user_stop_settled_receipt_order == candidate.user_stop_receipt_order
-            and set(candidate.source_event_ids).issubset(candidate.redacted_source_event_ids)
-        )
     ):
         candidate = merge_committed_response(candidate, current)
         if candidate is None:
@@ -158,22 +152,12 @@ def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> Te
     )
     if current is not None:
         candidate = canonicalize_turn_record(candidate, redacted_source_event_ids=current.redacted_source_event_ids)
-    if (
-        current is not None
-        and candidate.latest_edit_receipt_order is not None
-        and (
-            current.user_stop_receipt_order is not None
-            and current.user_stop_receipt_order >= candidate.latest_edit_receipt_order
-        )
-    ):
-        committed = current
-    else:
-        assert candidate.response_event_id is not None
-        committed = merge_committed_response(
-            current,
-            completed_response_record(candidate, candidate.response_event_id),
-            tombstoned_event_ids=tombstones,
-        )
+    assert candidate.response_event_id is not None
+    committed = merge_committed_response(
+        current,
+        completed_response_record(candidate, candidate.response_event_id),
+        tombstoned_event_ids=tombstones,
+    )
     if committed is None or committed.anchor_event_id is None:
         return None
     write = replace(

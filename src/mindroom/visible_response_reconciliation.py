@@ -243,7 +243,6 @@ class VisibleResponseReconciler:
         handled_turn: TurnRecord,
         *,
         requester_id: str,
-        correlation_id: str,
         target: MessageTarget,
         excluded_event_ids: Collection[str] = (),
     ) -> tuple[TurnRecord | None, str | None]:
@@ -255,7 +254,6 @@ class VisibleResponseReconciler:
             canonicalize_turn_record(
                 handled_turn,
                 requester_id=requester_id,
-                correlation_id=correlation_id,
             ),
             history_scope=None,
             conversation_target=target,

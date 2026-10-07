@@ -93,7 +93,6 @@ async def _assert_not_stopped(bot: AgentBot, message_id: str) -> None:
     pending = bot._turn_store.get_turn_record(f"{message_id}-source")
     assert pending is not None
     assert not pending.completed
-    assert pending.user_stop_receipt_order is None
     reply = await bot.journal_principal().replies.for_event(message_id)
     assert reply is not None
     assert not reply.unapplied_stop

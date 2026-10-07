@@ -72,38 +72,9 @@ __all__ = [
     "canonicalize_turn_record",
     "merge_edit_facts",
     "resolve_turn_record",
-    "with_user_stop",
 ]
 
 _TURN_RECORD_SCHEMA_VERSION = 1
-
-
-def with_user_stop(
-    turn_record: TurnRecord,
-    response_event_id: str,
-    stop_receipt_order: int,
-    *,
-    delivery_settled: bool = False,
-) -> TurnRecord:
-    """Return the monotonic durable state for one admitted STOP callback."""
-    if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
-        msg = "User-stop receipt order must be positive"
-        raise ValueError(msg)
-    return canonicalize_turn_record(
-        turn_record,
-        response_event_id=response_event_id,
-        completed=True,
-        user_stop_receipt_order=max(
-            stop_receipt_order,
-            turn_record.user_stop_receipt_order or stop_receipt_order,
-        ),
-        user_stop_settled_receipt_order=max(
-            turn_record.user_stop_settled_receipt_order or 0,
-            stop_receipt_order if delivery_settled else 0,
-        )
-        or None,
-        timestamp=0.0,
-    )
 
 
 class TurnRecordCodec:
@@ -148,12 +119,6 @@ class TurnRecordCodec:
             payload["suppressed_source_event_revisions"] = {
                 event_id: list(revision) for event_id, revision in record.suppressed_source_event_revisions.items()
             }
-        if record.latest_edit_receipt_order is not None:
-            payload["latest_edit_receipt_order"] = record.latest_edit_receipt_order
-        if record.user_stop_receipt_order is not None:
-            payload["user_stop_receipt_order"] = record.user_stop_receipt_order
-        if record.user_stop_settled_receipt_order is not None:
-            payload["user_stop_settled_receipt_order"] = record.user_stop_settled_receipt_order
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata._to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -162,8 +127,6 @@ class TurnRecordCodec:
             payload["response_owner"] = record.response_owner
         if record.requester_id is not None:
             payload["requester_id"] = record.requester_id
-        if record.correlation_id is not None:
-            payload["correlation_id"] = record.correlation_id
         if record.command_execution_started:
             payload["command_execution_started"] = True
         if record.command_result_text is not None:
@@ -236,16 +199,10 @@ class TurnRecordCodec:
             suppressed_source_event_revisions=_mapping_or_none(
                 record.get("suppressed_source_event_revisions"),
             ),
-            latest_edit_receipt_order=_positive_int_or_none(record.get("latest_edit_receipt_order")),
-            user_stop_receipt_order=_positive_int_or_none(record.get("user_stop_receipt_order")),
-            user_stop_settled_receipt_order=_positive_int_or_none(
-                record.get("user_stop_settled_receipt_order"),
-            ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
             prepared_voice_sources=_mapping_or_none(record.get("prepared_voice_sources")),
             response_owner=canonical_optional_string(record.get("response_owner")),
             requester_id=canonical_optional_string(record.get("requester_id")),
-            correlation_id=canonical_optional_string(record.get("correlation_id")),
             command_execution_started=record.get("command_execution_started") is True,
             command_result_text=canonical_optional_string(record.get("command_result_text")),
             command_result_extra_content=freeze_command_result_content(record.get("command_result_extra_content")),
@@ -332,7 +289,6 @@ class TurnRecordCodec:
             source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
             response_owner=canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
             requester_id=canonical_optional_string(metadata.get("requester_id")),
-            correlation_id=canonical_optional_string(metadata.get("correlation_id")),
             history_scope=HistoryScope.from_metadata(metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY)),
             conversation_target=MessageTarget.from_metadata(
                 metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
@@ -986,32 +942,12 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
             if newer.command_result_text is not None
             else older.command_result_extra_content
         ),
-        latest_edit_receipt_order=max(
-            newer.latest_edit_receipt_order or 0,
-            older.latest_edit_receipt_order or 0,
-        )
-        or None,
-        user_stop_receipt_order=max(
-            newer.user_stop_receipt_order or 0,
-            older.user_stop_receipt_order or 0,
-        )
-        or None,
-        user_stop_settled_receipt_order=max(
-            newer.user_stop_settled_receipt_order or 0,
-            older.user_stop_settled_receipt_order or 0,
-        )
-        or None,
     )
 
 
 def _bool_or_none(value: object) -> bool | None:
     """Return a strict boolean or None."""
     return value if isinstance(value, bool) else None
-
-
-def _positive_int_or_none(value: object) -> int | None:
-    """Return one positive non-boolean integer or None."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
@@ -1062,11 +998,6 @@ def _response_group_requires_retention(
         )
         or any(
             not record.completed and record.replay_source_event_ids and not _is_prepared_voice_checkpoint_only(record)
-            for record in group.records.values()
-        )
-        or any(
-            record.user_stop_receipt_order is not None
-            and (record.user_stop_settled_receipt_order or 0) < record.user_stop_receipt_order
             for record in group.records.values()
         )
     )

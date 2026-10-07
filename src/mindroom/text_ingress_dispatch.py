@@ -218,7 +218,6 @@ async def _prepare_text_dispatch(
         handled_turn=canonicalize_turn_record(
             handled_turn,
             requester_id=prepared.dispatch.requester_user_id,
-            correlation_id=prepared.dispatch.correlation_id,
         ),
         command=command,
         dispatch=prepared.dispatch,

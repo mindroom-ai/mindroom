@@ -905,7 +905,6 @@ class TurnController:
                 pending_turn, response_event_id = await self.deps.visible_responses.prepare_visible_delivery_turn(
                     TurnRecord.create([event.event_id]),
                     requester_id=requester_user_id,
-                    correlation_id=event.event_id,
                     target=target,
                 )
                 if pending_turn is None:
@@ -1693,7 +1692,6 @@ class TurnController:
                     (selection.question_event_id,) if source_event_id != selection.question_event_id else ()
                 ),
                 requester_id=requester_user_id,
-                correlation_id=source_event_id,
             ),
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,

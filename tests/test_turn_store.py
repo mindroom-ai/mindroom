@@ -131,8 +131,6 @@ async def _load_with_recovery(
                 ["$event"],
                 response_event_id="$stop-response",
                 response_owner="ledger-owner",
-                user_stop_receipt_order=20,
-                user_stop_settled_receipt_order=20,
             ),
             id="user-stop",
         ),
@@ -2037,7 +2035,6 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
         },
         response_owner="agent",
         requester_id="@user:example.org",
-        correlation_id="corr-1",
         history_scope=history_scope,
         conversation_target=target,
     )
@@ -2048,7 +2045,6 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
             constants.MATRIX_EVENT_ID_METADATA_KEY: "$anchor",
             constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$response",
             "requester_id": "@user:example.org",
-            "correlation_id": "corr-1",
         },
     )
     parsed = TurnRecordCodec.from_run_metadata(metadata)
@@ -2868,7 +2864,6 @@ async def test_record_turn_preserves_existing_optional_facts_at_the_owner_bounda
             ["$event"],
             response_event_id="$first-response",
             requester_id="@user:example.org",
-            correlation_id="corr-1",
         ),
     )
 
@@ -2878,7 +2873,6 @@ async def test_record_turn_preserves_existing_optional_facts_at_the_owner_bounda
     assert record is not None
     assert record.response_event_id == "$second-response"
     assert record.requester_id == "@user:example.org"
-    assert record.correlation_id == "corr-1"
 
 
 @pytest.mark.asyncio
@@ -3055,7 +3049,6 @@ async def test_absent_row_import_returns_concurrent_exact_record_unchanged(
         source_event_prompts={"$event": "stale prompt"},
         response_owner="run-owner",
         requester_id="@run-user:example.org",
-        user_stop_receipt_order=20,
         timestamp=10,
     )
     concurrent_record = TurnRecord.create(
@@ -3095,7 +3088,6 @@ async def test_absent_row_import_returns_concurrent_exact_record_unchanged(
     assert loaded.source_event_prompts == {"$event": "current prompt"}
     assert loaded.response_owner == "journal-owner"
     assert loaded.requester_id == "@journal-user:example.org"
-    assert loaded.user_stop_receipt_order is None
     assert store.get_turn_record("$run-alias") is None
 
 
@@ -3116,7 +3108,6 @@ def _saved_turn_with_selection_alias() -> TurnRecord:
         },
         response_owner="run-owner",
         requester_id="@run-user:example.org",
-        user_stop_receipt_order=20,
         timestamp=40,
     )
 
@@ -3163,7 +3154,6 @@ async def test_discovery_alias_import_returns_settled_recovered_source_owner_unc
     assert current.source_event_prompts == {"$question": "current prompt"}
     assert current.source_event_revisions == {"$question": (30, "$current-edit")}
     assert current.response_owner == "journal-owner"
-    assert current.user_stop_receipt_order is None
     assert store.get_turn_record("$selection") is None
 
     _reset_handled_turn_ledger_runtime()
@@ -3209,7 +3199,6 @@ async def test_discovery_alias_import_returns_concurrent_recovered_source_owner_
     assert current.response_event_id is None
     assert current.discovery_event_ids == ()
     assert current.response_owner == "journal-owner"
-    assert current.user_stop_receipt_order is None
     assert store.get_turn_record("$selection") is None
 
     _reset_handled_turn_ledger_runtime()

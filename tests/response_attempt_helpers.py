@@ -4,20 +4,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
-from mindroom.response_sources import ResponseSources
-from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
-
-
-def approval_sources(pending: tuple[str, ...], prepared: TurnRecord | None) -> ResponseSources:
-    """Build a current request value from a test's selected turn snapshot."""
-    return ResponseSources(
-        pending,
-        prepared.source_event_ids if prepared is not None else pending,
-        prepared.discovery_event_ids if prepared is not None else (),
-        prepared.latest_edit_receipt_order if prepared is not None else None,
-    )
-
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot

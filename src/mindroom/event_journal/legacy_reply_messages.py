@@ -572,10 +572,11 @@ def _reply_of_rows(
             presentations.empty(team),
             **base,  # type: ignore[arg-type]
         )
-    stopped = record.user_stop_receipt_order is not None
+    stop = _turn_stop(transaction, entity_name, delivery_id)
+    stopped = stop is not None
     # That release finished a settled Stop and shows it; its turn record turns
     # the replay of any source it left pending away.
-    stop_settled = stopped and (record.user_stop_settled_receipt_order or 0) >= (record.user_stop_receipt_order or 0)
+    stop_settled = stop is not None and stop.settled
     historical = initial.created_at_ns < now_ns - _HISTORICAL_STREAM_NS
     if stop_settled or (not sources.pending and (initial.acknowledged_event_id is None or stopped or historical)):
         return None
@@ -717,6 +718,43 @@ def _stream_created_reply(
     return _Adoption(reply=reply, spans=(span,))
 
 
+@dataclass(frozen=True, slots=True)
+class _TurnStop:
+    """A Stop an earlier release recorded on a turn record, which current records keep on the reply."""
+
+    receipt_order: int
+    # That release delivered the Stop's note or found it superseded.
+    settled: bool
+    # An edit admitted after the Stop regenerates past it.
+    newer_edit: bool
+
+
+def _positive(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _stop_of(raw: object) -> _TurnStop | None:
+    """Return the Stop a turn record an earlier release wrote holds, if any."""
+    stored = cast("Mapping[str, object]", raw) if isinstance(raw, dict) else {}
+    order = _positive(stored.get("user_stop_receipt_order"))
+    if not order:
+        return None
+    return _TurnStop(
+        receipt_order=order,
+        settled=_positive(stored.get("user_stop_settled_receipt_order")) >= order,
+        newer_edit=_positive(stored.get("latest_edit_receipt_order")) > order,
+    )
+
+
+def _turn_stop(transaction: Transaction, entity_name: str, event_id: str) -> _TurnStop | None:
+    """Return the Stop an earlier release kept on the turn record one event indexes."""
+    row = transaction.fetchone(
+        "SELECT record_json FROM turn_records WHERE agent_name = ? AND index_event_id = ?",
+        (entity_name, event_id),
+    )
+    return None if row is None else _stop_of(json.loads(str(row["record_json"])))
+
+
 def _unsettled_stops(
     transaction: Transaction,
     principal_id: str,
@@ -727,11 +765,12 @@ def _unsettled_stops(
     applied: list[AppliedTransition] = []
     seen: set[str] = set()
     for index_event_id, _anchor, record_json in turn_records.load_all(transaction, entity_name):
-        record = TurnRecordCodec._from_ledger_record(index_event_id, json.loads(record_json))
+        raw = json.loads(record_json)
+        record = TurnRecordCodec._from_ledger_record(index_event_id, raw)
         if record is None or record.response_event_id is None or record.response_event_id in seen:
             continue
-        stop_order = record.user_stop_receipt_order
-        if stop_order is None or (record.user_stop_settled_receipt_order or 0) >= stop_order:
+        stop = _stop_of(raw)
+        if stop is None or stop.settled:
             continue
         seen.add(record.response_event_id)
         found = reply_messages.for_event(transaction, principal_id, record.response_event_id)
@@ -740,11 +779,7 @@ def _unsettled_stops(
         reply = reply_messages.lock(transaction, principal_id, found.reply_id)
         span = reply_spans.load(transaction, principal_id, found.current_span_id or found.last_span_id)
         assert reply is not None
-        facts = rl.StopFacts(
-            receipt_order=stop_order,
-            newer_edit=(record.latest_edit_receipt_order or 0) > stop_order,
-            span_live=False,
-        )
+        facts = rl.StopFacts(receipt_order=stop.receipt_order, newer_edit=stop.newer_edit, span_live=False)
         applied.append(apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns)))
     return tuple(applied)
 

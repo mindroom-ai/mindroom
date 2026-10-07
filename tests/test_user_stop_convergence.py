@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mindroom.handled_turns import _reset_handled_turn_ledger_runtime, with_user_stop
+from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 
@@ -74,22 +74,12 @@ async def _store(journal_store: EventJournalStore) -> TurnStore:
     return store
 
 
-@pytest.mark.parametrize("stop_already_written", [False, True])
 async def test_stop_on_a_voice_echo_without_a_response_target_changes_nothing(
     journal_store: EventJournalStore,
-    stop_already_written: bool,
 ) -> None:
-    """A stop naming a visible voice echo has no response to finalize, so it must not write or raise.
-
-    The written case is the durable state an earlier release left behind before
-    it raised, which replays after an upgrade.
-    """
+    """A stop naming a visible voice echo has no response to finalize, so it must not write or raise."""
     store = await _store(journal_store)
     await store.record_visible_echo("$voice", "$echo")
-    if stop_already_written:
-        echo_turn = store.get_turn_record("$voice")
-        assert echo_turn is not None
-        await store.record_turn(with_user_stop(echo_turn, "$echo", 5))
     before = store.get_turn_record("$voice")
     gateway = _NoReplyGateway()
     reconciler = UserStopReconciler(

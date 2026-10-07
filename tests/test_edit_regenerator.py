@@ -403,7 +403,6 @@ async def test_repeated_locked_preparation_removes_stale_runs_once(tmp_path: Pat
     assert removal_kwargs["requester_user_id"] == USER_ID
     assert removal_kwargs["turn_record"] == replace(
         record,
-        latest_edit_receipt_order=1,
         source_event_prompts={ORIGINAL_EVENT_ID: "what is 3+3?"},
         source_event_revisions={
             ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
@@ -1895,7 +1894,6 @@ async def test_unsettled_cancellation_leaves_interrupted_edit_uncommitted(tmp_pa
     assert harness.regenerator._mailboxes == {}
     expected_record = replace(
         record,
-        latest_edit_receipt_order=1,
         source_event_prompts={ORIGINAL_EVENT_ID: "latest after restart"},
         source_event_revisions={
             ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
@@ -1905,53 +1903,6 @@ async def test_unsettled_cancellation_leaves_interrupted_edit_uncommitted(tmp_pa
         turn_record=expected_record,
         requester_user_id=USER_ID,
     )
-
-
-@pytest.mark.asyncio
-async def test_durable_user_stop_suppresses_preceding_edit_recovery(tmp_path: Path) -> None:
-    """An edit accepted before STOP must not regenerate after the process restarts."""
-    record = replace(
-        _turn_record(),
-        user_stop_receipt_order=2,
-        user_stop_settled_receipt_order=2,
-    )
-    harness = _harness(tmp_path, turn_record=record, receipt_order=1)
-    event, event_info = _edit_event(
-        new_body="edit before stop",
-        event_id="$z-edit-before-stop:example.org",
-        server_timestamp=1_000_020,
-    )
-
-    await _handle_edit(harness, event, event_info)
-
-    harness.generate_response.assert_not_awaited()
-    recorded = harness.turn_store.record_turn.call_args.args[0]
-    assert recorded.source_event_revisions == {
-        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
-    }
-    assert recorded.user_stop_settled_receipt_order == 2
-
-
-@pytest.mark.asyncio
-async def test_edit_after_durable_user_stop_can_regenerate(tmp_path: Path) -> None:
-    """STOP is a cutoff, not a permanent ban on later user edits."""
-    record = replace(
-        _turn_record(),
-        user_stop_receipt_order=2,
-        user_stop_settled_receipt_order=2,
-    )
-    harness = _harness(tmp_path, turn_record=record, receipt_order=3)
-    event, event_info = _edit_event(
-        new_body="edit after stop",
-        event_id="$a-edit-after-stop:example.org",
-        server_timestamp=1_000_020,
-    )
-
-    await _handle_edit(harness, event, event_info)
-
-    harness.generate_response.assert_awaited_once()
-    recorded = harness.turn_store.publish_committed_response.call_args.args[2]
-    assert recorded.user_stop_settled_receipt_order == 2
 
 
 @pytest.mark.asyncio

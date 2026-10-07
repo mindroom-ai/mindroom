@@ -5463,7 +5463,6 @@ class TestOutbox:
             response_event_id="$answer",
             completed=mutation != "projection",
             source_event_prompts={source: "original"},
-            latest_edit_receipt_order=1,
         )
         if mutation == "projection":
             await store.record_pending_turn(initial)
@@ -5615,7 +5614,6 @@ class TestOutbox:
                 [source],
                 response_event_id="$answer",
                 source_event_prompts={source: "original"},
-                latest_edit_receipt_order=1,
             ),
         )
         registered = await store.register_edit_revision(source, (20, driving))

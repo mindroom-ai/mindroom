@@ -11,7 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal import INTERRUPTED_FAILURE_REASON, ApprovalContinuation, DeliveryStage, EventKind
+from mindroom.event_journal import (
+    INTERRUPTED_FAILURE_REASON,
+    ApprovalContinuation,
+    DeliveryStage,
+    EventKind,
+    turn_records,
+)
 from mindroom.event_journal.replies import ReplyCreation, ReplyRowRequest
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
@@ -20,7 +26,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.turn_record import TurnRecord, canonicalize_turn_record
+from mindroom.turn_record import TurnRecord
 from tests.legacy_reply_helpers import keep_main_paused_answer, store_main_continuation
 from tests.test_event_journal_store import ROOM, admit
 
@@ -42,6 +48,7 @@ async def _turn(
     completed: bool = False,
     response_event_id: str | None = None,
     stop_order: int | None = None,
+    stop_settled: bool = False,
     history: bool = True,
 ) -> TurnRecord:
     """Store a main-era turn record of this agent, as main's ledger wrote it."""
@@ -53,13 +60,23 @@ async def _turn(
         conversation_target=MessageTarget.resolve(ROOM, None, source, room_mode=True),
         history_scope=HistoryScope(kind="agent", scope_id=ENTITY) if history else None,
     )
+    stored = TurnRecordCodec._to_ledger_record(record)
     if stop_order is not None:
-        record = canonicalize_turn_record(record, user_stop_receipt_order=stop_order)
-    assert record.anchor_event_id is not None
-    await journal_store.turn_records(ENTITY).upsert(
-        index_event_ids=record.indexed_event_ids,
-        anchor_event_id=record.anchor_event_id,
-        record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
+        # Main kept a turn's Stop on its record.
+        stored["user_stop_receipt_order"] = stop_order
+        if stop_settled:
+            stored["user_stop_settled_receipt_order"] = stop_order
+    anchor_event_id = record.anchor_event_id
+    assert anchor_event_id is not None
+    # Written as main's ledger stored it, past the current codec.
+    await journal_store.backend.write(
+        lambda transaction: turn_records.upsert(
+            transaction,
+            ENTITY,
+            index_event_ids=record.indexed_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=json.dumps(stored),
+        ),
     )
     return record
 
@@ -262,14 +279,7 @@ async def test_a_stop_the_earlier_release_finished_gets_no_reply(journal_store: 
     """A Stop shown just before a crash stands, though the source it left pending replays: that turn ignores it."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
-    record = await _turn(journal_store, "$source", stop_order=5)
-    settled = canonicalize_turn_record(record, user_stop_receipt_order=5, user_stop_settled_receipt_order=5)
-    assert settled.anchor_event_id is not None
-    await journal_store.turn_records(ENTITY).upsert(
-        index_event_ids=settled.indexed_event_ids,
-        anchor_event_id=settled.anchor_event_id,
-        record_json=json.dumps(TurnRecordCodec._to_ledger_record(settled)),
-    )
+    await _turn(journal_store, "$source", stop_order=5, stop_settled=True)
     await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
 
     assert await _adopt(principal) == ()
@@ -499,7 +509,6 @@ async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store:
     selected = TurnRecord.create(
         ["$source"],
         source_event_revisions={"$source": (20, "$edit")},
-        latest_edit_receipt_order=7,
         response_event_id="$reply",
         response_owner=ENTITY,
         conversation_target=MessageTarget.resolve(ROOM, None, "$source"),

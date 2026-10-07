@@ -372,7 +372,6 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         handled_turn=TurnRecord.create(
             [event.event_id],
             requester_id="@user:localhost",
-            correlation_id="$event:localhost",
         ),
     )
 

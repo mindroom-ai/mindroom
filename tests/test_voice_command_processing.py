@@ -842,7 +842,6 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         ),
         response_owner="home",
         requester_id="@alice:example.com",
-        correlation_id="$voice_event",
         history_scope=HistoryScope(kind="agent", scope_id="home"),
         conversation_target=MessageTarget(
             room_id=room.room_id,
@@ -1829,7 +1828,6 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     assert record.response_event_id == "$response"
     assert record.response_owner == ROUTER_AGENT_NAME
     assert record.requester_id == "@alice:example.com"
-    assert record.correlation_id == "$voice_event"
     assert record.history_scope is None
     assert record.conversation_target == MessageTarget.resolve(
         room_id=room.room_id,

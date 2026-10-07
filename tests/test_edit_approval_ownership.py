@@ -20,7 +20,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.event_journal.replies import ReplyRowRequest
-from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime, with_user_stop
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -90,7 +90,7 @@ class _ApprovalCase:
         await self.dispatch_newer()
         newer = await self.principal.approval_continuation_for_source("$newer-edit")
         assert newer is not None
-        assert newer.prepared_edit_record.latest_edit_receipt_order == 6
+        assert newer.sources.edit_receipt_order == 6
         assert await self.principal.approval_continuation_for_source("$edit") is not None
         return newer
 
@@ -258,7 +258,6 @@ async def _paused_case(  # noqa: PLR0915
     tmp_path: Path,
     journal_store: EventJournalStore,
     *,
-    stopped: bool,
     requires_human: bool,
 ) -> AsyncIterator[_ApprovalCase]:
     bot = _bot(tmp_path)
@@ -284,11 +283,6 @@ async def _paused_case(  # noqa: PLR0915
             history_scope=HistoryScope(kind="agent", scope_id="general"),
         ),
     )
-    if stopped:
-        # A Stop an earlier release recorded on the turn, before the edit.
-        stopped_turn = store.get_turn_record(source_id)
-        assert stopped_turn is not None
-        await store.record_turn(with_user_stop(stopped_turn, answer_id, 1))
     principal = journal_store.principal("general@@mindroom_general:localhost")
     original = nio.RoomMessageText.from_dict(
         {
@@ -466,17 +460,15 @@ async def _paused_case(  # noqa: PLR0915
 async def approval_case(
     tmp_path: Path,
     journal_store: EventJournalStore,
-    stopped: bool,
     requires_human: bool,
 ) -> AsyncIterator[_ApprovalCase]:
     """Pause a real edited response with durable journal ownership."""
-    async with _paused_case(tmp_path, journal_store, stopped=stopped, requires_human=requires_human) as case:
+    async with _paused_case(tmp_path, journal_store, requires_human=requires_human) as case:
         yield case
 
 
 @pytest.mark.asyncio
 @pytest.mark.ledger_loads_from_disk
-@pytest.mark.parametrize("stopped", [False, True])
 @pytest.mark.parametrize("requires_human", [False, True])
 class TestEditApprovalOwnership:
     """Exercise independent pause, resume, and settlement contracts through real controllers."""

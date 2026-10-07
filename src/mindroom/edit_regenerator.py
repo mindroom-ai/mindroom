@@ -102,15 +102,16 @@ def _answer_to_regenerate(record: TurnRecord, reply: Reply | None) -> tuple[str 
     if reply is not None:
         return (None if reply.state is ReplyState.GONE else reply.event_id), reply.stop_receipt_order
     # LEGACY_COMPAT: Answers written before reply records, named only by the turn record.
-    # Legacy format: a completed turn record whose response_event_id and user-Stop fields an earlier release wrote,
-    # with no reply record for its sources.
+    # Legacy format: a completed turn record whose response_event_id an earlier release wrote, with no reply record
+    # for its sources.
     # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record the answer and its
     # Stop on the reply.
-    # Handling: the edit regenerates that event as a historical answer, ignoring edits older than the recorded Stop.
+    # Handling: the edit regenerates that event as a historical answer; a Stop that release kept on the turn record is
+    # not read, as no reply holds it.
     # Coverage: tests/test_edit_response_regeneration.py::test_handle_message_edit_uses_journal_response_event_id_after_restart,
     # tests/test_edit_response_regeneration.py::test_handle_message_edit_recovers_missing_ledger_row_from_persisted_run_metadata,
     # tests/test_reply_records_turns.py::test_regenerating_an_answer_older_than_the_records_adopts_it.
-    return record.response_event_id, record.user_stop_receipt_order
+    return record.response_event_id, None
 
 
 @dataclass
@@ -397,7 +398,6 @@ class EditRegenerator:
             source_event_prompts=prompt_map,
             source_event_revisions=revisions,
             suppressed_source_event_revisions=suppressed_revisions,
-            latest_edit_receipt_order=active_receipt_order,
         )
         target = record.conversation_target
         assert target is not None

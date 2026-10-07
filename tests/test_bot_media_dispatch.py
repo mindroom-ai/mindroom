@@ -195,7 +195,6 @@ class TestAgentBot(AgentBotTestBase):
             room_id=room.room_id,
             event_id="$img_event",
             requester_id="@user:localhost",
-            correlation_id="$img_event",
             source_event_prompts={"$img_event": "[Attached image]"},
         )
         expected_handled_turn = replace(
@@ -814,7 +813,6 @@ class TestAgentBot(AgentBotTestBase):
                 event_id="$img_event_history",
                 thread_id="$thread_root",
                 requester_id="@user:localhost",
-                correlation_id="$img_event_history",
                 source_event_prompts={"$img_event_history": "[Attached image]"},
             ),
         )
@@ -1416,7 +1414,6 @@ class TestAgentBot(AgentBotTestBase):
                     room_id=room.room_id,
                     event_id="$file_event",
                     requester_id="@user:localhost",
-                    correlation_id="$file_event",
                     source_event_prompts={"$file_event": "[Attached file]"},
                 ),
                 response_owner=mock_agent_user.agent_name,

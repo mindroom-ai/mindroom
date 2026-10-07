@@ -1166,9 +1166,6 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         ),
         prepared_voice_sources={**(recovery.prepared_voice_sources or {}), **(authority.prepared_voice_sources or {})},
         source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
-        latest_edit_receipt_order=_latest_edit_receipt_order(authority, recovery),
-        user_stop_receipt_order=_latest_user_stop_receipt_order(authority, recovery),
-        user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(authority, recovery),
         source_event_metadata=(
             authority.source_event_metadata
             if authority.source_event_metadata is not None
@@ -1176,7 +1173,6 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         ),
         response_owner=authority.response_owner or recovery.response_owner,
         requester_id=authority.requester_id or recovery.requester_id,
-        correlation_id=authority.correlation_id or recovery.correlation_id,
         command_execution_started=authority.command_execution_started or recovery.command_execution_started,
         command_result_text=authority.command_result_text or recovery.command_result_text,
         command_result_extra_content=(
@@ -1186,32 +1182,4 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         ),
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
-    )
-
-
-def _latest_user_stop_receipt_order(*records: TurnRecord) -> int | None:
-    """Return the latest durable STOP receipt order on these same-turn records."""
-    return max(
-        (record.user_stop_receipt_order for record in records if record.user_stop_receipt_order is not None),
-        default=None,
-    )
-
-
-def _latest_edit_receipt_order(*records: TurnRecord) -> int | None:
-    """Return the latest edit admitted for these same-turn records."""
-    return max(
-        (record.latest_edit_receipt_order for record in records if record.latest_edit_receipt_order is not None),
-        default=None,
-    )
-
-
-def _latest_user_stop_settled_receipt_order(*records: TurnRecord) -> int | None:
-    """Return the latest STOP whose visible obligation is delivered or superseded."""
-    return max(
-        (
-            record.user_stop_settled_receipt_order
-            for record in records
-            if record.user_stop_settled_receipt_order is not None
-        ),
-        default=None,
     )
