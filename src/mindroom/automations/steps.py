@@ -22,7 +22,8 @@ class AutomationContext:
     ``entry`` is the agent's entry for this automation, ``options`` its ``options`` (empty for a built-in), and
     ``settings`` the plugin's own ``settings`` (empty for a built-in).
     ``options`` and ``settings`` are read-only.
-    ``workspace`` is the agent's workspace root, which may not exist yet, or None for an agent without one, and
+    ``workspace`` is the agent's workspace root, which may not exist yet, or None for an agent without file memory,
+    which has no workspace, and
     ``state_dir`` is the agent's automation state directory in primary storage, outside the workspace, created when
     something first writes there.
     """

@@ -786,7 +786,8 @@ from mindroom.automations import Ask, AutomationContext, Done, automation
 from mindroom.path_confinement import read_regular_file_within_root
 
 
-@automation("weekly_digest")
+# Only agents with file memory have a workspace for the digest.
+@automation("weekly_digest", requires_file_memory=True)
 def check(ctx: AutomationContext) -> Ask | None:
     if ctx.workspace is None or not ctx.workspace.is_dir():
         return None
@@ -815,7 +816,8 @@ plugins:
   - path: plugins/weekly-digest
 agents:
   mind:
-    tools: [file]      # the agent writes the digest
+    memory_backend: file   # gives the agent a workspace
+    tools: [file]          # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
 ```
@@ -840,7 +842,7 @@ agents:
 | `entry` | The agent's entry for this automation |
 | `options` | The entry's `options`, set per agent, read-only |
 | `settings` | The plugin's `settings`, set once per plugin, read-only |
-| `workspace` | The agent's workspace root, which may not exist yet, or `None` for an agent without a workspace |
+| `workspace` | The agent's workspace root, which may not exist yet; `None` for an agent without `memory_backend: file`, which has no workspace |
 | `state_dir` | The agent's automation state directory in MindRoom storage, outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees
