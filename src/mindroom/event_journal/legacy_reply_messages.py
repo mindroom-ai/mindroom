@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 
-from . import approval_continuations, journal, reply_messages, turn_records
-from .models import SUPERSEDED_FAILURE_REASON
+from . import approval_continuations, journal, outbox, reply_messages, turn_records
+from .models import SUPERSEDED_FAILURE_REASON, DeliveryStage
 from .replies import AppliedTransition, apply
 
 if TYPE_CHECKING:
@@ -102,6 +102,8 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # reply_messages and reply_spans.
 # Handling: once per principal at bot start, before owner_lost, the newest continuation of each reply pauses it; older
 # ones are superseded and keep their pauses on that reply to hold their sources until their cleanup settles them.
+# A failing newest one whose failure note Matrix already took or refused ends its reply as its cleanup will, and holds
+# it until that cleanup settles its sources, so an edit waits for the cleanup as one after a current failure note does.
 # Approvals a newer edit's delivered answer replaced keep their pauses on that answer's reply, which is finished, and
 # their cleanup runs. An upgrade runs while no reply is in flight, so nothing else is adopted.
 # Coverage: tests/test_legacy_reply_messages.py.
@@ -361,7 +363,12 @@ def _paused_reply(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> _Adoption:
-    """A continuation pauses its reply, which its approval runtime then resumes or settles."""
+    """A continuation pauses its reply, which its approval runtime then resumes or settles.
+
+    A failing one whose failure note's FINAL Matrix took or refused for good
+    already ended the reply in the room: the reply ends as the cleanup still
+    owed will end it, and the continuation holds it until that cleanup runs.
+    """
     reply_id = _new_id()
     paused = _pause_span(reply_id, continuation, rl.SpanOutcome.PAUSED, now_ns)
     shown = presentations.paused(
@@ -375,7 +382,7 @@ def _paused_reply(
         entity_name=entity_name,
         room_id=continuation.room_id,
         thread_id=continuation.thread_id,
-        state=rl.ReplyState.PAUSED,
+        state=_ended_by_failure(transaction, principal_id, continuation) or rl.ReplyState.PAUSED,
         span=paused,
         presentation=shown,
         now_ns=now_ns,
@@ -386,3 +393,22 @@ def _paused_reply(
         ),
     )
     return _Adoption(approval_id=continuation.approval_id, reply=reply, spans=(paused,))
+
+
+def _ended_by_failure(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> rl.ReplyState | None:
+    """Return the state a failing continuation's cleanup ends its reply in, once its note's FINAL resolved."""
+    if continuation.state != "failing":
+        return None
+    final = outbox.load(
+        transaction,
+        principal_id,
+        delivery_id=continuation.source_event_ids[0],
+        stage=DeliveryStage.FINAL,
+    )
+    if final is None or (final.acknowledged_event_id is None and final.permanent_failure_reason is None):
+        return None
+    return rl.ReplyState.CANCELLED if continuation.failure_reason == "cancelled_by_user" else rl.ReplyState.FAILED

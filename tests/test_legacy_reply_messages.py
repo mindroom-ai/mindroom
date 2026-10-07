@@ -296,6 +296,43 @@ async def test_an_older_approval_whose_failure_was_delivered_is_superseded_by_th
     assert (reply.state, reply.approval_id) == (rl.ReplyState.PAUSED, "approval-2")
 
 
+@pytest.mark.parametrize(
+    ("reason", "state"),
+    [("expired", rl.ReplyState.FAILED), ("cancelled_by_user", rl.ReplyState.CANCELLED)],
+)
+async def test_a_failing_approval_whose_note_was_delivered_ends_its_reply_until_its_cleanup(
+    journal_store: EventJournalStore,
+    reason: str,
+    state: rl.ReplyState,
+) -> None:
+    """The room already shows the failure note: the reply has ended, and an edit waits for the cleanup still owed."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
+    await _main_continuation(principal, replace(_continuation("failing"), failure_reason=reason))
+    await _row(
+        principal,
+        "$source",
+        DeliveryStage.FINAL,
+        "Approval failed.",
+        status="error",
+        edits="$reply",
+        acknowledged="$note",
+    )
+
+    await _adopt(principal)
+    reply = await _only_reply(principal)
+    assert (reply.state, reply.approval_id) == (state, "approval-1")
+    assert await _spans(principal, reply) == [(rl.SpanKind.TURN, rl.SpanOutcome.PAUSED)]
+    assert rl.claim_blocked(reply, durable_write_debt=False, driving_edit=True)
+
+    assert await principal.finish_approval_continuation("approval-1") is not None
+    settled = await _only_reply(principal)
+    assert (settled.state, settled.approval_id, settled.owed_write) == (state, None, None)
+    assert not await principal.is_pending("$source")
+    assert not rl.claim_blocked(settled, durable_write_debt=False, driving_edit=True)
+
+
 async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store: EventJournalStore) -> None:
     """A paused regeneration main left still answers the edit it selected once its reply is adopted."""
     principal = journal_store.principal(PRINCIPAL)
