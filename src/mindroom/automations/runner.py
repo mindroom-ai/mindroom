@@ -218,6 +218,8 @@ class AutomationRunner:
                 )
                 return
             if isinstance(step, Done):
+                if step.on_loop is not None:
+                    step.on_loop()
                 if step.notice is not None:
                     await bot._hook_send_message(pending.room_id, step.notice, pending.thread_id, name)
                 for thread_id in step.resolve:

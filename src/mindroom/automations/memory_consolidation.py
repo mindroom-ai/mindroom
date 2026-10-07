@@ -38,7 +38,7 @@ from mindroom.path_confinement import (
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from mindroom.config.automations import MemoryConsolidationAutomation
     from mindroom.config.main import Config
@@ -540,7 +540,8 @@ def _patch(run: _Run, proposal: _Proposal) -> str:
                 tofile=f"b/{path}" if after is not None else "/dev/null",
             ),
         )
-    return "".join(chunk if chunk.endswith("\n") else chunk + "\n" for chunk in chunks)
+    # A last line without a newline keeps the marker `git apply` needs to restore the bytes exactly.
+    return "".join(chunk if chunk.endswith("\n") else f"{chunk}\n\\ No newline at end of file\n" for chunk in chunks)
 
 
 def _deletion_report(deletions: list[_Deletion]) -> str:
@@ -598,6 +599,10 @@ def _after_dream(
         return _end_without_change(run, thread_id)
     write_file_within_root(run.root, f"{run.run_dir}/proposal.patch", _patch(run, proposal).encode())
     write_file_within_root(run.root, f"{run.run_dir}/deleted.txt", _deletion_report(deletions).encode())
+    # Pending from now on, so a restart before the review finishes still carries the proposal forward.
+    state = _load_state(run.runtime_paths, run.agent_name) or _State()
+    _keep_pending(state, run)
+    _save_state(run.runtime_paths, run.agent_name, state)
     return Ask(
         config.render_prompt(
             "MEMORY_CONSOLIDATION_VERIFY_TEMPLATE",
@@ -673,7 +678,6 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         parent, name = path.rsplit("/", 1)
         with open_directory_within_root(run.root, parent) as parent_fd:
             os.unlink(name, dir_fd=parent_fd)
-    refresh_agent_memory_search(run.agent_name, run.root, config, run.runtime_paths)
     notes = detail if verdict == "APPROVE-WITH-NOTES" and detail else None
     summary = (
         f"✅ Memory consolidation applied: {len(proposal.changed)} files written, {len(proposal.deleted)} removed."
@@ -685,7 +689,15 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         resolve=(proposal.dream_thread, thread_id),
         notes=notes,
         applied=tuple(proposal.changed),
+        # The refresh is scheduled on the event loop, which this step does not run on.
+        on_loop=partial(refresh_agent_memory_search, run.agent_name, run.root, config, run.runtime_paths),
     )
+
+
+def _keep_pending(state: _State, run: _Run) -> None:
+    """Make the run's proposal the one the next run carries, unless an older one is still unresolved."""
+    if state.pending_run is None:
+        state.pending_run = run.run_id
 
 
 def _end(
@@ -697,6 +709,7 @@ def _end(
     notes: str | None = None,
     applied: tuple[str, ...] = (),
     carry: bool = False,
+    on_loop: Callable[[], None] | None = None,
 ) -> Done:
     """Record the run's outcome, drop its staging, and return the notice that ends the chain.
 
@@ -714,8 +727,8 @@ def _end(
         state.reviewed = reviewed
         state.pending_run = None
         state.notes = notes
-    elif carry and state.pending_run is None:
-        state.pending_run = run.run_id
+    elif carry:
+        _keep_pending(state, run)
     _save_state(run.runtime_paths, run.agent_name, state)
     try:
         with open_directory_within_root(run.root, run.run_dir) as run_fd:
@@ -723,4 +736,4 @@ def _end(
     except FileNotFoundError:
         pass
     logger.info("Memory consolidation run ended", agent=run.agent_name, run=run.run_id, outcome=outcome)
-    return Done(notice, resolve=resolve)
+    return Done(notice, resolve=resolve, on_loop=on_loop)

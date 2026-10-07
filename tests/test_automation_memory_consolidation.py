@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -113,7 +115,11 @@ class _Workspace:
         assert ask.then is not None
         with patch("mindroom.automations.memory_consolidation.refresh_agent_memory_search") as refresh:
             done = ask.then(self.config, "$verify", timed_out)
-        assert isinstance(done, Done)
+            assert isinstance(done, Done)
+            # The runner calls this on the event loop.
+            assert not refresh.called
+            if done.on_loop is not None:
+                done.on_loop()
         self.refreshed = refresh.called
         return done
 
@@ -397,6 +403,37 @@ def test_an_approved_proposal_writes_only_what_changed_and_resolves_both_threads
     assert not (workspace.run_dir() / "staging").exists()
     assert (workspace.run_dir() / "proposal.patch").exists()
     assert workspace.check() is None
+
+
+def test_a_proposal_awaiting_review_is_already_pending(tmp_path: Path) -> None:
+    """A restart before the review finishes still leaves the proposal for the next run to carry forward."""
+    workspace = _workspace(tmp_path)
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
+
+    assert isinstance(workspace.dream(ask), Ask)
+
+    assert workspace.state()["pending_run"] == workspace.run_dir().name
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_an_applied_patch_reverses_exactly_with_git_apply(tmp_path: Path) -> None:
+    """The kept patch undoes the change, including files without a final newline."""
+    workspace = _workspace(tmp_path)
+    workspace.write("memory/plain.md", "- First.\n- Last line without newline.", age=timedelta(days=30))
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/plain.md", "- First.\n- Changed last line without newline.")
+    workspace.stage("memory/new.md", "- Created without newline.")
+    review = workspace.dream(ask)
+    workspace.review(review, "VERDICT: APPROVE")
+
+    patch_path = workspace.run_dir() / "proposal.patch"
+    subprocess.run(["git", "apply", "-R", str(patch_path)], cwd=workspace.root, check=True)
+
+    assert workspace.read("memory/plain.md") == "- First.\n- Last line without newline."
+    assert not (workspace.root / "memory/new.md").exists()
 
 
 def test_applied_bytes_are_the_validated_ones_even_when_staging_changes_later(tmp_path: Path) -> None:

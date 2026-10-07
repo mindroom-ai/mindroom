@@ -34,3 +34,5 @@ class Done:
 
     notice: str | None
     resolve: tuple[str, ...] = ()
+    # Called on the event loop, for work that must be scheduled there, such as a background re-index.
+    on_loop: Callable[[], None] | None = None

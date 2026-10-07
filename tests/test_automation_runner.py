@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -406,9 +407,10 @@ async def test_a_step_that_fails_posts_a_notice_in_its_thread_and_ends_the_chain
 
 @pytest.mark.asyncio
 async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_listed_thread(tmp_path: Path) -> None:
-    """A chain can move to a fresh thread, and its final notice resolves the threads it names."""
+    """A chain can move to a fresh thread, and its final step resolves the threads it names and runs work on the loop."""
     _config, _paths, runner, bot = _setup(tmp_path)
-    finish = Done("All done", resolve=("$event1", "$event2"))
+    loops: list[object] = []
+    finish = Done("All done", resolve=("$event1", "$event2"), on_loop=lambda: loops.append(asyncio.get_running_loop()))
     review = Ask("Review it", new_thread=True, then=lambda _config, _thread, _timed_out: finish)
     first = Ask("Draft it", new_thread=True, then=lambda _config, _thread, _timed_out: review)
 
@@ -429,3 +431,4 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
         ("All done", "$event2"),
     ]
     assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    assert loops == [asyncio.get_running_loop()]
