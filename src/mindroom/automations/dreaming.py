@@ -137,8 +137,8 @@ class _Run:
     # Memory paths the run may not write: today's daily note, context files, and files that cannot be read safely.
     excluded: frozenset[str]
     due: tuple[_Input, ...]
-    # Every input's version at fire time, due or not.
-    inputs: Mapping[str, _Version]
+    # Every input's path at fire time, so progress and attempts for inputs that are gone are dropped.
+    inputs: frozenset[str]
     # Unapplied proposals the run carries forward, oldest first.
     carried: tuple[str, ...]
 
@@ -454,7 +454,7 @@ def _agenda(run: _Run, state: _State, waiting: int) -> str:
         lines += ["", "## Notes from the last review", "", state.notes]
     sections = (
         ("conversation", "## 1. New or updated conversations"),
-        ("daily_note", "## 1. New daily notes"),
+        ("daily_note", "## 1. New or updated daily notes"),
     )
     for kind, heading in sections:
         items = [f"- `{item.path}`" for item in run.due if item.kind == kind]
@@ -525,7 +525,7 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
         snapshot=snapshot,
         excluded=excluded,
         due=tuple(due[:_MAX_INPUTS]),
-        inputs={path: item.version for path, item in inputs.items()},
+        inputs=frozenset(inputs),
         carried=carried,
     )
     _prune_runs(root, keep=carried)
@@ -534,7 +534,8 @@ def check_dreaming(config: Config, runtime_paths: RuntimePaths, agent_name: str)
         pass
     for path, payload in snapshot.items():
         write_file_within_root(root, f"{run.run_dir}/staging/{path}", payload)
-    # The agenda counts as attempted once it is posted, so a run a restart cut short also waits for new evidence.
+    # The agenda counts as attempted once the check writes it, so a run whose prompt was never posted or that a restart
+    # cut short also waits for new evidence.
     state.attempted = {path: version for path, version in state.attempted.items() if path in run.inputs}
     state.attempted.update((item.path, item.version) for item in run.due)
     _save_state(runtime_paths, agent_name, state)
