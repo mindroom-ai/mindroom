@@ -108,16 +108,19 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
 
 # LEGACY_COMPAT: Approvals whose reply a newer edit's answer already replaced.
 # Legacy format: a continuation whose response attempt a newer attempt of the same reply, room, membership, entity, and
-# logical sources superseded with a higher edit receipt order and an answer FINAL editing the same event, acknowledged
-# or still owed, while its own FINAL holds no answer; v2026.10.201 retired such an approval's failure without a note
-# once that answer was acknowledged.
+# logical sources superseded with a higher edit receipt order and an answer FINAL editing the same event, queued after
+# the continuation's pause and acknowledged or still owed, while its own FINAL holds no answer; v2026.10.201 retired
+# such an approval's failure without a note once that answer was acknowledged.
 # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages fence an approval superseded
 # when the edit's regeneration claims its reply.
 # Handling: the upgrade fences it superseded, so reply classification adopts the reply the newer answer shows, with an
 # owed answer as its next write, and keeps the approval's pause on it until its cleanup settles the sources it holds.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_a_newer_answer_replaced_is_superseded.
-def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool:
-    """Return whether a newer edit's answer, acknowledged or still owed, replaced the reply this attempt paused."""
+def _replaced(transaction: Transaction, principal_id: str, approval_id: str, driving: str) -> bool:
+    """Return whether a newer edit's answer, acknowledged or still owed, replaced the reply this attempt paused.
+
+    A pause queued after that answer, as a resume that paused again, is newer than it and stands.
+    """
     row = transaction.fetchone(
         """SELECT 1 AS present FROM response_attempts AS attempt
         JOIN response_attempts AS newer
@@ -130,15 +133,18 @@ def _replaced(transaction: Transaction, principal_id: str, driving: str) -> bool
           ON delivery.principal_id = newer.principal_id AND delivery.delivery_id = newer.driving_event_id
          AND delivery.room_id = newer.room_id AND delivery.membership_epoch = newer.membership_epoch
          AND delivery.edits_event_id = newer.response_event_id
+        JOIN approval_continuations AS paused
+          ON paused.principal_id = attempt.principal_id AND paused.approval_id = ?
         WHERE attempt.principal_id = ? AND attempt.driving_event_id = ? AND delivery.stage = 'final'
           AND delivery.result_json IS NOT NULL AND delivery.retired = 0 AND delivery.permanent_failure_reason IS NULL
+          AND delivery.created_at_ns > paused.created_at_ns
           AND NOT EXISTS (
             SELECT 1 FROM matrix_delivery_outbox AS own
             WHERE own.principal_id = attempt.principal_id AND own.delivery_id = attempt.driving_event_id
               AND own.stage = 'final' AND own.result_json IS NOT NULL
           )
         LIMIT 1""",
-        (principal_id, driving),
+        (approval_id, principal_id, driving),
     )
     return row is not None
 
@@ -233,7 +239,7 @@ def upgrade_continuation_identity(
                 stored,
             )
             claimed = row["state"] == "claimed"
-            if attempts and _replaced(transaction, principal_id, pending[0]):
+            if attempts and _replaced(transaction, principal_id, approval_id, pending[0]):
                 transaction.execute(
                     """UPDATE approval_continuations SET state = 'failing', failure_reason = ?, runtime_generation = NULL
                     WHERE principal_id = ? AND approval_id = ?""",
