@@ -677,6 +677,7 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
     spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
     assert [(span.span_id, span.outcome) for span in spans] == [(span_id, rl.SpanOutcome.COMPLETED)]
     assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response...", "Selected answer."]
+    assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
 async def test_a_retried_acknowledgement_finds_the_reply_its_first_attempt_created(tmp_path: Path) -> None:
@@ -686,6 +687,8 @@ async def test_a_retried_acknowledgement_finds_the_reply_its_first_attempt_creat
 
     assert await _acknowledge_selection(bot) == first
     assert len(_sent_bodies(bot)) == 1
+    # No task runs for an acknowledgement, so this instance expects none to register.
+    assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
 async def test_a_dispatch_failure_before_the_answer_ends_the_selection_reply(tmp_path: Path) -> None:
@@ -701,11 +704,24 @@ async def test_a_dispatch_failure_before_the_answer_ends_the_selection_reply(tmp
     assert reply.owed_write is None
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
     assert _sent_bodies(bot)[-1] == "[general] ⚠️ Error: lookup failed"
+    assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
-async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_runs(tmp_path: Path) -> None:
-    """A Stop that reaches a span still preparing cancels its task the moment it registers."""
+@pytest.mark.parametrize("selection", [False, True])
+async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_runs(
+    tmp_path: Path,
+    *,
+    selection: bool,
+) -> None:
+    """A Stop that reaches a span still preparing cancels its task the moment it registers.
+
+    A selection's answer continues the span its acknowledgement created, which its claim makes stoppable.
+    """
     bot = await _streaming_bot(tmp_path)
+    request = _plain_request(_target())
+    if selection:
+        ack_event_id, span_id = await _acknowledge_selection(bot)
+        request = replace(request, existing_event_id=ack_event_id, interactive_span_id=span_id)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     preparing = asyncio.Event()
     release = asyncio.Event()
@@ -725,7 +741,7 @@ async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_
             typing_indicator=_noop_typing,
         ),
     ):
-        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        response = asyncio.create_task(runner.generate_response(request))
         await asyncio.wait_for(preparing.wait(), timeout=5)
         stop = await _stop(bot, "$sent1", 7)
         release.set()
@@ -733,6 +749,7 @@ async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_
         assert await asyncio.wait_for(stop, timeout=5)
 
     model.assert_not_awaited()
+    assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.CANCELLED
     assert not reply.unapplied_stop

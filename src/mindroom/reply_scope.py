@@ -370,7 +370,7 @@ class ReplyRuntime:
         """Claim the reply one span answers, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
         request = replace(
-            await self._claim_request(
+            await self._new_request(
                 delivery_id=delivery_id,
                 sources=sources,
                 room_id=room_id,
@@ -382,6 +382,11 @@ class ReplyRuntime:
             interactive_span_id=interactive_span_id,
             prepared_edit=None if prepared_edit is None else encode_prepared_edit(prepared_edit),
         )
+        # A Stop can reach the span as soon as its claim commits, before its task registers. The claim may
+        # continue the span a selection's acknowledgement created instead of opening its own.
+        candidates = (request.span_id,) if interactive_span_id is None else (request.span_id, interactive_span_id)
+        for span_id in candidates:
+            self.spans.expect(span_id)
         try:
             applied = await self.committed(
                 await self.store.replies.claim(
@@ -394,12 +399,14 @@ class ReplyRuntime:
                 ),
             )
         except BaseException:
-            self.spans.forget(request.span_id)
+            for span_id in candidates:
+                self.spans.forget(span_id)
             raise
         transition = applied.transition
-        if transition.claimed is None or transition.claimed.span_id != request.span_id:
-            # Refused, or continuing the span an interactive selection acknowledged.
-            self.spans.forget(request.span_id)
+        claimed_span_id = None if transition.claimed is None else transition.claimed.span_id
+        for span_id in candidates:
+            if span_id != claimed_span_id:
+                self.spans.forget(span_id)
         if transition.outcome is rl.Outcome.STALE:
             return ClaimRefused.RETIRED
         if transition.outcome is rl.Outcome.DUPLICATE:
@@ -438,30 +445,6 @@ class ReplyRuntime:
         )
         await self.store.replies.adopt_historical_answer(request, event_id)
 
-    async def _claim_request(
-        self,
-        *,
-        delivery_id: str,
-        sources: rl.SpanSources,
-        room_id: str,
-        thread_id: str | None,
-        empty: Presentation,
-    ) -> rl.ClaimRequest:
-        """Return a claim by this bot instance, with fresh identities for the span and any reply it creates.
-
-        A Stop can reach the span as soon as its claim commits, before its
-        task registers, so the span registry expects it from here.
-        """
-        request = await self._new_request(
-            delivery_id=delivery_id,
-            sources=sources,
-            room_id=room_id,
-            thread_id=thread_id,
-            empty=empty,
-        )
-        self.spans.expect(request.span_id)
-        return request
-
     async def _new_request(
         self,
         *,
@@ -498,7 +481,7 @@ class ReplyRuntime:
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
         sources = continuation.sources
-        claim = await self._claim_request(
+        claim = await self._new_request(
             delivery_id=continuation.source_event_ids[0],
             sources=rl.SpanSources(
                 pending=sources.pending_event_ids,
@@ -509,6 +492,8 @@ class ReplyRuntime:
             thread_id=continuation.thread_id,
             empty=empty,
         )
+        # A Stop can reach the resume span as soon as its claim commits, before its task registers.
+        self.spans.expect(claim.span_id)
         try:
             claimed, applied = await self.store.claim_approval_resume(
                 continuation.approval_id,
@@ -547,8 +532,11 @@ class ReplyRuntime:
         thread_id: str | None,
         text: str,
     ) -> ReplyWrite:
-        """Return an interactive selection's acknowledgement, the row that creates its reply."""
-        claim = await self._claim_request(
+        """Return an interactive selection's acknowledgement, the row that creates its reply.
+
+        No task runs for its span until the selection's answer claims it, which a Stop or departure before then refuses.
+        """
+        claim = await self._new_request(
             delivery_id=delivery_id,
             sources=rl.SpanSources(pending=pending, logical=logical, discovery=discovery),
             room_id=room_id,
