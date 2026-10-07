@@ -1,7 +1,6 @@
 """Admin-only routes for platform management."""
 
-from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger
@@ -35,7 +34,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel
 
 router = APIRouter()
-ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
+ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs"}
 # The accounts.status CHECK constraint allows exactly these values.
 ACCOUNT_STATUSES = ("active", "suspended", "deleted", "pending_verification")
 
@@ -376,24 +375,6 @@ async def get_dashboard_metrics(
         tier_prices = _monthly_plan_prices_usd()
         mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
 
-        seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
-        messages = (
-            sb.table("usage_metrics")
-            .select("metric_date, messages_sent")
-            .gte("metric_date", seven_days_ago)
-            .order("metric_date")
-            .execute()
-        )
-
-        if messages.data:
-            by_date = defaultdict(int)
-            for m in messages.data:
-                date = m["metric_date"][:10]
-                by_date[date] += m.get("messages_sent", 0)
-            _ = [  # noqa: F841
-                {"date": date, "messages_sent": count} for date, count in sorted(by_date.items())
-            ]
-
         all_instances = instances_data.list_instances(sb, columns="status")
         status_counts: dict[str, int] = {}
         for inst in all_instances:
@@ -476,8 +457,6 @@ async def admin_get_list(  # noqa: C901
             query = sb.table("subscriptions").select("*, accounts(email, full_name)", count="exact")
         elif resource == "audit_logs":
             query = sb.table("audit_logs").select("*, accounts(email)", count="exact")
-        elif resource == "usage_metrics":
-            query = sb.table("usage_metrics").select("*, accounts(email, full_name)", count="exact")
         else:
             query = sb.table(resource).select("*", count="exact")
 

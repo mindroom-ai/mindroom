@@ -496,7 +496,6 @@ async def test_nightly_job_catches_missed_cancellation_and_records_run(platform:
             "backend.tasks.cleanup.cleanup_soft_deleted_accounts", return_value={"accounts_deleted": 0, "errors": []}
         ),
         patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0}),
-        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", return_value={"usage_metrics_deleted": 0}),
     ):
         run = await run_cleanup_job()
 
@@ -581,18 +580,15 @@ async def test_teardown_skipped_when_subscription_became_entitled(platform: Plat
 @pytest.mark.asyncio
 async def test_one_failing_cleanup_task_does_not_skip_the_others(platform: Platform) -> None:
     audit_logs = Mock(return_value={"audit_logs_deleted": 3})
-    usage_metrics = Mock(return_value={"usage_metrics_deleted": 4})
     reconcile = AsyncMock(return_value=LifecycleSummary())
     with (
         patch("backend.tasks.cleanup.cleanup_soft_deleted_accounts", side_effect=RuntimeError("rpc denied")),
         patch("backend.tasks.cleanup.cleanup_old_audit_logs", audit_logs),
-        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", usage_metrics),
         patch("backend.tasks.cleanup.reconcile_all_subscriptions", reconcile),
     ):
         run = await run_cleanup_job()
 
     audit_logs.assert_called_once()
-    usage_metrics.assert_called_once()
     reconcile.assert_awaited_once()
     assert run["ok"] is False
     assert run["summary"]["accounts"] == {"error": "rpc denied"}
@@ -1484,10 +1480,7 @@ async def test_account_pending_deletion_stops_instances_during_a_stripe_outage(p
 
 
 def _cleanup_with_other_tasks_stubbed() -> Any:  # noqa: ANN401
-    return (
-        patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0}),
-        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", return_value={"usage_metrics_deleted": 0}),
-    )
+    return patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0})
 
 
 @pytest.mark.asyncio
@@ -1506,8 +1499,8 @@ async def test_hard_delete_uninstalls_every_instance_and_cancels_billing_before_
 
     _claimable(platform)
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics:
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs:
         run = await run_cleanup_job()
 
     assert order == ["cancel sub_stripe_1", "uninstall 7"]
@@ -1526,16 +1519,16 @@ async def test_failed_auth_user_deletion_is_retried_by_the_next_run(platform: Pl
     _claimable(platform)
     platform.db.auth.admin.error = RuntimeError("auth unavailable")
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics:
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs:
         failed = await run_cleanup_job()
     # The account row, and with it the login, survives the failure, so the next run finds the account again.
     assert platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] is not None
     assert failed["summary"]["accounts"]["errors"] == [f"account {ACCOUNT_ID}: auth unavailable"]
 
     platform.db.auth.admin.error = None
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics:
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs:
         retried = await run_cleanup_job()
 
     assert platform.db.auth.admin.deleted_users == [ACCOUNT_ID]
@@ -1551,8 +1544,8 @@ async def test_failed_teardown_keeps_the_account_rows_for_the_next_run(platform:
     platform.uninstall.side_effect = HTTPException(status_code=500, detail="Failed to uninstall instance: timeout")
     _claimable(platform)
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics:
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs:
         run = await run_cleanup_job()
 
     assert [name for name, _params in platform.db.rpc_calls] == ["claim_account_hard_delete"]
@@ -1569,8 +1562,8 @@ async def test_account_the_database_does_not_let_cleanup_claim_is_not_torn_down(
     platform.db.tables["instances"].append(_instance("stopped"))
     platform.db.rpc_results["claim_account_hard_delete"] = False
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics:
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs:
         run = await run_cleanup_job()
 
     platform.uninstall.assert_not_awaited()
@@ -1584,8 +1577,8 @@ async def test_account_inside_its_grace_period_is_not_torn_down(platform: Platfo
     platform.db.tables["subscriptions"].append(_subscription("cancelled"))
     platform.db.tables["instances"].append(_instance("stopped"))
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics:
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs:
         await run_cleanup_job()
 
     platform.uninstall.assert_not_awaited()
@@ -2001,8 +1994,8 @@ async def test_nightly_run_sets_billing_of_accounts_inside_their_grace_period_to
     platform.db.tables["subscriptions"].append(_subscription("active"))
     _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active"), _stripe_sub("sub_unpaid", "incomplete"))
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics:
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs:
         run = await run_cleanup_job()
 
     platform.stripe.Subscription.modify.assert_called_once_with(
@@ -2048,8 +2041,8 @@ async def test_nightly_billing_change_leaves_an_account_restored_meanwhile_bille
 
     platform.stripe.Subscription.modify.side_effect = modify
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
-    with audit_logs, usage_metrics, patch.object(platform.db, "table", side_effect=restore_after_listing):
+    audit_logs = _cleanup_with_other_tasks_stubbed()
+    with audit_logs, patch.object(platform.db, "table", side_effect=restore_after_listing):
         await run_cleanup_job()
 
     ends = call("sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"})
@@ -2425,10 +2418,9 @@ async def test_nightly_cleanup_pages_through_every_pending_account(platform: Pla
         seen.append(account_id)
         return []
 
-    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
+    audit_logs = _cleanup_with_other_tasks_stubbed()
     with (
         audit_logs,
-        usage_metrics,
         patch("backend.tasks.cleanup._PAGE_SIZE", 1),
         patch("backend.tasks.cleanup.end_account_billing_at_period_end", side_effect=record),
         patch("backend.tasks.cleanup.cancel_unpaid_subscriptions", AsyncMock()),

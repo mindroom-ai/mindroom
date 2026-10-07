@@ -765,26 +765,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/my/subscription/reactivate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Reactivate Subscription
-         * @description Reactivate a cancelled subscription (if still in billing period).
-         */
-        post: operations["reactivate_subscription_my_subscription_reactivate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/pricing/config": {
         parameters: {
             query?: never;
@@ -1385,10 +1365,6 @@ export interface components {
             }[];
             /** Third Party Processors */
             third_party_processors: components["schemas"]["GdprThirdPartyProcessor"][];
-            /** Usage Metrics */
-            usage_metrics: {
-                [key: string]: unknown;
-            }[];
         };
         /**
          * GdprPersonalData
@@ -1670,18 +1646,6 @@ export interface components {
             trial_ends_at?: string | null;
             /** Updated At */
             updated_at?: string | null;
-        };
-        /**
-         * SubscriptionReactivateResponse
-         * @description Subscription reactivation response model.
-         */
-        SubscriptionReactivateResponse: {
-            /** Message */
-            message: string;
-            /** Subscription Id */
-            subscription_id?: string | null;
-            /** Success */
-            success: boolean;
         };
         /**
          * SyncResult
@@ -3075,37 +3039,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubscriptionCancelResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reactivate_subscription_my_subscription_reactivate_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                authorization?: string;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SubscriptionReactivateResponse"];
                 };
             };
             /** @description Validation Error */

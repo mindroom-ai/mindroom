@@ -214,91 +214,22 @@ class TestSubscriptionsEndpoints:
         assert response.status_code == 500
         assert "Failed to cancel" in response.json()["detail"]
 
-    def test_reactivate_subscription_success(
-        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
-    ):
-        """Test reactivating cancelled subscription."""
-        # Setup
-        subscription = {
-            "id": "sub_123",
-            "account_id": "acc_test_123",
-            "stripe_subscription_id": "stripe_sub_123",
-            "status": "cancelled",
-        }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
-
-        # Mock Stripe reactivation
-        mock_stripe_sub = Mock()
-        mock_stripe_sub.status = "active"
-        mock_stripe_sub.cancel_at_period_end = False
-        mock_stripe_sub.id = "stripe_sub_123"  # Set the id attribute properly
-        mock_stripe.Subscription.modify.return_value = mock_stripe_sub
-
-        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "sub_123", "status": "active"}])
-
-        # Make request
-        response = client.post("/my/subscription/reactivate")
-
-        # Verify
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert "reactivated" in data["message"]
-        assert data["subscription_id"] == "stripe_sub_123"
-        mock_stripe.Subscription.modify.assert_called_once_with(
-            "stripe_sub_123", cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""}
-        )
-
-    @pytest.mark.parametrize("path", ["/my/subscription/cancel", "/my/subscription/reactivate"])
-    def test_account_pending_deletion_cannot_change_its_subscription(
+    def test_account_pending_deletion_cannot_cancel_its_subscription(
         self,
         client: TestClient,
         mock_supabase: MagicMock,
         mock_stripe: Mock,
         mock_verify_user: Mock,
         account_pending_deletion: Mock,
-        path: str,
     ):
         """Teardown cancels the subscription without a refund, so the deletion has to be cancelled first."""
         account_pending_deletion.return_value = True
 
-        response = client.post(path, json={"cancel_at_period_end": False})
+        response = client.post("/my/subscription/cancel", json={"cancel_at_period_end": False})
 
         assert response.status_code == 409
         mock_stripe.Subscription.modify.assert_not_called()
         mock_stripe.Subscription.delete.assert_not_called()
-
-    def test_reactivate_subscription_not_cancelled(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
-    ):
-        """Test reactivating active subscription."""
-        # Setup
-        subscription = {
-            "id": "sub_123",
-            "account_id": "acc_test_123",
-            "status": "active",
-            "stripe_subscription_id": "stripe_sub_123",
-        }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
-
-        # Make request
-        response = client.post("/my/subscription/reactivate")
-
-        # Verify
-        assert response.status_code == 400
-        assert "not cancelled" in response.json()["detail"]
-
-    def test_reactivate_no_subscription(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
-        """Test reactivating when no subscription exists."""
-        # Setup - no subscription
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
-
-        # Make request
-        response = client.post("/my/subscription/reactivate")
-
-        # Verify
-        assert response.status_code == 404
-        assert "No subscription found" in response.json()["detail"]
 
     def test_unauthorized_access(self, client: TestClient):
         """Test accessing endpoints without authentication."""

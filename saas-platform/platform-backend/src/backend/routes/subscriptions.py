@@ -6,7 +6,7 @@ from typing import Annotated, Any
 from backend.config import logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.entitlements import decorate_subscription_for_response, is_expired_trial
-from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
+from backend.models import SubscriptionCancelResponse, SubscriptionOut
 from backend.services import provisioner_service
 from backend.services.instance_lifecycle import DELETION_BILLING_MARKER, PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -108,50 +108,3 @@ async def cancel_subscription(
     except Exception:
         logger.exception("Error cancelling subscription")
         raise HTTPException(status_code=500, detail="Failed to cancel subscription")
-
-
-@router.post("/my/subscription/reactivate", response_model=SubscriptionReactivateResponse)
-@limiter.limit("5/minute")  # Sensitive operation
-async def reactivate_subscription(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
-    """Reactivate a cancelled subscription (if still in billing period)."""
-    sb = ensure_supabase()
-    account_id = user["account_id"]
-    provisioner_service.refuse_pending_deletion(sb, account_id, PENDING_DELETION_BILLING_DETAIL)
-
-    # Get current subscription
-    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
-
-    if not sub_result.data:
-        raise HTTPException(status_code=404, detail="No subscription found")
-
-    subscription = sub_result.data[0]
-    if subscription.get("status") != "cancelled":
-        raise HTTPException(status_code=400, detail="Subscription is not cancelled")
-
-    if not subscription.get("stripe_subscription_id"):
-        raise HTTPException(status_code=400, detail="No Stripe subscription found")
-
-    stripe_sub_id = subscription["stripe_subscription_id"]
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Stripe not configured")
-
-    try:
-        # Reactivate by removing the cancel_at_period_end flag
-        reactivated_sub = stripe.Subscription.modify(
-            stripe_sub_id, cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""}
-        )
-
-        # Update local database
-        sb.table("subscriptions").update(
-            {"status": "active", "cancelled_at": None, "updated_at": datetime.now(UTC).isoformat()}
-        ).eq("account_id", account_id).execute()
-
-        return {  # noqa: TRY300
-            "success": True,
-            "message": "Subscription reactivated successfully",
-            "subscription_id": reactivated_sub.id,
-        }
-
-    except Exception:
-        logger.exception("Error reactivating subscription")
-        raise HTTPException(status_code=500, detail="Failed to reactivate subscription")
