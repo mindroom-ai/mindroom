@@ -1507,7 +1507,11 @@ def _state_for_span_outcome(outcome: SpanOutcome | None) -> ReplyState | None:
 
 
 def approval_released(reply: Reply, span: Span | None, *, now_ns: int) -> Transition:
-    """A continuation released to replay ends the span running for it, if any, keeping sources pending."""
+    """A continuation released to replay ends the span running for it, if any, keeping sources pending.
+
+    A Stop the run never saw outranks the replay instead: the reply ends
+    cancelled with its note owed, and the sources settle.
+    """
     if reply.terminal or (span is None and reply.approval_id is None) or (span is not None and span.ended):
         return _unchanged(Outcome.DUPLICATE, reply)
     if reply.unapplied_stop:

@@ -1938,6 +1938,32 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
     assert discarded.reply is not None
     assert discarded.reply.state is ReplyState.FAILED
     assert discarded.effects == (SettleSources(span.span_id, answered=False),)
+    # An owner that comes back first writes the approval's note and finishes it with its turn answered.
+    paused = _span_after(transition, span.span_id)
+    noted = rl.approval_failure_note(
+        removed.reply,
+        paused,
+        approval_id="approval-1",
+        shown="approval failed",
+        state=ReplyState.FAILED,
+        prepared_revision=removed.reply.revision,
+        span_has_final=False,
+        now_ns=NOW,
+    )
+    assert noted.reply is not None
+    assert noted.row is not None
+    assert noted.row.stage is WriteStage.FINAL
+    finished = rl.approval_settled(
+        noted.reply,
+        paused,
+        approval_id="approval-1",
+        paused_span_id=span.span_id,
+        result="failed",
+        disposition="failed",
+        answers_turn=True,
+        now_ns=NOW,
+    )
+    assert finished.effects == (SettleSources(span.span_id),)
 
 
 def test_a_restart_leaves_a_span_approved_in_place_to_its_approval() -> None:

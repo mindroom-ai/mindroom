@@ -484,7 +484,7 @@ class ApprovalResponseCoordinator:
         return written and await self.finish_approval(current.approval_id)
 
     async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
-        """End an interrupted continuation's cards and hand its pending sources back to ordinary replay."""
+        """End an interrupted continuation's cards and release it: its sources go back to replay unless a Stop ends the reply."""
         manager = approval_manager.get_approval_store()
         current = await prepare_approval_failure(
             continuation,

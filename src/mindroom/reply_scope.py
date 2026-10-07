@@ -230,9 +230,11 @@ class ReplyRuntime:
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
         """Hand an interrupted run's sources back to replay with its reply; return whether it was released."""
         released = await self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)
-        if released:
-            self._retry_waiting_claims()
-        return released
+        if released is None:
+            return False
+        await self.run_effects(released.post_commit)
+        self._retry_waiting_claims()
+        return True
 
     def _retry_waiting_claims(self) -> None:
         """A claim an approval held back may run now that the run is gone."""

@@ -1559,6 +1559,8 @@ class AgentBot:
         try:
             # Replies an earlier release left in flight learn what they showed before anything owed for them is sent.
             await self._legacy_reply_reads.run()
+            # A deletion history recovery learned ended replies too: their spans stop and what they owe follows.
+            self._replies_ended(await self._reply_runtime.deletions_ended())
             outcome = await self._delivery_gateway.recover_deliveries()
         except Exception:
             self.logger.exception("Delivery recovery failed")

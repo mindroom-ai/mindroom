@@ -76,7 +76,7 @@ from .projection import (
 )
 from .replies import (
     AppliedTransition,
-    FinishedApproval,
+    EndedApproval,
     PostCommitEffect,
     ReplyRowEnqueue,
     ReplyRowRequest,
@@ -1654,10 +1654,18 @@ class PrincipalStore:
             ),
         )
 
-    async def release_approval_continuation(self, approval_id: str, *, expected_generation: int) -> bool:
-        """Hand an interrupted continuation's still-pending sources back to replay, with its reply."""
+    async def release_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        expected_generation: int,
+    ) -> EndedApproval | None:
+        """Release an interrupted continuation, whose reply rule hands its sources back to replay or ends it stopped.
 
-        def release(transaction: Transaction) -> bool:
+        Returns ``None`` when the run may not be released.
+        """
+
+        def release(transaction: Transaction) -> EndedApproval | None:
             continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
             if continuation is not None:
                 replies.lock_paused_reply(transaction, self._principal_id, continuation)
@@ -1668,15 +1676,15 @@ class PrincipalStore:
                 expected_generation=expected_generation,
             )
             if released is None:
-                return False
-            # The reply hands its span back to replay while the run still holds it; the run goes after.
-            replies.approval_released(transaction, self._principal_id, released)
+                return None
+            # The reply applies the release while the run still holds it; the run goes after.
+            applied = replies.approval_released(transaction, self._principal_id, released)
             approval_continuations.delete(transaction, self._principal_id, approval_id=approval_id)
-            return True
+            return EndedApproval(post_commit=() if applied is None else applied.post_commit)
 
         return await self._backend.write(release)
 
-    async def finish_approval_continuation(self, approval_id: str) -> FinishedApproval | None:
+    async def finish_approval_continuation(self, approval_id: str) -> EndedApproval | None:
         """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply.
 
         Returns ``None`` when the run is not ready to finish.
@@ -1961,7 +1969,7 @@ def _finish_approval_continuation(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
-) -> FinishedApproval | None:
+) -> EndedApproval | None:
     """Finish a continuation, settle its turn, and apply the outcome to the reply it paused, in one transaction."""
     continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if continuation is not None:
@@ -1972,7 +1980,7 @@ def _finish_approval_continuation(
     # The reply learns the finish while the run still holds it; the run goes after.
     post_commit = _settled_approval(transaction, principal_id, finishing, owner_available=True)
     approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
-    return FinishedApproval(post_commit=post_commit)
+    return EndedApproval(post_commit=post_commit)
 
 
 def _settled_approval(

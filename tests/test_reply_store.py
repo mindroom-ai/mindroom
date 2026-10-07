@@ -1183,17 +1183,48 @@ async def test_an_edit_held_back_by_a_settling_approval_is_retried_when_it_finis
     assert refused is reply_scope.ClaimRefused.DEFERRED
     assert retried == []
 
+    # The runtime fails the approval, writes its note as the reply's FINAL, and finishes once Matrix took it.
     assert (
         await alice.request_approval_failure(
             "approval-1",
-            "superseded",
+            "failed",
             expected_state="claimed",
             expected_runtime_generation="gen-test",
         )
         is not None
     )
+    await alice.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id=resume.reply_id,
+            span_id=resume.span_id,
+            decide=lambda reply, span: rl.approval_failure_note(
+                reply,
+                span,
+                approval_id="approval-1",
+                shown=encode_presentation(Presentation()),
+                state=ReplyState.FAILED,
+                prepared_revision=reply.revision,
+                span_has_final=False,
+                now_ns=2,
+            ),
+        ),
+        room_id=ROOM,
+        thread_id="$thread",
+        payload={"body": "approval failed"},
+    )
+    assert await alice.claim_matrix_delivery(delivery_id=resume.delivery_id, stage=DeliveryStage.FINAL)
+    await alice.acknowledge_matrix_delivery(
+        delivery_id=resume.delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_id="$failure-note",
+        delivered_projections=(),
+    )
     assert await runtime.finish_approval("approval-1")
     assert retried == [("$edit",)]
+    ended = await alice.replies.load(resume.reply_id)
+    assert ended is not None
+    assert ended.state is ReplyState.FAILED
+    assert ended.approval_id is None
 
 
 async def test_an_approval_whose_sources_were_deleted_leaves_its_turn_unanswered(

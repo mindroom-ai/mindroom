@@ -8017,7 +8017,7 @@ class TestApprovalContinuations:
         assert claimed is not None
 
         # Only a fenced continuation can be released; a live claim may still be running.
-        assert await alice.release_approval_continuation("approval-1", expected_generation=claimed.generation) is False
+        assert await alice.release_approval_continuation("approval-1", expected_generation=claimed.generation) is None
         failing = await alice.request_approval_failure(
             "approval-1",
             "interrupted",
@@ -8027,7 +8027,9 @@ class TestApprovalContinuations:
         )
         assert failing is not None
 
-        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is True
+        assert (
+            await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is not None
+        )
 
         assert await alice.approval_continuation("approval-1") is None
         assert await alice.approval_continuation_for_source("$source-1") is None
@@ -8058,7 +8060,7 @@ class TestApprovalContinuations:
             edits_event_id="$waiting",
         )
 
-        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is False
+        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is None
         assert await alice.approval_continuation("approval-1") is not None
 
     async def test_finish_serializes_with_responder_departure(

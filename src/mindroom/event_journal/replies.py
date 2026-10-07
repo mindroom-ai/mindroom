@@ -48,8 +48,8 @@ type PostCommitEffect = CancelSpan | WakeApproval | TurnCompleted
 
 
 @dataclass(frozen=True, slots=True)
-class FinishedApproval:
-    """A finished approval continuation, and the work its commit left for afterwards."""
+class EndedApproval:
+    """An approval continuation that finished or was released, and the work its commit left for afterwards."""
 
     post_commit: tuple[PostCommitEffect, ...]
 
@@ -306,7 +306,7 @@ def approval_released(
     principal_id: str,
     continuation: approval_continuations.ApprovalContinuation,
 ) -> AppliedTransition | None:
-    """End the span running for a continuation handed back to replay, keeping its sources pending.
+    """End the span running for a continuation handed back to replay; see ``rl.approval_released``.
 
     That is its resume span, or a span it was approved in place in; a reply
     whose span a restart already ended only loses the approval's hold.
