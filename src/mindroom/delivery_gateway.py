@@ -58,7 +58,6 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.legacy_delivery_payloads import legacy_prepared_edit
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -137,7 +136,6 @@ from mindroom.streaming import (
     stream_progress_edits,
     strip_matching_visible_tool_markers,
 )
-from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -1027,19 +1025,9 @@ class DeliveryGateway:
         rather than reaching across. A reply's row commits nothing here: the
         reply's records record its turn answered when they settle its sources.
         """
-        if delivery.reply_id is not None:
+        if delivery.reply_id is not None or self.deps.terminal_turn_for is None:
             return None
-        legacy_edit = legacy_prepared_edit(delivery.result)
-        if legacy_edit is not None:
-            record = TurnRecordCodec._from_ledger_record(*legacy_edit)
-            assert record is not None, "Corrupt prepared edit record"
-            record = canonicalize_turn_record(record, response_event_id=event_id, completed=True)
-        else:
-            record = (
-                None
-                if self.deps.terminal_turn_for is None
-                else self.deps.terminal_turn_for(delivery.delivery_id, event_id)
-            )
+        record = self.deps.terminal_turn_for(delivery.delivery_id, event_id)
         if record is None or record.anchor_event_id is None:
             return None
         return TerminalTurnWrite(

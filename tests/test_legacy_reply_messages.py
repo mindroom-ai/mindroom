@@ -28,7 +28,7 @@ from mindroom.reply_presentation import Presentation, Segment, decode_presentati
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import RevisionReplay, TurnRecord
 from tests.journal_membership_helpers import admit_room_membership
 from tests.legacy_reply_helpers import keep_main_paused_answer, store_main_continuation
 from tests.test_event_journal_store import ROOM, admit
@@ -53,6 +53,7 @@ async def _turn(
     stop_order: int | None = None,
     stop_settled: bool = False,
     history: bool = True,
+    revision_replay: dict[str, RevisionReplay] | None = None,
 ) -> TurnRecord:
     """Store a main-era turn record of this agent, as main's ledger wrote it."""
     record = TurnRecord.create(
@@ -62,6 +63,7 @@ async def _turn(
         response_event_id=response_event_id,
         conversation_target=MessageTarget.resolve(ROOM, None, source, room_mode=True),
         history_scope=HistoryScope(kind="agent", scope_id=ENTITY) if history else None,
+        revision_replay=revision_replay,
     )
     stored = TurnRecordCodec._to_ledger_record(record)
     if stop_order is not None:
@@ -93,6 +95,7 @@ async def _row(
     status: str,
     acknowledged: str | None = None,
     edits: str | None = None,
+    result: dict[str, object] | None = None,
 ) -> None:
     """Record one of main's outbox rows for a turn, without reply identity."""
     content: dict[str, object] = {"msgtype": "m.text", "body": body, "io.mindroom.stream_status": status}
@@ -107,6 +110,7 @@ async def _row(
         room_id=ROOM,
         thread_id=None,
         payload=payload,
+        result=result,
         edits_event_id=edits,
     )
     if acknowledged is not None:
@@ -685,6 +689,74 @@ async def test_an_adopted_regeneration_keeps_the_edit_it_selected(journal_store:
     assert stop.transition.outcome is rl.Outcome.DUPLICATE
     assert stop.post_commit == ()
     assert (await principal.approval_continuation("approval-1")) == adopted
+
+
+async def test_an_edit_answer_still_in_flight_is_written_by_its_reply(journal_store: EventJournalStore) -> None:
+    """An earlier release's regeneration answer, keyed by its edit, commits that edit; a newer edit waits for it.
+
+    The newer edit's answer is therefore never overwritten by the older one.
+    """
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await principal.settle_many(("$source",))
+    await admit(principal, "$edit")
+    # Ingress kept the edit on the turn it revises before the regeneration selected it.
+    edited = {"$edit": RevisionReplay("$source", 20)}
+    original = await _turn(
+        journal_store,
+        "$source",
+        completed=True,
+        response_event_id="$reply",
+        revision_replay=edited,
+    )
+    selected = replace(
+        original,
+        source_event_prompts={"$source": "Edited request"},
+        source_event_revisions={"$source": (20, "$edit")},
+    )
+    await _row(
+        principal,
+        "$edit",
+        DeliveryStage.FINAL,
+        "Edited answer.",
+        status="completed",
+        edits="$reply",
+        result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(selected)},
+    )
+
+    await _adopt(principal)
+    reply = await principal.replies.for_event("$reply")
+    assert reply is not None
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert await _spans(principal, reply) == [(rl.SpanKind.REGENERATION, rl.SpanOutcome.COMPLETED)]
+    row = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
+    assert row is not None
+    assert row.reply_id == reply.reply_id
+    # Its answer is enqueued, so the edit it selected is consumed, as a regeneration's terminal row does now.
+    assert not await principal.is_pending("$edit")
+    consumed = await journal_store.backend.read(
+        lambda transaction: turn_records.load_record(transaction, ENTITY, "$source"),
+    )
+    assert consumed is not None
+    assert consumed.source_event_revisions == {"$source": (20, "$edit")}
+
+    await admit(principal, "$newer")
+    newer = rl.ClaimRequest(
+        span_id="span-newer",
+        delivery_id="$newer",
+        sources=rl.SpanSources(pending=("$newer",), logical=("$source",)),
+        bot_generation="gen-new",
+        now_ns=NOW,
+        new_reply_id="reply-newer",
+        entity_name=ENTITY,
+        room_id=ROOM,
+        thread_id=None,
+        membership_epoch=await principal.membership_epoch(ROOM),
+        empty_presentation=encode_presentation(Presentation()),
+        driving_edit_id="$newer",
+    )
+    waiting = await principal.replies.claim(newer, ClaimLookup(existing_event_id="$reply", edit_receipt_order=30))
+    assert waiting.transition.outcome is rl.Outcome.DEFERRED
 
 
 async def test_a_claimed_team_resume_keeps_its_document_instead_of_a_read(journal_store: EventJournalStore) -> None:

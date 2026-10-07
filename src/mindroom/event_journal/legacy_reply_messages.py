@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.handled_turns import TurnRecordCodec
+from mindroom.legacy_delivery_payloads import legacy_prepared_edit
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
 from .membership_state import claim_membership_epoch
@@ -137,7 +138,8 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # reply per newest continuation (older ones are superseded, their pauses kept on that reply to hold their sources;
 # approvals a newer edit's answer replaced keep theirs on that answer's reply, finished unless its rows are in flight,
 # and their cleanup runs), the
-# state a frozen unacknowledged FINAL implies with its sources settled and its turn answered, a lost
+# state a frozen unacknowledged FINAL implies with its sources settled and its turn answered (a regeneration's,
+# keyed by its edit, on a regeneration span that commits the edit it selected), a lost
 # span for an INITIAL whose sources are pending or whose stream, started within a day, may need a restart note, unless
 # its turn's Stop already settled, and an adoption scan for a pending turn whose stream created its reply directly; a
 # Stop is kept on the reply it names, adopting a finished answer's reply when nothing in flight held it, even for a Stop
@@ -179,6 +181,8 @@ def classify(
         if delivery_id in adopted:
             continue
         found = _reply_of_rows(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
+        if found is None:
+            found = _regeneration_answer(transaction, principal_id, delivery_id, entity_name, presentations, now_ns)
         if found is None or found.reply.event_id in adopted_events:
             continue
         adopted.add(delivery_id)
@@ -720,6 +724,69 @@ def _reply_of_rows(
         **base,  # type: ignore[arg-type]
     )
     return _Adoption(reply=reply, spans=(span,), row=initial if owns_create else None, row_placeholder_only=True)
+
+
+def _regeneration_answer(
+    transaction: Transaction,
+    principal_id: str,
+    delivery_id: str,
+    entity_name: str,
+    presentations: LegacyPresentations,
+    now_ns: int,
+) -> _Adoption | None:
+    """A regeneration answer an earlier release queued: its reply's first write, which consumes the edit it selected.
+
+    The row is keyed by the edit, which indexes no turn. A newer edit then
+    waits for its delivery, as for any write a reply owes.
+    """
+    final = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+    if final is None or final.edits_event_id is None or not _owed_final(final):
+        return None
+    legacy_edit = legacy_prepared_edit(final.result)
+    selected = None if legacy_edit is None else TurnRecordCodec._from_ledger_record(*legacy_edit)
+    if selected is None or selected.conversation_target is None:
+        return None
+    reply_id = _new_id()
+    state = _final_state(final)
+    span = _span(
+        reply_id,
+        kind=rl.SpanKind.REGENERATION,
+        delivery_id=delivery_id,
+        sources=rl.SpanSources(
+            pending=(delivery_id,) if journal.is_pending(transaction, principal_id, delivery_id) else (),
+            logical=selected.source_event_ids,
+            discovery=selected.discovery_event_ids,
+        ),
+        now_ns=now_ns,
+        outcome=_OUTCOME_BY_STATE[state],
+        prepared_edit=turn_records.encode_prepared_edit(selected),
+    )
+    shown = presentations.answered(final, span.span_id)
+    edit = journal.load(transaction, principal_id, delivery_id)
+    target = selected.conversation_target
+    reply = _reply(
+        transaction,
+        principal_id,
+        entity_name=entity_name,
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        state=state,
+        span=span,
+        presentation=shown,
+        now_ns=now_ns,
+        membership_epoch=final.membership_epoch,
+        event_id=final.edits_event_id,
+        possibly_shown=shown,
+        possibly_shown_seq=1,
+        reply_sequence=1,
+        edit_receipt_order=None if edit is None else edit.receipt_order,
+    )
+    return _Adoption(
+        reply=reply,
+        spans=(span,),
+        row=final,
+        effects=(rl.SettleSources(span.span_id, consumes_edit=True),),
+    )
 
 
 def _deleted_source_reply(

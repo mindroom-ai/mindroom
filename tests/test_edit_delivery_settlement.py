@@ -15,7 +15,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import FinalDeliveryRequest
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
+from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -422,74 +422,6 @@ async def test_edit_delivery_process_boundaries(
         final = (await _store(journal_store)).get_turn_record("$source")
         assert final.source_event_revisions == {"$source": (20, "$edit")}
         assert final.revision_watermark("$source") == (30, "$newer")
-
-
-@pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
-async def test_an_edit_answer_an_earlier_release_queued_consumes_its_edit_when_delivered(
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-) -> None:
-    """An earlier release froze a regeneration's selected edit on its answer row; delivering the row consumes it."""
-    store = await _store(journal_store)
-    principal = journal_store.principal("agent@alice")
-    await principal.admit(
-        InboundEvent(
-            event_id="$edit",
-            room_id="!room:localhost",
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=20,
-            source={},
-        ),
-    )
-    await store.record_responded_turn(
-        TurnRecord.create(
-            ["$source"],
-            completed=True,
-            response_event_id="$answer",
-            source_event_prompts={"$source": "original"},
-        ),
-    )
-    registered = await store.register_edit_revision("$source", (20, "$edit"))
-    selected = canonicalize_turn_record(
-        registered,
-        source_event_prompts={"$source": "selected edit"},
-        source_event_revisions={"$source": (20, "$edit")},
-    )
-    assert await principal.enqueue_matrix_delivery(
-        delivery_id="$edit",
-        stage=DeliveryStage.FINAL,
-        room_id="!room:localhost",
-        thread_id=None,
-        payload={"msgtype": "m.text", "body": "generated answer"},
-        result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(selected)},
-        edits_event_id="$answer",
-    )
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=store.publish_committed_response,
-    )
-
-    async def send(
-        _client: nio.AsyncClient,
-        _room: str,
-        content: dict[str, Any],
-        **_kwargs: object,
-    ) -> DeliveredMatrixEvent:
-        return DeliveredMatrixEvent("$physical-edit", content)
-
-    with patch("mindroom.delivery_gateway.send_message_outcome", send):
-        assert (await gateway.recover_deliveries()).recovered == 1
-    _reset_handled_turn_ledger_runtime()
-    owner = (await _store(journal_store)).get_turn_record("$source")
-    assert owner is not None
-    assert owner.source_event_prompts == {"$source": "selected edit"}
-    assert owner.source_event_revisions == {"$source": (20, "$edit")}
 
 
 @pytest.mark.asyncio
