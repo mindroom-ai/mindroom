@@ -1103,6 +1103,7 @@ class ResponseRunner:
             delivery_gateway=self.deps.delivery_gateway,
             retry_sources=self.deps.retry_approval_sources,
             finish_approval=self.deps.replies.finish_approval,
+            release_approval=self.deps.replies.release_approval,
         )
         self._cli_approval_waits = CliApprovalWaits(
             store=self.deps.approval_store,

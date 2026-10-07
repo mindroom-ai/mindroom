@@ -143,6 +143,7 @@ async def test_only_policy_pause_offers_timed_approval(
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
         finish_approval=AsyncMock(return_value=True),
+        release_approval=AsyncMock(return_value=True),
     )
     tool = ToolExecution(
         tool_call_id="call-authored",
@@ -233,6 +234,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
         finish_approval=AsyncMock(return_value=True),
+        release_approval=AsyncMock(return_value=True),
     )
     sent = []
 

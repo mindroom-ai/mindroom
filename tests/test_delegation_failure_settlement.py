@@ -61,6 +61,7 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
         finish_approval=finish,
+        release_approval=AsyncMock(return_value=True),
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
@@ -100,6 +101,7 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
         delivery_gateway=gateway,
         retry_sources=lambda _room, _sources: None,
         finish_approval=finish_approval,
+        release_approval=AsyncMock(return_value=True),
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
@@ -134,6 +136,7 @@ async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, 
         delivery_gateway=gateway,
         retry_sources=lambda _room, _sources: None,
         finish_approval=finish_approval,
+        release_approval=AsyncMock(return_value=True),
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),

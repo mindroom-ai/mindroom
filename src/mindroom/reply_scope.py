@@ -195,8 +195,8 @@ class ReplyRuntime:
     clock: Callable[[], int] = field(default=time.time_ns)
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
-    # Sources whose claim waited for a reply's earlier writes, by reply.
-    _waiting_for_rows: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
+    # Sources whose claim waited until the reply could be claimed, by reply.
+    _waiting_claims: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -223,10 +223,20 @@ class ReplyRuntime:
         if finished is None:
             return False
         await self.run_effects(finished.post_commit)
-        # A claim an approval held back may run now that the run is gone.
-        for reply_id in tuple(self._waiting_for_rows):
-            self.rows_resolved(reply_id)
+        self._retry_waiting_claims()
         return True
+
+    async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
+        """Hand an interrupted run's sources back to replay with its reply; return whether it was released."""
+        released = await self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)
+        if released:
+            self._retry_waiting_claims()
+        return released
+
+    def _retry_waiting_claims(self) -> None:
+        """A claim an approval held back may run now that the run is gone."""
+        for reply_id in tuple(self._waiting_claims):
+            self.claim_may_proceed(reply_id)
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
         """Run a fenced approval's failure settlement."""
@@ -241,26 +251,33 @@ class ReplyRuntime:
         # Its source worker settles it once whatever owns the source lets go of it.
         self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
-    async def _wait_for_rows(self, reply_id: str, room_id: str, sources: tuple[str, ...]) -> None:
+    async def _wait_to_claim(
+        self,
+        reply_id: str,
+        room_id: str,
+        sources: tuple[str, ...],
+        *,
+        driving_edit: bool,
+    ) -> None:
         """Retry sources once what blocked their claim on the reply is gone, instead of retrying at once.
 
         The wait registers first and then rechecks, so a resolution that landed
         in between still retries them. A retry claims again and may wait again.
         """
-        self._waiting_for_rows.setdefault(reply_id, []).append((room_id, sources))
+        self._waiting_claims.setdefault(reply_id, []).append((room_id, sources))
         reply = await self.store.replies.load(reply_id)
         if reply is None or not rl.claim_blocked(
             reply,
             durable_write_debt=await self.store.replies.has_unresolved_rows(reply_id),
-            driving_edit=True,
+            driving_edit=driving_edit,
         ):
             # A note still owed and not yet enqueued wakes it when its row
-            # resolves; an approval's finish wakes it when the run is gone.
-            self.rows_resolved(reply_id)
+            # resolves; an approval's finish or release wakes it when the run is gone.
+            self.claim_may_proceed(reply_id)
 
-    def rows_resolved(self, reply_id: str) -> None:
+    def claim_may_proceed(self, reply_id: str) -> None:
         """Retry the claims that waited on this reply."""
-        for room_id, sources in self._waiting_for_rows.pop(reply_id, ()):
+        for room_id, sources in self._waiting_claims.pop(reply_id, ()):
             self.retry_sources(room_id, sources)
 
     async def committed(self, applied: AppliedTransition, handle: SpanHandle | None = None) -> AppliedTransition:
@@ -398,7 +415,12 @@ class ReplyRuntime:
             # Earlier writes of this reply are unresolved; their resolution
             # wakes these sources instead of waiting under the conversation lock.
             assert transition.reply is not None, "only a reply with earlier writes defers a claim"
-            await self._wait_for_rows(transition.reply.reply_id, room_id, sources.pending)
+            await self._wait_to_claim(
+                transition.reply.reply_id,
+                room_id,
+                sources.pending,
+                driving_edit=driving_edit_id is not None,
+            )
             return ClaimRefused.DEFERRED
         return _handle_for(self, transition.reply, transition.claimed, empty)
 
@@ -512,7 +534,12 @@ class ReplyRuntime:
                 # Another instance took the replies over; its approval recovery resumes this.
                 return None, None
             assert transition.reply is not None, "only a reply with earlier writes defers a resume"
-            await self._wait_for_rows(transition.reply.reply_id, continuation.room_id, sources.pending_event_ids)
+            await self._wait_to_claim(
+                transition.reply.reply_id,
+                continuation.room_id,
+                sources.pending_event_ids,
+                driving_edit=False,
+            )
             return None, None
         return claimed, _handle_for(self, transition.reply, transition.claimed, empty)
 

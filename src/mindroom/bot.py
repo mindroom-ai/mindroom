@@ -951,7 +951,7 @@ class AgentBot:
 
     def _reply_row_resolved(self, reply_id: str) -> None:
         """Wake claims that waited for this reply's rows, and settle any debt its rows left."""
-        self._reply_runtime.rows_resolved(reply_id)
+        self._reply_runtime.claim_may_proceed(reply_id)
         self._settle_reply_debt_later(reply_id)
 
     def _replies_ended(self, reply_ids: tuple[str, ...]) -> None:

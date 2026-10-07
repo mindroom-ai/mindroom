@@ -201,6 +201,8 @@ class ApprovalResponseCoordinator:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Finishes a paused run once its FINAL is terminal, settling its turn.
     finish_approval: Callable[[str], Awaitable[bool]]
+    # Hands an interrupted run's sources back to replay, with the generation it observed.
+    release_approval: Callable[[str, int], Awaitable[bool]]
 
     async def plan_pause(
         self,
@@ -498,10 +500,7 @@ class ApprovalResponseCoordinator:
             runtime_paths=self.runtime_paths,
             reason=reason,
         )
-        return await self.store.release_approval_continuation(
-            current.approval_id,
-            expected_generation=current.generation,
-        )
+        return await self.release_approval(current.approval_id, current.generation)
 
     async def successful_final_delivery(
         self,
