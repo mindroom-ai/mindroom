@@ -14,6 +14,7 @@ import pytest
 from mindroom.automations import runner as runner_module
 from mindroom.automations.runner import AutomationRunner
 from mindroom.automations.steps import Ask, Done
+from mindroom.automations.threads import automation_threads
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.automations import MemoryConsolidationAutomation, PromptCurationAutomation
@@ -118,6 +119,8 @@ async def test_a_due_check_posts_a_visible_prompt_that_the_agent_answers(tmp_pat
     assert prompt["body"].startswith("@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts")
     # No internal user is provisioned in this runtime, so no original sender is attached; the prompt owns its thread.
     assert prompt["extra_content"] == {PER_FIRE_THREAD_ROOT_KEY: True}
+    # The thread is recorded as an automation's, so no automation reads its export back as a conversation.
+    assert automation_threads(_paths) == {"$event1"}
 
 
 @pytest.mark.asyncio
@@ -481,6 +484,6 @@ async def test_memory_consolidation_runs_its_dream_and_review_through_the_runner
     assert [message["thread_id"] for message in bot.sent] == [None, None, "$event2"]
     assert (root / "memory" / "people.md").read_text(encoding="utf-8") == "- Sam lives in Utrecht.\n"
     assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
-    state = json.loads((tmp_path / "tracking/automations/mind/memory_consolidation.json").read_text(encoding="utf-8"))
-    assert state["own_threads"] == ["$event1", "$event2"]
+    threads = json.loads((tmp_path / "tracking/automations/threads.json").read_text(encoding="utf-8"))
+    assert threads == ["$event1", "$event2"]
     assert "mind:memory_consolidation" not in runner._active

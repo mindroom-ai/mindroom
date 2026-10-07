@@ -5,7 +5,8 @@ room as a hook-dispatched message, like a todo poke, so the agent answers it wit
 When that run's response is final, or after an hour without one, the prompt's continuation runs off the loop and
 returns the next prompt or the notice that ends the chain.
 An automation does not fire again until its chain ends.
-The runner persists nothing: the cron cadence is the cooldown, and a restart only skips the occurrence it missed.
+The runner persists only the threads it starts, so their exports are not read back as conversations; the cron cadence
+is the cooldown, and a restart only skips the occurrence it missed.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from croniter import croniter
 from mindroom.automations.memory_consolidation import check_consolidation
 from mindroom.automations.prompt_curation import check_curation
 from mindroom.automations.steps import Ask, Done
+from mindroom.automations.threads import record_automation_thread
 from mindroom.background_tasks import create_background_task
 from mindroom.config.automations import PromptCurationAutomation
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY
@@ -249,11 +251,11 @@ class AutomationRunner:
         thread = event_id if target_thread is None else target_thread
         self._pending[event_id] = _PendingRun(chain, thread, ask, now + _RUN_FALLBACK)
         self._wake.set()
-        if ask.on_posted is not None:
+        if target_thread is None:
             try:
-                await asyncio.to_thread(ask.on_posted, event_id)
+                await asyncio.to_thread(record_automation_thread, self.runtime_paths, event_id)
             except (OSError, ValueError) as exc:
-                logger.warning("Automation could not record its prompt", agent=chain.agent_name, error=str(exc))
+                logger.warning("Automation could not record its thread", agent=chain.agent_name, error=str(exc))
         logger.info(
             "Automation prompt posted",
             agent=chain.agent_name,

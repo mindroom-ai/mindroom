@@ -159,6 +159,7 @@ Matrix sync callback
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
 | `automations/runner.py` | Built-in automation schedule loop: cron timing, the visible hook-dispatched prompts, and the steps after their runs |
 | `automations/steps.py` | The `Ask` and `Done` steps a built-in automation returns to the runner |
+| `automations/threads.py` | The record of threads built-in automations started, under `tracking/automations/`, so none is read back as a conversation |
 | `automations/prompt_curation.py` | The `prompt_curation` automation: size check over always-loaded files, the bounded prompt, and the verify that asks for a re-check |
 | `automations/memory_consolidation.py` | The `memory_consolidation` automation: changed-input agenda, per-run staging of `memory/`, proposal validation, the fresh-thread review, and batch-conflict apply with progress under `tracking/automations/` |
 | `config/automations.py` | Built-in automation settings and validation |

@@ -24,8 +24,6 @@ class Ask:
     text: str
     new_thread: bool
     then: Callable[[Config, str, bool], Ask | Done] | None = None
-    # Called off the event loop with the posted event's ID.
-    on_posted: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)

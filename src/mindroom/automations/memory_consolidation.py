@@ -18,6 +18,7 @@ import re
 import shutil
 import stat
 import threading
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -28,12 +29,11 @@ from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.automations.steps import Ask, Done
-from mindroom.constants import resolve_config_relative_path
+from mindroom.automations.threads import automation_threads
 from mindroom.logging_config import get_logger
 from mindroom.memory import refresh_agent_memory_search
 from mindroom.path_confinement import (
     open_directory_within_root,
-    open_regular_file_at,
     read_regular_file_within_root,
     write_file_within_root,
 )
@@ -50,6 +50,7 @@ logger = get_logger(__name__)
 _RUNS_DIR = ".mindroom/memory_consolidation/runs"
 _MEMORY_DIR = "memory"
 _EXPORTS_DIR = "thread_exports"
+_KNOWLEDGE_DIR = "knowledge"
 _DAILY_NOTE = re.compile(r"memory/(\d{4}-\d{2}-\d{2})\.md")
 # A workspace path memory cites, such as `knowledge/docs/setup.md` or `thread_exports/<room>/<thread>.yaml`, without
 # a trailing anchor, line number, or punctuation.
@@ -60,6 +61,8 @@ _MAX_INPUTS = 40
 _SEED_AGE = timedelta(days=7)
 _KEPT_RUNS = 30
 _MAX_FILE_BYTES = 1 << 20
+# The exporter caps a room's index.json at 8 MiB.
+_MAX_INDEX_BYTES = 8 << 20
 # Removed lines are deleted lines found nowhere in the staged files; ordinary corrections fit the absolute allowances.
 _MAX_REMOVED_FRACTION = 0.08
 _MIN_REMOVED_ALLOWANCE = 10
@@ -77,12 +80,14 @@ type _Outcome = Literal["applied", "unchanged", "incomplete", "invalid", "reject
 
 @dataclass
 class _State:
-    """Progress kept in primary storage: what was handled, what is still unapplied, and which threads are ours."""
+    """Progress kept in primary storage: what was handled and which proposals are still unapplied."""
 
     reviewed: dict[str, _Version] = field(default_factory=dict)
+    # The oldest unapplied proposal, whose changes a rejected successor may have dropped, and the newest, whose review
+    # explains the latest failure; both lead the next agenda until a run applies or needs no change.
     pending_run: str | None = None
+    latest_run: str | None = None
     notes: str | None = None
-    own_threads: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,8 @@ class _Input:
     path: str
     kind: Literal["conversation", "daily_note", "source"]
     version: _Version
+    # When its content last changed, in nanoseconds: a conversation's last message, otherwise the file's mtime.
+    changed_ns: int = 0
     # For a cited source, the path as memory spells it and the memory files that cite it.
     cited_as: str = ""
     cited_by: tuple[str, ...] = ()
@@ -121,7 +128,8 @@ class _Run:
     due: tuple[_Input, ...]
     # Every input's version at fire time, due or not.
     inputs: Mapping[str, _Version]
-    pending_run: str | None
+    # Unapplied proposals the run carries forward, oldest first.
+    carried: tuple[str, ...]
 
     @property
     def run_dir(self) -> str:
@@ -155,12 +163,12 @@ def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State | None:
             for path, version in payload["reviewed"].items()
         },
         pending_run=payload["pending_run"],
+        latest_run=payload["latest_run"],
         notes=payload["notes"],
-        own_threads=set(payload["own_threads"]),
     )
 
 
-# The review's prompt is recorded while its run may already be ending, so every state change holds this lock.
+# A run's steps and the next check never overlap for one agent, but agents share this module.
 _STATE_LOCK = threading.Lock()
 
 
@@ -175,19 +183,14 @@ def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> 
     payload = {
         "reviewed": state.reviewed,
         "pending_run": state.pending_run,
+        "latest_run": state.latest_run,
         "notes": state.notes,
-        "own_threads": sorted(state.own_threads),
     }
     write_file_within_root(
         _state_root(runtime_paths, agent_name),
         "memory_consolidation.json",
         json.dumps(payload, indent=1, sort_keys=True).encode(),
     )
-
-
-def _record_thread(runtime_paths: RuntimePaths, agent_name: str, thread_id: str) -> None:
-    """Remember a thread this automation started, so its export is never read back as a conversation."""
-    _update_state(runtime_paths, agent_name, lambda state: state.own_threads.add(thread_id))
 
 
 def _walk(directory_fd: int, prefix: str, found: dict[str, os.stat_result], rejected: list[str]) -> None:
@@ -261,16 +264,13 @@ def _read_memory_tree(root: Path, base: str) -> _Tree:
 
 
 def _read_markdown(base_fd: int, path: str) -> bytes | None:
-    """Return one Markdown file's bytes, or None when it is not Markdown, too large, or not UTF-8."""
+    """Return one Markdown file's bytes, or None when it is not Markdown or not UTF-8.
+
+    Raises ``ValueError`` for a file over the size cap or not regular, and ``FileNotFoundError`` for one gone.
+    """
     if not path.endswith(".md"):
         return None
-    parent, name = path.rsplit("/", 1)
-    with open_directory_within_root(base_fd, parent) as parent_fd:
-        descriptor = open_regular_file_at(parent_fd, name)
-    with os.fdopen(descriptor, "rb") as handle:
-        payload = handle.read(_MAX_FILE_BYTES + 1)
-    if len(payload) > _MAX_FILE_BYTES:
-        return None
+    payload = read_regular_file_within_root(base_fd, path, max_bytes=_MAX_FILE_BYTES)
     try:
         payload.decode("utf-8")
     except UnicodeDecodeError:
@@ -296,16 +296,25 @@ def _thread_id(export_path: str) -> str:
     return unquote(PurePosixPath(export_path).stem)
 
 
-def _knowledge_aliases(config: Config, runtime_paths: RuntimePaths, agent_name: str, root: Path) -> dict[str, str]:
-    """Map each `knowledge/<base_id>` link MindRoom maintains in the workspace to its workspace-relative target."""
+def _knowledge_aliases(root: Path) -> dict[str, str]:
+    """Map each entry of the workspace's `knowledge/` to the workspace-relative path it shows, reading links unfollowed.
+
+    MindRoom links each workspace-local knowledge base there; a link that leaves the workspace is skipped.
+    """
     workspace = root.resolve()
+    knowledge_root = workspace / _KNOWLEDGE_DIR
     aliases: dict[str, str] = {}
-    for base_id in config.resolve_entity(agent_name).knowledge_base_ids:
-        if config.get_private_knowledge_base_agent(base_id) is not None:
-            continue
-        path = resolve_config_relative_path(config.get_knowledge_base_config(base_id).path, runtime_paths).resolve()
-        if path.is_relative_to(workspace) and path != workspace:
-            aliases[base_id] = path.relative_to(workspace).as_posix()
+    try:
+        with open_directory_within_root(root, _KNOWLEDGE_DIR) as knowledge_fd, os.scandir(knowledge_fd) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    aliases[entry.name] = f"{_KNOWLEDGE_DIR}/{entry.name}"
+                elif entry.is_symlink():
+                    target = Path(os.path.normpath(knowledge_root / os.readlink(entry.name, dir_fd=knowledge_fd)))
+                    if target.is_relative_to(workspace) and target != workspace:
+                        aliases[entry.name] = target.relative_to(workspace).as_posix()
+    except FileNotFoundError:
+        pass
     return aliases
 
 
@@ -329,52 +338,78 @@ def _citations(snapshot: Mapping[str, bytes]) -> dict[str, list[str]]:
     return {spelled: sorted(paths) for spelled, paths in cited.items()}
 
 
+def _last_messages(root: Path, exports: Mapping[str, os.stat_result]) -> dict[str, int]:
+    """Return each indexed thread export's last message time in nanoseconds, from its room's index.json.
+
+    An export written today can hold a conversation that ended months ago, so its mtime says nothing about its age.
+    """
+    times: dict[str, int] = {}
+    for index_path in (path for path in exports if path.endswith("/index.json")):
+        try:
+            index = json.loads(read_regular_file_within_root(root, index_path, max_bytes=_MAX_INDEX_BYTES))
+            entries = index["threads"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        room = index_path.rsplit("/", 1)[0]
+        for entry in entries if isinstance(entries, list) else ():
+            if isinstance(entry, dict) and isinstance(name := entry.get("file"), str):
+                timestamp = entry.get("last_timestamp")
+                if isinstance(timestamp, int) and not isinstance(timestamp, bool):
+                    times[f"{room}/{name}"] = timestamp * 1_000_000
+    return times
+
+
 def _collect_inputs(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
     root: Path,
     snapshot: Mapping[str, bytes],
     versions: Mapping[str, tuple[int, int]],
     today: str,
-    own_threads: set[str],
+    automation_thread_ids: set[str],
 ) -> dict[str, _Input]:
     inputs: dict[str, _Input] = {}
-    for path, status in sorted(_regular_files(root, _EXPORTS_DIR).items()):
-        if path.endswith(".yaml") and _thread_id(path) not in own_threads:
-            inputs[path] = _Input(path, "conversation", (status.st_mtime_ns, status.st_size))
+    exports = _regular_files(root, _EXPORTS_DIR)
+    last_messages = _last_messages(root, exports)
+    for path, status in sorted(exports.items()):
+        if path.endswith(".yaml") and _thread_id(path) not in automation_thread_ids:
+            version = (status.st_mtime_ns, status.st_size)
+            inputs[path] = _Input(path, "conversation", version, last_messages.get(path, status.st_mtime_ns))
     for path, version in versions.items():
         if path in snapshot and (match := _DAILY_NOTE.fullmatch(path)) and match.group(1) < today:
-            inputs[path] = _Input(path, "daily_note", version)
-    aliases = _knowledge_aliases(config, runtime_paths, agent_name, root)
+            inputs[path] = _Input(path, "daily_note", version, version[0])
+    aliases = _knowledge_aliases(root)
     for spelled, cited_by in sorted(_citations(snapshot).items()):
         path = _canonical_citation(spelled, aliases)
-        if path is None or path in inputs or (path.startswith(f"{_EXPORTS_DIR}/") and _thread_id(path) in own_threads):
+        if (
+            path is None
+            or path in inputs
+            or (path.startswith(f"{_EXPORTS_DIR}/") and _thread_id(path) in automation_thread_ids)
+        ):
             continue
         if (version := _version(root, path)) is not None:
-            inputs[path] = _Input(path, "source", version, cited_as=spelled, cited_by=tuple(cited_by))
+            changed_ns = 0 if version == _MISSING else version[0]
+            inputs[path] = _Input(path, "source", version, changed_ns, cited_as=spelled, cited_by=tuple(cited_by))
     return inputs
 
 
 def _seeded(inputs: Iterable[_Input], now: datetime) -> dict[str, _Version]:
-    """Treat every existing input older than the seed age as already handled."""
+    """Treat every existing input whose content is older than the seed age as already handled."""
     cutoff = (now - _SEED_AGE).timestamp() * 1e9
-    return {item.path: item.version for item in inputs if item.version != _MISSING and item.version[0] < cutoff}
+    return {item.path: item.version for item in inputs if item.version != _MISSING and item.changed_ns < cutoff}
 
 
 def _order(item: _Input) -> tuple[int, int, str]:
     # Dead citations have no time, so they come first; everything else oldest first.
-    return (0, 0, item.path) if item.version == _MISSING else (1, item.version[0], item.path)
+    return (0, 0, item.path) if item.version == _MISSING else (1, item.changed_ns, item.path)
 
 
-def _prune_runs(root: Path, keep: str | None) -> None:
-    """Keep the newest run directories and the unapplied one; staging goes with the rest."""
+def _prune_runs(root: Path, keep: tuple[str, ...]) -> None:
+    """Keep the newest run directories and the unapplied ones; staging goes with the rest."""
     try:
         with open_directory_within_root(root, _RUNS_DIR) as runs_fd:
             with os.scandir(runs_fd) as entries:
                 names = sorted(entry.name for entry in entries if entry.is_dir(follow_symlinks=False))
             for name in names[:-_KEPT_RUNS]:
-                if name != keep:
+                if name not in keep:
                     shutil.rmtree(name, dir_fd=runs_fd)
     except FileNotFoundError:
         return
@@ -382,13 +417,14 @@ def _prune_runs(root: Path, keep: str | None) -> None:
 
 def _agenda(run: _Run, state: _State, waiting: int) -> str:
     lines = ["# Memory consolidation agenda", "", f"Run `{run.run_id}`; paths are relative to your workspace."]
-    if run.pending_run is not None:
+    if run.carried:
         lines += [
             "",
-            "## 0. Previous proposal",
+            "## 0. Previous proposals",
             "",
-            f"The proposal in `{_RUNS_DIR}/{run.pending_run}/` was never applied; read its `proposal.patch`, "
-            "`report.md`, and `verdict.md`.",
+            "These proposals were never applied; read each one's `proposal.patch`, `report.md`, and `verdict.md`:",
+            "",
+            *(f"- `{_RUNS_DIR}/{run_id}/`" for run_id in run.carried),
         ]
     if state.notes:
         lines += ["", "## Notes from the last review", "", state.notes]
@@ -425,7 +461,8 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
     # Automations only run for shared agents, whose file memory is the workspace root.
     runtime = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=None)
     root = runtime.file_memory_root
-    if root is None:
+    # A workspace appears with the agent's first turn.
+    if root is None or not root.is_dir():
         return None
     now = datetime.now(UTC)
     today = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
@@ -436,12 +473,13 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
     state = _load_state(runtime_paths, agent_name)
     first_run = state is None
     state = state or _State()
-    inputs = _collect_inputs(config, runtime_paths, agent_name, root, snapshot, tree.versions, today, state.own_threads)
+    inputs = _collect_inputs(root, snapshot, tree.versions, today, automation_threads(runtime_paths))
     if first_run:
         state.reviewed = _seeded(inputs.values(), now)
         _update_state(runtime_paths, agent_name, lambda saved: saved.reviewed.update(state.reviewed))
     due = sorted((item for item in inputs.values() if state.reviewed.get(item.path) != item.version), key=_order)
-    if not due and state.pending_run is None:
+    carried = tuple(dict.fromkeys(run_id for run_id in (state.pending_run, state.latest_run) if run_id is not None))
+    if not due and not carried:
         return None
     run = _Run(
         agent_name=agent_name,
@@ -452,9 +490,9 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
         excluded=excluded,
         due=tuple(due[:_MAX_INPUTS]),
         inputs={path: item.version for path, item in inputs.items()},
-        pending_run=state.pending_run,
+        carried=carried,
     )
-    _prune_runs(root, keep=state.pending_run)
+    _prune_runs(root, keep=carried)
     write_file_within_root(root, f"{run.run_dir}/agenda.md", _agenda(run, state, len(due) - len(run.due)).encode())
     with open_directory_within_root(root, f"{run.run_dir}/staging/{_MEMORY_DIR}", create=True):
         pass
@@ -471,7 +509,6 @@ def check_consolidation(config: Config, runtime_paths: RuntimePaths, agent_name:
         ),
         new_thread=True,
         then=partial(_after_dream, run),
-        on_posted=partial(_record_thread, runtime_paths, agent_name),
     )
 
 
@@ -503,8 +540,17 @@ class _Deletion:
 
 
 def _deletions(run: _Run, staged: Mapping[str, bytes]) -> list[_Deletion]:
-    """List every deleted non-blank line, kept when it appears inside any staged line."""
-    staged_text = "\n".join(payload.decode() for payload in staged.values())
+    """List every deleted non-blank line, kept when a staged line is it or starts with it.
+
+    That covers a line moved to another file, a duplicate removed, and a line marked superseded by appending to it.
+    """
+    staged_lines = sorted({line.strip() for payload in staged.values() for line in payload.decode().splitlines()})
+
+    def kept(text: str) -> bool:
+        # Lines that start with ``text`` sort right at or after it.
+        index = bisect_left(staged_lines, text)
+        return index < len(staged_lines) and staged_lines[index].startswith(text)
+
     deletions: list[_Deletion] = []
     for path, before in run.snapshot.items():
         old = before.decode().splitlines()
@@ -523,7 +569,7 @@ def _deletions(run: _Run, staged: Mapping[str, bytes]) -> list[_Deletion]:
                             path=path,
                             line=index + 1,
                             text=old[index],
-                            kept=text in staged_text,
+                            kept=kept(text),
                             before=old[index - 1] if index > 0 else None,
                             after=old[index + 1] if index + 1 < len(old) else None,
                         ),
@@ -635,7 +681,6 @@ def _after_dream(
         ),
         new_thread=True,
         then=partial(_after_verify, run, proposal),
-        on_posted=partial(_record_thread, run.runtime_paths, run.agent_name),
     )
 
 
@@ -721,9 +766,10 @@ def _publish(root: Path, path: str, payload: bytes) -> None:
 
 
 def _keep_pending(state: _State, run: _Run) -> None:
-    """Make the run's proposal the one the next run carries, unless an older one is still unresolved."""
+    """Carry the run's proposal into the next agenda as the newest unapplied one, beside the oldest."""
     if state.pending_run is None:
         state.pending_run = run.run_id
+    state.latest_run = run.run_id
 
 
 def _end(
@@ -753,6 +799,7 @@ def _end(
                     reviewed[path] = version
             state.reviewed = reviewed
             state.pending_run = None
+            state.latest_run = None
             state.notes = notes
         elif carry:
             _keep_pending(state, run)

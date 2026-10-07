@@ -334,11 +334,11 @@ Memory keeps claims that later conversations correct and that their sources stop
 
 1. The check lists inputs that changed since a run last handled them: [thread exports](https://docs.mindroom.chat/thread-exports/) in the workspace, daily notes from before today, and the `knowledge/` and `thread_exports/` paths that `memory/` files cite, including cited files that no longer exist; when nothing changed, it posts nothing.
 2. The agent works through an agenda of at most 40 inputs, oldest first, in a copy of `memory/`: it reconciles memory with the new evidence, records whether each changed source still supports the claims that cite it, and removes duplicates, giving each fact a source path and date and recording conflicting sources with both versions.
-3. MindRoom checks the copy and asks the agent once to re-check when anything but Markdown under `memory/` changed, when today's daily note or a file in `context_files` changed, or when more than the larger of 10 lines and 8% of memory, or more than half of one file, was deleted without the lines appearing anywhere else.
+3. MindRoom checks the copy and asks the agent once to re-check when anything but Markdown under `memory/` changed, when today's daily note or a file in `context_files` changed, or when more than the larger of 10 lines and 8% of memory, or more than half of one file, was deleted without the lines surviving, whole or with text appended, anywhere else.
 4. A second run, in a thread of its own, reviews the proposed patch against the cited sources and ends its verdict with `APPROVE`, `APPROVE-WITH-NOTES` (applied, with notes for the next run), or `REJECT`.
 5. MindRoom applies an approved patch when none of the files the run could change changed since it started, refreshes semantic memory search, and marks both threads resolved.
 
-A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due, and the next run starts by carrying forward a proposal that was never applied.
+A rejected, conflicting, or unfinished run applies nothing and leaves its inputs due, and the next run starts by carrying forward the proposals that were never applied.
 `MEMORY.md` and context files never change; the agent suggests changes to them in its report.
 When first enabled, it reviews only inputs from the last seven days, so older conversations and notes are never reconciled.
 Each run keeps its agenda, report, patch, list of deleted lines, and verdict in `.mindroom/memory_consolidation/runs/<run>/` in the workspace, the newest 30 runs at least, so an applied patch can be undone with `git apply -R` from the workspace root.
@@ -349,4 +349,5 @@ Each run keeps its agenda, report, patch, list of deleted lines, and verdict in 
 | `room` | first configured room | Where both prompts are posted |
 | `model` | the agent's model | A key of `models` to run both prompts with |
 
-`memory_consolidation` needs `memory_backend: file`, and its prompt templates are overridable as `MEMORY_CONSOLIDATION_DREAM_TEMPLATE`, `MEMORY_CONSOLIDATION_RECHECK_TEMPLATE`, and `MEMORY_CONSOLIDATION_VERIFY_TEMPLATE`.
+`memory_consolidation` needs `memory_backend: file` and a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+Its prompt templates are overridable as `MEMORY_CONSOLIDATION_DREAM_TEMPLATE`, `MEMORY_CONSOLIDATION_RECHECK_TEMPLATE`, and `MEMORY_CONSOLIDATION_VERIFY_TEMPLATE`.

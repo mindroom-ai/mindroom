@@ -15,6 +15,7 @@ import pytest
 
 from mindroom.automations.memory_consolidation import check_consolidation
 from mindroom.automations.steps import Ask, Done
+from mindroom.automations.threads import record_automation_thread
 from mindroom.config.agent import AgentConfig
 from mindroom.config.automations import MemoryConsolidationAutomation
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -156,6 +157,28 @@ def test_a_new_agent_with_only_old_files_asks_for_nothing(tmp_path: Path) -> Non
     assert workspace.check() is not None
 
 
+def test_a_freshly_exported_old_conversation_counts_by_its_last_message(tmp_path: Path) -> None:
+    """Turning on thread exports writes every old thread today; the room index's last message time decides its age."""
+    workspace = _workspace(tmp_path)
+    old = int((datetime.now(UTC) - timedelta(days=90)).timestamp() * 1000)
+    recent = int(datetime.now(UTC).timestamp() * 1000)
+    workspace.write("thread_exports/room/old.yaml", "messages: [long ago]\n")
+    workspace.write("thread_exports/room/new.yaml", "messages: [today]\n")
+    workspace.write(
+        "thread_exports/room/index.json",
+        json.dumps(
+            {"threads": [{"file": "new.yaml", "last_timestamp": recent}, {"file": "old.yaml", "last_timestamp": old}]},
+        ),
+    )
+
+    _started(workspace)
+
+    agenda = workspace.agenda()
+    assert "- `thread_exports/room/new.yaml`" in agenda
+    assert "old.yaml" not in agenda
+    assert "thread_exports/room/old.yaml" in workspace.state()["reviewed"]
+
+
 def test_recent_conversations_and_daily_notes_are_on_the_agenda_and_today_is_not(tmp_path: Path) -> None:
     """New exports and past daily notes are reviewed; today's note is still being written, so it is neither input nor staged."""
     workspace = _workspace(tmp_path, context_files=["memory/profile.md"])
@@ -280,17 +303,47 @@ def test_an_entry_that_vanishes_during_the_scan_is_skipped(tmp_path: Path) -> No
     assert ask.new_thread
 
 
-def test_threads_the_automation_started_are_never_read_back(tmp_path: Path) -> None:
-    """The dream and review threads are recorded as they are posted, so their exports are not conversations."""
+def test_threads_any_automation_started_are_never_read_back(tmp_path: Path) -> None:
+    """Threads the runner recorded for any built-in, such as a prompt_curation thread, are not conversations or sources."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
-    assert ask.on_posted is not None
-    ask.on_posted("$dream:example.test")
     workspace.dream(ask)
+    record_automation_thread(workspace.paths, "$curation:example.test")
+    export = f"thread_exports/room/{quote('$curation:example.test', safe='')}.yaml"
+    workspace.write(export, "messages: [maintenance]\n")
+    workspace.write("memory/maintenance.md", f"- Condensed in {export}.\n", age=timedelta(days=30))
 
-    workspace.write(f"thread_exports/room/{quote('$dream:example.test', safe='')}.yaml", "messages: [maintenance]\n")
     assert workspace.check() is None
+
+
+def test_an_agent_without_a_workspace_yet_is_skipped_quietly(tmp_path: Path) -> None:
+    """A workspace appears with the agent's first turn; until then there is nothing to reconcile and no warning."""
+    workspace = _Workspace(tmp_path)
+    workspace.root.rmdir()
+
+    assert workspace.check() is None
+
+
+def test_old_runs_are_pruned_but_unapplied_proposals_are_kept(tmp_path: Path) -> None:
+    """The newest 30 run directories stay for undo, plus every proposal the next run still carries."""
+    workspace = _workspace(tmp_path)
+    assert workspace.check() is None
+    state_path = tmp_path / "tracking/automations/mind/memory_consolidation.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["pending_run"] = "20260101T000000000000Z"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    runs = workspace.root / ".mindroom/memory_consolidation/runs"
+    for index in range(35):
+        (runs / f"20260101T0000{index:02}000000Z" / "staging").mkdir(parents=True)
+
+    workspace.check()
+
+    names = sorted(path.name for path in runs.iterdir())
+    # The pending run, the newest 30 older ones, and the run that just started.
+    assert names[0] == "20260101T000000000000Z"
+    assert names[1] == "20260101T000005000000Z"
+    assert len(names) == 32
 
 
 # Validate
@@ -341,6 +394,20 @@ def test_moves_dedupes_and_annotations_are_kept_lines(tmp_path: Path) -> None:
     patch_text = (workspace.run_dir() / "proposal.patch").read_text(encoding="utf-8")
     assert f"--- a/{YESTERDAY}" in patch_text
     assert "+- Sam moved to Utrecht." in patch_text
+
+
+def test_a_short_line_found_only_inside_another_line_is_removed(tmp_path: Path) -> None:
+    """Deleting `- Done.` is not hidden by an unrelated staged line that merely contains those characters."""
+    workspace = _workspace(tmp_path)
+    workspace.write("memory/tasks.md", "- Done.\n- Ship the release.\n", age=timedelta(days=30))
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/tasks.md", "- Ship the release. Status: - Done. elsewhere\n")
+
+    review = workspace.dream(ask)
+
+    assert isinstance(review, Ask)
+    assert "(2 deleted lines, 1 of them found nowhere else in the proposal)" in review.text
 
 
 def test_an_ordinary_correction_fits_the_absolute_allowance_in_a_small_corpus(tmp_path: Path) -> None:
@@ -601,7 +668,7 @@ def test_anything_but_an_approval_applies_nothing_and_carries_the_proposal(
 
 
 def test_an_unresolved_proposal_stays_pending_across_rejected_successors_until_one_applies(tmp_path: Path) -> None:
-    """Job 0 keeps naming the oldest unapplied proposal, even with no new input, until a later run applies."""
+    """Job 0 names the oldest and the newest unapplied proposals, even with no new input, until a later run applies."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
@@ -610,16 +677,20 @@ def test_an_unresolved_proposal_stays_pending_across_rejected_successors_until_o
     workspace.review(workspace.dream(ask), "VERDICT: REJECT — wrong source")
 
     ask = _started(workspace)
-    assert f"The proposal in `.mindroom/memory_consolidation/runs/{first_run}/` was never applied" in workspace.agenda()
+    second_run = workspace.run_dir().name
+    assert f"- `.mindroom/memory_consolidation/runs/{first_run}/`" in workspace.agenda()
     workspace.stage("memory/projects.md", PROJECTS + "- Second attempt.\n")
     workspace.review(workspace.dream(ask), "VERDICT: REJECT — still wrong")
-    assert workspace.state()["pending_run"] == first_run
+    assert (workspace.state()["pending_run"], workspace.state()["latest_run"]) == (first_run, second_run)
 
     ask = _started(workspace)
+    agenda = workspace.agenda()
+    assert f"- `.mindroom/memory_consolidation/runs/{first_run}/`" in agenda
+    assert f"- `.mindroom/memory_consolidation/runs/{second_run}/`" in agenda
     workspace.stage("memory/projects.md", PROJECTS + "- Third attempt.\n")
     workspace.review(workspace.dream(ask), "VERDICT: APPROVE")
 
-    assert workspace.state()["pending_run"] is None
+    assert (workspace.state()["pending_run"], workspace.state()["latest_run"]) == (None, None)
     assert workspace.check() is None
 
 

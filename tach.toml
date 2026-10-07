@@ -7975,6 +7975,11 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.automations.threads"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.automations.memory_consolidation", "mindroom.automations.runner"]
+
+[[modules]]
 path = "mindroom.automations.steps"
 depends_on = []
 visibility = ["mindroom.automations.memory_consolidation", "mindroom.automations.prompt_curation", "mindroom.automations.runner"]
@@ -7996,7 +8001,7 @@ path = "mindroom.automations.memory_consolidation"
 depends_on = [
     "mindroom.atomic_file",
     "mindroom.automations.steps",
-    "mindroom.constants",
+    "mindroom.automations.threads",
     "mindroom.logging_config",
     "mindroom.memory",
     "mindroom.path_confinement",
@@ -8010,6 +8015,7 @@ depends_on = [
     "mindroom.automations.memory_consolidation",
     "mindroom.automations.prompt_curation",
     "mindroom.automations.steps",
+    "mindroom.automations.threads",
     "mindroom.background_tasks",
     "mindroom.config.automations",
     "mindroom.constants",
