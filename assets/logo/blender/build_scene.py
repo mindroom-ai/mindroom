@@ -15,7 +15,6 @@ shows consistent geometry.
 import argparse
 import math
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
 import bmesh
@@ -74,11 +73,6 @@ FOOT_WALL = (512.0 + A * (TOWER_Y[1] - WING_X[0]) - 387.0) / (2 * A)
 CUBE_BEAM = lift(382.5, 403.0, x=1.0).y  # Cube pane corner "a" on the left face.
 CUBE_CENTER = Vector((0.5, 0.5, H / 2))
 
-# Sliding a rigid part along the hero camera's line of sight leaves the SVG view unchanged.
-# The drawing alone puts the towers a full unit behind the cube; sliding each tower forward with
-# its foot keeps the M together from other angles, and the tower still hovers above its foot as drawn.
-TOWARD_CAMERA = Vector((math.cos(PHI) / math.sqrt(2), math.cos(PHI) / math.sqrt(2), math.sin(PHI)))
-TOWER_SLIDE = 0.9
 HOLLOW = True  # The SVG draws hollow glass rooms; a solid-crystal look can turn this off.
 GLASS_BEVEL = (0.012, 3)  # Width and segments of the rounded glass edges.
 
@@ -121,33 +115,13 @@ def add_prism(
     profile: list[tuple[float, float]],
     x0: float,
     x1: float,
-    split: tuple[int, int] | None = None,
 ) -> None:
-    """Extrude a closed (y, z) profile along x, optionally splitting both caps between two profile points."""
+    """Extrude a closed (y, z) profile along x."""
     near = [bm.verts.new((x0, y, z)) for y, z in profile]
     far = [bm.verts.new((x1, y, z)) for y, z in profile]
     faces = [bm.faces.new(near), bm.faces.new(far)]
     faces += [bm.faces.new((near[i], near[i - 1], far[i - 1], far[i])) for i in range(len(profile))]
     bmesh.ops.recalc_face_normals(bm, faces=faces)
-    if split:
-        for verts in (near, far):
-            bmesh.ops.connect_verts(bm, verts=[verts[split[0]], verts[split[1]]])
-
-
-def slide(bm: bmesh.types.BMesh, amount: Callable[[Vector], float]) -> None:
-    """Move each vertex toward the hero camera by `amount(position)`."""
-    for vert in bm.verts:
-        vert.co += amount(vert.co) * TOWARD_CAMERA
-
-
-def bridge_slide(position: Vector) -> float:
-    """The tower slides rigidly; its bridge shears back to zero where it meets the cube."""
-    return TOWER_SLIDE * min(max(position.y / TOWER_Y[1], 0.0), 1.0)
-
-
-def floor_z() -> float:
-    """Height of the feet's undersides after sliding."""
-    return FOOT_Z[0] + TOWER_SLIDE * math.sin(PHI)
 
 
 def swap_xy(bm: bmesh.types.BMesh) -> None:
@@ -216,28 +190,24 @@ def build_wing(
     y0, y1 = TOWER_Y
     bm = bmesh.new()
     # Tower and bridge share the roof plane in the drawing; the bridge ends at the cube.
-    # The cap split at the tower face keeps every face planar once the bridge shears.
     profile = [
         (y0, TOWER_BOTTOM),
         (y1, TOWER_BOTTOM),
         (y1, H - BRIDGE_DEPTH),
         (0.0, H - BRIDGE_DEPTH),
         (0.0, H),
-        (y1, H),
         (y0, H),
     ]
-    add_prism(bm, profile, x0, x1, split=(2, 5))
+    add_prism(bm, profile, x0, x1)
     t = TOWER_WALL
     if HOLLOW:
         add_box(bm, (x0 + t, y0 + t, TOWER_BOTTOM + t), (x1 - t, y1 - t, H - t), inward=True)
-    slide(bm, bridge_slide)
     if mirror:
         swap_xy(bm)
     upper = mesh_object(f"{name}-tower", bm, materials["glass"], collection)
     bm = bmesh.new()
-    well = [(WELL_Y, H - 2), (0.0, H - 2), (0.5, H - 2), (0.5, H + 1), (0.0, H + 1), (WELL_Y, H + 1)]
-    add_prism(bm, well, *WELL_X, split=(1, 4))
-    slide(bm, bridge_slide)
+    well = [(WELL_Y, H - 2), (0.5, H - 2), (0.5, H + 1), (WELL_Y, H + 1)]
+    add_prism(bm, well, *WELL_X)
     if mirror:
         swap_xy(bm)
     subtract(upper, cutter(f"{name}-well", bm, cutters))
@@ -248,7 +218,6 @@ def build_wing(
     add_box(bm, (x0, y0, FOOT_Z[0]), (x1, y1, FOOT_Z[1]))
     if HOLLOW:
         add_box(bm, (x0 + t, y0 + t, FOOT_Z[0] + t), (x1 - t, y1 - t, FOOT_Z[1] - t), inward=True)
-    slide(bm, lambda _position: TOWER_SLIDE)
     if mirror:
         swap_xy(bm)
     foot = mesh_object(f"{name}-foot", bm, materials["glass"], collection)
@@ -727,7 +696,7 @@ def build_studio_set(materials: dict[str, bpy.types.Material]) -> None:
     camera = add_camera("studio-camera", studio)
     camera.data.lens = 85.0
     camera.data.clip_end = 200.0
-    target = Vector((0.3, 0.3, (floor_z() + H + TOWER_SLIDE * math.sin(PHI)) / 2))
+    target = Vector((0.3, 0.3, (FOOT_Z[0] + H) / 2))
     azimuth, elevation = math.radians(60.0), math.radians(22.0)
     view = Vector(
         (math.cos(azimuth) * math.cos(elevation), math.sin(azimuth) * math.cos(elevation), math.sin(elevation)),
@@ -735,7 +704,7 @@ def build_studio_set(materials: dict[str, bpy.types.Material]) -> None:
     camera.location = target + 11.0 * view
     camera.rotation_euler = (-view).to_track_quat("-Z", "Y").to_euler()
     bm = bmesh.new()
-    add_box(bm, (-30.0, -30.0, floor_z() - 0.01), (30.0, 30.0, floor_z()))
+    add_box(bm, (-30.0, -30.0, FOOT_Z[0] - 0.01), (30.0, 30.0, FOOT_Z[0]))
     mesh_object("studio-floor", bm, materials["floor"], studio)
 
 

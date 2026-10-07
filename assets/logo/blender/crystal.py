@@ -31,9 +31,7 @@ import build_scene as logo  # noqa: E402
 
 FRAMES = 120  # Four seconds at 30 fps.
 LOCK_IN_HOLD = 30  # Frames held on the finished logo after the camera locks in.
-# The lock-in keeps the drawing's full depth so the parts visibly gather;
-# the other shots use the compact model so floor reflections stay close to the letter.
-EFFECTS = {"still": 0.9, "lock-in": 0.0, "ignition": 0.9, "hyperspin": 0.9}
+EFFECTS = ("still", "lock-in", "ignition", "hyperspin")
 HDRI = "studio_small_09"  # CC0 studio lighting from Poly Haven, used for reflections.
 HDRI_URL = f"https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/{HDRI}_2k.hdr"
 HDRI_CACHE = Path.home() / ".cache" / "mindroom-logo" / "hdri" / f"{HDRI}_2k.hdr"
@@ -330,13 +328,12 @@ def build_tesseract(collection: bpy.types.Collection) -> None:
 
 
 def leg_boxes() -> list[tuple[Vector, Vector]]:
-    """Lowest and highest corners of the towers and feet, after the slide and the mirroring."""
+    """Lowest and highest corners of the towers and feet, including the mirrored wing."""
     x0, x1 = logo.WING_X
     y0, y1 = logo.TOWER_Y
-    shift = logo.TOWER_SLIDE * logo.TOWARD_CAMERA
     boxes = []
     for bottom, top in ((logo.TOWER_BOTTOM, logo.H), logo.FOOT_Z):
-        lo, hi = Vector((x0, y0, bottom)) + shift, Vector((x1, y1, top)) + shift
+        lo, hi = Vector((x0, y0, bottom)), Vector((x1, y1, top))
         boxes.append((lo, hi))
         boxes.append((Vector((lo.y, lo.x, lo.z)), Vector((hi.y, hi.x, hi.z))))  # The mirrored wing.
     return boxes
@@ -430,12 +427,11 @@ def crystallize(scene: bpy.types.Scene, *, frozen: bool) -> None:
 
 def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
     """Mirror floor, a high back light, a cool pool behind the letter, and rim strips."""
-    floor_z = logo.floor_z()
+    floor_z = logo.FOOT_Z[0]
     bm = bmesh.new()
     logo.add_box(bm, (-30.0, -30.0, floor_z - 0.02), (30.0, 30.0, floor_z))
     floor = logo.mesh_object("mirror-floor", bm, mirror_floor(), collection)
-    toward = logo.TOWARD_CAMERA
-    level = Vector((toward.x, toward.y, 0.0)).normalized()
+    level = Vector((1.0, 1.0, 0.0)).normalized()  # Toward the hero camera, along the floor.
     right = Vector((-1.0, 1.0, 0.0)).normalized()
     center = Vector((0.3, 0.3, (floor_z + logo.H) / 2))
     rig = {}
@@ -472,9 +468,8 @@ def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
     return rig
 
 
-def build(slide: float, *, frozen: bool = False) -> dict[str, bpy.types.Object]:
-    """Build the model with the given tower slide and stage it, in clear crystal or frosted ice."""
-    logo.TOWER_SLIDE = slide
+def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
+    """Build the model and stage it, in clear crystal or frosted ice."""
     logo.HOLLOW = False
     logo.GLASS_BEVEL = (0.04, 6)
     logo.CUBE_BEAM = 0.11  # Slimmer beams open the frame enough to see the inner cube.
@@ -557,7 +552,7 @@ def hyperspin(rig: dict[str, bpy.types.Object], frame: int) -> None:
 
 def render(effect: str, output_dir: Path, resolution: int, samples: int, *, frozen: bool = False) -> None:
     """Build and render one effect: a still PNG, or numbered frames in a folder."""
-    rig = build(EFFECTS[effect], frozen=frozen)
+    rig = build(frozen=frozen)
     scene = bpy.context.scene
     scene.render.resolution_x = scene.render.resolution_y = resolution
     scene.cycles.samples = samples
@@ -578,7 +573,7 @@ def main() -> None:
     """Parse arguments after Blender's `--`, then render each requested effect."""
     argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--render", nargs="+", default=["still"], choices=list(EFFECTS))
+    parser.add_argument("--render", nargs="+", default=["still"], choices=EFFECTS)
     parser.add_argument("--resolution", type=int, default=1080)
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--output-dir", type=Path, default=HERE)

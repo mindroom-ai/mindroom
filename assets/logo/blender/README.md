@@ -4,7 +4,7 @@
 
 The SVG logo is an orthographic drawing of a real object, so this directory rebuilds that object in Blender.
 `build_scene.py` lifts the named corners from [`../artwork.py`](../artwork.py) back into 3D, saves `mindroom-logo.blend`, and renders it.
-From the hero camera the model reproduces the SVG silhouette; from other front-facing angles it still reads as an M.
+From the hero camera the model reproduces the SVG silhouette; from other angles its parts drift apart, because the M forms from that one viewpoint only.
 
 | File | Purpose |
 | --- | --- |
@@ -73,7 +73,7 @@ The look rests on a few choices:
 The tesseract is computed rather than modeled: the 16 corners of a 4D cube are rotated in the x-w plane and projected from a 4D viewpoint at distance 4, which draws the far cell at 3/5 the size of the near one.
 At angle 0 the near cell matches the navy frame and the far cell is the glowing inner cube.
 
-- **Lock-in** keeps the drawing's full depth (`TOWER_SLIDE = 0`), so the parts start visibly apart.
+- **Lock-in** starts low and off to the side, where the parts are visibly apart.
   A dolly zoom lengthens the lens toward orthographic while the camera swings into the logo's view, and the lights and HDRI turn with the camera.
 - **Ignition** lights a spark at the center, traces the inner cube's edges, grows the struts outward, fills in the light, and finally wakes the glow in the legs.
 - **Hyperspin** turns the tesseract once in 4D; the gold inner cube grows through the frame while the outer cell shrinks inward, and the loop is seamless.
@@ -93,19 +93,12 @@ The drawing's details turn out to be real geometry:
 
 The right wing mirrors the left across the vertical plane through the cube's front and back edges.
 
-## Keeping the M together in 3D
+## A single-viewpoint M
 
-Taken literally, the drawing places both towers a full unit behind the cube, with each lower block hovering below its tower.
-The M then exists only from the logo's angle: elsewhere the parts drift apart.
-
-An orthographic camera cannot see movement along its line of sight, so any rigid part can slide toward or away from it without changing the SVG view.
-`TOWER_SLIDE` moves each tower 0.9 units toward the camera, which raises it and brings it close behind the cube.
-Its bridge shears from that offset back to zero at the cube, so the flat bridges become the diagonal arms of the M.
-Each lower block slides with its tower, so the tower keeps hovering just above it, as drawn.
-The strip the SVG paints as the block's cap is the block's top, seen through that gap.
-
-The hero render is unchanged by these slides, while front and three-quarter views keep the letter's legs, arms, and center together.
-The back of the model still does not read as an M, so the animation sways instead of turning fully.
+Taken literally, the drawing places both towers a full unit behind the cube at its height, each hovering just above its lower block.
+The strip the SVG paints as a block's cap is the block's top, seen through that gap.
+The model keeps that layout, so the M exists only from the logo's angle and the parts drift apart elsewhere.
+The lock-in effect turns that into a reveal, and the sway loop stays within ±30° of the hero pose.
 
 ## Look development
 
