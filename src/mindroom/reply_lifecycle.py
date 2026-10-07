@@ -992,11 +992,15 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
 
 
 def _terminal_write_failed(reply: Reply, span: Span, *, first_create: bool, sequence: int, now_ns: int) -> Transition:
-    """A span's terminal row failed for good after the span ended; its outcome stays.
-
-    A later span claims the reply only after this row resolved, unless an
-    earlier release queued both: the later write then decides the reply.
-    """
+    """A span's terminal row failed for good after the span ended; its outcome stays."""
+    # LEGACY_COMPAT: Two writes of one reply an earlier release queued.
+    # Legacy format: reply classification adopted several owed FINAL rows of one reply, each on its own span, so a row
+    # whose span is not the reply's last can be refused; at runtime a later span claims a reply only after its earlier
+    # rows resolved.
+    # Last legacy release: v2026.10.201; replacement: the unreleased durable reply messages queue one reply's writes
+    # in order and defer a claim until they resolve.
+    # Handling: the later write decides the reply, which the refusal leaves unchanged.
+    # Coverage: tests/test_legacy_reply_messages.py::test_an_earlier_queued_edit_answer_refused_for_good_leaves_the_later_one_deciding.
     if span.span_id != reply.last_span_id:
         return _unchanged(Outcome.DUPLICATE, reply)
     if first_create:

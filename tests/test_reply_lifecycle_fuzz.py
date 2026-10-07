@@ -522,6 +522,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.rows.pop(0)
         reply = self.model.reply
         assert reply is not None
+        # A later span claims the reply only after its rows resolved, so a refused FINAL is the last span's.
+        assert row.intent.stage is not WriteStage.FINAL or span.span_id == reply.last_span_id, (row, reply)
         restorable = (
             row.intent.stage is WriteStage.FINAL
             and span.kind is SpanKind.REGENERATION
