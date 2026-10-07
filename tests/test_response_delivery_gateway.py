@@ -3726,7 +3726,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         assert stored.completed, "a delivered turn came back unfinished"
 
 
-def test_a_published_body_is_remembered_until_a_later_one_is_written_ahead() -> None:
+async def test_a_published_body_is_remembered_until_a_later_one_is_written_ahead() -> None:
     """However many newer bodies arrive while one edit is formatted, that edit still finds what it shows."""
     shows = {f"body-{index}": Presentation(placeholder=f"shown-{index}") for index in range(12)}
     published = dict(shows)
@@ -3739,7 +3739,7 @@ def test_a_published_body_is_remembered_until_a_later_one_is_written_ahead() -> 
 
 
 @pytest.mark.parametrize("show_tool_calls", [True, False])
-def test_a_whole_reply_write_sends_its_trace_only_when_tool_calls_show(show_tool_calls: bool) -> None:
+async def test_a_whole_reply_write_sends_its_trace_only_when_tool_calls_show(show_tool_calls: bool) -> None:
     """A write over earlier spans' work renders the whole reply, and a reply that hides tool calls sends no trace."""
     lookup = ToolTraceEntry(type="tool_call_completed", tool_name="lookup", args_preview="q=secret")
     shown = Presentation(

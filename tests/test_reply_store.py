@@ -1386,7 +1386,7 @@ async def test_owner_lost_leaves_a_reply_waiting_for_its_legacy_read(journal_sto
     assert span.outcome is None
 
 
-def test_finished_replies_are_kept_as_long_as_the_ledger_keeps_their_turns() -> None:
+async def test_finished_replies_are_kept_as_long_as_the_ledger_keeps_their_turns() -> None:
     """Nothing reaches a finished reply after its turn is forgotten, so both retentions agree."""
     ledger_default = inspect.signature(HandledTurnLedger._cleanup_old_events).parameters["max_age_days"].default
     assert ledger_default * 24 * 60 * 60 * 1_000_000_000 == reply_scope._FINISHED_REPLY_RETENTION_NS

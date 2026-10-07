@@ -369,7 +369,6 @@ Registration and tombstone reconciliation share ledger conflict keys, and unsett
 Retention also keeps every turn record that carries a redaction tombstone for a conversation, because history cleanup derives from it once a departure has dropped the journal's tombstone or for history older than the journal.
 Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts.
 The revision map remains ledger-owned; model runs carry consumption provenance.
-Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
 A regeneration's span carries the edit it selected; the turn record takes those revisions and prompts in the transaction that settles the span's sources with its answer, and internal prompts and ledger metadata never enter the Matrix payload.
 Reply settlement and ordinary ledger writes claim the same existing canonical rows before merging, so a delayed cached write cannot erase a committed answer before cache publication or restart.
 Cache publication uses the actual committed record; final-delivery recovery resends the frozen row without another model call.

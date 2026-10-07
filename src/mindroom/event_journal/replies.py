@@ -520,8 +520,6 @@ class StopTarget:
 
     # The reply bound to the event, in the Stop's room.
     reply: Reply | None = None
-    # The turn that reply's latest span answers.
-    turn_id: str | None = None
     # No reply is bound to the event yet; the Stop waits for its create.
     pending: bool = False
 
@@ -541,8 +539,7 @@ def _stop_target(
     if found is not None:
         if found.room_id != room_id:
             return StopTarget()
-        span = reply_spans.load(transaction, principal_id, found.last_span_id)
-        return StopTarget(reply=found, turn_id=None if span is None else span.delivery_id)
+        return StopTarget(reply=found)
     if not may_wait or not reply_messages.has_unresolved_create(transaction, principal_id, room_id):
         return StopTarget()
     reply_messages.record_pending_stop(
