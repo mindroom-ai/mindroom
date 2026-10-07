@@ -93,7 +93,7 @@ A failure or Stop fences the continuation; its settlement writes the note and fi
 A response-local CLI approval waits in place: its span stays current through the wait, and once approved it runs for that approval as a resume does, so the continuation's finish or failure settles the sources and ends the reply.
 
 A reply is held by the continuation that names one of its spans and is not fenced `superseded`; the store derives the hold when it loads the reply, so no rule writes it.
-While held, a Stop fences the approval, a deletion keeps the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
+While held, a Stop fences the approval, a deletion or sources that settle without an answer keep the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
 A continuation finishes once a FINAL at its first source was acknowledged or refused for good, or once an edit superseded it.
 Its finish, release, or discard applies the reply rule while the continuation still exists and deletes the continuation in the same transaction.
 A release hands the run's sources back to replay, unless a Stop is recorded: the reply then ends cancelled instead of replaying what the user stopped.
