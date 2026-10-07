@@ -675,6 +675,158 @@ async def test_room_level_text_dispatches_before_late_media() -> None:
     ]
 
 
+def _recording_gate(debounce_seconds: float) -> tuple[CoalescingGate, list[PreparedTurn]]:
+    """Return a gate that records every dispatched turn."""
+    batches: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: debounce_seconds,
+        is_shutting_down=lambda: False,
+    )
+    return gate, batches
+
+
+def _dispatched_source_count(batches: list[PreparedTurn]) -> int:
+    return sum(len(batch.handled_turn.source_event_ids) for batch in batches)
+
+
+@pytest.mark.asyncio
+async def test_room_level_backlog_splits_messages_sent_outside_the_debounce_window() -> None:
+    """A voice note and a much later top-level message delivered together keep their own turns."""
+    gate, batches = _recording_gate(1.0)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _voice_pending("$voice:localhost", "voice transcript", 1_000_000))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "test", 1_037_510)))
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$voice:localhost"],
+        ["$text:localhost"],
+    ]
+    assert [batch.event.event_id for batch in batches] == ["$voice:localhost", "$text:localhost"]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_room_message_sent_while_voice_is_preparing_keeps_its_own_turn() -> None:
+    """A top-level message held behind slow voice readiness must not join the voice turn."""
+    gate, batches = _recording_gate(1.0)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+    lane_key = ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id)
+    voice_ready = asyncio.Event()
+
+    voice_slot = gate.enter_lane(lane_key)
+    gate.submit_lane_slot(
+        voice_slot,
+        key=key,
+        source_event_id="$voice:localhost",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(
+            _ready_after(voice_ready, _voice_pending("$voice:localhost", "voice transcript", 1_000_000)),
+        ),
+    )
+    text_slot = gate.enter_lane(lane_key)
+    gate.submit_lane_slot(
+        text_slot,
+        key=key,
+        source_event_id="$text:localhost",
+        source_kind=MESSAGE_SOURCE_KIND,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "test", 1_010_000))),
+    )
+    await asyncio.sleep(0.01)
+    assert batches == []
+
+    voice_ready.set()
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$voice:localhost"],
+        ["$text:localhost"],
+    ]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_room_level_media_backlog_splits_a_message_sent_much_later() -> None:
+    """An upload flushes at once when the next queued message was sent outside its burst."""
+    gate, batches = _recording_gate(10.0)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _image_pending("$image:localhost", 1_000_000))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "later", 1_037_000)))
+    # The wait deadline is far shorter than the 10 s debounce, so the upload must not wait for a caption.
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$image:localhost"],
+        ["$text:localhost"],
+    ]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_room_level_media_does_not_merge_earlier_independent_messages() -> None:
+    """A later upload must not let earlier top-level messages from another burst batch together."""
+    gate, batches = _recording_gate(1.0)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _pending(_text_event("$a:localhost", "first question", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$b:localhost", "second question", 1_000_100)))
+    await _admit_ready(gate, key, _image_pending("$image:localhost", 1_037_000))
+    await gate.drain_all()
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$a:localhost"],
+        ["$b:localhost"],
+        ["$image:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_thread_backlog_still_combines_messages_sent_far_apart() -> None:
+    """Inside one thread a delivered backlog stays one turn regardless of send gaps."""
+    gate, batches = _recording_gate(1.0)
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _voice_pending("$voice:localhost", "voice transcript", 1_000_000))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "test", 1_037_510)))
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$voice:localhost", "$text:localhost"],
+    ]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("send_gap_ms", "expected_batches"),
+    [
+        (1_000, [["$voice:localhost", "$text:localhost"]]),
+        (1_001, [["$voice:localhost"], ["$text:localhost"]]),
+    ],
+)
+async def test_room_level_send_burst_window_includes_its_boundary(
+    send_gap_ms: int,
+    expected_batches: list[list[str]],
+) -> None:
+    """Room-level messages sent exactly one debounce window apart still share a burst."""
+    gate, batches = _recording_gate(1.0)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _voice_pending("$voice:localhost", "voice transcript", 1_000_000))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "test", 1_000_000 + send_gap_ms)))
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == expected_batches
+    await gate.drain_all()
+
+
 @pytest.mark.asyncio
 async def test_thread_caption_promotes_only_the_pending_room_media_burst() -> None:
     """Later room traffic must stay outside a media turn promoted into a thread."""
@@ -710,6 +862,32 @@ async def test_thread_caption_promotes_only_the_pending_room_media_burst() -> No
     assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
         "$image:localhost": ["$image:localhost", "$caption:localhost"],
         None: ["$room:localhost"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_thread_caption_promotes_only_the_upload_burst_it_started() -> None:
+    """A later upload burst must stay at room level when a thread caption promotes an earlier one."""
+    gate, batches = _recording_gate(1.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$first:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$first:localhost", 1_000_000))
+    await _admit_ready(gate, room_key, _image_pending("$second:localhost", 1_000_100))
+    await _admit_ready(gate, room_key, _image_pending("$third:localhost", 1_040_000))
+    await _admit_ready(gate, room_key, _image_pending("$fourth:localhost", 1_040_100))
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$caption:localhost", "describe these", 1_041_000)),
+    )
+    await gate.drain_all()
+
+    assert len(batches) == 2
+    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+        "$first:localhost": ["$first:localhost", "$second:localhost", "$caption:localhost"],
+        None: ["$third:localhost", "$fourth:localhost"],
     }
 
 

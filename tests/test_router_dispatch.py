@@ -312,6 +312,8 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         config = self._config_for_storage(tmp_path)
+        # A top-level caption joins its upload only when sent within the debounce window of it.
+        config.defaults.coalescing.debounce_ms = 1000
         bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
