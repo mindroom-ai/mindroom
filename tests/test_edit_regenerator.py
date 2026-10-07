@@ -437,6 +437,24 @@ async def test_an_answer_older_than_the_records_is_adopted_before_history_is_pru
 
 
 @pytest.mark.asyncio
+async def test_an_edit_a_stop_covers_by_the_time_it_runs_prunes_nothing(tmp_path: Path) -> None:
+    """The Stop arrived while the edit waited for the conversation: nothing runs, so its history stays."""
+    record = _turn_record()
+    harness = _harness(tmp_path, turn_record=record, receipt_order=4)
+    reply_for_sources = harness.regenerator.deps.reply_for_sources
+    assert isinstance(reply_for_sources, AsyncMock)
+    reply_for_sources.return_value = _reply(event_id="$answer:example.org")
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    reply_for_sources.return_value = _reply(event_id="$answer:example.org", stop_receipt_order=5)
+    assert await request.prepare_source_turn(request.thread_history) is True
+    harness.turn_store.remove_stale_runs_for_edit.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_newer_same_source_edit_rejects_older_callback_during_generation(tmp_path: Path) -> None:
     """An older callback arriving during newer generation must never run or overwrite it."""
     record = _turn_record()

@@ -443,6 +443,11 @@ class EditRegenerator:
             )
             mailbox.rebuild_requested = result is EditPreparation.REBUILD
             if result is False and not stale_runs_removed:
+                current = await self.deps.reply_for_sources(record.source_event_ids)
+                stop = None if current is None else current.stop_receipt_order
+                if stop is not None and stop >= active_receipt_order:
+                    # A Stop that arrived while the edit waited covers it: nothing runs, so nothing is pruned.
+                    return True
                 if reply is None:
                     # Pruning may remove the history run that alone names this answer; its reply keeps it.
                     await self.deps.adopt_historical_answer(
