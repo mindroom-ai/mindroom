@@ -4255,6 +4255,9 @@ path = "mindroom.cli.config"
 depends_on = [
     "mindroom.cli.local_model_config",
     "mindroom.atomic_file",
+    # Deferred imports in config validate's automation check.
+    "mindroom.automations.registry",
+    "mindroom.tool_system.plugins",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
     "mindroom.cli.owner",

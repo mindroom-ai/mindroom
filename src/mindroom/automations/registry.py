@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.automations.steps import Ask, AutomationContext
+    from mindroom.config.main import Config
     from mindroom.config.plugin import PluginEntryConfig
 
     type CheckFn = Callable[[AutomationContext], Ask | None]
@@ -127,3 +128,15 @@ def compile_automations(plugins: Iterable[_AutomationPlugin]) -> AutomationCatal
                 continue
             definitions[name] = _definition(check, plugin.name, plugin.entry_config.settings)
     return AutomationCatalog(definitions, tuple(sorted(collisions)))
+
+
+def automation_reference_errors(config: Config, catalog: AutomationCatalog) -> list[str]:
+    """Return one message per configured automation nothing provides, and per name registered more than once."""
+    listed = [("defaults.automations", entry.name) for entry in config.defaults.automations]
+    for agent_name, agent in config.agents.items():
+        listed += [(f"agents.{agent_name}.automations", entry.name) for entry in agent.automations or []]
+    errors = [
+        f"{where}: {name!r} is not provided by any loaded plugin" for where, name in listed if catalog.get(name) is None
+    ]
+    errors += [f"automation {name!r} is registered more than once" for name in catalog.collisions]
+    return errors

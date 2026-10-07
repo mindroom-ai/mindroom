@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.automations import Ask, AutomationContext, automation
-from mindroom.automations.registry import compile_automations, iter_module_automations
+from mindroom.automations.registry import (
+    AutomationCatalog,
+    automation_reference_errors,
+    compile_automations,
+    iter_module_automations,
+)
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
 from mindroom.config.plugin import PluginEntryConfig
 
 if TYPE_CHECKING:
@@ -83,3 +91,24 @@ def test_built_ins_resolve_without_any_plugin() -> None:
         assert definition.plugin_name is None
         assert definition.requires_file_memory
     assert catalog.get("weekly_digest") is None
+
+
+def test_reference_errors_cover_defaults_explicit_lists_and_collisions() -> None:
+    """Every authored entry is checked, built-ins always resolve, and a name registered twice is reported."""
+    config = Config(
+        defaults={"automations": [{"name": "nightly", "cron": "0 1 * * *"}]},
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                automations=["dreaming", {"name": "weekly_digest", "cron": "0 9 * * 1"}],
+            ),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert automation_reference_errors(config, AutomationCatalog(collisions=("dup",))) == [
+        "defaults.automations: 'nightly' is not provided by any loaded plugin",
+        "agents.mind.automations: 'weekly_digest' is not provided by any loaded plugin",
+        "automation 'dup' is registered more than once",
+    ]

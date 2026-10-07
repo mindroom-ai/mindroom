@@ -1887,6 +1887,21 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
+    def test_validate_fails_on_an_automation_no_plugin_provides(self, tmp_path: Path) -> None:
+        """A plugin automation name that no loaded plugin registers fails validation with its location."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n"
+            "router:\n  model: default\n",
+        )
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+        assert result.exit_code == 1
+        assert "agents.assistant.automations: 'weekly_digest' is not provided by any loaded plugin" in " ".join(
+            result.output.split(),
+        )
+
     def test_validate_missing_file(self, tmp_path: Path) -> None:
         """Config validate exits 1 when file is missing."""
         missing = tmp_path / "nonexistent.yaml"
