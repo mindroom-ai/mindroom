@@ -11,12 +11,17 @@ import ast
 import re
 import textwrap
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# One interface of a module: (expose patterns, visibility or None, exclusive).
-_Interface = tuple[list[str], list[str] | None, bool]
+
+@dataclass(frozen=True)
+class _Interface:
+    expose: list[str]
+    visibility: list[str] | None
+    exclusive: bool
 
 
 def _module_name(path: Path, source_root: Path) -> str:
@@ -81,11 +86,13 @@ def _module_aliases(tree: ast.Module, package: str, interfaced: set[str]) -> dic
 
 def _visible_patterns(interfaces: list[_Interface], importer: str) -> list[str] | None:
     """Return the expose patterns Tach applies to one importer, or None when it checks nothing."""
-    visible = [interface for interface in interfaces if interface[1] is None or importer in interface[1]]
-    applied = [interface for interface in visible if interface[2]] or visible
+    visible = [
+        interface for interface in interfaces if interface.visibility is None or importer in interface.visibility
+    ]
+    applied = [interface for interface in visible if interface.exclusive] or visible
     if not applied:
         return None
-    return [pattern for expose, _, _ in applied for pattern in expose]
+    return [pattern for interface in applied for pattern in interface.expose]
 
 
 def _attribute_violations(config: dict[str, list[dict]], source_root: Path) -> list[str]:
@@ -94,7 +101,7 @@ def _attribute_violations(config: dict[str, list[dict]], source_root: Path) -> l
     for interface in config["interfaces"]:
         for module in interface["from"]:
             interfaces.setdefault(module, []).append(
-                (interface["expose"], interface.get("visibility"), interface.get("exclusive", False)),
+                _Interface(interface["expose"], interface.get("visibility"), interface.get("exclusive", False)),
             )
     # Tach only checks imports between declared modules, so hold attribute access to the same scope.
     interfaced = {module for module in interfaces if module in declared}
