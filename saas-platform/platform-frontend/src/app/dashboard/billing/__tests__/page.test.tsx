@@ -32,11 +32,6 @@ const enterprisePricing = {
       price_yearly: 'custom',
       description: 'Custom enterprise plan',
       features: ['Dedicated support'],
-      limits: {
-        max_agents: 'unlimited',
-        max_messages_per_day: 'unlimited',
-        storage_gb: 'unlimited',
-      },
       recommended: false,
       included_ai_budget_usd: 0,
       requires_customer_provider_keys: false,
@@ -50,6 +45,24 @@ const enterprisePricing = {
   },
   discounts: {
     annual_percentage: 20,
+  },
+}
+
+const noPlanPricing = {
+  ...enterprisePricing,
+  trial: { enabled: true, days: 3, applicable_plans: ['byok', 'hobby', 'pro'] },
+  plans: {
+    free: {
+      name: 'No plan',
+      price_monthly: 0,
+      price_yearly: 0,
+      description: 'Choose a plan to run a hosted MindRoom instance',
+      features: [],
+      recommended: false,
+      included_ai_budget_usd: 0,
+      requires_customer_provider_keys: true,
+      resource_profile: 'small',
+    },
   },
 }
 
@@ -77,5 +90,91 @@ describe('BillingPage', () => {
 
     expect(screen.getByText('Custom')).toBeInTheDocument()
     expect(screen.queryByText('custom/month')).not.toBeInTheDocument()
+  })
+
+  it('shows an account without a plan as No plan with a way to choose one', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: { tier: 'free', status: 'active', stripe_subscription_id: null },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue(noPlanPricing)
+
+    render(<BillingPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('No plan')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('$0/month')).not.toBeInTheDocument()
+    expect(screen.queryByText('Active')).not.toBeInTheDocument()
+    expect(screen.queryByText('Plan Includes:')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Choose a plan' })).toHaveAttribute('href', '/dashboard/billing/upgrade')
+    expect(screen.getByText(/Choose a plan to run a hosted MindRoom instance; your first plan starts with a 3-day free trial\./)).toBeInTheDocument()
+  })
+
+  it('lets a lapsed plan holder choose their old plan again', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: { tier: 'hobby', status: 'cancelled', can_run_instances: false, stripe_subscription_ended: true, stripe_subscription_id: null },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue({
+      ...enterprisePricing,
+      plans: {
+        byok: { ...enterprisePricing.plans.enterprise, name: 'Your own keys', price_monthly: '$10', price_yearly: '$96', features: [] },
+        hobby: { ...enterprisePricing.plans.enterprise, name: 'Hobby', price_monthly: '$20', price_yearly: '$192', features: [] },
+      },
+    })
+
+    render(<BillingPage />)
+
+    expect(await screen.findByRole('button', { name: 'Choose Hobby' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Choose Your own keys' })).toBeInTheDocument()
+    expect(screen.queryByText('Contact support to downgrade')).not.toBeInTheDocument()
+  })
+
+  it('dates a paid plan cancelled after its trial by the billing period, not the old trial end', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: {
+        tier: 'hobby',
+        status: 'active',
+        can_run_instances: true,
+        stripe_subscription_ended: false,
+        stripe_subscription_id: 'sub_123',
+        trial_ends_at: '2026-09-04T12:00:00Z',
+        current_period_end: '2026-11-04T12:00:00Z',
+        cancelled_at: '2026-10-05T12:00:00Z',
+      },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue(enterprisePricing)
+
+    render(<BillingPage />)
+
+    expect(await screen.findByText(new Date('2026-11-04T12:00:00Z').toLocaleDateString())).toBeInTheDocument()
+    expect(screen.queryByText(new Date('2026-09-04T12:00:00Z').toLocaleDateString())).not.toBeInTheDocument()
+  })
+
+  it('keeps an unpaid plan current and points to fixing billing instead of a new checkout', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: { tier: 'hobby', status: 'unpaid', can_run_instances: false, stripe_subscription_ended: false, stripe_subscription_id: 'sub_123' },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue({
+      ...enterprisePricing,
+      plans: {
+        byok: { ...enterprisePricing.plans.enterprise, name: 'Your own keys', price_monthly: '$10', price_yearly: '$96', features: [] },
+        hobby: { ...enterprisePricing.plans.enterprise, name: 'Hobby', price_monthly: '$20', price_yearly: '$192', features: [] },
+      },
+    })
+
+    render(<BillingPage />)
+
+    expect(await screen.findByText(/stopped until billing is fixed/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Choose Hobby' })).not.toBeInTheDocument()
+    expect(screen.getByText('Contact support to downgrade')).toBeInTheDocument()
   })
 })

@@ -7,8 +7,9 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase, limiter
+from backend.entitlements import ENDED_STRIPE_STATUSES
 from backend.models import WebhookResponse
-from backend.services.instance_lifecycle import ENDED_STRIPE_STATUSES, reconcile_account_instances
+from backend.services.instance_lifecycle import reconcile_account_instances
 from backend.services.subscription_projection import (
     PermanentEventError,
     maybe_timestamp_to_iso,

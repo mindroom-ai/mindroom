@@ -34,6 +34,7 @@ import anyio
 from backend.config import INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
 from backend.deps import ensure_supabase
 from backend.entitlements import (
+    ENDED_STRIPE_STATUSES,
     is_expired_trial,
     is_subscription_service_active,
     parse_timestamp,
@@ -77,8 +78,6 @@ _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
 _PAGE_SIZE = 1000
 _STRIPE_REFRESH_ATTEMPTS = 3
 _INSTANCES_NAMESPACE = "mindroom-instances"
-# Stripe subscriptions in these states no longer bill and cannot be cancelled again.
-ENDED_STRIPE_STATUSES = frozenset({"canceled", "incomplete_expired"})
 # Stripe subscriptions in these states have no paid period to finish, so a recorded account deletion cancels them;
 # otherwise a customer could still pay an open first invoice or resume a paused trial during the grace period.
 _UNBILLED_STRIPE_STATUSES = frozenset({"incomplete", "paused"})
