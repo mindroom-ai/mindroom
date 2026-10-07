@@ -32,24 +32,37 @@ def _owning_module(name: str, declared: set[str]) -> str | None:
     return max(candidates, key=len) if candidates else None
 
 
-def _type_checking_imports(tree: ast.Module) -> set[ast.AST]:
-    """Return imports under `if TYPE_CHECKING:`, which this repository's Tach setup ignores."""
-    return {
-        child
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
-        for child in ast.walk(node)
-        if isinstance(child, (ast.Import, ast.ImportFrom))
-    }
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
+
+
+def _module_level_runtime_imports(statements: list[ast.stmt]) -> list[ast.Import | ast.ImportFrom]:
+    """Return module-level imports that run at import time.
+
+    Imports under `if TYPE_CHECKING:` are skipped, as this repository's Tach setup ignores them.
+    Function and class bodies are skipped too, so a function-local import cannot leak its alias
+    to the rest of the file.
+    """
+    imports: list[ast.Import | ast.ImportFrom] = []
+    for statement in statements:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            imports.append(statement)
+        elif isinstance(statement, ast.If):
+            if not _is_type_checking_guard(statement.test):
+                imports.extend(_module_level_runtime_imports(statement.body))
+            imports.extend(_module_level_runtime_imports(statement.orelse))
+        elif isinstance(statement, ast.Try):
+            for block in (statement.body, statement.orelse, statement.finalbody, *(h.body for h in statement.handlers)):
+                imports.extend(_module_level_runtime_imports(block))
+    return imports
 
 
 def _module_aliases(tree: ast.Module, package: str, interfaced: set[str]) -> dict[str, str]:
-    """Map local names bound to interfaced modules at runtime to those modules."""
+    """Map names that module-level runtime imports bind to interfaced modules to those modules."""
     aliases: dict[str, str] = {}
-    type_only = _type_checking_imports(tree)
-    for node in ast.walk(tree):
-        if node in type_only:
-            continue
+    for node in _module_level_runtime_imports(tree.body):
         if isinstance(node, ast.ImportFrom):
             origin = node.module
             if node.level:
@@ -59,7 +72,7 @@ def _module_aliases(tree: ast.Module, package: str, interfaced: set[str]) -> dic
                 target = f"{origin}.{alias.name}"
                 if target in interfaced:
                     aliases[alias.asname or alias.name] = target
-        elif isinstance(node, ast.Import):
+        else:
             for alias in node.names:
                 if alias.asname and alias.name in interfaced:
                     aliases[alias.asname] = alias.name
@@ -121,18 +134,33 @@ def test_checker_applies_tach_interface_rules(tmp_path: Path) -> None:
         "__init__.py": "",
         "lib.py": "public = shared = hidden = 1\n",
         "private_lib.py": "anything = 1\n",
-        # Public interface; a type-only alias stays unchecked; a module only friend sees is unchecked here.
+        # Public interface; type-only and function-local aliases stay unchecked, a runtime `else` alias is
+        # checked, and a module whose only interface is friend's is unchecked here.
         "user.py": """
+            import typing
             from typing import TYPE_CHECKING
 
             from pkg import lib, private_lib
 
             if TYPE_CHECKING:
                 from pkg import lib as typed_lib
+            else:
+                from pkg import lib as runtime_lib
+            if typing.TYPE_CHECKING:
+                from pkg import lib as also_typed_lib
+
+
+            def local_import():
+                from pkg import lib as local_lib
+
+                local_lib.hidden
+
 
             lib.public
             lib.hidden
             typed_lib.hidden
+            also_typed_lib.hidden
+            runtime_lib.hidden
             private_lib.anything
         """,
         # An exclusive interface replaces the public one for the modules it lists.
@@ -172,5 +200,6 @@ def test_checker_applies_tach_interface_rules(tmp_path: Path) -> None:
     assert _attribute_violations(config, tmp_path) == [
         "pkg/friend.py:5: pkg.lib.public from pkg.friend",
         "pkg/sub/user.py:4: pkg.lib.hidden from pkg.sub.user",
-        "pkg/user.py:10: pkg.lib.hidden from pkg.user",
+        "pkg/user.py:22: pkg.lib.hidden from pkg.user",
+        "pkg/user.py:25: pkg.lib.hidden from pkg.user",
     ]
