@@ -139,7 +139,8 @@ The handled-turn retention pass deletes finished replies that owe nothing, with 
 - I12. A regeneration that recorded a write Matrix may show never restores its rollback.
 - I13. At most one continuation that is not superseded names a reply's spans.
 - I14. An abandoned regeneration that recorded a write Matrix may show leaves a terminal row, an owed note, or an owed redaction; a create still in flight is redacted once acknowledged.
+- I15. Once a finished reply owes nothing, its latest write that may show ends it and Matrix took it, unless Matrix refused a note, which is not resent, or the bot left the room.
 
-`tests/test_reply_lifecycle_fuzz.py` checks I1 and I4 through I14 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, and dropped replays.
+`tests/test_reply_lifecycle_fuzz.py` checks I1 and I4 through I15 over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, and dropped replays.
 It keeps continuations as rows the hold is derived from, defers edit claims through the shared blocking predicate, and ends every run by draining every owner.
 The unit tests cover stale and retired spans and the remaining rules.

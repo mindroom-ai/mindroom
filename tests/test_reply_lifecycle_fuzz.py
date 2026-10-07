@@ -116,6 +116,10 @@ class _Model:
     consumed: set[str] = field(default_factory=set)
     # Spans whose sources a departure settled unanswered, before anything consumed their edit.
     departed: set[str] = field(default_factory=set)
+    # The bot left the room, which drops everything owed to it.
+    left: bool = False
+    # What each write of a reply, by sequence, may show: one that ends the reply, work in progress, or refused.
+    writes: dict[tuple[str, int], str] = field(default_factory=dict)
 
 
 class ReplyLifecycleMachine(RuleBasedStateMachine):
@@ -194,6 +198,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         for effect in transition.effects:
             self._apply_effect(effect)
         self._derive_hold()
+        self._note_write(before, transition)
         if transition.row is not None:
             reply = self.model.reply
             assert reply is not None
@@ -203,6 +208,21 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             if transition.row.stage is WriteStage.FINAL:
                 self.model.finals[span.delivery_id] = "pending"
         return transition
+
+    def _note_write(self, before: Reply | None, transition: rl.Transition) -> None:
+        """Record what a write the transition recorded may show: a row's, or a progress edit sent ahead of its record."""
+        reply = self.model.reply
+        if reply is None or transition.outcome is not Outcome.APPLIED:
+            return
+        if transition.row is not None:
+            self.model.writes[(reply.reply_id, transition.row.sequence)] = "ends" if reply.terminal else "open"
+        elif (
+            before is not None
+            and before.reply_id == reply.reply_id
+            and reply.possibly_shown_seq is not None
+            and reply.possibly_shown_seq > (before.possibly_shown_seq or 0)
+        ):
+            self.model.writes.setdefault((reply.reply_id, reply.possibly_shown_seq), "open")
 
     def _check_abandonment(self, before: Reply, span: Span, transition: rl.Transition) -> None:
         """I11, I12, I14: an abandoned regeneration restores exactly when nothing it wrote may show."""
@@ -523,6 +543,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.rows.pop(0)
         reply = self.model.reply
         assert reply is not None
+        refused = "refused" if row.intent.stage is WriteStage.FINAL else "refused_edit"
+        self.model.writes[(reply.reply_id, row.intent.sequence)] = refused
         # A later span claims the reply only after its rows resolved, so a refused FINAL is the last span's.
         assert row.intent.stage is not WriteStage.FINAL or span.span_id == reply.last_span_id, (row, reply)
         restorable = (
@@ -1060,6 +1082,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     def depart(self) -> None:
         """The bot leaves the room: its replies end, and the room's continuations go with them."""
         self._apply(rl.departed(self.model.reply, self._current(), now_ns=self._now()))  # type: ignore[arg-type]
+        self.model.left = True
         self.model.rows = [row for row in self.model.rows if row.intent.stage is not WriteStage.EDIT]
         for continuation in tuple(self.model.continuations.values()):
             del self.model.continuations[continuation.approval_id]
@@ -1263,6 +1286,32 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             assert reply.stop_button_event_id is None
 
     @invariant()
+    def a_finished_reply_shows_its_end(self) -> None:
+        """I15: once a finished reply owes nothing, its latest write that may show ends it and Matrix took it.
+
+        A note Matrix refused cannot be resent, so the reply stops owing it; a
+        room the bot left owes nothing.
+        """
+        reply = self.model.reply
+        if (
+            reply is None
+            or not reply.terminal
+            or reply.state is ReplyState.GONE
+            or self.model.removed
+            or self.model.left
+        ):
+            return
+        if (
+            self.model.rows
+            or reply.owed_write is not None
+            or reply.redaction_pending
+            or reply.possibly_shown_seq is None
+        ):
+            return
+        shown = self.model.writes.get((reply.reply_id, reply.possibly_shown_seq), "ends")
+        assert shown in {"ends", "refused_edit"}, (shown, reply)
+
+    @invariant()
     def a_finished_reply_shows_its_stop(self) -> None:
         """I4: a terminal reply that is still visible has no Stop left to apply."""
         reply = self.model.reply
@@ -1401,6 +1450,25 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self._settle(span.span_id)
                 return True
         return False
+
+
+def test_a_refused_answer_after_an_approved_regeneration_ends_with_the_delivery_failed_note() -> None:
+    """I15 on the sequence that left a partial reply looking unfinished: Matrix refuses its answer for good."""
+    machine = ReplyLifecycleMachine()
+    machine.start_turn()
+    machine.dispatch_failure()
+    machine.flush_owed()
+    machine.acknowledge_row()
+    machine.regenerate()
+    machine.pause(in_place=False)
+    machine.pause_shown_and_approved()
+    machine.finish()
+    machine.fail_row(reason="too_large")
+    machine.a_finished_reply_shows_its_end()
+    machine.teardown()
+    reply = machine.model.reply
+    assert reply is not None
+    assert reply.state is ReplyState.FAILED
 
 
 @pytest.mark.timeout(300)
