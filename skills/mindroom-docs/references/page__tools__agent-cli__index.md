@@ -168,7 +168,7 @@ Worker shells can reach MindRoom's API, so the API must be locked down:
 - Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`.
 
 Workers call MindRoom at `MINDROOM_AGENT_CLI_PRIMARY_URL`, a plain `http(s)://host:port` origin, when it is set.
-Otherwise, with `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` and `MINDROOM_SCRIPT_GATEWAY_PORT` set, they call the origin of a `MINDROOM_SCRIPT_GATEWAY_URL` ending in `/api/script-gateway`, because that [gateway-only listener](https://docs.mindroom.chat/tools/background-scripts/#kubernetes) also serves the CLI routes and keeps workers off the general API port.
+Otherwise, with `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` and `MINDROOM_SCRIPT_GATEWAY_PORT` set, they call the origin of a `MINDROOM_SCRIPT_GATEWAY_URL` whose path is `/api/script-gateway`, because that [gateway-only listener](https://docs.mindroom.chat/tools/background-scripts/#kubernetes) also serves the CLI routes and keeps workers off the general API port.
 The runtime chart's `scriptGateway.enabled` sets this up.
 Otherwise MindRoom uses its own API address; with Docker workers and the default API bind on every interface, workers reach it through `host.docker.internal`.
 Kubernetes workers and shared static runners need one of these settings unless the API listens on a specific non-loopback address.
