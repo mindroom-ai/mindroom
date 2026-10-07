@@ -635,6 +635,50 @@ def test_a_stop_with_no_span_running_restores_a_regeneration_that_wrote_nothing(
     assert transition.effects == (SettleSources("span-2"),)
 
 
+def test_a_restart_applies_a_stop_its_regeneration_never_saw_as_a_live_stop_would() -> None:
+    """The Stop committed, the process died before the span saw it: the answer the regeneration never replaced stands."""
+    reply, span = _regenerating()
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, newer_edit=False, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    for pending in (True, False):
+        restarted = rl.owner_lost(
+            stop.reply,
+            span,
+            rl.OwnerLostFacts(active_generation="gen-next", sources_pending=pending),
+            now_ns=NOW,
+        )
+        assert restarted.reply is not None
+        assert restarted.reply.state is ReplyState.COMPLETED
+        assert restarted.reply.presentation == "old"
+        assert restarted.reply.owed_write is None
+        assert not restarted.reply.unapplied_stop
+        assert restarted.effects == (SettleSources("span-2"),)
+
+
+def test_an_edit_older_than_the_replys_stop_is_not_claimed() -> None:
+    """The Stop covers edits received before it, even one whose claim raced it; a newer edit regenerates."""
+    reply, span = _turn()
+    reply, span = _ended(reply, span, SpanOutcome.CANCELLED)
+    reply = replace(
+        reply,
+        state=ReplyState.CANCELLED,
+        event_id="$reply",
+        stop_receipt_order=8,
+        stop_applied_receipt_order=8,
+    )
+    older = rl.claim(
+        _request("span-2", delivery_id="$edit", driving_edit_id="$edit"),
+        _context(reply, span, edit_receipt_order=5),
+    )
+    assert older.outcome is Outcome.DUPLICATE
+    assert older.claimed is None
+    newer = rl.claim(
+        _request("span-3", delivery_id="$edit-2", driving_edit_id="$edit-2"),
+        _context(reply, span, edit_receipt_order=9),
+    )
+    assert newer.claimed is not None
+
+
 def test_a_stop_never_returns_a_regeneration_to_unfinished_work() -> None:
     """Restoring a turn that still waits for its retry would run it after the Stop: the reply ends cancelled."""
     reply, span = _interrupted_turn_regenerating()
@@ -1528,7 +1572,8 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert after_restart.reply is not None
     assert after_restart.reply.state is ReplyState.COMPLETED
     assert after_restart.reply.redaction_pending == ()
-    assert after_restart.effects == (SettleSources("span-2"),)
+    # The answer stands, but nothing answers the deleted message's edit.
+    assert after_restart.effects == (SettleSources("span-2", answered=False),)
 
 
 def _regeneration_that_showed_partial_text() -> tuple[Reply, Span]:

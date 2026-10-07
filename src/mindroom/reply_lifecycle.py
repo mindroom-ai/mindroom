@@ -686,6 +686,14 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         return claimed(_make_current(created, span, request.now_ns), span)
 
     last = context.last_span
+    if (
+        request.driving_edit_id is not None
+        and context.edit_receipt_order is not None
+        and reply.stop_receipt_order is not None
+        and context.edit_receipt_order < reply.stop_receipt_order
+    ):
+        # The Stop covers every edit received before it, including one whose claim raced it.
+        return _unchanged(Outcome.DUPLICATE, reply)
     if request.driving_edit_id is not None and (last is None or request.driving_edit_id != last.delivery_id):
         if reply.state is ReplyState.GONE:
             created = replace(
@@ -1709,7 +1717,8 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     if regeneration is not None and _keeps_earlier_answer(reply, regeneration, finished_only=True):
         # The answer an edit was regenerating stands, as when the regeneration
         # fails before showing anything: a finished answer is kept.
-        settle = SettleSources(regeneration.span_id)
+        # The restored answer stands, but nothing answers sources the user deleted.
+        settle = SettleSources(regeneration.span_id, answered=False)
         effects = (settle,) if regeneration is waiting else (CancelSpan(regeneration.span_id), settle)
         return _restored(reply, regeneration, now_ns, *effects)
     effects: list[Effect] = []
@@ -1761,6 +1770,21 @@ class OwnerLostFacts:
     sources_pending: bool
 
 
+def _stop_left_unapplied(reply: Reply, updated: Reply, last: Span, ended: tuple[Span, ...], now_ns: int) -> Transition:
+    """Apply at start a Stop the span an older bot instance ran never saw, as that span would have."""
+    if _keeps_earlier_answer(reply, last, finished_only=True):
+        # The answer the regeneration never replaced stands.
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_restore(updated, last, now_ns),
+            spans=tuple(replace(span, outcome=SpanOutcome.RESTORED) for span in ended),
+            effects=(SettleSources(last.span_id),),
+        )
+    owed = OwedWrite(last.span_id, _NOTE_CANCELLED)
+    cancelled = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
+    return Transition(outcome=Outcome.APPLIED, reply=cancelled, spans=ended, effects=(SettleSources(last.span_id),))
+
+
 def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) -> Transition:  # noqa: PLR0911
     """Settle a reply whose span an older bot instance left behind."""
     if (
@@ -1793,14 +1817,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
         spans.append(last)
         updated = _clear_current(updated, last.span_id)
     if reply.unapplied_stop:
-        owed = OwedWrite(last.span_id, _NOTE_CANCELLED)
-        updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=updated,
-            spans=tuple(spans),
-            effects=(SettleSources(last.span_id),),
-        )
+        return _stop_left_unapplied(reply, updated, last, tuple(spans), now_ns)
     if facts.sources_pending:
         # Replay claims it; the lost span marks where the claim continues.
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=tuple(spans))
@@ -1818,6 +1835,15 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=tuple(spans))
 
 
+# LEGACY_COMPAT: Applying what an earlier-release reply's event showed, read once its room synced.
+# Legacy format: a reply adopted with legacy_pending, and the read the post-sync reader in legacy_reply_messages.py
+# built from its event's body, wire status, and timestamp.
+# Last legacy release: v2026.10.199; replacement: the unreleased durable reply messages record every write ahead of
+# sending it, so no reply needs a read.
+# Handling: ``legacy_read_done`` binds what the event showed once; a stream that release stopped after its sources
+# settled ends as its wire status says, else failed, with the restart note when it was recent enough for that
+# release's startup cleanup. It composes the lifecycle's state rules, so it stays beside them.
+# Coverage: tests/test_legacy_reply_messages.py.
 @dataclass(frozen=True, slots=True)
 class LegacyRead:
     """What reading an earlier-release reply's event found, once its room synced."""

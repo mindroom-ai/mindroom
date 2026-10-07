@@ -106,6 +106,8 @@ class _Model:
     # Edits whose claim waited for the reply to be free.
     deferred: list[str] = field(default_factory=list)
     removed: bool = False
+    # Logical sources the user deleted: no settlement answers their turn.
+    deleted: set[str] = field(default_factory=set)
 
 
 class ReplyLifecycleMachine(RuleBasedStateMachine):
@@ -196,18 +198,20 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     def _check_abandonment(self, before: Reply, span: Span, transition: rl.Transition) -> None:
         """I11, I12, I14: an abandoned regeneration restores exactly when nothing it wrote may show."""
-        if span.kind is not SpanKind.REGENERATION or span.rollback is None:
+        if span.kind is not SpanKind.REGENERATION or span.rollback is None or self.model.removed:
             return
         wrote = before.possibly_shown_seq is not None and before.possibly_shown_seq > span.base_sequence
         if span.outcome is SpanOutcome.RESTORED:
             # I12: never back to the rollback once a write that may show was recorded.
             assert not wrote, (before, span)
             return
-        # An exit whose own terminal row ends the reply, as a finish that found the Stop, is no abandonment.
-        if span.outcome not in _ABANDONED_OUTCOMES or transition.row is not None:
-            return
         after = self.model.reply
         assert after is not None
+        # An exit whose own terminal row ends the reply, as a finish that found the Stop, is no abandonment; a span
+        # a restart lost is abandoned only when the reply ends with it instead of waiting for a retry.
+        abandoned = span.outcome in _ABANDONED_OUTCOMES or (span.outcome is SpanOutcome.LOST and after.terminal)
+        if not abandoned or transition.row is not None:
+            return
         shown = before.event_id is not None and not before.placeholder_only
         if not wrote and shown and before.approval_id is None and span.rollback.state in rl._TERMINAL_STATES:
             # I11: a finished answer the regeneration never replaced stands.
@@ -225,7 +229,17 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     def _apply_effect(self, effect: rl.Effect) -> None:
         match effect:
-            case SettleSources(span_id=span_id):
+            case SettleSources(span_id=span_id, consumes_edit=consumes_edit, answered=answered):
+                settled = self.model.spans[span_id]
+                if answered:
+                    # S6: a turn whose every source the user deleted is never answered.
+                    assert not set(settled.sources.logical) <= self.model.deleted, settled
+                if consumes_edit:
+                    # S5: only an answer the reply completed consumes the edit a regeneration selected.
+                    reply = self.model.reply
+                    assert reply is not None
+                    assert answered, effect
+                    assert self.model.spans[reply.last_span_id].outcome is SpanOutcome.COMPLETED, reply
                 self._settle(span_id)
             case CancelSpan(span_id=span_id):
                 self.model.cancel_requested.add(span_id)
@@ -352,13 +366,21 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         """Replay the sources the reply's last span left pending; an approval's are its recovery's, not replay's."""
         last = self._last()
         assert last is not None
-        if last.kind is SpanKind.REGENERATION:
+        if "$source" in self.model.deleted:
+            # The source gate finds the message deleted, and the reply ends as a deletion ends it.
+            self._apply(rl.sources_deleted(self.model.reply, last, now_ns=self._now()))  # type: ignore[arg-type]
+        elif last.kind is SpanKind.REGENERATION:
             self._claim(edit=last.delivery_id)
         else:
             self._claim(replay_of=last)
 
     @precondition(
-        lambda self: self._bot() and self.model.reply is not None and self.model.reply.current_span_id is None,
+        lambda self: (
+            self._bot()
+            and self.model.reply is not None
+            and self.model.reply.current_span_id is None
+            and "$source" not in self.model.deleted
+        ),
     )
     @rule()
     def regenerate(self) -> None:
@@ -377,6 +399,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     def _retry_deferred(self) -> None:
         reply = self.model.reply
         if reply is None:
+            self.model.deferred.clear()
+            return
+        if "$source" in self.model.deleted:
+            # The regenerator turns away an edit of a deleted message; its event settles as ignored.
+            self.model.settled.update(self.model.deferred)
             self.model.deferred.clear()
             return
         for edit in tuple(self.model.deferred):
@@ -857,7 +884,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         """Apply the finish to the reply while the continuation still holds it, then delete the continuation."""
         reply = self.model.reply
         assert reply is not None
-        self._apply(
+        paused = self.model.spans[continuation.paused_span_id]
+        # The store's choice: no owner left to answer, or every source deleted, leaves the turn unanswered.
+        answers_turn = owner_available and not set(paused.sources.logical) <= self.model.deleted
+        transition = self._apply(
             rl.approval_settled(
                 reply,
                 self._last(),
@@ -865,10 +895,12 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 paused_span_id=continuation.paused_span_id,
                 result="failed" if continuation.state == "failing" else "finished",
                 disposition=continuation.disposition,
-                answers_turn=owner_available,
+                answers_turn=answers_turn,
                 now_ns=self._now(),
             ),
         )
+        if not answers_turn:
+            assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
         del self.model.continuations[continuation.approval_id]
         self._derive_hold()
         if retry:
@@ -970,9 +1002,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     @precondition(lambda self: self._bot() and self.model.reply is not None and not self.model.reply.terminal)
     @rule()
     def delete_sources(self) -> None:
-        """Delete sources."""
+        """The user deletes the message every span of the reply answers."""
         span = self._current() or self._last()
-        self._apply(rl.sources_deleted(self.model.reply, span, now_ns=self._now()))  # type: ignore[arg-type]
+        self.model.deleted.add("$source")
+        transition = self._apply(rl.sources_deleted(self.model.reply, span, now_ns=self._now()))  # type: ignore[arg-type]
+        assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
 
     @precondition(lambda self: self._bot() and self.model.reply is not None)
     @rule()
@@ -1052,6 +1086,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply is not None
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.approval_id is None
+            # The source gate turns a deleted message away before any dispatch.
+            and "$source" not in self.model.deleted
         ),
     )
     @rule()
@@ -1065,8 +1101,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         """The entity leaves the configuration: its reply ends, and its approvals are discarded once noticed."""
         reply = self.model.reply
         assert reply is not None
-        self._apply(rl.removed_entity(reply, self._current() or self._last(), now_ns=self._now()))  # type: ignore[arg-type]
+        # No bot remains to write anything: the removal is no abandonment the reply's Matrix event must match.
         self.model.removed = True
+        transition = self._apply(rl.removed_entity(reply, self._current() or self._last(), now_ns=self._now()))  # type: ignore[arg-type]
+        # S2: nothing answered the turn of a removed entity's reply.
+        assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
         self.model.deferred.clear()
         # Nothing delivers its rows any more.
         self.model.rows.clear()
@@ -1106,6 +1145,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.settled = set()
         self.model.finals = {}
         self.model.deferred.clear()
+        # The next turn is a new message.
+        self.model.deleted.clear()
 
     # --- invariants ---------------------------------------------------------
 
@@ -1217,7 +1258,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 continue
             assert self._is_settled(span.span_id), span
 
-    def _drain_step(self) -> bool:  # noqa: C901, PLR0911, PLR0912
+    def _drain_step(self) -> bool:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Move one owner forward; return whether anything was left to move."""
         model = self.model
         if model.removed:
@@ -1285,6 +1326,13 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 return True
             self.restart()
             return True
+        for span in self.model.spans.values():
+            if span.ended and span.kind is not SpanKind.APPROVAL_RESUME and not self._is_settled(span.span_id):
+                # Journal replay dispatches the sources a later span overtook; the ended reply answers nothing.
+                transition = self._claim(replay_of=span)
+                assert transition.outcome is Outcome.DUPLICATE, transition
+                self._settle(span.span_id)
+                return True
         return False
 
 
