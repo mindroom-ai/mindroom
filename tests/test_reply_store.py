@@ -701,22 +701,35 @@ async def _answered_and_regenerating(principal: PrincipalStore) -> rl.Span:
 async def test_a_regeneration_keeps_the_membership_its_edit_was_admitted_in(journal_store: EventJournalStore) -> None:
     """After the bot left and rejoined, the regenerated reply's records name the membership its rows now belong to."""
     principal = journal_store.principal(PRINCIPAL)
-    regeneration = await _answered_and_regenerating(principal)
-    await principal.replies.decide(
-        reply_id="reply-1",
-        span_id=regeneration.span_id,
-        decide=lambda reply, span: rl.release(reply, span, now_ns=60),
+    reply, span = await _claimed(principal)
+    await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$answer",
+        delivered_projections=(),
     )
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
     rejoined = await admit_room_membership(principal, ROOM, "join")
-    await admit(principal, "$edit-2")
-    retry = replace(
-        _request("span-3", source="$edit-2"),
-        sources=SpanSources(pending=("$edit-2",), logical=("$source",)),
-        driving_edit_id="$edit-2",
+    answered = await principal.replies.load("reply-1")
+    assert answered is not None
+    assert answered.state is ReplyState.COMPLETED
+    assert answered.membership_epoch != rejoined
+    await admit(principal, "$edit")
+    regeneration = replace(
+        _request("span-2", reply_id="reply-new", source="$edit"),
+        sources=SpanSources(pending=("$edit",), logical=("$source",)),
+        driving_edit_id="$edit",
     )
-    claimed = (await principal.replies.claim(retry, ClaimLookup(existing_event_id="$answer"))).transition
+    claimed = (await principal.replies.claim(regeneration, ClaimLookup(existing_event_id="$answer"))).transition
     assert claimed.claimed is not None
+    assert claimed.claimed.reply_id == "reply-1"
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.membership_epoch == rejoined

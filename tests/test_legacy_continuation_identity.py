@@ -15,7 +15,7 @@ from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import ReplyState, WakeApproval
+from mindroom.reply_lifecycle import ReplyState, SpanKind, SpanOutcome, WakeApproval
 from mindroom.turn_record import TurnRecord
 from tests.legacy_reply_helpers import store_main_continuation
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
@@ -321,7 +321,10 @@ async def test_an_approval_a_newer_answer_replaced_is_superseded(
         assert reply is not None
         assert reply.state is ReplyState.COMPLETED
         assert reply.approval_id is None
-        assert await principal.replies.span(reply.last_span_id) is not None
+        answer = await principal.replies.span(reply.last_span_id)
+        assert answer is not None
+        # The answer the newer edit delivered is the reply's own span, so a later edit rolls back to it.
+        assert (answer.kind, answer.outcome, answer.delivery_id) == (SpanKind.TURN, SpanOutcome.COMPLETED, "$answer")
         assert await principal.finish_approval_continuation("approval") is not None
         assert not await principal.is_pending("$first")
     finally:

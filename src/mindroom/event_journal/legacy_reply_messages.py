@@ -344,10 +344,26 @@ def _replaced_reply(
     presentations: LegacyPresentations,
     now_ns: int,
 ) -> _Adoption:
-    """The answer a newer edit delivered stands: the reply is finished, holding only the replaced approvals' pauses."""
+    """The answer a newer edit delivered stands: a finished reply, keeping the replaced approvals' pauses.
+
+    Its own span is that answer's, as for any answer older than the reply
+    records, so a later edit regenerates it with a rollback to it.
+    """
     newest = superseded[-1]
     reply_id = _new_id()
-    pauses = _superseded_pauses(reply_id, superseded, now_ns)
+    sources = newest.sources
+    answer = _span(
+        reply_id,
+        kind=rl.SpanKind.TURN,
+        delivery_id=event_id,
+        sources=rl.SpanSources(
+            pending=(),
+            logical=sources.logical_source_event_ids,
+            discovery=sources.discovery_event_ids,
+        ),
+        now_ns=now_ns,
+        outcome=rl.SpanOutcome.COMPLETED,
+    )
     reply = _reply(
         transaction,
         principal_id,
@@ -355,12 +371,13 @@ def _replaced_reply(
         room_id=newest.room_id,
         thread_id=newest.thread_id,
         state=rl.ReplyState.COMPLETED,
-        span=pauses[-1],
+        span=answer,
         presentation=presentations.empty(newest.entity_kind == "team"),
         now_ns=now_ns,
         event_id=event_id,
     )
-    return _with_replaced_approvals(_Adoption(reply=reply, spans=()), superseded, pauses)
+    pauses = _superseded_pauses(reply_id, superseded, now_ns)
+    return _with_replaced_approvals(_Adoption(reply=reply, spans=(answer,)), superseded, pauses)
 
 
 def _reply(
