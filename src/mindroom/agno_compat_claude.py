@@ -320,69 +320,23 @@ def _tool_search_result_ids(content: list[Any]) -> set[str]:
     return result_ids
 
 
-def _request_tool_names(request_kwargs: dict[str, Any]) -> frozenset[str]:
-    """Return client tool names available on the current request."""
-    tools = request_kwargs.get("tools")
-    if not isinstance(tools, list):
-        return frozenset()
-    return frozenset(
-        name
-        for tool in tools
-        if (tool_dict := as_dict(tool)) is not None and isinstance(name := tool_dict.get("name"), str)
-    )
-
-
-def _replay_safe_tool_search_result(
-    block_dict: dict[str, Any],
-    available_tool_names: frozenset[str],
-) -> tuple[dict[str, Any], bool]:
-    """Sanitize one replayed search result, dropping references to unavailable tools."""
-    changed = not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
-    prepared_block = {key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS}
-    content = as_dict(prepared_block.get("content"))
-    if content is None:
-        return prepared_block, changed
-    tool_references = content.get("tool_references")
-    if not isinstance(tool_references, list):
-        return prepared_block, changed
-
-    available_references = []
-    for reference in tool_references:
-        reference_dict = as_dict(reference)
-        tool_name = reference_dict.get("tool_name") if reference_dict is not None else None
-        if not isinstance(tool_name, str) or tool_name not in available_tool_names:
-            changed = True
-            continue
-        available_references.append(reference)
-    # Even when every reference is stale, keep the search as an empty result:
-    # dropping its pair would change a signed turn whose blocks surround it.
-    if len(available_references) == len(tool_references):
-        return prepared_block, changed
-
-    prepared_content = dict(content)
-    prepared_content["tool_references"] = available_references
-    prepared_block["content"] = prepared_content
-    return prepared_block, True
-
-
-def _replay_safe_message_content(
-    content: list[Any],
-    available_tool_names: frozenset[str],
-) -> tuple[list[Any], bool]:
-    """Repair replayed tool-search blocks in one assistant message."""
+def _replay_safe_message_content(content: list[Any]) -> tuple[list[Any], bool]:
+    """Strip response-only fields from replayed search results and drop search uses left without one."""
     prepared_content: list[Any] = []
     changed = False
     for block in content:
         block_dict = as_dict(block)
-        if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
+        if (
+            block_dict is not None
+            and block_dict.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE
+            and not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
+        ):
+            prepared_content.append(
+                {key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS},
+            )
+            changed = True
+        else:
             prepared_content.append(block)
-            continue
-        prepared_block, block_changed = _replay_safe_tool_search_result(
-            block_dict,
-            available_tool_names,
-        )
-        changed = changed or block_changed
-        prepared_content.append(prepared_block)
 
     paired_result_ids = _tool_search_result_ids(prepared_content)
     sanitized_content: list[Any] = []
@@ -410,7 +364,6 @@ def _replay_safe_message_content(
 # Upstream PR: https://github.com/agno-agi/agno/pull/8686, open and partial; strips citations only from
 # code-execution result blocks.
 # Remove when: The pinned Agno replays tool-search blocks in request shape and drops unpaired search uses.
-# Dropping references to tools absent from the current request stays MindRoom policy.
 # Coverage: tests/test_extra_kwargs.py::test_replay_safe_tool_search_results_strips_response_only_fields;
 # tests/test_extra_kwargs.py::test_replay_safe_tool_search_results_drops_only_orphaned_search_uses.
 def request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -426,17 +379,12 @@ def request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str
 
     Anthropic can also return a ``server_tool_use`` without its matching
     ``tool_search_tool_result`` when native search and client tools are called
-    together. Replaying that orphan produces another 400. Search results can
-    likewise reference tools that are absent from a later request after its
-    dynamic tool surface changes. Drop unavailable references; a search left
-    with none stays as an empty result, like a search that matched nothing, so
-    the signed thinking blocks around it are not moved together. Valid pairs and
-    other server-tool types remain intact. The input structure is never mutated.
+    together. Replaying that orphan produces another 400. Valid pairs and other
+    server-tool types remain intact. The input structure is never mutated.
     """
     messages = request_kwargs.get("messages")
     if not isinstance(messages, list):
         return request_kwargs
-    available_tool_names = _request_tool_names(request_kwargs)
     sanitized_messages = list(messages)
     changed = False
     for message_index, message in enumerate(sanitized_messages):
@@ -444,10 +392,7 @@ def request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str
         content = message_dict.get("content") if message_dict is not None else None
         if message_dict is None or not isinstance(content, list):
             continue
-        sanitized_content, content_changed = _replay_safe_message_content(
-            content,
-            available_tool_names,
-        )
+        sanitized_content, content_changed = _replay_safe_message_content(content)
         if content_changed:
             sanitized_message = dict(message_dict)
             sanitized_message["content"] = sanitized_content

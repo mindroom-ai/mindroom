@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.agno_compat_claude import (
     BEDROCK_MAX_INLINE_MEDIA_BYTES,
     MAX_INLINE_MEDIA_BYTES,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_NAME,
     as_dict,
     request_kwargs_with_leading_tool_results,
@@ -344,6 +345,79 @@ def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
 
 
+def _request_tool_names(request_kwargs: dict[str, Any]) -> frozenset[str]:
+    """Return client tool names available on the current request."""
+    tools = request_kwargs.get("tools")
+    if not isinstance(tools, list):
+        return frozenset()
+    return frozenset(
+        name
+        for tool in tools
+        if (tool_dict := as_dict(tool)) is not None and isinstance(name := tool_dict.get("name"), str)
+    )
+
+
+def _search_result_with_available_references(
+    block_dict: dict[str, Any],
+    available_tool_names: frozenset[str],
+) -> dict[str, Any] | None:
+    """Return one search result without references to unavailable tools, or None when all are available."""
+    content = as_dict(block_dict.get("content"))
+    tool_references = content.get("tool_references") if content is not None else None
+    if content is None or not isinstance(tool_references, list):
+        return None
+    available_references = [
+        reference
+        for reference in tool_references
+        if (reference_dict := as_dict(reference)) is not None
+        and isinstance(tool_name := reference_dict.get("tool_name"), str)
+        and tool_name in available_tool_names
+    ]
+    if len(available_references) == len(tool_references):
+        return None
+    # Even when every reference is stale, keep the search as an empty result:
+    # dropping its pair would change a signed turn whose blocks surround it.
+    return {**block_dict, "content": {**content, "tool_references": available_references}}
+
+
+def _request_kwargs_with_replayable_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Repair replayed tool-search blocks and drop their references to tools absent from this request.
+
+    Search results can reference tools that a later request no longer offers after
+    its dynamic tool surface changes, which Claude rejects. A search left with no
+    references stays as an empty result, like a search that matched nothing, so
+    the signed thinking blocks around it are not moved together.
+    """
+    prepared_kwargs = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    messages = prepared_kwargs.get("messages")
+    if not isinstance(messages, list):
+        return prepared_kwargs
+    available_tool_names = _request_tool_names(prepared_kwargs)
+    prepared_messages = list(messages)
+    changed = False
+    for message_index, message in enumerate(messages):
+        message_dict = as_dict(message)
+        content = message_dict.get("content") if message_dict is not None else None
+        if message_dict is None or not isinstance(content, list):
+            continue
+        prepared_content = list(content)
+        content_changed = False
+        for block_index, block in enumerate(content):
+            block_dict = as_dict(block)
+            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
+                continue
+            filtered_block = _search_result_with_available_references(block_dict, available_tool_names)
+            if filtered_block is not None:
+                prepared_content[block_index] = filtered_block
+                content_changed = True
+        if content_changed:
+            prepared_messages[message_index] = {**message_dict, "content": prepared_content}
+            changed = True
+    if not changed:
+        return prepared_kwargs
+    return {**prepared_kwargs, "messages": prepared_messages}
+
+
 def _request_kwargs_with_deferred_tool_search(
     request_kwargs: dict[str, Any],
     deferred_tool_names: frozenset[str],
@@ -547,7 +621,7 @@ def prepare_claude_request_kwargs(
     request_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply MindRoom's wire transformations to one Claude request payload."""
-    prepared_kwargs = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared_kwargs = _request_kwargs_with_replayable_tool_search_results(request_kwargs)
     prepared_kwargs = request_kwargs_without_replayed_citations(prepared_kwargs)
     prepared_kwargs = request_kwargs_with_leading_tool_results(prepared_kwargs)
     prepared_kwargs = request_kwargs_with_supported_inline_media(
