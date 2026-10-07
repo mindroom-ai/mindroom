@@ -114,6 +114,8 @@ class _Model:
     deleted: set[str] = field(default_factory=set)
     # Edits a completed answer consumed, as the turn ledger commits them.
     consumed: set[str] = field(default_factory=set)
+    # Spans whose sources a departure settled unanswered, before anything consumed their edit.
+    departed: set[str] = field(default_factory=set)
 
 
 class ReplyLifecycleMachine(RuleBasedStateMachine):
@@ -1053,6 +1055,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             del self.model.continuations[continuation.approval_id]
         # The departure settles every pending turn event of the room, unanswered.
         for span_id in self.model.spans:
+            if not self._is_settled(span_id):
+                self.model.departed.add(span_id)
             self._settle(span_id)
         self._derive_hold()
         self.model.deferred.clear()
@@ -1306,6 +1310,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 and span.outcome is SpanOutcome.COMPLETED
                 and span.prepared_edit is not None
                 and "$source" not in self.model.deleted
+                and span.span_id not in self.model.departed
             ):
                 # S5: a regeneration that completed its answer consumed the edit it selected.
                 assert span.prepared_edit in self.model.consumed, span
