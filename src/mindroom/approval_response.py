@@ -517,7 +517,7 @@ class ApprovalResponseCoordinator:
             # LEGACY_COMPAT: Approval answers frozen before reply records, marked successful by their result.
             # Legacy format: an acknowledged FINAL row without reply_id whose result_json an approval resume's
             # completed answer filled, while a failure note's row has none.
-            # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages read success
+            # Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages read success
             # from the outcome of the reply span that wrote the row.
             # Handling: such a row is successful when it has a result, as it was.
             # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.

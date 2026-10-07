@@ -2191,7 +2191,7 @@ class ResponseRunner:
             # LEGACY_COMPAT: Approval answers frozen before reply records, with their body in the result.
             # Legacy format: an acknowledged FINAL row without reply_id whose result_json holds the body the
             # completed approval resume showed.
-            # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages read the body
+            # Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages read the body
             # from the presentation of the reply the row answered.
             # Handling: the result's body, else the payload's, restores the answer's visible body.
             # Coverage: tests/test_response_runner_focused.py::test_frozen_approval_final_without_reply_records_restores_its_body.

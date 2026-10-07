@@ -1983,7 +1983,7 @@ def _settled_approval(
     # LEGACY_COMPAT: Finishing an adopted continuation that reply classification never named a span for.
     # Legacy format: an approval_continuations row with no span_id, whose identity the schema upgrade copied into its
     # context; it stays so when its entity never starts again, such as an entity removed from the configuration.
-    # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages settle a continuation's
+    # Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages settle a continuation's
     # sources through its paused span's SettleSources.
     # Handling: its adopted pending and logical sources settle and its turn is answered, consuming its adopted
     # selected edit unless it failed, as the paused span's settlement would.

@@ -33,7 +33,7 @@ VALUES ('@bot:example.org', 'approval', 'bot', 'waiting',
 INSERT INTO approval_continuation_sources VALUES ('@bot:example.org', 'approval', '$edit', 0);
 """
 
-# What v2026.10.178 wrote: the continuation's identity in its response attempt tables.
+# What v2026.10.196 wrote: the continuation's identity in its response attempt tables.
 _ATTEMPT_OWNER = """
 CREATE TABLE matrix_sync_consumers (
     principal_id TEXT PRIMARY KEY, consumer_generation TEXT NOT NULL,
@@ -101,7 +101,7 @@ async def test_a_continuation_keeps_the_identity_its_context_held(legacy_databas
 
 @pytest.mark.asyncio
 async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legacy_database: _LegacyDatabase) -> None:
-    """The identity v2026.10.178 kept in response attempts moves onto the continuation, and the tables go."""
+    """The identity v2026.10.196 kept in response attempts moves onto the continuation, and the tables go."""
     legacy_database.execute(_ATTEMPT_OWNER)
     store = legacy_database.open()
     try:
@@ -136,7 +136,7 @@ async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legac
 
 @pytest.mark.asyncio
 async def test_a_claimed_continuation_keeps_its_claim_across_the_upgrade(legacy_database: _LegacyDatabase) -> None:
-    """A claim v2026.10.178 stored on the continuation reads as claimed by no running instance until classification."""
+    """A claim v2026.10.196 stored on the continuation reads as claimed by no running instance until classification."""
     legacy_database.execute(_ATTEMPT_OWNER)
     legacy_database.execute(
         "UPDATE approval_continuations SET state = 'claimed', runtime_generation = 'old-runtime' "

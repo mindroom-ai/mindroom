@@ -104,7 +104,7 @@ def _answer_to_regenerate(record: TurnRecord, reply: Reply | None) -> tuple[str 
     # LEGACY_COMPAT: Answers written before reply records, named only by the turn record.
     # Legacy format: a completed turn record whose response_event_id an earlier release wrote, with no reply record
     # for its sources.
-    # Last legacy release: v2026.10.178; replacement: the unreleased durable reply messages record the answer and its
+    # Last legacy release: v2026.10.196; replacement: the unreleased durable reply messages record the answer and its
     # Stop on the reply.
     # Handling: the edit regenerates that event as a historical answer; a Stop that release kept on the turn record is
     # not read, as no reply holds it.
