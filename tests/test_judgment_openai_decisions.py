@@ -198,7 +198,7 @@ async def test_uncertain_choices_abstain(answer: dict[str, Any]) -> None:
 
 async def test_refusals_abstain_without_failure() -> None:
     """A provider refusal is an explicit non-answer, not a malformed response."""
-    for answer in ({"type": "refusal", "name": "simple_task"}, {"type": "refusal"}):
+    for answer in ({"type": "refusal", "name": "simple_task"}, {"type": "refusal"}, {"type": "refusal", "name": None}):
         result = await _judge(_body(answer))
         assert result.failure is None
         assert result.decision is None

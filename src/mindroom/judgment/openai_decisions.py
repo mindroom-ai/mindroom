@@ -73,7 +73,7 @@ def _answer(root: object, question_id: str) -> tuple[str, TokenUsage, dict[str, 
         msg = "response must contain exactly one answer"
         raise InvalidJudgmentResponseError(msg)
     named = cast("dict[str, object]", answers[0])
-    if named.get("name", question_id) != question_id:
+    if named.get("name") not in (None, question_id):
         msg = "response answer names another question"
         raise InvalidJudgmentResponseError(msg)
     answer = {key: value for key, value in named.items() if key != "name"}
