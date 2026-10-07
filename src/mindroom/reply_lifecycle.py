@@ -880,12 +880,11 @@ def write_acknowledged(
     write: WriteFacts,
     *,
     event_id: str,
-    membership_current: bool = True,
+    membership_current: bool,
     now_ns: int,
 ) -> Transition:
     """Apply Matrix's acknowledgement of one durable row."""
     updated = reply
-    effects: list[Effect] = []
     if write.creates_event:
         if reply.event_id is not None and reply.event_id != event_id:
             msg = f"Reply {reply.reply_id} is bound to {reply.event_id}, not {event_id}"
@@ -902,7 +901,7 @@ def write_acknowledged(
             updated = replace(updated, placeholder_only=write.placeholder_only)
     if updated == reply:
         return _unchanged(Outcome.DUPLICATE, reply)
-    return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), effects=tuple(effects))
+    return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1904,7 +1903,7 @@ def redactions_done(reply: Reply, event_ids: tuple[str, ...], *, now_ns: int) ->
     return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, redaction_pending=remaining))
 
 
-def record_stop_button(reply: Reply, *, event_id: str, membership_current: bool = True, now_ns: int) -> Transition:
+def record_stop_button(reply: Reply, *, event_id: str, membership_current: bool, now_ns: int) -> Transition:
     """Record the Stop button reaction sent for a running reply, or queue it for removal (I8).
 
     A reply runs while active, and while paused with the span that waits in

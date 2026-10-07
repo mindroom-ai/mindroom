@@ -403,6 +403,7 @@ def test_initial_create_acknowledgement_binds_the_event() -> None:
         initial.reply,
         WriteFacts(WriteStage.INITIAL, initial.row.sequence, span.span_id, creates_event=True, placeholder_only=True),
         event_id="$reply",
+        membership_current=True,
         now_ns=NOW,
     )
     assert acked.reply is not None
@@ -414,6 +415,7 @@ def test_initial_create_acknowledgement_binds_the_event() -> None:
             acked.reply,
             WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
             event_id="$other",
+            membership_current=True,
             now_ns=NOW,
         )
 
@@ -426,6 +428,7 @@ def test_late_create_of_a_gone_reply_is_queued_for_redaction() -> None:
         gone,
         WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
         event_id="$late",
+        membership_current=True,
         now_ns=NOW,
     )
     assert acked.reply is not None
@@ -1260,7 +1263,7 @@ def test_a_wait_in_place_keeps_its_stop_button_until_its_span_ends() -> None:
     """The waiting span still runs, so the button stays through the wait and goes when the span ends."""
     reply, span = _turn()
     reply = replace(reply, event_id="$reply")
-    shown = rl.record_stop_button(reply, event_id="$button", now_ns=NOW)
+    shown = rl.record_stop_button(reply, event_id="$button", membership_current=True, now_ns=NOW)
     assert shown.reply is not None
     waiting = rl.pause(
         shown.reply,
@@ -1294,11 +1297,16 @@ def test_a_button_acknowledged_during_a_wait_in_place_stays_until_the_span_ends(
         now_ns=NOW,
     )
     assert waiting.reply is not None
-    late = rl.record_stop_button(waiting.reply, event_id="$button", now_ns=NOW)
+    late = rl.record_stop_button(waiting.reply, event_id="$button", membership_current=True, now_ns=NOW)
     assert late.reply is not None
     assert late.reply.stop_button_event_id == "$button"
     assert late.reply.redaction_pending == ()
-    paused = rl.record_stop_button(replace(waiting.reply, current_span_id=None), event_id="$late", now_ns=NOW)
+    paused = rl.record_stop_button(
+        replace(waiting.reply, current_span_id=None),
+        event_id="$late",
+        membership_current=True,
+        now_ns=NOW,
+    )
     assert paused.reply is not None
     assert paused.reply.redaction_pending == ("$late",)
 
@@ -1306,7 +1314,12 @@ def test_a_button_acknowledged_during_a_wait_in_place_stays_until_the_span_ends(
 def test_a_wait_in_place_an_older_instance_ran_ends_as_a_pause_at_start() -> None:
     """After a restart the reply waits for its decision as any pause does, and its Stop button goes."""
     reply, span = _turn()
-    shown = rl.record_stop_button(replace(reply, event_id="$reply"), event_id="$button", now_ns=NOW)
+    shown = rl.record_stop_button(
+        replace(reply, event_id="$reply"),
+        event_id="$button",
+        membership_current=True,
+        now_ns=NOW,
+    )
     assert shown.reply is not None
     waiting = rl.pause(
         shown.reply,
@@ -1395,13 +1408,18 @@ def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None
 def test_a_reply_shows_one_stop_button() -> None:
     """A second button recorded on a running reply queues the first for removal; a reply that ended removes it."""
     reply, _span = _turn()
-    first = rl.record_stop_button(reply, event_id="$button-1", now_ns=NOW)
+    first = rl.record_stop_button(reply, event_id="$button-1", membership_current=True, now_ns=NOW)
     assert first.reply is not None
-    second = rl.record_stop_button(first.reply, event_id="$button-2", now_ns=NOW)
+    second = rl.record_stop_button(first.reply, event_id="$button-2", membership_current=True, now_ns=NOW)
     assert second.reply is not None
     assert second.reply.stop_button_event_id == "$button-2"
     assert second.reply.redaction_pending == ("$button-1",)
-    ended = rl.record_stop_button(replace(reply, state=ReplyState.COMPLETED), event_id="$button-3", now_ns=NOW)
+    ended = rl.record_stop_button(
+        replace(reply, state=ReplyState.COMPLETED),
+        event_id="$button-3",
+        membership_current=True,
+        now_ns=NOW,
+    )
     assert ended.reply is not None
     assert ended.reply.stop_button_event_id is None
     assert ended.reply.redaction_pending == ("$button-3",)
@@ -1550,13 +1568,13 @@ def test_stop_guards() -> None:
 def test_stop_button_is_redacted_when_the_reply_leaves_active() -> None:
     """I8: leaving active queues the button's redaction."""
     reply, span = _turn()
-    with_button = rl.record_stop_button(reply, event_id="$button", now_ns=NOW)
+    with_button = rl.record_stop_button(reply, event_id="$button", membership_current=True, now_ns=NOW)
     assert with_button.reply is not None
     finished = rl.finish(with_button.reply, span, _write(with_button.reply, ReplyState.COMPLETED), now_ns=NOW)
     assert finished.reply is not None
     assert finished.reply.redaction_pending == ("$button",)
     assert finished.reply.stop_button_event_id is None
-    late = rl.record_stop_button(finished.reply, event_id="$late-button", now_ns=NOW)
+    late = rl.record_stop_button(finished.reply, event_id="$late-button", membership_current=True, now_ns=NOW)
     assert late.reply is not None
     assert "$late-button" in late.reply.redaction_pending
 
@@ -2049,6 +2067,7 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
         initial.reply,
         WriteFacts(WriteStage.INITIAL, initial.row.sequence, span.span_id, creates_event=True, placeholder_only=True),
         event_id="$reply",
+        membership_current=True,
         now_ns=NOW,
     )
     assert acked.reply is not None
@@ -2214,6 +2233,7 @@ def test_a_selection_whose_sources_settle_before_its_claim_removes_its_acknowled
             placeholder_only=True,
         ),
         event_id="$ack",
+        membership_current=True,
         now_ns=NOW,
     )
     assert acked.reply is not None

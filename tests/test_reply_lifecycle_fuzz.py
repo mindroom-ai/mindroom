@@ -502,6 +502,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 reply,
                 WriteFacts(row.intent.stage, row.intent.sequence, row.intent.span_id, creates, row.placeholder_only),
                 event_id="$reply",
+                membership_current=True,
                 now_ns=self._now(),
             ),
         )
@@ -602,7 +603,14 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     @rule()
     def stop_button(self) -> None:
         """Stop button."""
-        self._apply(rl.record_stop_button(self.model.reply, event_id=self._next("$button"), now_ns=self._now()))  # type: ignore[arg-type]
+        self._apply(
+            rl.record_stop_button(
+                self.model.reply,
+                event_id=self._next("$button"),
+                membership_current=True,
+                now_ns=self._now(),
+            ),
+        )  # type: ignore[arg-type]
 
     # --- span exits ---------------------------------------------------------
 
