@@ -17,6 +17,7 @@ import secrets
 import stat
 import threading
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,9 @@ _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 # collide with a requester directory inside the primary-runtime scoped store.
 _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME = "_agents"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
+# Securing one dormant worker store takes several filesystem round trips, which on network
+# storage with thousands of workers made the primary's first credential access take seconds.
+_WORKER_STORE_HARDENING_CONCURRENCY = 16
 _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
 _AES_GCM_NONCE_SIZE = 12
 logger = get_logger(__name__)
@@ -392,6 +396,31 @@ def _worker_credential_paths(storage_root: Path) -> _WorkerCredentialPaths:
     return _WorkerCredentialPaths(existing=tuple(existing), uninspectable=tuple(uninspectable))
 
 
+def _harden_worker_credential_store(credential_path: Path) -> None:
+    """Secure one dormant worker store, warning instead of failing when worker code locked it."""
+    try:
+        _ensure_private_directory(credential_path, harden_existing=True)
+        _harden_existing_credential_files(credential_path)
+    except OSError as exc:
+        # Worker code owns its store and may change its modes, which must never stop the primary.
+        logger.warning("Cannot secure a worker credential store", path=str(credential_path), error=str(exc))
+
+
+def _harden_worker_credential_stores(credential_paths: tuple[Path, ...]) -> None:
+    """Secure every dormant worker store before returning, overlapping their filesystem round trips."""
+    if len(credential_paths) < 2:
+        for credential_path in credential_paths:
+            _harden_worker_credential_store(credential_path)
+        return
+    with ThreadPoolExecutor(
+        max_workers=min(_WORKER_STORE_HARDENING_CONCURRENCY, len(credential_paths)),
+        thread_name_prefix="mindroom-credential-hardening",
+    ) as executor:
+        # Consuming the results re-raises anything but the per-store OSError that is only logged.
+        for _ in executor.map(_harden_worker_credential_store, credential_paths):
+            pass
+
+
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:
     if len(payload) > _MAX_CREDENTIALS_PAYLOAD_BYTES:
         # Refuse what the store could never read back, rather than publishing a dead entry.
@@ -446,15 +475,10 @@ class CredentialsManager:
         if self.current_worker_key is None and self.base_path.name == "credentials":
             _reject_linked_primary_credential_directories(credential_paths)
             worker_credential_paths = _worker_credential_paths(self.storage_root).existing
-        for credential_path in (*credential_paths, *worker_credential_paths):
-            try:
-                _ensure_private_directory(credential_path, harden_existing=True)
-                _harden_existing_credential_files(credential_path)
-            except OSError as exc:
-                if credential_path not in worker_credential_paths:
-                    raise
-                # Worker code owns its store and may change its modes, which must never stop the primary.
-                logger.warning("Cannot secure a worker credential store", path=str(credential_path), error=str(exc))
+        for credential_path in credential_paths:
+            _ensure_private_directory(credential_path, harden_existing=True)
+            _harden_existing_credential_files(credential_path)
+        _harden_worker_credential_stores(worker_credential_paths)
 
     @property
     def storage_root(self) -> Path:
