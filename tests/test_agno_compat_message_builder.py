@@ -7,16 +7,20 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from agno.agent import Agent
 from agno.agent import _messages as agent_messages
 from agno.media import Audio, File, Image, Video
 from agno.models.message import Message
 from agno.models.openai.chat import OpenAIChat
 from agno.models.response import ModelResponse
+from agno.run.agent import RunOutput
 from agno.run.base import RunContext
 from agno.run.messages import RunMessages
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from agno.team import Team, _messages
+from agno.team import _run as team_run
 from pydantic import BaseModel
 
 from mindroom.history import agno_compat_message_builder, message_content
@@ -273,6 +277,100 @@ async def test_persisted_history_media_is_not_replayed() -> None:
     assert run_messages.user_message.images == [current_image]
 
 
+def _voice_note_history_message() -> Message:
+    return Message(
+        role="user",
+        content="voice note",
+        audio=[Audio(id="att_voice", content=b"history-audio", mime_type="audio/mp4")],
+        files=[File(id="att_paste", content=b"history-file", mime_type="text/plain")],
+    )
+
+
+def _paused_run_input() -> tuple[Message, list[Message]]:
+    current_message = Message(
+        role="user",
+        content="canvas response",
+        images=[Image(id="att_current", content=b"current")],
+    )
+    return current_message, [Message(role="system", content="system"), current_message]
+
+
+def _assert_continuation_replays_history_without_media(
+    run_messages: RunMessages,
+    history_message: Message,
+    current_message: Message,
+) -> None:
+    replayed = [message for message in run_messages.messages if message.from_history]
+    assert len(replayed) == 1
+    assert replayed[0].content == "voice note"
+    assert replayed[0].audio is None
+    assert replayed[0].files is None
+    assert history_message.audio
+    assert history_message.files
+    assert run_messages.user_message is current_message
+    assert current_message.images
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.asyncio
+async def test_agent_continuation_does_not_replay_persisted_history_media(use_async: bool) -> None:
+    """Approval continuations rebuild history without the media a fresh run would strip."""
+    agent = Agent(model=RecordingOpenAIChat(id="gpt-test", api_key="sk-test"), telemetry=False)
+    history_message = _voice_note_history_message()
+    session = AgentSession(
+        session_id="session",
+        runs=[RunOutput(run_id="history", session_id="session", messages=[history_message])],
+    )
+    current_message, paused_input = _paused_run_input()
+
+    if use_async:
+        run_messages = await agent_messages.aget_continue_run_messages(
+            agent,
+            input=paused_input,
+            session=session,
+            add_history_to_context=True,
+        )
+    else:
+        run_messages = agent_messages.get_continue_run_messages(
+            agent,
+            input=paused_input,
+            session=session,
+            add_history_to_context=True,
+        )
+
+    _assert_continuation_replays_history_without_media(run_messages, history_message, current_message)
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.asyncio
+async def test_team_continuation_does_not_replay_persisted_history_media(use_async: bool) -> None:
+    """Team approval continuations rebuild history without persisted inline media."""
+    team = _team(RecordingOpenAIChat(id="gpt-test", api_key="sk-test"))
+    history_message = _voice_note_history_message()
+    session = TeamSession(
+        session_id="session",
+        runs=[TeamRunOutput(run_id="history", session_id="session", messages=[history_message])],
+    )
+    current_message, paused_input = _paused_run_input()
+
+    if use_async:
+        run_messages = await team_run._aget_continue_run_messages(
+            team,
+            input=paused_input,
+            session=session,
+            add_history_to_context=True,
+        )
+    else:
+        run_messages = team_run._get_continue_run_messages(
+            team,
+            input=paused_input,
+            session=session,
+            add_history_to_context=True,
+        )
+
+    _assert_continuation_replays_history_without_media(run_messages, history_message, current_message)
+
+
 @pytest.mark.asyncio
 async def test_viewed_image_replay_keeps_only_newest_four_and_discloses_omissions() -> None:
     """Historical viewed images stay bounded without changing durable or current media."""
@@ -387,6 +485,8 @@ def test_apply_patch_is_idempotent() -> None:
     patched_team_async = _messages._aget_run_messages
     patched_agent_sync = agent_messages.get_run_messages
     patched_agent_async = agent_messages.aget_run_messages
+    patched_team_continue = team_run._build_continue_run_messages
+    patched_agent_continue = agent_messages._build_continue_run_messages
 
     agno_compat_message_builder.apply_patch()
     agno_compat_message_builder.apply_patch()
@@ -395,6 +495,8 @@ def test_apply_patch_is_idempotent() -> None:
     assert _messages._aget_run_messages is patched_team_async
     assert agent_messages.get_run_messages is patched_agent_sync
     assert agent_messages.aget_run_messages is patched_agent_async
+    assert team_run._build_continue_run_messages is patched_team_continue
+    assert agent_messages._build_continue_run_messages is patched_agent_continue
 
 
 @pytest.mark.parametrize(
