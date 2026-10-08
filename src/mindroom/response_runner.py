@@ -243,15 +243,18 @@ _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "Your reply to the current message was interrupted by a restart before it finished. The user still sees what "
     "it had shown, which is below, and your reply continues it in the same message after a restart note. Continue "
     "naturally from where it stopped without repeating what it already said; you may briefly acknowledge the "
-    "interruption first. Build on the tool results it shows: tool calls it lists as finished already ran, and those "
-    "it lists as still running may have finished too. Calls hidden from the conversation or made just before it "
-    "stopped may be missing, so before repeating any tool call with side effects, check whether it already took effect."
+    "interruption first."
+)
+# Real-model A/B: without "do not call a finished tool with side effects again", a fast model repeated finished
+# calls; without the read-only allowance, models no longer re-ran a listing whose cut-off result they needed.
+_ATTEMPT_TOOL_CALLS_INSTRUCTION = (
+    "It already made the tool calls below for the current message, and their effects stand: do not call a "
+    "finished tool with side effects again, though a read-only call whose shortened result is not enough may run "
+    "again, and before repeating one that was still running, check whether it already took effect."
 )
 _RECORDED_ATTEMPT_INSTRUCTION = (
     "Your previous attempt at replying to the current message was interrupted by a restart before it finished. "
-    "It made the tool calls below: those listed as finished already ran, and those listed as still running may "
-    "have finished too. Do not repeat a finished tool call with side effects, and before repeating one that was "
-    "still running, check whether it already took effect."
+    f"{_ATTEMPT_TOOL_CALLS_INSTRUCTION}"
 )
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
@@ -3988,7 +3991,12 @@ class ResponseRunner:
                 completed_tools=completed_tools,
                 interrupted_tools=interrupted_tools,
             )
-            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+            head = (
+                f"{_INTERRUPTED_ATTEMPT_INSTRUCTION} {_ATTEMPT_TOOL_CALLS_INSTRUCTION}"
+                if tools
+                else _INTERRUPTED_ATTEMPT_INSTRUCTION
+            )
+            instruction = f"{head}\n\n{attempt}"
         elif tools:
             # It showed none of its work, but it recorded each tool call before the tool ran.
             attempt = render_stopped_attempt(

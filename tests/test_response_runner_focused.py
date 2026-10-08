@@ -1941,6 +1941,7 @@ def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(t
     assert 'The `report` tool was still running with input preview "{\\"pages\\": 3}"' in account
     assert "Team Response" not in account
     assert "No team consensus" not in account
+    assert "their effects stand: do not call a finished tool with side effects again" in account
 
 
 @pytest.mark.asyncio

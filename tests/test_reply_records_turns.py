@@ -1238,6 +1238,8 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
         assert account.startswith("Your reply to the current message was interrupted by a restart before it finished.")
         assert "Partial" in account
+        # The stopped attempt made no tool call, so the account names none.
+        assert "tool calls below" not in account
         assert _sent_bodies(restarted)[-1] == f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
         assert not await restarted._reply_runtime.store.is_pending("$event")
     finally:
