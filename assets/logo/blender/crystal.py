@@ -22,6 +22,7 @@ from pathlib import Path
 
 import bmesh
 import bpy
+from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Matrix, Vector
 
 HERE = Path(__file__).resolve().parent
@@ -422,7 +423,22 @@ def crystallize(scene: bpy.types.Scene, *, frozen: bool) -> None:
     core.data.energy = 700.0
     core.visible_glossy = False  # It lights the crystal; the filaments are what the glass reflects.
     bpy.data.materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0
-    scene.compositing_node_group.nodes["Glare"].inputs["Threshold"].default_value = 2.0
+    glow = scene.compositing_node_group
+    glow.nodes["Glare"].inputs["Threshold"].default_value = 2.0
+    streaks = glow.nodes.new("CompositorNodeGlare")  # Lens streaks, muted until the lock-in flash.
+    streaks.name = "flash-streaks"
+    streaks.inputs["Type"].default_value = "Streaks"
+    streaks.inputs["Threshold"].default_value = 3.0
+    streaks.inputs["Strength"].default_value = 0.0
+    beams = glow.nodes.new("CompositorNodeGlare")  # Rays bursting from the core, likewise.
+    beams.name = "flash-beams"
+    beams.inputs["Type"].default_value = "Sun Beams"
+    beams.inputs["Threshold"].default_value = 1.5
+    beams.inputs["Strength"].default_value = 0.0
+    streaks.mute = beams.mute = True
+    glow.links.new(glow.nodes["Glare"].outputs["Image"], streaks.inputs["Image"])
+    glow.links.new(streaks.outputs["Image"], beams.inputs["Image"])
+    glow.links.new(beams.outputs["Image"], glow.nodes["Group Output"].inputs["Image"])
     scene.world = studio_world()
 
 
@@ -469,48 +485,41 @@ def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
     return rig
 
 
-def flash_ring(collection: bpy.types.Collection, camera: bpy.types.Object) -> bpy.types.Object:
-    """A ring of light facing the camera at the cube's center; the lock-in expands it as the M forms."""
-    material, tree = node_material("flash-ring")
+def flash_haze(collection: bpy.types.Collection, rig: dict[str, bpy.types.Object]) -> bpy.types.Object:
+    """Air around the letter that only the core lights; during the flash it shows rays streaming from the center."""
+    material, tree = node_material("flash-haze")
     nodes, links = tree.nodes, tree.links
+    # The haze thins out away from the cube, so the light blooms at the center and the edges stay dark.
     coords = nodes.new("ShaderNodeTexCoord")
-    radius = nodes.new("ShaderNodeVectorMath")
-    radius.operation = "LENGTH"
-    links.new(coords.outputs["Object"], radius.inputs[0])
-    # A soft inner edge and a crisp outer edge, like a shockwave.
-    inner = nodes.new("ShaderNodeMapRange")
-    inner.interpolation_type = "SMOOTHSTEP"
-    inner.inputs["From Min"].default_value = 0.88
-    inner.inputs["From Max"].default_value = 0.97
-    links.new(radius.outputs["Value"], inner.inputs["Value"])
-    outer = nodes.new("ShaderNodeMapRange")
-    outer.interpolation_type = "SMOOTHSTEP"
-    outer.inputs["From Min"].default_value = 0.97
-    outer.inputs["From Max"].default_value = 1.0
-    outer.inputs["To Min"].default_value = 1.0
-    outer.inputs["To Max"].default_value = 0.0
-    links.new(radius.outputs["Value"], outer.inputs["Value"])
-    band = nodes.new("ShaderNodeMath")
-    band.operation = "MULTIPLY"
-    links.new(inner.outputs["Result"], band.inputs[0])
-    links.new(outer.outputs["Result"], band.inputs[1])
-    glow = nodes.new("ShaderNodeEmission")
-    glow.name = "flash-glow"
-    glow.inputs["Color"].default_value = logo.srgb("#fff1d6")
-    clear = nodes.new("ShaderNodeBsdfTransparent")
-    mix = nodes.new("ShaderNodeMixShader")
-    links.new(band.outputs["Value"], mix.inputs["Fac"])
-    links.new(clear.outputs["BSDF"], mix.inputs[1])
-    links.new(glow.outputs["Emission"], mix.inputs[2])
-    links.new(mix.outputs["Shader"], output(tree).inputs["Surface"])
+    offset = nodes.new("ShaderNodeVectorMath")
+    offset.operation = "SUBTRACT"
+    offset.inputs[1].default_value = logo.CUBE_CENTER
+    links.new(coords.outputs["Object"], offset.inputs[0])
+    distance = nodes.new("ShaderNodeVectorMath")
+    distance.operation = "LENGTH"
+    links.new(offset.outputs["Vector"], distance.inputs[0])
+    thickness = nodes.new("ShaderNodeMapRange")
+    thickness.name = "haze-density"  # The lock-in raises the peak density for the flash.
+    thickness.interpolation_type = "SMOOTHSTEP"
+    thickness.inputs["From Min"].default_value = 0.4
+    thickness.inputs["From Max"].default_value = 2.2
+    thickness.inputs["To Min"].default_value = 0.0
+    thickness.inputs["To Max"].default_value = 0.0
+    links.new(distance.outputs["Value"], thickness.inputs["Value"])
+    haze = nodes.new("ShaderNodeVolumeScatter")
+    haze.inputs["Color"].default_value = logo.srgb("#fff3dc")
+    haze.inputs["Anisotropy"].default_value = 0.5  # Scattering forward makes the rays brightest toward the camera.
+    links.new(thickness.outputs["Result"], haze.inputs["Density"])
+    links.new(haze.outputs["Volume"], output(tree).inputs["Volume"])
     bm = bmesh.new()
-    bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=1.0)
-    ring = logo.mesh_object("flash-ring", bm, material, collection)
-    ring.visible_shadow = False
-    ring.hide_render = True
-    facing = ring.constraints.new("COPY_ROTATION")  # The camera looks down its -Z; the plane faces back up it.
-    facing.target = camera
-    return ring
+    logo.add_box(bm, (-2.5, -2.5, logo.FOOT_Z[0] + 0.01), (3.5, 3.5, logo.H + 2.5))
+    box = logo.mesh_object("flash-haze", bm, material, collection)
+    box.hide_render = True  # Shown only while the flash lasts.
+    for name in ("back", "rim-left", "rim-right"):  # The behind light already reaches only the floor.
+        receivers = rig[name].light_linking.receiver_collection
+        receivers.objects.link(box)
+        receivers.collection_objects[len(receivers.objects) - 1].light_linking.link_state = "EXCLUDE"
+    return box
 
 
 def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
@@ -535,7 +544,7 @@ def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
     camera.location = hero.location.copy()
     camera.rotation_euler = hero.rotation_euler.copy()
     scene.camera = rig["camera"] = camera
-    rig["flash"] = flash_ring(collection, camera)
+    rig["haze"] = flash_haze(collection, rig)
     return rig
 
 
@@ -571,22 +580,30 @@ def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
     turn = azimuth - math.radians(45.0)
     rig["mount"].rotation_euler = (0.0, 0.0, turn)
     world["hdri-turn"].inputs["Rotation"].default_value = (0.0, 0.0, turn)
-    # The moment the M forms, a flash bursts from the center: the core and filaments flare,
-    # the legs brighten, and a ring of light races outward, all fading within about a second.
+    # The moment the M forms, a flash bursts from the center: the core floods the scene with light,
+    # the haze shows its rays streaming out through the frame, and the camera overexposes and streaks.
     since = frame - LOCK_FRAME
-    burst = min(max(since, 0) / 2, 1.0) * math.exp(-max(since - 2, 0) / 6)
+    burst = math.exp(-since / 4) if since >= 0 else 0.0
     rig["core"].data.energy = 700.0 * (1 + 6 * burst)
     materials = bpy.data.materials
-    materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * (1 + 4 * burst)
+    materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * (1 + 6 * burst)
     for family, strength in FILAMENT.items():
         glow = materials[f"filament-{family}"].node_tree.nodes["Emission"]
         glow.inputs["Strength"].default_value = strength * (1 + 3 * burst)
     materials["leg-glow"].node_tree.nodes["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * (1 + 2 * burst)
-    wave = max(1 - since / 14, 0.0) ** 2 if since >= 0 else 0.0  # The ring is gone well before the hold ends.
-    rig["flash"].hide_render = wave == 0.0
-    rig["flash"].location = logo.CUBE_CENTER + 0.9 * view  # In front of the cube, so its beams never hide it.
-    rig["flash"].scale = (0.3 + 0.22 * max(since, 0),) * 3
-    materials["flash-ring"].node_tree.nodes["flash-glow"].inputs["Strength"].default_value = 16.0 * wave
+    quiet = burst < 0.02
+    rig["haze"].hide_render = quiet
+    materials["flash-haze"].node_tree.nodes["haze-density"].inputs["To Min"].default_value = 0.15 * burst
+    scene = bpy.context.scene
+    lens = scene.compositing_node_group.nodes
+    lens["flash-streaks"].mute = lens["flash-beams"].mute = quiet
+    lens["flash-streaks"].inputs["Strength"].default_value = 0.4 * burst
+    lens["flash-beams"].inputs["Strength"].default_value = 0.5 * burst
+    if not quiet:
+        bpy.context.view_layer.update()  # The beams need the camera's new pose to find the core on screen.
+        core = world_to_camera_view(scene, camera, logo.CUBE_CENTER)
+        lens["flash-beams"].inputs["Sun Position"].default_value = (core.x, core.y)
+    scene.view_settings.exposure = 0.3 * burst
 
 
 def ignition(rig: dict[str, bpy.types.Object], frame: int) -> None:
