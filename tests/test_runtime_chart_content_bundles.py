@@ -472,6 +472,8 @@ def test_overwrite_false_copies_over_the_target_without_removing_anything(
 ) -> None:
     """With overwrite: false, bundle files replace their target copies and target-only files stay."""
     source = _make_source(tmp_path / "bundle")
+    # This path is the unchanged plain cp -a, and BusyBox 1.36 cp -a cannot replace an existing symlink.
+    (source / "current").unlink()
     target = tmp_path / "keep"
     _run(bundle_inits["keep"], tool_dir, source, target)
     notes = target / "local-notes.md"
