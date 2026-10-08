@@ -125,6 +125,7 @@ def _regeneration_prompt(record: TurnRecord) -> str:
             turn_store=MagicMock(),
             ingress_hook_runner=MagicMock(),
             start_regeneration=MagicMock(),
+            settle_sources=AsyncMock(),
             stop_reply=AsyncMock(),
             receipt_order=AsyncMock(return_value=1),
             timestamp_formatter=_timestamp_formatter,

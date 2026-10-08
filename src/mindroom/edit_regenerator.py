@@ -51,8 +51,11 @@ class EditRegeneratorDeps:
     resolver: ConversationResolver
     turn_store: TurnStore
     ingress_hook_runner: IngressHookRunner
-    # Runs a regeneration on a runner-owned task, so the room's event lane never waits for its model run.
-    start_regeneration: Callable[[ResponseRequest], asyncio.Task[None]]
+    # Runs a regeneration on a runner-owned task, off the room's event lane, then the callback it is given unless the
+    # task was cancelled.
+    start_regeneration: Callable[[ResponseRequest, Callable[[], Awaitable[None]]], asyncio.Task[None]]
+    # Settles sources nothing will answer, as the room's lane does for an event it ignores.
+    settle_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     # Records a Stop on a reply that still runs, as a Stop reaction would.
     stop_reply: Callable[[Reply, int], Awaitable[object]]
     receipt_order: Callable[[], Awaitable[int]]
@@ -233,7 +236,7 @@ class EditRegenerator:
             prompt,
             structured=structured,
         )
-        return await self._regenerate(request)
+        return self._regenerate(request)
 
     def _prompt(self, room: nio.MatrixRoom, record: TurnRecord, edited_content: str) -> tuple[str | None, bool]:
         """Return the prompt the edited turn runs with, and whether it is structured."""
@@ -312,28 +315,28 @@ class EditRegenerator:
             source_handoff=asyncio.Event(),
         )
 
-    async def _regenerate(self, request: ResponseRequest) -> bool:
-        """Start the regeneration off the room's lane; return once a span owns the edit or nothing will.
+    def _regenerate(self, request: ResponseRequest) -> bool:
+        """Start the regeneration off the room's lane, which hands it the edit.
 
-        The lane waits only for the claim: until then a refusal must settle the
-        edit, and after it the regeneration's span settles it.
+        Its claim waits for the conversation, which another reply of this agent
+        holds for as long as that reply runs, so the lane does not wait for it.
+        A regeneration that ends with no span owning its edit settles the edit
+        itself, unless its claim was deferred to the wake that retries it.
         """
-        claimed = asyncio.Event()
+        claimed = False
         commit_edit = request.on_reply_claimed
+        handoff = request.source_handoff
         assert commit_edit is not None
+        assert handoff is not None
 
         async def on_claimed() -> None:
-            claimed.set()
+            nonlocal claimed
+            claimed = True
             await commit_edit()
 
-        handoff = request.source_handoff
-        assert handoff is not None
-        task = self.deps.start_regeneration(replace(request, on_reply_claimed=on_claimed))
-        claim = asyncio.ensure_future(claimed.wait())
-        handed_off = asyncio.ensure_future(handoff.wait())
-        try:
-            await asyncio.wait({task, claim, handed_off}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            claim.cancel()
-            handed_off.cancel()
-        return claimed.is_set() or handoff.is_set()
+        async def settle_unless_owned() -> None:
+            if not claimed and not handoff.is_set():
+                await self.deps.settle_sources(request.sources.pending_event_ids)
+
+        self.deps.start_regeneration(replace(request, on_reply_claimed=on_claimed), settle_unless_owned)
+        return True

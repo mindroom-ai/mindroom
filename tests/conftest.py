@@ -2557,9 +2557,10 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
         generate_response = cast("Callable[[ResponseRequest], Awaitable[object]]", changes["generate_response"])
         runner = unwrap_extracted_collaborator(bot._response_runner)
 
-        def start_regeneration(request: ResponseRequest) -> asyncio.Task[None]:
+        def start_regeneration(request: ResponseRequest, after: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
             async def regenerate() -> None:
                 await generate_response(request)
+                await after()
 
             return runner.track_inbox_response(
                 regenerate(),

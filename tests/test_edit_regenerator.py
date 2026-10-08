@@ -30,6 +30,7 @@ from tests.conftest import make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -65,6 +66,9 @@ class _Harness:
     generate_response: AsyncMock
     stop_reply: AsyncMock
     later_human_message: AsyncMock
+    settle_sources: AsyncMock
+    # The conversation lock the harness's regenerations take before they claim.
+    response_lock: asyncio.Lock
     # The regenerations the regenerator started, which a test awaits before it checks their effects.
     regenerations: list[asyncio.Task[None]]
     config: Config
@@ -240,8 +244,12 @@ def _harness(
             # The reply records own the answer from then on, which is what a later edit regenerates.
             reply_for_sources.return_value = _reply(event_id=event_id)
 
-    def start_regeneration(request: ResponseRequest) -> asyncio.Task[None]:
-        task = asyncio.create_task(regenerate(request))
+    def start_regeneration(request: ResponseRequest, after: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
+        async def run() -> None:
+            await regenerate(request)
+            await after()
+
+        task = asyncio.create_task(run())
         regenerations.append(task)
         return task
 
@@ -254,6 +262,7 @@ def _harness(
             turn_store=turn_store,
             ingress_hook_runner=ingress_hook_runner,
             start_regeneration=start_regeneration,
+            settle_sources=AsyncMock(),
             stop_reply=AsyncMock(),
             receipt_order=AsyncMock(return_value=receipt_order),
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
@@ -269,6 +278,8 @@ def _harness(
         generate_response=generate_response,
         stop_reply=regenerator.deps.stop_reply,  # type: ignore[arg-type]
         later_human_message=regenerator.deps.later_human_message,  # type: ignore[arg-type]
+        settle_sources=regenerator.deps.settle_sources,  # type: ignore[arg-type]
+        response_lock=response_lock,
         regenerations=regenerations,
         config=config,
         runtime_paths=runtime_paths,
@@ -579,19 +590,40 @@ async def test_an_edit_of_a_reply_that_still_streams_stops_it_and_regenerates_in
 
 
 @pytest.mark.asyncio
-async def test_an_edit_whose_regeneration_runs_nothing_leaves_the_edit_to_settle(tmp_path: Path) -> None:
-    """A regeneration that opens no span hands nothing off, so the room's lane settles the edit."""
+async def test_an_edit_whose_regeneration_runs_nothing_is_settled_by_it(tmp_path: Path) -> None:
+    """A regeneration that opens no span settles the edit the room's lane handed it."""
     harness = _harness(tmp_path, turn_record=_turn_record())
-    harness.generate_response.return_value = None
     event, event_info = _edit_event()
 
-    # The harness signals the claim before generating; a refusal is the task ending without it.
-    harness.regenerator.deps = replace(
-        harness.regenerator.deps,
-        start_regeneration=lambda _request: asyncio.create_task(asyncio.sleep(0)),
-    )
+    # A refusal is the regeneration ending without signalling a claim.
+    def refuse(_request: ResponseRequest, after: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
+        task = asyncio.create_task(after())
+        harness.regenerations.append(task)
+        return task
 
-    assert await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID) is False
+    harness.regenerator.deps = replace(harness.regenerator.deps, start_regeneration=refuse)
+
+    assert await _handle_edit(harness, event, event_info) is True
+    harness.settle_sources.assert_awaited_once_with((event.event_id,))
+
+
+@pytest.mark.asyncio
+async def test_an_edit_does_not_hold_the_rooms_lane_while_another_reply_holds_the_conversation(
+    tmp_path: Path,
+) -> None:
+    """The lane hands the edit off at once; its regeneration claims once the reply holding the conversation ends."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event()
+
+    async with harness.response_lock, asyncio.timeout(5):
+        # Another reply of this agent in the same conversation runs and holds it.
+        assert await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID) is True
+        harness.generate_response.assert_not_awaited()
+    await asyncio.gather(*harness.regenerations)
+
+    harness.generate_response.assert_awaited_once()
+    harness.turn_store.record_edit.assert_called_once()
+    harness.settle_sources.assert_not_awaited()
 
 
 @pytest.mark.asyncio

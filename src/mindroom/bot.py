@@ -781,6 +781,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
                 start_regeneration=self._start_regeneration,
+                settle_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
                 stop_reply=self._stop_reply_for_edit,
                 receipt_order=self._journal_dispatcher.receipt_order,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
@@ -2845,11 +2846,23 @@ class AgentBot:
         """Run one edit-regenerated turn through this bot's response path."""
         return await self._response_runner.generate_response(request)
 
-    def _start_regeneration(self, request: ResponseRequest) -> asyncio.Task[None]:
-        """Run an edit's regeneration on a runner-owned task, off the room's event lane."""
+    def _start_regeneration(
+        self,
+        request: ResponseRequest,
+        after: Callable[[], Awaitable[None]],
+    ) -> asyncio.Task[None]:
+        """Run an edit's regeneration on a runner-owned task, off the room's event lane, then ``after``."""
 
         async def regenerate() -> None:
-            await self._run_regenerated_response(request)
+            try:
+                await self._run_regenerated_response(request)
+            except asyncio.CancelledError:
+                # Cancelled, as at shutdown, its edit stays pending, so a restart regenerates again.
+                raise
+            except Exception:
+                await after()
+                raise
+            await after()
 
         return self._response_runner.track_inbox_response(
             regenerate(),
