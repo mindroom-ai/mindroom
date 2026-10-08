@@ -10,6 +10,7 @@ payloads for the revision it knows and learn when a Stop changed it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
@@ -181,6 +182,12 @@ _INTERRUPTED_OUTCOMES = frozenset(
 )
 
 
+def _entry_json(entry: ToolTraceEntry) -> str:
+    """Return one tool call as the reply records store it."""
+    (encoded,) = serialize_tool_trace((entry,))
+    return json.dumps(encoded)
+
+
 @dataclass(frozen=True)
 class _SpanToolCalls:
     """Records each tool call on the span the calling task runs, before the tool runs."""
@@ -193,12 +200,15 @@ class _SpanToolCalls:
             return None
         call_id = _new_id()
         _, entry = format_tool_combined(tool_name, dict(args), None)
-        await self.runtime.record_tool_call(
+        if not await self.runtime.store.replies.start_tool_call(
             span_id=handle.span_id,
             call_id=call_id,
-            entry=replace(entry, type="tool_call_started"),
+            entry_json=_entry_json(replace(entry, type="tool_call_started")),
             now_ns=self.runtime.clock(),
-        )
+        ):
+            # A Stop committed before this start, or the span ended: the tool must not run. A synchronous tool's
+            # hooks run on a thread the Stop's cancellation never reaches, so this refusal is what stops it.
+            raise asyncio.CancelledError
         return call_id
 
     async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
@@ -275,12 +285,11 @@ class ReplyRuntime:
                 self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
 
     async def record_tool_call(self, *, span_id: str, call_id: str, entry: ToolTraceEntry, now_ns: int) -> None:
-        """Record one tool call a span made, as it starts and again once it returned."""
-        (encoded,) = serialize_tool_trace((entry,))
+        """Record what a started tool call returned."""
         await self.store.replies.record_tool_call(
             span_id=span_id,
             call_id=call_id,
-            entry_json=json.dumps(encoded),
+            entry_json=_entry_json(entry),
             now_ns=now_ns,
         )
 
@@ -860,14 +869,14 @@ def interrupted_end(
     delivery_started: bool,
     confirms: rl.ProgressConfirmation | None,
 ) -> NotedEnd | Decide:
-    """Return how a span ends when its response was stopped, interrupted, or failed.
+    """Return how a span ends when its response was cancelled, or failed with a settled outcome.
 
     ``cancel_source`` is ``None`` for a failure. A recorded Stop ends the reply
-    cancelled, as the rules decide for every exit. Once delivery started, the
-    reply ends failed with its note. Before that its sources stay for a retry:
-    an interruption that showed nothing leaves Matrix untouched, and anything
-    else shows its note while the retry runs, so a failure that recurs on every
-    attempt never leaves the reply showing only its placeholder.
+    cancelled, as the rules decide for every exit. An interruption of a reply
+    with no event yet leaves Matrix untouched and its sources retry. Otherwise,
+    before delivery starts, the reply shows its note while its sources retry,
+    so a failure that recurs on every attempt never leaves the reply showing
+    only its placeholder; once delivery started, it ends failed with its note.
     """
     if reply.unapplied_stop:
         return NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))

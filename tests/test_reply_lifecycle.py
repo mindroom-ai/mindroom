@@ -2163,6 +2163,20 @@ def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
     assert failed.reply.state is ReplyState.FAILED
 
 
+# --- tool starts -----------------------------------------------------------
+
+
+def test_only_a_running_current_span_without_a_waiting_stop_starts_a_tool() -> None:
+    """A Stop committed first, or a span that ended or was replaced, keeps a tool from starting."""
+    reply, span = _turn()
+    assert rl.admits_tool_start(reply, span)
+    assert not rl.admits_tool_start(replace(reply, stop_receipt_order=1), span)
+    assert rl.admits_tool_start(replace(reply, stop_receipt_order=1, stop_applied_receipt_order=1), span)
+    ended_reply, ended_span = _ended(reply, span, SpanOutcome.FAILED)
+    assert not rl.admits_tool_start(ended_reply, ended_span)
+    assert not rl.admits_tool_start(replace(reply, current_span_id="span-2"), span)
+
+
 # --- interrupted responses -------------------------------------------------
 
 

@@ -739,6 +739,32 @@ async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
+    """A Stop that commits while the start record is written stops a synchronous tool the cancellation cannot reach."""
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+    assert bridge is not None
+    ran: list[str] = []
+
+    class _StoppedRecorder:
+        async def started(self, tool_name: str, args: Mapping[str, object]) -> str:
+            del tool_name, args
+            raise asyncio.CancelledError
+
+        async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+            del call_id, tool_name, args, result
+            ran.append("finished")
+
+    def sync_tool() -> str:
+        ran.append("body")
+        return "done"
+
+    with recording_tool_calls(_StoppedRecorder()), pytest.raises(asyncio.CancelledError):
+        await bridge("sync_tool", sync_tool, {})
+
+    assert ran == []
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_runs_sync_tools_off_event_loop() -> None:
     """Blocking sync tools should not stall the async tool-dispatch loop."""
     bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")

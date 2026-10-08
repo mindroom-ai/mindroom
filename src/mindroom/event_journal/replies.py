@@ -793,8 +793,28 @@ class ReplyStore:
             lambda transaction: reply_spans.for_reply(transaction, self._principal_id, reply_id),
         )
 
+    async def start_tool_call(self, *, span_id: str, call_id: str, entry_json: str, now_ns: int) -> bool:
+        """Record a tool call before the tool runs, when its span may still start one; return whether it may run."""
+
+        def start(transaction: Transaction) -> bool:
+            span = reply_spans.load(transaction, self._principal_id, span_id)
+            reply = None if span is None else reply_messages.lock(transaction, self._principal_id, span.reply_id)
+            if span is None or reply is None or not rl.admits_tool_start(reply, span):
+                return False
+            reply_spans.record_tool_call(
+                transaction,
+                self._principal_id,
+                span_id=span_id,
+                call_id=call_id,
+                entry_json=entry_json,
+                now_ns=now_ns,
+            )
+            return True
+
+        return await self._backend.write(start)
+
     async def record_tool_call(self, *, span_id: str, call_id: str, entry_json: str, now_ns: int) -> None:
-        """Record a tool call a span made, before the tool runs and again once it returned."""
+        """Record what a started tool call returned, replacing its start."""
         await self._backend.write(
             lambda transaction: reply_spans.record_tool_call(
                 transaction,

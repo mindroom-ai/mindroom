@@ -393,6 +393,14 @@ def _stale_span(reply: Reply, span: Span) -> Transition | None:
     return None
 
 
+def admits_tool_start(reply: Reply, span: Span) -> bool:
+    """Return whether a span may start a tool: it still runs as its reply's current span and no Stop waits for it.
+
+    The start is recorded in the same transaction, so a Stop committed first keeps the tool from running.
+    """
+    return not span.ended and reply.current_span_id == span.span_id and not reply.unapplied_stop
+
+
 def _check_revision(reply: Reply, prepared_revision: int) -> Transition | None:
     if prepared_revision != reply.revision:
         return _unchanged(Outcome.RECOMPUTE, reply)

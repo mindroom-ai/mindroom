@@ -652,6 +652,23 @@ async def test_the_note_of_a_refused_only_create_is_sent_as_the_replys_message(
     assert not await principal.replies.has_unresolved_rows("reply-1")
 
 
+async def test_a_tool_starts_only_while_its_span_runs_without_a_recorded_stop(journal_store: EventJournalStore) -> None:
+    """The start record admits a call only for a running span; a Stop committed first refuses it, unrecorded."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    assert await principal.replies.start_tool_call(span_id=span.span_id, call_id="before", entry_json="{}", now_ns=20)
+
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, stop_receipt_order=1)))
+    assert not await principal.replies.start_tool_call(
+        span_id=span.span_id,
+        call_id="after-stop",
+        entry_json="{}",
+        now_ns=30,
+    )
+    assert not await principal.replies.start_tool_call(span_id="no-such-span", call_id="x", entry_json="{}", now_ns=30)
+    assert await principal.replies.tool_calls((span.span_id,)) == ("{}",)
+
+
 async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took_over(
     journal_store: EventJournalStore,
 ) -> None:

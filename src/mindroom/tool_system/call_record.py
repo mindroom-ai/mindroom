@@ -14,7 +14,10 @@ class _ToolCallRecorder(Protocol):
     """Records tool calls where the work that made them keeps its durable state."""
 
     async def started(self, tool_name: str, args: Mapping[str, object]) -> str | None:
-        """Record a call before the tool runs; return its id, or ``None`` when nothing records it."""
+        """Record a call before the tool runs; return its id, or ``None`` when nothing records it.
+
+        Raises ``asyncio.CancelledError`` when the work the call belongs to was stopped or ended, so the tool never runs.
+        """
         ...
 
     async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
