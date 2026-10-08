@@ -73,7 +73,7 @@ Redacting the held edit itself clears its payload immediately but retains its id
 
 `matrix_delivery_outbox.payload_json` holds each ordinary response or tool-approval event frozen before it is sent.
 `matrix_delivery_outbox.result_json` stores local completion and recovery facts separately from Matrix wire content.
-Those facts can include source prompts inside a serialized prepared edit turn record, plus final response text and interactive metadata.
+Those facts can include final response text and interactive metadata; rows an earlier release wrote can also hold source prompts inside a serialized prepared edit turn record.
 
 Acknowledgement does not clear ordinary delivery payload or result columns, and projection redaction or membership cleanup does not by itself remove those copies.
 Ordinary acknowledged and retired rows currently have no general TTL or payload-pruning path.
@@ -82,10 +82,13 @@ Specialized approval cleanup and withdrawal of a superseded, unattempted `INITIA
 `approval_cards` retains only the durable delivery reference, exact continuation and tool-call identity, and membership epoch while a card is actionable.
 
 `approval_continuations.context_json` may contain the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` required to resume an approved call.
-It also retains the acknowledged `response_text`, structured team `response_presentation_state`, and `response_tool_trace` needed to preserve transcript order after continuation.
-The durable tool trace contains redacted argument and result previews plus internal tool-call and member-scope identities; those internal identities are omitted from Matrix message metadata.
-A team continuation without the versioned structured presentation is rejected instead of reconstructed from rendered Markdown, because reconstruction could bind a tool to the wrong member or transcript position; the requester must start a new turn.
-`finish()` and `discard_unavailable()` delete the continuation after terminal delivery or cleanup, and foreign-key cascades remove its sources and calls.
+What the paused reply showed lives in its reply record (below); a continuation an earlier release wrote can still carry `response_text`, `response_presentation_state`, and `response_tool_trace` keys.
+The continuation is deleted after terminal delivery or cleanup, and a foreign-key cascade removes its calls.
+
+`reply_messages` keeps each AI reply's presentation in `presentation_json`, and what its latest progress edit may have shown in `possibly_shown_json`: the visible text, the tool trace, and structured team presentation state.
+`reply_tool_calls.entry_json` keeps each tool call a reply's span made, recorded before the tool runs, with its argument preview and, once it returns, its result preview, whether or not the reply shows tool calls.
+These tool traces contain redacted argument and result previews plus internal tool-call and member-scope identities; those internal identities are omitted from Matrix message metadata.
+A finished reply, its spans, and their tool calls are deleted with the handled-turn retention.
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
 The shared terminal-payload boundary removes full-argument transport fields and pending duration choices before freezing edits, preserving the compact argument preview and grant acknowledgement.

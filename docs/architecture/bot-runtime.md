@@ -37,7 +37,7 @@ The turn record holds an edit's text once its regeneration claims the reply, and
 `response_sources.py` owns the immutable runtime values, and `event_journal/legacy_response_attempts.py` owns the one-time adoption of approval continuation identity from released stores.
 
 `EditRegenerator` owns edits of answered messages: it regenerates the reply to the latest message of a conversation while no approval holds that reply, stopping the reply first while it streams (see [Reply messages](reply-messages.md#claims)).
-It runs the regeneration on a runner-owned task, so the room's event lane waits only for the regeneration's claim.
+It runs the regeneration on a runner-owned task and does not wait for its claim, so another reply holding the conversation never holds up the room's event lane.
 An edit of a message still waiting in its coalescing queue changes that message's text in the queue instead.
 
 `TurnStore` owns source-redaction tombstoning and answers which events a conversation's history derives from are redacted; each response removes that history from the scope it opens before using it.
@@ -86,10 +86,11 @@ A crash leaves the same pending state as orderly shutdown and entity replacement
 An approved run cut short by any of them ends its cards and releases its approval continuation without settling its sources, unless a FINAL is already owed, so replay adopts its reply too.
 When the adopted reply already shows streamed text or a tool trace, its reply record says so (see [Reply messages](reply-messages.md)), and the new attempt streams below them after `**[Response interrupted by service restart]**`, numbering its tool calls after the stopped ones.
 A resumed reply always streams, because a blocking answer would replace what it showed.
-The new attempt's prompt carries an account of what the stopped attempt showed, separating finished tool calls from those still running, and is saved with the turn, so later turns keep it in history.
-The account names no calls as forbidden: with it in the current message, models left side-effecting calls alone while still re-running a read-only call whose shortened result was not enough.
-Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a call started just before the stop may not have reached Matrix, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the account.
-A recovered reply whose record shows no work instead gets an account warning that side effects may already have happened.
+The new attempt's prompt carries an account of what the stopped attempt showed and of the tool calls it made, separating finished calls from those still running, and is saved with the turn, so later turns keep it in history.
+Every tool call is recorded on its reply span before the tool runs, so the account lists calls that `show_tool_calls: false` hid or that a non-streaming reply never showed.
+The account tells the model not to call a finished side-effecting tool again while letting it re-run a read-only call whose shortened result is not enough; real-model A/B runs chose that wording.
+In a team only the leader reads the account.
+A recovered reply that shows no work and recorded no tool calls instead gets an account warning that side effects may already have happened.
 A replayed turn whose earlier attempt stopped before it claimed a reply gets no account.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
 Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.

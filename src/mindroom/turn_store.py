@@ -178,7 +178,7 @@ class TurnStore:
         source_event_id: str,
         revision: SourceEventRevision,
     ) -> TurnRecord | None:
-        """Retain a physical edit before its text enters a prompt or mailbox."""
+        """Retain a physical edit before its text enters a prompt."""
         if self.get_turn_record(source_event_id) is None:
             return None
 

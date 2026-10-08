@@ -68,12 +68,13 @@ A claim runs under the conversation lock after the turn's first source gate and 
 - No reply: create one in `active` with a `turn` span; a regeneration never creates one.
 - A new edit of an unheld reply that is not `gone`: a `regeneration` span with a rollback snapshot of a finished answer, or the rollback of the regeneration it re-runs when that one never wrote; a reply an approval holds, or one that is `gone`, regenerates nothing (`duplicate`).
 - An edit the last span already answered (a sync restart's retry): `duplicate`, nothing runs.
-- A last span ended `released`, `lost`, or `superseded`: a `replay`, or the same regeneration re-run.
+- A last span ended `released` or `lost`: a `replay`, or the same regeneration re-run.
+- A last span ended `superseded`: a span of the same kind.
 - Unresolved durable writes or an owed note: `deferred`; their resolution retries the sources.
 
 The edit regenerator decides which edits reach a claim: only an edit of the latest message of its conversation, with no later message from someone other than an agent, whose reply showed something, no approval holds, and is not `gone`.
 It records a Stop on that reply first when a span still runs for it, and its claim then waits for the conversation lock that span holds.
-It runs the regeneration on a runner-owned task, so the room's event lane waits only for the claim, and once the claim succeeds it records the edit's text and revision in the turn ledger and prunes the history run the regeneration replaces.
+It hands the edit to a regeneration on a runner-owned task without waiting for its claim, because the claim waits for the conversation, which another reply of the agent may hold for as long as that reply runs; once the claim succeeds the regeneration records the edit's text and revision in the turn ledger and prunes the history run it replaces, and a regeneration that ends without a span owning the edit settles the edit itself, unless its claim was deferred.
 An edit of a message still waiting in its coalescing queue changes that message's text instead and never reaches the regenerator.
 
 ## Writes
@@ -82,7 +83,7 @@ The create, each pause, and every terminal update are durable rows, recorded wit
 Each progress edit is a direct edit recorded first by `write_ahead`, which raises the confirmed sequence of the previous edit.
 A note a rule decides without a payload (an ownerless Stop, a restart, a settlement without an answer) is an owed write that `settle_reply_debt` renders and enqueues.
 Recovery renders from the possibly-shown presentation, so a restart continues below what the reply may already show.
-A replay, or a regeneration retried after one, tells the model which tool calls the attempts it takes over recorded, those spans that ended `lost`, `released`, or `paused` since the reply's last answer, so it does not repeat a finished call.
+A replay, or a regeneration retried after one, tells the model which tool calls the attempts it takes over recorded, those spans that ended `lost`, `released`, `paused`, or `superseded` since the reply's last answer, so it does not repeat a finished call.
 
 ## Stop
 

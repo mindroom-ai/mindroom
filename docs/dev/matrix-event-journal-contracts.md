@@ -291,7 +291,7 @@ Failure stays a visible readiness or request failure rather than reviving room-w
 
 Initial and final delivery stages use deterministic transaction IDs derived from principal, delivery ID, and stage.
 
-The completed model result is durable in `TurnStore` before final outbox enqueue, so recovery does not rerun a completed model call merely to rebuild delivery content.
+The completed model result is durable before final outbox enqueue, in the AI reply's record or, for other deliveries, in `TurnStore`, so recovery does not rerun a completed model call merely to rebuild delivery content.
 
 Enqueue may create a row or update an unattempted one.
 The worker then atomically claims the row by committing `attempted=true` **before** network I/O; claiming freezes the payload and target and returns the exact stored delivery to send.
@@ -299,7 +299,8 @@ An attempted but unacknowledged row is retried with the same payload and transac
 
 That ordering closes the case where Matrix accepted an older deterministic transaction while a restarted model run produced different content that could never become visible.
 
-Acknowledgement and the terminal turn record commit in **one** transaction, and an acknowledgement loser writes neither row — that is what stops the outbox and the turn record naming different events.
+For a delivery that is not an AI reply, acknowledgement and the terminal turn record commit in **one** transaction, and an acknowledgement loser writes neither row — that is what stops the outbox and the turn record naming different events.
+An AI reply's acknowledgement binds the event on its reply record instead, and the reply's rules settle its turn when its terminal row is enqueued.
 
 ## Storage concurrency
 
