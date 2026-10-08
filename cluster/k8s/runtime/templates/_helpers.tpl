@@ -218,6 +218,107 @@ image digest and the selected image directory. root is the directory the transpo
 {{- toJson $bootstrap -}}
 {{- end -}}
 
+{{- /*
+Content-bundle init script; takes the bundle's overwrite flag and receives the source and target paths as $1 and $2.
+With overwrite, the target ends up with the same entries, types, contents, modes, symlink targets, and (where cp -a
+can preserve them) owners as after rm -rf and cp -a, but only entries that differ are rewritten, so a restart on
+network storage copies only what changed. Unlike a full copy, unchanged files keep their timestamps, directory
+timestamps and symlink owners are not synced, and hard-link relationships between files are not guaranteed to be preserved.
+An image missing a tool the sync uses, or a name with a newline in either tree (listings are line-based),
+falls back to the full copy. Directory modes and owners are applied last, deepest first, so copying into a
+directory that ends up read-only still works. It needs only POSIX sh and BusyBox-compatible tools.
+*/ -}}
+{{- define "mindroom-runtime.contentBundleCopyScript" -}}
+set -eu
+{{- if . }}
+src=$1
+dst=$2
+nl='
+'
+kind() {
+  if [ -L "$1" ]; then k=l
+  elif [ -d "$1" ]; then k=d
+  elif [ -f "$1" ]; then k=f
+  elif [ -e "$1" ]; then k=o
+  else k=-
+  fi
+}
+# BusyBox test -w is always true for root, which root-squashed NFS does not honour, so root always tries u+w.
+# Best effort: a parent we may not chmod can still be writable, and the copy or removal reports a real denial.
+writable() { if [ "$uid" = 0 ] || [ ! -w "$1" ]; then chmod u+w "$1" 2>/dev/null || :; fi; }
+if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
+mkdir -p "$dst"
+reason=
+for tool in find stat cmp readlink chmod chown id; do
+  command -v "$tool" >/dev/null || reason="the image has no $tool"
+done
+[ -n "$reason" ] || [ -z "$(find "$src" "$dst" -name "*$nl*")" ] || reason="a name contains a newline"
+if [ -n "$reason" ]; then
+  echo "$0: $reason, so $dst is replaced by a full copy" >&2
+  chmod -R u+w "$dst" 2>/dev/null || :
+  rm -rf "$dst"
+  mkdir -p "$dst"
+  cp -a "$src/." "$dst/"
+else
+  sources=$(cd "$src" && find .)
+  targets=$(cd "$dst" && find .)
+  directories=$(cd "$src" && find . -depth -type d)
+  uid=$(id -u)
+  # cp -a keeps ownership only where chown works, so compare it only then (root without NFS root squashing).
+  own=
+  if [ "$uid" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
+  # Remove target entries that are missing from the source, of another type, special, or a different symlink.
+  gone=
+  printf '%s\n' "$targets" | while IFS= read -r p; do
+    case $p in .|"$gone"/*) continue ;; esac
+    kind "$src/$p"; sk=$k
+    kind "$dst/$p"
+    case $sk$k in
+      dd|ff) continue ;;
+      ll) [ "$(readlink "$src/$p"; echo .)" != "$(readlink "$dst/$p"; echo .)" ] || continue ;;
+    esac
+    writable "$dst/${p%/*}"
+    [ "$k" != d ] || chmod -R u+w "$dst/$p" 2>/dev/null || :
+    rm -rf "$dst/$p"
+    gone=$p
+  done
+  # Copy missing entries whole, and recopy files whose size, mode, owner, or content differ.
+  new=
+  printf '%s\n' "$sources" | while IFS= read -r p; do
+    case $p in "$new"/*) continue ;; esac
+    s=$src/$p
+    d=$dst/$p
+    kind "$d"
+    if [ "$k" = - ]; then
+      writable "$dst/${p%/*}"
+      cp -a "$s" "$d"
+      new=$p
+    elif [ "$k" = f ]; then
+      m=$(stat -c "%s %a$own" "$s" "$d")
+      if [ "${m%"$nl"*}" != "${m#*"$nl"}" ] || ! cmp -s "$s" "$d"; then
+        writable "$dst/${p%/*}"
+        rm -f "$d"
+        cp -a "$s" "$d"
+      fi
+    fi
+  done
+  # Fix directory modes and owners deepest first; directories cp -a just created already match.
+  printf '%s\n' "$directories" | while IFS= read -r p; do
+    m=$(stat -c "%a$own" "$src/$p" "$dst/$p")
+    if [ "${m%"$nl"*}" != "${m#*"$nl"}" ]; then
+      set -- ${m%"$nl"*}
+      [ -z "$own" ] || chown "$2:$3" "$dst/$p"
+      # The leading zeros make GNU chmod clear a directory's setgid bit too.
+      chmod "00$1" "$dst/$p"
+    fi
+  done
+fi
+{{- else }}
+mkdir -p "$2"
+cp -a "$1/." "$2/"
+{{- end }}
+{{- end -}}
+
 {{- define "mindroom-runtime.contentBundleSeedCommand" -}}
 {{- $bundle := index . 0 -}}
 {{- range $argIndex, $arg := $bundle.seed.command -}}
