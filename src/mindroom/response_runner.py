@@ -4391,7 +4391,7 @@ class ResponseRunner:
         )
         return final_outcome.final_visible_event_id if source_handled else None
 
-    async def _end_span_after_outcome(  # noqa: PLR0911
+    async def _end_span_after_outcome(
         self,
         handle: SpanHandle,
         outcome: FinalDeliveryOutcome,
@@ -4426,20 +4426,15 @@ class ResponseRunner:
             )
             return replace(noted, cancel_source=outcome.cancel_source, failure_reason=outcome.failure_reason)
         if outcome.terminal_status == "error" and not delivery_started:
-            if handle.resumed is not None:
-                # A resumed reply shows the interruption below its recovered content; the sources are retried.
-                noted = await gateway.end_reply_span_with_note(
-                    handle,
-                    target,
-                    state=rl.ReplyState.ACTIVE,
-                    note=note_segment(NoteKind.ERROR, format_error_note(outcome.failure_reason or "interrupted")),
-                )
-                return replace(noted, terminal_status="error", failure_reason=outcome.failure_reason)
-            await gateway.end_reply_span(
+            # The reply shows the error while its sources are retried, so a failure that recurs on every attempt
+            # never leaves it showing only its placeholder; a regeneration keeps the answer it was replacing.
+            noted = await gateway.end_reply_span_with_note(
                 handle,
-                lambda reply, span: rl.fail(reply, span, None, phase="pre_delivery", confirms=confirms, now_ns=now_ns),
+                target,
+                state=rl.ReplyState.ACTIVE,
+                note=note_segment(NoteKind.ERROR, format_error_note(outcome.failure_reason or "interrupted")),
             )
-            return outcome
+            return replace(noted, terminal_status="error", failure_reason=outcome.failure_reason)
         if outcome.terminal_status == "cancelled":
             reply = await handle.runtime.store.replies.load(handle.reply_id)
             if reply is not None and reply.event_id is None:

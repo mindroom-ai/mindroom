@@ -343,7 +343,7 @@ async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behin
 
 
 async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp_path: Path) -> None:
-    """A failure before anything streamed keeps the placeholder; the retry answers into it as a replay."""
+    """A failure before anything streamed shows its error; the retry answers into the same message as a replay."""
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with (
@@ -378,7 +378,11 @@ async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp
         (rl.SpanKind.TURN, rl.SpanOutcome.RELEASED),
         (rl.SpanKind.REPLAY, rl.SpanOutcome.COMPLETED),
     ]
-    assert _sent_bodies(bot) == ["Thinking...", "Recovered answer."]
+    assert _sent_bodies(bot) == [
+        "Thinking...",
+        "**[Response interrupted by an error: model down]**",
+        "Recovered answer.",
+    ]
     assert not await bot._reply_runtime.store.is_pending("$event")
 
 
@@ -778,7 +782,7 @@ async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_
 
 
 async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_left(tmp_path: Path) -> None:
-    """The first gate's rejection of a terminal source ends the released reply through its records."""
+    """The first gate's rejection of a terminal source ends the released reply, its error, through its records."""
     bot = await _streaming_bot(tmp_path)
     with pytest.raises(RuntimeError, match="model down"):
         await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=RuntimeError("model down")))
@@ -792,12 +796,14 @@ async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_
     assert await _answer(bot, retry, AsyncMock(return_value="Never.")) is None
 
     reply = await _reply(bot)
-    assert reply.state is rl.ReplyState.GONE
+    assert reply.state is rl.ReplyState.FAILED
     assert reply.redaction_pending == ()
-    bot.client.room_redact.assert_awaited_once()
-    assert "$sent1" in (*bot.client.room_redact.await_args.args, *bot.client.room_redact.await_args.kwargs.values())
-    # Main's interrupted note is not written over the placeholder.
-    assert _sent_bodies(bot) == ["Thinking..."]
+    bot.client.room_redact.assert_not_awaited()
+    assert _sent_bodies(bot) == [
+        "Thinking...",
+        "**[Response interrupted by an error: model down]**",
+        "**[Response interrupted]**",
+    ]
 
 
 async def test_a_selection_whose_source_ended_before_its_claim_removes_the_acknowledgement(tmp_path: Path) -> None:
