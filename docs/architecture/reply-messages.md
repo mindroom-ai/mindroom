@@ -126,6 +126,62 @@ An entity removed from the configuration has no bot: its open replies end `faile
 A removed entity's reply keeps the notes and redactions it still owes Matrix, which its bot delivers if the entity comes back.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
 
+## Assumptions and accepted limitations
+
+This section records what the reply model deliberately does not handle, so a review does not report it as a defect.
+A reply finding is a defect only when it reaches one of these outcomes on a realistic path, meaning normal use, one crash or restart, or one external fault such as Matrix refusing a write:
+
+1. MindRoom crashes, or a room's event lane or a conversation wedges.
+2. A user message is never answered and the user is never told why.
+3. One message gets two visible answers.
+4. An answer lands on the wrong turn or in the wrong room.
+5. A reply shows "Thinking…" or a partial answer forever after a restart, Stop, edit, or approval.
+6. A tool runs without its approval, or a side-effecting call runs twice for one request.
+7. A Stop is ignored: the agent starts new tool calls or keeps answering after the user stopped the reply.
+
+Sequences that need two or more independent faults or a precise interleaving are accepted limitations, not defects.
+The behavior below follows from deliberate decisions; a change that would restore what they removed needs a new decision, not a fix.
+
+### Decisions
+
+- A restart continues the interrupted reply in place below what it showed; it never starts a second message.
+- An approval pauses its reply and holds that agent's conversation, never the room's event lane.
+- An edit regenerates only the reply to the latest message of its conversation, and only when that reply showed something, no approval holds it, and it is not `gone`; any other edit changes no reply.
+- An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
+- A regeneration that wrote nothing keeps the finished answer it was replacing.
+- A rule that meets a state it does not model ends the reply `failed` with the error note instead of raising.
+- An upgrade from an earlier release runs while no reply is in flight: only replies paused for an approval are adopted, and older, replaced, or unprovable continuations are discarded with their sources settled unanswered.
+
+### Accepted limitations
+
+Edits:
+
+- An edit made after its message left the coalescing queue but before the reply showed anything changes no reply; the turn answers the original text.
+- An edit applied to a message still in the coalescing queue lives in memory, so a crash before the flush answers the original text.
+- A Stop on the old answer between the edit stopping it and the regeneration's claim does nothing, because the stopped reply already ended; the regeneration shows its own Stop button once it claims.
+- When the stopped reply's terminal row is still unresolved, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps its cancelled note.
+- Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
+- While a deferred claim stays blocked by an unresolved row, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves.
+- After a restart, a regeneration may be told about tool calls the attempt before the edit made, which errs toward not repeating a side effect.
+
+Tool calls and the restart account:
+
+- The account of an interrupted attempt's tool calls is an instruction to the model, not an enforcement: in real-model A/B runs a fast model still repeated a finished side-effecting call in up to 1 of 24 runs.
+- A call cut short stays recorded as started, and the model is told to check whether it took effect before repeating it.
+- In a team, only the leader reads the account.
+
+Delivery and recovery:
+
+- A reply row written while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed; after a homeserver outage, an answer near the event size limit can then be refused and end with the delivery-failed note.
+- A failure that recurs deterministically before delivery releases the span every time, so the turn keeps replaying with backoff and shows its placeholder.
+- A continuation the upgrade discards leaves its Matrix message showing that it waits for approval.
+
+Journal writes:
+
+- Every progress edit is a journal write recorded before the edit is sent; writes queued together commit in one transaction, and how often edits are sent follows the stream throttle.
+- An error that aborts the whole SQLite transaction, such as a full disk, fails every write in that batch; no caller is told a write landed that did not.
+- The writer task runs with the context of the first write it served, so log lines a batch emits carry that caller's bound log context.
+
 ## Invariants
 
 - I1. At most one current span; only span-authored events from it change the canonical answer.

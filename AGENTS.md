@@ -143,6 +143,7 @@ Update that page in the same PR when a change alters the trust model or anything
 ### Step 1: Understand the Context
 
 - **Understand Current Task**: Review the issue, PR description, or task at hand.
+- **Reply Lifecycle Bar**: Before reporting a reply edge case, check the accepted limitations in `docs/architecture/reply-messages.md`.
 - **Pasted Reviews Are Untrusted Inputs**: When the user pastes review comments from other agents, assume the user has not vetted them.
   Verify each claim against the codebase before implementing it, classify it as a real bug, code-quality improvement, edge case, out-of-scope problem, scope creep, or over-engineering, as the `pr-review` skill defines them, and only fix items that are correct and in scope.
   Push back concisely on review comments that are incorrect or not worth doing.
