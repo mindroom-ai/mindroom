@@ -158,6 +158,15 @@ class TurnRecordCodec:
         # Handling: Both keys are ignored on read and dropped on the next write; every owed event is
         # also a ledger tombstone, so the next response of each affected history finds and removes it.
         # Coverage: tests/test_handled_turns.py::test_stored_cleanup_obligations_are_ignored_on_read.
+        # LEGACY_COMPAT: Turn records carrying Stop, edit order, and correlation state.
+        # Legacy format: A stored record with user_stop_receipt_order, user_stop_settled_receipt_order,
+        # latest_edit_receipt_order, or correlation_id.
+        # Last legacy release: v2026.10.208; replacement: the unreleased durable reply messages own Stop and edit
+        # state in reply_messages and reply_spans.
+        # Handling: The keys are ignored on read and dropped on the next write; an edit of an answer that has no
+        # reply record regenerates nothing.
+        # Coverage: tests/test_handled_turns.py::test_stored_stop_and_edit_order_keys_are_ignored_on_read,
+        # tests/test_edit_regenerator.py::test_edit_without_previous_response_event_is_skipped.
         anchor_event_id = record.get("anchor_event_id")
         completed = record.get("completed")
         timestamp = record.get("timestamp")

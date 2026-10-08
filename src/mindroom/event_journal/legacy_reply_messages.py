@@ -152,8 +152,8 @@ def _newest_continuations(
 ) -> tuple[ApprovalContinuation, ...]:
     """Return the newest live continuation of each earlier-release reply, discarding the rest.
 
-    An older continuation of the same reply, or one an earlier release
-    superseded, is discarded with its cards and its sources settled unanswered.
+    An older continuation of the same reply is discarded with its cards and
+    its sources settled unanswered.
     """
     newest: dict[str, ApprovalContinuation] = {}
     for continuation in approval_continuations.for_principal(transaction, principal_id):

@@ -1614,6 +1614,32 @@ async def test_stored_cleanup_obligations_are_ignored_on_read(journal_store: Eve
 
 
 @pytest.mark.asyncio
+async def test_stored_stop_and_edit_order_keys_are_ignored_on_read(journal_store: EventJournalStore) -> None:
+    """Stop, edit order, and correlation keys an earlier release stored load as nothing and go on the next write."""
+    record = TurnRecord.create(["$source"], response_event_id="$answer", completed=True)
+    raw = TurnRecordCodec._to_ledger_record(record)
+    legacy_keys = {
+        "user_stop_receipt_order": 3,
+        "user_stop_settled_receipt_order": 3,
+        "latest_edit_receipt_order": 2,
+        "correlation_id": "$source",
+    }
+    raw.update(legacy_keys)
+    await journal_store.turn_records("legacy_stop_keys").upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id="$source",
+        record_json=json.dumps(raw),
+    )
+
+    ledger = await _reload_ledger(journal_store, "legacy_stop_keys")
+    loaded = ledger.get_turn_record("$source")
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$answer"
+    assert legacy_keys.keys().isdisjoint(TurnRecordCodec._to_ledger_record(loaded))
+
+
+@pytest.mark.asyncio
 async def test_discovery_alias_redaction_persists(journal_store: EventJournalStore) -> None:
     """Selection aliases must retain their tombstone across restart."""
     tracker = await _open_ledger(journal_store, "test_discovery_redaction")
