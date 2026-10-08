@@ -2810,10 +2810,10 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic_dispatch(  # noqa: PLR0915
+async def test_start_runtime_publishes_after_router_sync_without_waiting_for_room_setup(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
-    """Owned joins need ingestion while semantic work waits for published grants."""
+    """Semantic work waits for the router's grant refresh, not for startup room setup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config, source_fingerprint=None)
@@ -2892,21 +2892,20 @@ async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic
             assert orchestrator._response_admission_gate.closed
             assert not orchestrator._response_admission_gate.close_if_idle()
 
-            # An early frame completion cannot release semantic callbacks while
-            # setup still owns the initial membership publication.
-            await orchestrator.handle_bot_ready(router_bot)
+            # Another responder's first frame cannot publish semantic callbacks
+            # before the router's first frame has rebuilt reply grants.
             await orchestrator.handle_bot_ready(general_bot)
-            await asyncio.sleep(0)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(runtime_ready.wait(), timeout=0.05)
             router_bot.release_pending_turn_journal_replay.assert_not_called()
             general_bot.release_pending_turn_journal_replay.assert_not_called()
+            assert orchestrator._response_admission_gate.closed
 
-            setup_can_finish.set()
+            await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
             await asyncio.sleep(0)
 
-            setup_finished = call_order.index("setup_finished")
-            assert call_order.index("sync_started:router") < setup_finished
-            assert call_order.index("sync_started:general") < setup_finished
+            assert "setup_finished" not in call_order
             router_bot.release_pending_turn_journal_replay.assert_called()
             general_bot.release_pending_turn_journal_replay.assert_called()
             assert not orchestrator._response_admission_gate.closed
@@ -3101,6 +3100,75 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             old_maintenance_task.cancel()
         with suppress(asyncio.CancelledError):
             await old_maintenance_task
+
+
+@pytest.mark.asyncio
+async def test_config_reload_during_post_readiness_room_setup_replays_it_with_live_bots(tmp_path: Path) -> None:
+    """Room setup still running after readiness restarts with the bots a reload left running."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities=set(),
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+    router_bot = MagicMock(spec=AgentBot, running=True)
+    old_bot = MagicMock(spec=AgentBot, running=True)
+    new_bot = MagicMock(spec=AgentBot, running=True)
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": old_bot}
+    orchestrator.config = current_config
+    orchestrator.running = True
+    orchestrator._runtime_ready_event.set()
+    old_setup_started = asyncio.Event()
+    setup_calls: list[list[object]] = []
+
+    async def setup_rooms(bots: list[object]) -> None:
+        setup_calls.append(list(bots))
+        if old_bot in bots:
+            old_setup_started.set()
+            await asyncio.Event().wait()
+
+    async def replace_general_bot(_plan: ConfigUpdatePlan) -> None:
+        # Stands in for any apply step that replaces a bot the first setup pass holds.
+        old_bot.running = False
+        orchestrator.agent_bots["general"] = new_bot
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator, "_update_unchanged_bots", side_effect=replace_general_bot),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        patch.object(orchestrator._computer_runtime, "bind_if_ready"),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
+    ):
+        orchestrator._startup_maintenance.start([router_bot, old_bot], current_config)
+        first_maintenance_task = orchestrator._startup_maintenance.task
+        assert first_maintenance_task is not None
+        try:
+            await asyncio.wait_for(old_setup_started.wait(), timeout=1.0)
+            await orchestrator.config_reload._update_config()
+            replayed_task = orchestrator._startup_maintenance.task
+            assert replayed_task is not None
+            assert replayed_task is not first_maintenance_task
+            await asyncio.wait_for(replayed_task, timeout=1.0)
+        finally:
+            await orchestrator._startup_maintenance.cancel()
+
+    assert first_maintenance_task.cancelled()
+    assert setup_calls == [[router_bot, old_bot], [router_bot, new_bot]]
 
 
 def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -> None:

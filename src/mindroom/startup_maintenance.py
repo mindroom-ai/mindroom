@@ -37,30 +37,15 @@ class StartupMaintenanceController:
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
     started: bool = field(default=False, init=False)
-    _room_setup_completion: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
 
     def start(self, bots: list[_StartupBot], config: Config) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.started = True
-        room_setup_completion = asyncio.get_running_loop().create_future()
-        self._room_setup_completion = room_setup_completion
         self.task = create_logged_task(
-            self._run(
-                bots,
-                config,
-                room_setup_completion=room_setup_completion,
-            ),
+            self._run(bots, config),
             name="startup_maintenance",
             failure_message="Startup maintenance task failed",
         )
-
-    async def wait_for_rooms_and_memberships(self) -> None:
-        """Wait until initial room setup has published or failed closed."""
-        room_setup_completion = self._room_setup_completion
-        if room_setup_completion is None:
-            msg = "Startup maintenance has not started"
-            raise RuntimeError(msg)
-        await room_setup_completion
 
     async def cancel(self) -> bool:
         """Cancel detached startup maintenance and report whether unfinished work was interrupted."""
@@ -68,18 +53,15 @@ class StartupMaintenanceController:
         self.task = None
         should_replay = task is not None and not task.done()
         await cancel_logged_task(task)
-        room_setup_completion = self._room_setup_completion
-        if room_setup_completion is not None and not room_setup_completion.done():
-            room_setup_completion.set_result(None)
         return should_replay
 
-    def restart_after_config_reload(
+    def restart_after_runtime_replacement(
         self,
         *,
         config: Config,
         running_bots: _RunningBots,
     ) -> None:
-        """Replay canceled startup maintenance after config reload completes."""
+        """Replay canceled startup maintenance with the bots running after a replacement."""
         if not self.started or self.task is not None:
             return
         bots = running_bots()
@@ -87,22 +69,12 @@ class StartupMaintenanceController:
             return
         self.start(bots, config)
 
-    async def _run(
-        self,
-        bots: list[_StartupBot],
-        config: Config,
-        *,
-        room_setup_completion: asyncio.Future[None],
-    ) -> None:
-        try:
-            await self._run_phase(
-                "startup_maintenance.rooms_and_memberships",
-                lambda: self.setup_rooms_and_memberships(bots),
-                failure_message="Startup room and membership maintenance failed",
-            )
-        finally:
-            if not room_setup_completion.done():
-                room_setup_completion.set_result(None)
+    async def _run(self, bots: list[_StartupBot], config: Config) -> None:
+        await self._run_phase(
+            "startup_maintenance.rooms_and_memberships",
+            lambda: self.setup_rooms_and_memberships(bots),
+            failure_message="Startup room and membership maintenance failed",
+        )
         runtime_support_ready = await self._run_phase(
             "startup_maintenance.runtime_support",
             lambda: self.sync_runtime_support(config),

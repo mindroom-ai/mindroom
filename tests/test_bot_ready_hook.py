@@ -435,10 +435,17 @@ def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path) -> None:
-    """The first successful response in each receive generation rebuilds grants."""
+    """The first successful response in each receive generation rebuilds grants.
+
+    Startup publishes semantic callbacks on the router's ready signal, so the
+    rebuild must finish before that signal.
+    """
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.mark_sync_loop_started()
+    call_order: list[str] = []
+    orchestrator.refresh_agent_reply_memberships.side_effect = lambda: call_order.append("refresh")
+    orchestrator.handle_bot_ready.side_effect = lambda _bot: call_order.append("ready")
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -447,6 +454,7 @@ async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path
         await _complete_frame(bot)
 
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
+    assert call_order == ["refresh", "ready"]
 
 
 @pytest.mark.asyncio

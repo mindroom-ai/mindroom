@@ -72,7 +72,7 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
 
     replay_config = MagicMock()
     with patch.object(controller, "start") as start:
-        controller.restart_after_config_reload(
+        controller.restart_after_runtime_replacement(
             config=replay_config,
             running_bots=running_bots,
         )
@@ -98,7 +98,7 @@ async def test_startup_maintenance_cancel_completed_task_returns_false() -> None
     assert should_replay is False
     with patch.object(controller, "start") as start:
         if should_replay:
-            controller.restart_after_config_reload(config=MagicMock(), running_bots=lambda: [MagicMock()])
+            controller.restart_after_runtime_replacement(config=MagicMock(), running_bots=lambda: [MagicMock()])
     start.assert_not_called()
 
 
