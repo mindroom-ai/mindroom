@@ -18,9 +18,10 @@ if TYPE_CHECKING:
 
 # LEGACY_COMPAT: Approval continuations whose reply identity lived outside the continuation.
 # Legacy format: approval_continuations without a span_id column. Every release kept a continuation's entity in its
-# entity_name column and its pending sources in approval_continuation_sources; v2026.9.138 through v2026.10.208 kept its entity, room, visible event, logical and discovery sources, and
-# edit receipt order in response_attempts and response_attempt_sources, keyed by its first pending source;
-# v2026.9.137 and earlier kept room_id, response_event_id, and any prepared edit record in context_json.
+# entity_name column and its pending sources in approval_continuation_sources; v2026.9.138 through v2026.10.208 kept
+# its entity, room, visible event, logical and discovery sources, and edit receipt order in response_attempts and
+# response_attempt_sources, keyed by its first pending source; v2026.9.137 and earlier kept room_id,
+# response_event_id, and any prepared edit record in context_json.
 # Last legacy release: v2026.10.208; replacement: the unreleased durable reply messages name the paused span in
 # approval_continuations.span_id and read the reply's identity and held sources from the reply's records.
 # Handling: the schema upgrade adds span_id, copies each continuation's identity and pending sources into its context
@@ -77,7 +78,7 @@ def _event_ids(value: object) -> list[str]:
 
 
 def _attempt_identity(transaction: Transaction, principal_id: str, driving: str) -> dict[str, object] | None:
-    """Read the identity v2026.10.201 stored in its response attempt tables."""
+    """Read the identity v2026.9.138 through v2026.10.208 stored in their response attempt tables."""
     attempt = transaction.fetchone(
         "SELECT * FROM response_attempts WHERE principal_id = ? AND driving_event_id = ?",
         (principal_id, driving),

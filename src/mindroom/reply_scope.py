@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.replies import PostCommitEffect
     from mindroom.matrix_delivery import ReplyRowEnqueuer
-    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_record import TurnRecord
 
 
