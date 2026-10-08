@@ -121,6 +121,7 @@ def _hook_registry(events: list[str]) -> HookRegistry:
     plugin = SimpleNamespace(
         name="script-broker-test",
         discovered_hooks=(before, after),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path="./plugins/script-broker-test"),
         plugin_order=0,
     )

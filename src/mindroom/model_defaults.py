@@ -43,6 +43,7 @@ __all__ = (
     "OLLAMA_QWEN",
     "OPENAI_AVATAR_IMAGE",
     "OPENAI_AVATAR_PROMPT",
+    "OPENAI_DECISIONS_MODEL",
     "OPENAI_EMBEDDING_DIMENSIONS",
     "OPENAI_EMBEDDING_LARGE",
     "OPENAI_EMBEDDING_SMALL",
@@ -96,7 +97,7 @@ class ModelPreset:
 _ANTHROPIC_FABLE = "claude-fable-5-1"
 _ANTHROPIC_OPUS = "claude-opus-5-5"
 _ANTHROPIC_SONNET = "claude-sonnet-5-5"
-_ANTHROPIC_HAIKU = "claude-haiku-4-5"
+_ANTHROPIC_HAIKU = "claude-haiku-5-5"
 # Prefixes also cover newer point releases (claude-sonnet-5 matches claude-sonnet-5-5).
 CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-sonnet-4-6",
@@ -127,7 +128,7 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
 _AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-1"
 AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5-5"
 _AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5-5"
-_AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-4-5"
+_AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-5-5"
 CODEX_GPT = "gpt-6.1-sol"
 CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
@@ -137,6 +138,8 @@ KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
 OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
+# The Decisions API serves only this model, so it does not follow the Luna default.
+OPENAI_DECISIONS_MODEL = "gpt-6-luna"
 # Chat Completions sampling controls each model rejects: GPT-6 Astra always rejects
 # both, GPT-6.1 Sol and GPT-6 Luna reject both at their default (non-`none`) reasoning effort,
 # and GPT-5.6 Terra and Luna reject top_p.
@@ -187,7 +190,7 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5.5"
 _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5.5"
-_OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-4.5"
+_OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-5.5"
 _OPENROUTER_GEMINI_FLASH = f"google/{_GOOGLE_GEMINI_FLASH}"
 _OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"
 _OPENROUTER_OPENAI_GPT = f"openai/{_OPENAI_GPT}"
@@ -258,12 +261,12 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
         "anthropic": (
             ("fable", ModelPreset("anthropic", _ANTHROPIC_FABLE, 1_000_000)),
             ("opus", ModelPreset("anthropic", _ANTHROPIC_OPUS, 1_000_000)),
-            ("haiku", ModelPreset("anthropic", _ANTHROPIC_HAIKU, 200_000)),
+            ("haiku", ModelPreset("anthropic", _ANTHROPIC_HAIKU, 1_000_000)),
         ),
         "bedrock_claude": (
             ("fable", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_FABLE, 1_000_000)),
             ("sonnet", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_SONNET, 1_000_000)),
-            ("haiku", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_HAIKU, 200_000)),
+            ("haiku", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_HAIKU, 1_000_000)),
         ),
         "openai": (
             ("openai_sol", ModelPreset("openai", OPENAI_GPT_SOL, 1_050_000)),
@@ -275,7 +278,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("luna", ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000)),
             ("fable", ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000)),
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
-            ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000)),
+            ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000)),
             ("gemini_flash", ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576)),
             ("gemini_lite", ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576)),
             ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576)),
@@ -287,7 +290,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
         "vertexai_claude": (
             ("fable", ModelPreset("vertexai_claude", _ANTHROPIC_FABLE, 1_000_000)),
             ("opus", ModelPreset("vertexai_claude", _ANTHROPIC_OPUS, 1_000_000)),
-            ("haiku", ModelPreset("vertexai_claude", _ANTHROPIC_HAIKU, 200_000)),
+            ("haiku", ModelPreset("vertexai_claude", _ANTHROPIC_HAIKU, 1_000_000)),
         ),
     },
 )
@@ -334,7 +337,7 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "fable": ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000),
         "opus": ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000),
         "sonnet": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
-        "haiku": ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000),
+        "haiku": ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000),
         "gemini_flash": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576),
         "gemini_lite": ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576),
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576),

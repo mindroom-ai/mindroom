@@ -33,6 +33,7 @@ from mindroom.approval_response import (
     require_ordered_pause_presentation,
 )
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
+from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.constants import (
@@ -2504,6 +2505,7 @@ class ResponseRunner:
             ),
             thread_history=self._approval_memory_history(continuation),
             user_id=continuation.requester_id,
+            hook_source=continuation.hook_source,
         )
 
     def _memory_persistence(
@@ -2515,8 +2517,12 @@ class ResponseRunner:
         prompt: str,
         thread_history: Sequence[ResolvedVisibleMessage],
         user_id: str | None,
-    ) -> Callable[[], None]:
-        """Build the shared completed-agent memory handoff."""
+        hook_source: str | None,
+    ) -> Callable[[], None] | None:
+        """Build the shared completed-agent memory handoff, or None for a turn that is not memory."""
+        if is_automation_hook_source(hook_source):
+            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
+            return None
 
         def queue() -> None:
             mark_auto_flush_dirty_session(
@@ -5984,6 +5990,7 @@ class ResponseRunner:
             prompt=memory_prompt,
             thread_history=memory_thread_history,
             user_id=request.user_id,
+            hook_source=request.response_envelope.hook_source,
         )
         queue_skill_review, runtime = self._response_skill_review(
             request,

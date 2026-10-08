@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mindroom.config.automations import PromptCurationAutomation
+    from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
     from mindroom.config.models import CompactionConfig, EffectiveToolConfig, FileAccess
@@ -85,8 +85,8 @@ class ResolvedEntityView:
         return self._config._agent_memory_search(self.name)
 
     @property
-    def automations(self) -> list[PromptCurationAutomation]:
-        """Built-in automations this agent runs."""
+    def automations(self) -> list[Automation]:
+        """Automations this agent runs."""
         return self._config._agent_automations(self._agent_name())
 
     @property

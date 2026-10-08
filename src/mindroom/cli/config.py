@@ -791,6 +791,17 @@ def config_validate(
         format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
 
+    from mindroom.automations.registry import automation_reference_errors, compile_automations  # noqa: PLC0415
+    from mindroom.tool_system.plugins import isolated_plugin_runtime  # noqa: PLC0415
+
+    with isolated_plugin_runtime(config, runtime_paths, skip_broken_plugins=True) as plugins:
+        automation_errors = automation_reference_errors(config, compile_automations(plugins))
+    if automation_errors:
+        console.print("[red]Issues found:[/red]")
+        for error in automation_errors:
+            console.print(f"  {error}")
+        raise typer.Exit(1)
+
     console.print("[green]Configuration is valid.[/green]\n")
     console.print(f"  Agents: {len(config.agents)} ({', '.join(config.agents.keys()) or 'none'})")
     console.print(f"  Teams:  {len(config.teams)} ({', '.join(config.teams.keys()) or 'none'})")

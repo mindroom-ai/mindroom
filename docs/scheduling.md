@@ -267,9 +267,10 @@ Without it, or after a schedule edit, MindRoom resumes from the next future occu
 Restarts do not post the same trigger twice.
 For `schedule:fired` hooks that run more than once for the same occurrence, see [Hooks](hooks.md#event-notes).
 
-## Built-in Automations
+## Automations
 
-Built-in automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](plugins.md#automations) can add more.
 The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
 Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
 
@@ -283,20 +284,26 @@ agents:
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
+      - dreaming
+      - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}   # from a plugin
 ```
 
-- An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
+- An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
+- Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
 - `cron` is a five-field expression in the configured [timezone](#timezone).
-- `room` is a room alias or ID; it defaults to the agent's first configured room, and each prompt starts a new thread.
+- `room` is a room alias or ID; it defaults to the agent's first configured room.
+- Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
+- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
-- An automation does not post again while its previous prompt awaits verify.
-- A restart skips an occurrence it missed, and prompts posted before the restart get no verify notice.
+- When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
+- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- A check that cannot read what it checks posts a warning in the room.
+- A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
-For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](hooks.md#event-notes), which can suppress a fire or rewrite its message.
+For conditions that need your own code, write a [plugin automation](plugins.md#automations), or gate an ordinary recurring schedule with a [`schedule:fired` hook](hooks.md#event-notes), which can suppress a fire or rewrite its message.
 
 ### `prompt_curation`
 
@@ -328,3 +335,29 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 | `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
+
+### `dreaming`
+
+`dreaming` keeps the agent's `memory/` files current: each night it reconciles them with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+1. It runs only when a [thread export](thread-exports.md) or a daily note from before today is new or changed since its last run, so a night without new threaded messages in the agent's rooms and without new daily notes costs nothing.
+2. The agent proposes changes in a copy of `memory/`: it updates facts that later evidence corrects, marks superseded lines instead of deleting them, files new durable facts such as decisions, preferences, and stable settings in topic files with their source and date, records conflicting sources with both versions, and removes duplicates.
+   It leaves transient tasks in the daily notes and never removes or doubts a fact only because newer notes do not mention it.
+3. A second run, in a thread of its own, reviews the proposal against its sources and approves or rejects it.
+4. MindRoom applies an approved proposal and marks both threads resolved.
+
+MindRoom never changes `MEMORY.md`, context files, or today's daily note; the agent suggests changes to them in its report.
+When the review rejects a proposal, a run stops unfinished or changes a file it may not, or memory changed during the run, nothing is applied; the next run, once a new thread export or daily note arrives, retries the same inputs and starts from any proposal that reached review and its review.
+A run handles at most 40 inputs; the rest wait for later runs.
+Turning the automation or thread exports on starts from conversations and notes of the last seven days instead of reviewing the older archive.
+Each run keeps its agenda and report, and a run that reached review also its patch and verdict, in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least; undo an applied run with `git apply -R .mindroom/dreaming/runs/<run>/proposal.patch` from the workspace root.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `15 3 * * *` | When to check |
+| `room` | first configured room | Where both prompts are posted |
+| `model` | the agent's model | A key of `models` to run both prompts with |
+
+`dreaming` needs `memory_backend: file` and something to work from: [auto-flush](memory.md#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](thread-exports.md) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
+It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.

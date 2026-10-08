@@ -280,6 +280,7 @@ Open `config.yaml` in your editor, chosen from `$EDITOR`, then `$VISUAL`, then `
 ### config validate
 
 Check `config.yaml` against the schema, report errors readably, and warn about missing provider API keys.
+It also loads the configured plugins and fails on [automation](https://docs.mindroom.chat/scheduling/#automations) names no loaded plugin provides or that two register.
 
 ### config path
 

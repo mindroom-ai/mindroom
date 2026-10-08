@@ -21,10 +21,13 @@ from mindroom.ai_runtime import install_queued_message_notice_hook, queued_messa
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
+from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.response_lifecycle import _QueuedMessageState
 from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
@@ -534,12 +537,12 @@ async def test_configured_backends_control_resumed_turns(
 ) -> None:
     """Backend errors retain the actual notice; valid approvals suppress it."""
 
-    async def post(_client: SystemOneClient, _body: bytes) -> bytes:
+    async def post(_client: JudgmentClient, _body: bytes) -> bytes:
         if outcome == "timeout":
             await asyncio.Event().wait()
         return json.dumps(
             {
-                "model": PINNED_MODEL,
+                "model": _PINNED_MODEL,
                 "usage": {"input_tokens": 20, "output_tokens": 1},
                 "answers": {
                     "interrupt_current_turn": {
@@ -550,7 +553,7 @@ async def test_configured_backends_control_resumed_turns(
             },
         ).encode()
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     judge = ParticipationModel(
         TimeoutError()
         if outcome == "timeout"
@@ -721,41 +724,47 @@ async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool
         (1.0, 0.0, True),
     ],
 )
+@pytest.mark.parametrize("provider", ["typesafe", "openai_decisions"])
 async def test_interrupt_probability_preserves_continuation_threshold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
     probability: float,
     threshold: float,
     *,
     finish: bool,
 ) -> None:
-    """A low-confidence no-interruption answer must still request a handoff."""
+    """A low-confidence no-interruption answer must still request a handoff on every probability backend."""
 
-    async def post(_client: SystemOneClient, body: bytes) -> bytes:
-        question_id = next(iter(json.loads(body)["questions"]))
+    async def post(_client: JudgmentClient, body: bytes) -> bytes:
+        questions = json.loads(body)["questions"]
+        if provider == "typesafe":
+            question_id = next(iter(questions))
+            model, answers = _PINNED_MODEL, {question_id: {"type": "noul", "noul": probability}}
+        else:
+            question_id = questions[0]["name"]
+            model = OPENAI_DECISIONS_MODEL
+            answers = [{"type": "predicate", "name": question_id, "probability": probability}]
         assert question_id == "interrupt_current_turn"
         return json.dumps(
-            {
-                "model": PINNED_MODEL,
-                "usage": {"input_tokens": 20, "output_tokens": 1},
-                "answers": {question_id: {"type": "noul", "noul": probability}},
-            },
+            {"model": model, "usage": {"input_tokens": 20, "output_tokens": 1}, "answers": answers},
         ).encode()
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     config = Config.model_validate(
         {
             "agents": {
                 "test_agent": {
                     "display_name": "Test",
                     "mid_turn": {
-                        "judgment": {"provider": "typesafe", "threshold": threshold},
+                        "judgment": {"provider": provider, "threshold": threshold},
                     },
                 },
             },
         },
     )
     paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": "synthetic"})
+    get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "synthetic"})
     gate = create_mid_turn_gate(config, paths, request_envelope(), prompt="Do the task", has_media=False)
     assert gate is not None
     assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is finish

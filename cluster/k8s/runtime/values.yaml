@@ -306,6 +306,13 @@ apiAuth:
   # pod network from dedicated Kubernetes workers, so the chart gives the primary a generated MINDROOM_API_KEY;
   # set true only when other API auth is configured.
   allowUnauthenticatedPrimary: false
+  # Existing Secret holding the primary's MINDROOM_API_KEY instead of the generated one.
+  # Use it with helm template and GitOps tools, where the generated key changes on every offline render.
+  # It must be a Secret this chart does not manage, not <fullname>-api-key, which the chart then stops rendering;
+  # to keep the current key, copy it from <fullname>-api-key into that Secret first.
+  existingSecret: ""
+  # Key in existingSecret that holds the API key.
+  key: MINDROOM_API_KEY
 
 matrix:
   homeserverUrl: ""

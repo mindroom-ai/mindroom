@@ -15,7 +15,9 @@ from structlog.testing import capture_logs
 
 from mindroom import model_loading, routing
 from mindroom.config.main import Config
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from tests.conftest import test_runtime_paths
 
@@ -63,12 +65,12 @@ def _paths(tmp_path: Path) -> RuntimePaths:
 def _choice_provider(monkeypatch: pytest.MonkeyPatch, choice: str | None) -> list[dict]:
     posted = []
 
-    async def post(_self: SystemOneClient, body: bytes) -> bytes:
+    async def post(_self: JudgmentClient, body: bytes) -> bytes:
         payload = json.loads(body)
         posted.append(payload)
         return json.dumps(
             {
-                "model": PINNED_MODEL,
+                "model": _PINNED_MODEL,
                 "answers": {
                     "responder_selection": {
                         "type": "choice",
@@ -83,8 +85,45 @@ def _choice_provider(monkeypatch: pytest.MonkeyPatch, choice: str | None) -> lis
             },
         ).encode()
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     return posted
+
+
+@pytest.mark.asyncio
+async def test_router_selects_with_openai_decisions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI Decisions answers the same responder choice with the shared OpenAI key."""
+    legacy = _providers(monkeypatch)
+    paths = test_runtime_paths(tmp_path)
+    get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "synthetic"})
+    posted = []
+
+    async def post(_self: JudgmentClient, body: bytes) -> bytes:
+        question = json.loads(body)["questions"][0]
+        posted.append(question)
+        values = [choice["value"] for choice in question["choices"]]
+        answer = {
+            "type": "choice",
+            "name": question["name"],
+            "choice": "candidate_2",
+            "confidence": 1,
+            "probabilities": [{"value": value, "probability": int(value == "candidate_2")} for value in values],
+        }
+        return json.dumps(
+            {"answers": [answer], "model": "gpt-6-luna", "usage": {"input_tokens": 42, "output_tokens": 0}},
+        ).encode()
+
+    monkeypatch.setattr(JudgmentClient, "_post", post)
+    result = await routing.suggest_responder(
+        "Fix my Python code",
+        ["code", "research", "crew"],
+        _config({"provider": "openai_decisions"}),
+        paths,
+    )
+
+    assert result is not None
+    assert result.entity_name == "crew"
+    assert not legacy
+    assert [question["name"] for question in posted] == ["responder_selection"]
 
 
 @pytest.mark.asyncio
@@ -219,7 +258,7 @@ async def test_typesafe_routing_uses_shared_client_and_fallback(
     legacy = _providers(monkeypatch)
     posted = []
 
-    async def post(_self: SystemOneClient, body: bytes) -> bytes:
+    async def post(_self: JudgmentClient, body: bytes) -> bytes:
         posted.append(json.loads(body))
         if scenario == "timeout":
             error = "unavailable"
@@ -227,7 +266,7 @@ async def test_typesafe_routing_uses_shared_client_and_fallback(
         return (
             json.dumps(
                 {
-                    "model": "wrong" if scenario == "drift" else PINNED_MODEL,
+                    "model": "wrong" if scenario == "drift" else _PINNED_MODEL,
                     "answers": {
                         "responder_selection": {
                             "type": "choice",
@@ -245,7 +284,7 @@ async def test_typesafe_routing_uses_shared_client_and_fallback(
             else b"bad json"
         )
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     paths = replace(
         _paths(tmp_path),
         process_env={"TYPESAFE_API_KEY": "" if scenario == "missing_key" else "synthetic"},

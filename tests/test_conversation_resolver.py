@@ -19,7 +19,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ATTACHMENT_IDS_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
@@ -963,3 +963,19 @@ async def test_coalescing_keeps_a_server_failure_retryable(
             await resolver.coalescing_thread_id(_room(), _reply_event())
 
     assert not isinstance(raised.value, RelatedEventUnavailableError)
+
+
+def test_only_a_managed_sender_can_mark_a_turn_as_an_automation_turn(config: Config) -> None:
+    """A person's message carrying an automation hook source is an ordinary turn, so auto-flush still keeps it."""
+    resolver = _resolver(config)
+    event = _event({"body": "hello", HOOK_SOURCE_KEY: "automation/dreaming"})
+
+    envelope = resolver.build_ingress_envelope(
+        event=event,
+        requester_user_id=_SENDER,
+        target=MessageTarget.resolve(_ROOM_ID, None, _EVENT_ID),
+        body="hello",
+        mentioned_agents=[],
+    )
+
+    assert envelope.hook_source is None

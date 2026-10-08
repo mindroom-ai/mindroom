@@ -2519,6 +2519,7 @@ depends_on = ["mindroom.hooks.types"]
 [[modules]]
 path = "mindroom.hooks.registry"
 depends_on = [
+    "mindroom.automations.registry",
     "mindroom.hooks.decorators",
     "mindroom.hooks.types",
     "mindroom.logging_config",
@@ -2755,6 +2756,7 @@ depends_on = [
     "mindroom.reply_presentation",
     "mindroom.reply_scope",
     "mindroom.error_handling",
+    "mindroom.automations.steps",
     "mindroom.runtime_resolution",
     "mindroom.ai_runtime",
     "mindroom.mid_turn",
@@ -4251,6 +4253,9 @@ path = "mindroom.cli.config"
 depends_on = [
     "mindroom.cli.local_model_config",
     "mindroom.atomic_file",
+    # Deferred imports in config validate's automation check.
+    "mindroom.automations.registry",
+    "mindroom.tool_system.plugins",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
     "mindroom.cli.owner",
@@ -4910,6 +4915,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.plugins"
 depends_on = [
+    "mindroom.automations.registry",
     "mindroom.constants",
     "mindroom.hooks",
     "mindroom.tool_schema_cache",
@@ -5737,11 +5743,13 @@ expose = [
     "list_all_agent_memories",
     "mark_auto_flush_dirty_session",
     "read_scope_memory_files",
+    "refresh_agent_memory_search",
     "reprioritize_auto_flush_sessions",
     "search_agent_memories",
     "store_conversation_memory",
     "strip_user_turn_time_prefix",
     "update_agent_memory",
+    "write_scope_markdown_file",
 ]
 from = ["mindroom.memory"]
 
@@ -7834,7 +7842,15 @@ depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.judgment.client"
-depends_on = ["mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.judgment.state"]
+depends_on = ["mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution"]
+
+[[modules]]
+path = "mindroom.judgment.typesafe"
+depends_on = ["mindroom.judgment.client"]
+
+[[modules]]
+path = "mindroom.judgment.openai_decisions"
+depends_on = ["mindroom.judgment.client", "mindroom.model_defaults"]
 
 [[modules]]
 path = "mindroom.participation_judgment"
@@ -7855,7 +7871,7 @@ depends_on = ["mindroom.model_loading", "mindroom.json_utils", "mindroom.judgmen
 
 [[modules]]
 path = "mindroom.judgment.evaluator"
-depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.logging_config"]
+depends_on = ["mindroom.config.judgment", "mindroom.credentials_sync", "mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.judgment.openai_decisions", "mindroom.judgment.typesafe", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.path_confinement"
@@ -7984,23 +8000,79 @@ visibility = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.config.automations"
-depends_on = ["mindroom.config.validation"]
-visibility = ["mindroom.automations.prompt_curation", "mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
+depends_on = ["mindroom.config.schema_hints", "mindroom.config.validation"]
+visibility = [
+    "mindroom.automations.prompt_curation",
+    "mindroom.automations.registry",
+    "mindroom.automations.runner",
+    "mindroom.config.agent",
+    "mindroom.config.main",
+    "mindroom.config.models",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.automations.threads"
+depends_on = ["mindroom.constants", "mindroom.path_confinement"]
+visibility = ["mindroom.automations", "mindroom.automations.dreaming", "mindroom.automations.runner"]
+
+[[modules]]
+path = "mindroom.automations.steps"
+depends_on = []
+visibility = [
+    "mindroom.automations",
+    "mindroom.automations.dreaming",
+    "mindroom.automations.prompt_curation",
+    "mindroom.automations.runner",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.automations.registry"
+depends_on = [
+    "mindroom.automations.dreaming",
+    "mindroom.automations.prompt_curation",
+    "mindroom.config.automations",
+    "mindroom.logging_config",
+]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
-depends_on = ["mindroom.config.automations", "mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
-visibility = ["mindroom.automations.runner"]
+depends_on = [
+    "mindroom.automations.registry",
+    "mindroom.automations.steps",
+    "mindroom.config.automations",
+    "mindroom.logging_config",
+    "mindroom.memory",
+    "mindroom.path_confinement",
+    "mindroom.runtime_resolution",
+]
+visibility = ["mindroom.automations.registry"]
+
+[[modules]]
+path = "mindroom.automations.dreaming"
+depends_on = [
+    "mindroom.automations.registry",
+    "mindroom.automations.steps",
+    "mindroom.automations.threads",
+    "mindroom.logging_config",
+    "mindroom.memory",
+    "mindroom.path_confinement",
+]
+visibility = ["mindroom.automations.registry"]
 
 [[modules]]
 path = "mindroom.automations.runner"
 depends_on = [
-    "mindroom.automations.prompt_curation",
+    "mindroom.automations.steps",
+    "mindroom.automations.threads",
     "mindroom.background_tasks",
+    "mindroom.config.automations",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.state",
+    "mindroom.runtime_resolution",
     "mindroom.thread_tags",
 ]
 visibility = ["mindroom.orchestrator"]

@@ -1646,7 +1646,7 @@ agents:
 | `learning_mode` | string | `null` | `always` learns after every turn; `agentic` lets the agent decide through a tool call |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory but not `learning`. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
-| `automations` | list | `null` | Built-in automations such as `prompt_curation`; `null` inherits `defaults.automations` for shared file-memory agents and `[]` turns them off. See [Built-in Automations](https://docs.mindroom.chat/scheduling/#built-in-automations) |
+| `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 | `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
 | `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
 | `private` | object | `null` | Give each requester a separate copy of the agent's state; see [Private Instances](#private-instances) |
@@ -1777,7 +1777,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `worker_scope` | `null` |
 | `file_access` | `workspace` |
 | `allow_self_config` | `false` |
-| `automations` | `[]`; private and non-file-memory agents never inherit them. See [Built-in Automations](https://docs.mindroom.chat/scheduling/#built-in-automations) |
+| `automations` | `[]`; private agents never inherit them, and agents without file memory skip the built-ins. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 
 `defaults.tools` (default `[scheduler]`) is added to every agent with `include_default_tools: true`; set it to `[]` to add nothing.
 It accepts the same per-tool overrides as `agents.<name>.tools`.
@@ -1869,7 +1869,7 @@ models:
 
   haiku:
     provider: anthropic
-    id: claude-haiku-4-5
+    id: claude-haiku-5-5
     context_window: 200000
 
   # OpenAI
@@ -2472,7 +2472,7 @@ Ad hoc teams take their history and compaction settings from `defaults`; see [Te
 
 The router is a built-in MindRoom account that is always present, cannot be disabled, and joins every room with configured agents or teams.
 It picks which agent or team answers a message that mentions no one, accepts room invitations, and sends welcome messages.
-Configure it under `router:` to choose its routing model, who may invite it into rooms, who may interact with it, and optional System One responder selection.
+Configure it under `router:` to choose its routing model, who may invite it into rooms, who may interact with it, and optional System One or OpenAI Decisions responder selection.
 
 See also [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/), [Access Control](https://docs.mindroom.chat/authorization/), and [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/).
 
@@ -2487,7 +2487,7 @@ router:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model alias used for routing decisions |
-| `judgment` | object or null | `null` | Optional System One responder selection before LLM routing; see [Responder Selection Judgments](#responder-selection-judgments) |
+| `judgment` | object or null | `null` | Optional System One or OpenAI Decisions responder selection before LLM routing; see [Responder Selection Judgments](#responder-selection-judgments) |
 | `access` | object or null | `null` | Who may interact with the router; see [Access Control](https://docs.mindroom.chat/authorization/) |
 | `accept_invites` | bool or list[string] | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID |
 
@@ -2531,8 +2531,8 @@ Mention a specific agent or team to get an answer, or several agents for an ad-h
 
 ## Responder Selection Judgments
 
-Set `router.judgment` to let System One (TypeSafe) choose among the eligible agents and teams before ordinary LLM routing.
-It is off by default, even when `TYPESAFE_API_KEY` is set.
+Set `router.judgment` to let System One (TypeSafe) or the OpenAI Decisions API choose among the eligible agents and teams before ordinary LLM routing.
+It is off by default, even when the backend's API key is set.
 Explicit mentions, thread participation rules, access control, and the single-candidate shortcut work the same way with or without it.
 
 Set `TYPESAFE_API_KEY` in the process environment or the `.env` next to `config.yaml`, then enable it:
@@ -2546,15 +2546,17 @@ router:
     timeout_seconds: 1.5
 ```
 
+For the OpenAI Decisions API, set `provider: openai_decisions`; it uses the OpenAI API key described in [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends).
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | string | Required | Must be `typesafe` |
-| `threshold` | float | `0.8` | From `0` to `1`; both the chosen option's probability and System One's confidence must reach it |
+| `provider` | string | Required | `typesafe` or `openai_decisions` |
+| `threshold` | float | `0.8` | From `0` to `1`; both the chosen option's probability and the backend's confidence must reach it |
 | `timeout_seconds` | float | `1.5` | Positive deadline of at most `30` seconds |
 
 Unknown fields are rejected.
 
-System One receives each candidate's role, tools, delegation targets, and brief instructions, the current message, and the last three visible messages with senders replaced by aliases.
+The backend receives each candidate's role, tools, delegation targets, and brief instructions, the current message, and the last three visible messages with senders replaced by aliases.
 It does not receive system prompts, tool results, attachment contents, or the rest of the conversation.
 It runs only with 2 to 253 candidates and a request of at most 16,000 bytes; messages are never shortened, so long input or input that looks like a secret uses ordinary routing instead.
 
@@ -2565,7 +2567,7 @@ It runs only with 2 to 253 candidates and a request of at most 16,000 bytes; mes
 | `multiple` | Ordinary LLM routing picks one responder; several agents are never launched |
 | Tie, low confidence, abstention, missing key, full judgment limit, timeout, or error | Ordinary LLM routing with `router.model` |
 
-The router's prompt overrides apply only to LLM routing, not to System One.
+The router's prompt overrides apply only to LLM routing, not to the judgment backend.
 Router judgments share the process-wide limit and logging described in [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends), with at most one router judgment at a time.
 
 ## Welcome Messages
@@ -2691,10 +2693,10 @@ After a judgment backend approves, the agent replies normally with its own model
 
 | Field | Backend | Default | Description |
 |-------|---------|---------|-------------|
-| `provider` | both | Required | `llm` for a configured model alias, or `typesafe` for System One |
+| `provider` | all | Required | `llm` for a configured model alias, `typesafe` for System One, or `openai_decisions` for the OpenAI Decisions API |
 | `model` | `llm` | Required | Existing alias under `models`, which can be cheaper than the reply model |
-| `threshold` | `typesafe` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
-| `timeout_seconds` | both | `5` for `llm`, `1.5` for `typesafe` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
+| `threshold` | `typesafe`, `openai_decisions` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
+| `timeout_seconds` | all | `5` for `llm`, otherwise `1.5` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
 
 Unknown fields are rejected.
 
@@ -2719,13 +2721,16 @@ To use System One instead, set `TYPESAFE_API_KEY` in the process environment or 
         timeout_seconds: 1.5
 ```
 
+To use the OpenAI Decisions API with `gpt-6-luna`, set `provider: openai_decisions` instead.
+It uses the same OpenAI API key as OpenAI models, from `OPENAI_API_KEY` or the dashboard, and always calls `api.openai.com`, regardless of any model `base_url`.
+
 The LLM backend uses the alias's normal provider credentials and receives no tools, agent system prompt, or agent memory.
 A model alias whose provider adds native tools that cannot be disabled is refused.
-For participation, a TypeSafe probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
-Both backends get the same question and context, but their judgments can differ.
+For participation, a TypeSafe or OpenAI Decisions probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
+All backends get the same question and context, but their judgments can differ.
 
 At most eight judgments run at once across the process, including [router judgments](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
-Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe and OpenAI Decisions, without request text or credentials.
 
 #### Participation Context and Fallback
 
@@ -2743,7 +2748,7 @@ The setting applies in every room where the agent may reply and has no per-room 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `judgment` | object | Required | LLM model alias or TypeSafe backend; see [Judgment Backends](#judgment-backends) |
+| `judgment` | object | Required | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](#judgment-backends) |
 | `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
 | `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
 
@@ -2763,7 +2768,7 @@ agents:
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
 It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
 When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
-With TypeSafe, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
+With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
 The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
@@ -3128,7 +3133,7 @@ Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not 
 
 In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
-Writes through the `memory` tool and auto-flush refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
+Writes through the `memory` tool, auto-flush, and an applied [dreaming](https://docs.mindroom.chat/scheduling/#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 ```yaml
@@ -3158,6 +3163,8 @@ It applies only to agents whose effective backend is `file`.
 3. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts.
 4. When the model answers with the `no_reply_token`, nothing is written.
 5. Results are appended to `memory/YYYY-MM-DD.md`.
+
+Turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start are not auto-flushed.
 
 ```yaml
 memory:
@@ -3202,6 +3209,22 @@ agents:
   mind:
     memory_backend: file
     automations: [prompt_curation]
+```
+
+## Dreaming
+
+Facts in `memory/` go stale when a later conversation corrects them.
+Enable the [`dreaming`](https://docs.mindroom.chat/scheduling/#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+```yaml
+memory:
+  auto_flush:
+    enabled: true           # writes the daily notes dreaming reviews
+agents:
+  mind:
+    memory_backend: file
+    thread_exports: true    # also reviews threaded conversations
+    automations: [dreaming]
 ```
 
 ## [`memory`]
@@ -4209,9 +4232,10 @@ Without it, or after a schedule edit, MindRoom resumes from the next future occu
 Restarts do not post the same trigger twice.
 For `schedule:fired` hooks that run more than once for the same occurrence, see [Hooks](https://docs.mindroom.chat/hooks/#event-notes).
 
-## Built-in Automations
+## Automations
 
-Built-in automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](https://docs.mindroom.chat/plugins/#automations) can add more.
 The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
 Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
 
@@ -4225,20 +4249,26 @@ agents:
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
+      - dreaming
+      - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}   # from a plugin
 ```
 
-- An entry is a built-in name, or a mapping with `name` plus overrides; unknown names and fields fail config load.
+- An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
+- Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
 - `cron` is a five-field expression in the configured [timezone](#timezone).
-- `room` is a room alias or ID; it defaults to the agent's first configured room, and each prompt starts a new thread.
+- `room` is a room alias or ID; it defaults to the agent's first configured room.
+- Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
+- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
-- When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a notice in the prompt's thread.
-- An automation does not post again while its previous prompt awaits verify.
-- A restart skips an occurrence it missed, and prompts posted before the restart get no verify notice.
+- When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
+- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- A check that cannot read what it checks posts a warning in the room.
+- A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
-For conditions that need your own code, gate an ordinary recurring schedule with a [`schedule:fired` hook](https://docs.mindroom.chat/hooks/#event-notes), which can suppress a fire or rewrite its message.
+For conditions that need your own code, write a [plugin automation](https://docs.mindroom.chat/plugins/#automations), or gate an ordinary recurring schedule with a [`schedule:fired` hook](https://docs.mindroom.chat/hooks/#event-notes), which can suppress a fire or rewrite its message.
 
 ### `prompt_curation`
 
@@ -4270,6 +4300,32 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 | `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
 
 `prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
+
+### `dreaming`
+
+`dreaming` keeps the agent's `memory/` files current: each night it reconciles them with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+1. It runs only when a [thread export](https://docs.mindroom.chat/thread-exports/) or a daily note from before today is new or changed since its last run, so a night without new threaded messages in the agent's rooms and without new daily notes costs nothing.
+2. The agent proposes changes in a copy of `memory/`: it updates facts that later evidence corrects, marks superseded lines instead of deleting them, files new durable facts such as decisions, preferences, and stable settings in topic files with their source and date, records conflicting sources with both versions, and removes duplicates.
+   It leaves transient tasks in the daily notes and never removes or doubts a fact only because newer notes do not mention it.
+3. A second run, in a thread of its own, reviews the proposal against its sources and approves or rejects it.
+4. MindRoom applies an approved proposal and marks both threads resolved.
+
+MindRoom never changes `MEMORY.md`, context files, or today's daily note; the agent suggests changes to them in its report.
+When the review rejects a proposal, a run stops unfinished or changes a file it may not, or memory changed during the run, nothing is applied; the next run, once a new thread export or daily note arrives, retries the same inputs and starts from any proposal that reached review and its review.
+A run handles at most 40 inputs; the rest wait for later runs.
+Turning the automation or thread exports on starts from conversations and notes of the last seven days instead of reviewing the older archive.
+Each run keeps its agenda and report, and a run that reached review also its patch and verdict, in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least; undo an applied run with `git apply -R .mindroom/dreaming/runs/<run>/proposal.patch` from the workspace root.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `15 3 * * *` | When to check |
+| `room` | first configured room | Where both prompts are posted |
+| `model` | the agent's model | A key of `models` to run both prompts with |
+
+`dreaming` needs `memory_backend: file` and something to work from: [auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](https://docs.mindroom.chat/thread-exports/) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
+It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
 
 # Chat Commands
 
@@ -4775,7 +4831,7 @@ models:
     id: claude-opus-5-5
   call_fast:
     provider: anthropic
-    id: claude-haiku-4-5
+    id: claude-haiku-5-5
 
 agents:
   assistant:
@@ -8401,7 +8457,7 @@ pip_install_package("rich")
 `coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`.
-`grep()` and `find_files()` skip hidden and gitignored paths, though `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
+`grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
 
@@ -13710,9 +13766,11 @@ Kubernetes mounts such knowledge read-only, because kubelet follows links inside
 ### Workspace files the primary reads and writes
 
 The primary treats everything inside a mounted workspace as worker-controlled.
-Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, and the files `prompt_curation` measures, are reached through `path_confinement` descriptors walked from the workspace root.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, and the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `dreaming` reads, are reached through `path_confinement` descriptors walked from the workspace root.
 Those descriptors refuse links, never write to a file that has another hard link, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
+`dreaming` writes each run's agenda, staging copy of `memory/`, and patch under `.mindroom/dreaming/runs/`, and removes a run's staging when the run ends and run directories beyond the newest 30 through descriptor-relative deletes that never follow a link.
+It writes an approved proposal into `memory/` from bytes worker code staged, which gives the agent nothing it could not write itself; it writes only Markdown under `memory/` other than today's daily note and context files, and keeps its progress below `tracking/`, outside the workspace.
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
@@ -13731,6 +13789,8 @@ Reads of worker-controlled files are capped per surface.
 |---|---|---|
 | Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
 | `prompt_curation` snapshots of `MEMORY.md` and context files | 1 MiB per file | Refused, so the check is skipped with a warning or verify reports the file as unreadable |
+| `dreaming` memory files, staging copies, reports, and verdicts | 1 MiB per file | A memory file is left out of the run, a staged file stops the run, and a report or verdict counts as missing, so the run stops or the proposal is rejected |
+| `dreaming` thread-export `index.json` | 8 MiB per room | Ignored, so that room's conversations are aged by file modification time |
 | Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
@@ -13843,8 +13903,8 @@ When a maintainer rejects a finding as intended behavior, add it to the list abo
 > A malicious plugin has full access to your credentials, Matrix sessions, file system, and network.
 > Only install plugins you trust and have reviewed.
 
-Plugins extend MindRoom with custom tools, [hooks](https://docs.mindroom.chat/hooks/), OAuth providers, and skills without changing MindRoom itself.
-Use one to add an integration MindRoom does not ship, react to or transform events, or connect an additional Google or Atlassian account.
+Plugins extend MindRoom with custom tools, [hooks](https://docs.mindroom.chat/hooks/), [automations](#automations), OAuth providers, and skills without changing MindRoom itself.
+Use one to add an integration MindRoom does not ship, react to or transform events, run agent maintenance on a schedule, or connect an additional Google or Atlassian account.
 A plugin is a directory with a `mindroom.plugin.json` manifest, loaded from the paths listed under `plugins:` in `config.yaml`.
 
 ## Installing plugins
@@ -13927,7 +13987,7 @@ plugins:
 | --- | --- | --- | --- |
 | `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
 | `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
-| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks and OAuth module; masked as secret in the dashboard |
+| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module; masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
 Each hook override supports:
@@ -14024,8 +14084,8 @@ Validate a plugin against the installed MindRoom version before deployment:
 mindroom plugins check ./my-plugin
 ```
 
-The check strictly validates the manifest, imports declared modules, validates tool, hook, and OAuth registrations, and verifies that declared skill directories exist.
-It prints the discovered tools, hooks, and skill directories, and exits nonzero on failure.
+The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
+It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 
 ## Plugin structure
@@ -14035,13 +14095,13 @@ my-plugin/
 ├── mindroom.plugin.json   # Required manifest
 ├── tools.py               # Tool factories (optional)
 ├── oauth.py               # OAuth providers (optional)
-├── hooks.py               # Event hooks (optional)
+├── hooks.py               # Event hooks and automations (optional)
 └── skills/                # Skill directories (optional)
     └── my-skill/
         └── SKILL.md
 ```
 
-Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, OAuth providers, and skills.
+Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, and skills.
 
 ## Manifest format
 
@@ -14060,7 +14120,7 @@ Only the manifest `name` is required; a plugin may provide any combination of to
 | `name` | string | **yes** | Plugin identifier using only lowercase ASCII letters, digits, `-`, and `_`; must be unique among configured plugins |
 | `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
-| `hooks_module` | string | no | Relative path to the module with `@hook` functions; when omitted, `tools_module` is scanned for hooks |
+| `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 
 Every declared module file and skill directory must exist.
@@ -14596,6 +14656,107 @@ See [Skills](https://docs.mindroom.chat/skills/) for the `SKILL.md` format, prec
 Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, tool-call gating, reactions, schedules, and custom events.
 See [Hooks](https://docs.mindroom.chat/hooks/) for the `@hook` decorator, events, execution modes, timeouts and errors, the hook context and Matrix helpers, and testing.
 
+## Automations
+
+An automation is a check a plugin runs on each agent's cron schedule; when the check finds work, the agent answers a visible prompt, and code steps decide what happens after each answer.
+Use one for recurring agent maintenance whose trigger or follow-up needs code, such as the built-in [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) and [`dreaming`](https://docs.mindroom.chat/scheduling/#dreaming), which use this same API.
+Operators enable it per agent under [`automations:`](https://docs.mindroom.chat/scheduling/#automations).
+
+### Minimal example
+
+`mindroom.plugin.json`:
+
+```json
+{"name": "weekly-digest", "hooks_module": "hooks.py"}
+```
+
+`hooks.py`:
+
+```python
+from datetime import UTC, datetime
+from functools import partial
+
+from mindroom.automations import Ask, AutomationContext, Done, automation
+from mindroom.path_confinement import read_regular_file_within_root
+
+
+# Only agents with file memory have a workspace for the digest.
+@automation("weekly_digest", requires_file_memory=True)
+def check(ctx: AutomationContext) -> Ask | None:
+    if ctx.workspace is None or not ctx.workspace.is_dir():
+        return None
+    target = ctx.options.get("target", "digest.md")
+    # A stamp only this run asks for tells its result apart from last week's file.
+    stamp = f"Digest {datetime.now(UTC):%Y-%m-%d %H:%M}"
+    prompt = f"Summarize this week's threads into `{target}`, and end the file with the line `{stamp}`."
+    return Ask(prompt, new_thread=True, then=partial(after_run, ctx, target, stamp))
+
+
+def after_run(ctx: AutomationContext, target: str, stamp: str, config, thread_id: str, timed_out: bool) -> Done:
+    # The run ending says nothing about success: check the result before claiming it.
+    try:
+        written = read_regular_file_within_root(ctx.workspace, target).decode()
+    except (OSError, ValueError):
+        written = ""
+    if stamp not in written:
+        return Done(f"⚠️ The digest run ended without writing `{target}`.")
+    return Done(f"Digest written to `{target}`.", resolve=(thread_id,))
+```
+
+`config.yaml`:
+
+```yaml
+plugins:
+  - path: plugins/weekly-digest
+agents:
+  mind:
+    display_name: Mind
+    memory_backend: file   # gives the agent a workspace
+    tools: [file]          # the agent writes the digest
+    automations:
+      - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
+```
+
+### The check and its steps
+
+- `@automation(name, requires_file_memory=False)` marks a synchronous check; the name starts with a lowercase letter and continues with lowercase letters, digits, and `_`, must not be `prompt_curation` or `dreaming`, and must be unique across loaded plugins, or the later registration is ignored with a warning.
+  Set `requires_file_memory=True` when the automation maintains file memory, so it never runs for an agent without the file backend.
+- The check returns `None` when there is nothing to do, which posts nothing and calls no model, or an `Ask(text, new_thread=..., then=...)` that the agent answers.
+- `then(config, thread_id, timed_out)` runs after that answer and returns the next `Ask` or a `Done(notice, resolve=..., on_loop=...)` that posts `notice` in the thread, marks the listed threads resolved, and runs `on_loop` on the event loop.
+  Bind anything a step needs from the check with `functools.partial`.
+- `timed_out` is true when no answer ended within an hour of the prompt being posted; `False` only means the answer ended, which includes a failed run, so check the result before reporting success.
+- The check's `Ask` and every later `Ask` with `new_thread=True` get their own thread and session, even for an agent with `thread_mode: room`; a later `Ask` with `new_thread=False` follows up in the current thread.
+
+`AutomationContext` fields:
+
+| Field | Description |
+| --- | --- |
+| `agent_name` | The agent the automation runs for |
+| `config` | The config when the automation fired; steps receive the current one |
+| `runtime_paths` | Storage and config paths of this MindRoom runtime |
+| `entry` | The agent's entry for this automation |
+| `options` | The entry's `options`, set per agent, read-only |
+| `settings` | The plugin's `settings`, set once per plugin, read-only |
+| `workspace` | The agent's workspace root, which may not exist yet; `None` for an agent without `memory_backend: file`, which has no workspace |
+| `state_dir` | The agent's automation state directory in MindRoom storage, outside the workspace; name your files after your automation and create the directory when you first write |
+
+### What MindRoom guarantees
+
+The rules for [scheduling](https://docs.mindroom.chat/scheduling/#automations) and [memory auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) apply to plugin automations as they do to the built-ins.
+For plugin code, MindRoom also guarantees:
+
+- Checks and steps run off the event loop, so ordinary replies and other agents are not held back by them.
+- The one-hour limit applies to the agent's answer, not to a check or step that hangs.
+- `OSError` and `ValueError` from a check or step post a warning in the room and end the chain; other exceptions are logged.
+- `automation_threads(runtime_paths)` from `mindroom.automations` returns the threads automations started, so an automation that reads exported conversations can skip them.
+- A chain finishes with the code that started it; after a plugin reload, the next fire uses the new code on the same schedule, but resources the old module kept, such as tasks in module-level variables, may already be cancelled.
+
+### Helpers the built-ins use
+
+Agent workspaces can contain files worker code wrote, so read and write them without following links: `read_regular_file_within_root`, `write_file_within_root`, and `open_directory_within_root` from `mindroom.path_confinement` do that.
+To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths))` with `refresh_agent_memory_search` from `mindroom.memory`.
+[`prompt_curation.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/prompt_curation.py) and [`dreaming.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/dreaming.py) are complete examples: a single prompt with a re-check, and a proposal reviewed in a second thread before code applies it.
+
 # Hooks
 
 Hooks are async functions in a [plugin](https://docs.mindroom.chat/plugins/) that run when MindRoom events happen.
@@ -15012,7 +15173,7 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     origin: TurnOrigin,
-    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages
+    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages, "automation/<name>" for automation prompts and notices
     dispatch_policy_source_kind: str | None,
 )
 # Derived properties: room_id (from target), requester_id, sender_id, source_kind (from origin).
@@ -16783,7 +16944,7 @@ See [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/#de
 
 Dedicated workers mount no config and resolve agents from the [live config snapshot](#live-config-snapshots).
 They never receive the credentials-encryption key, so tool settings reach them only through [credential leases](#credential-leases).
-Worker pods can reach the primary API over the pod network, so the runtime chart gives the primary a generated `MINDROOM_API_KEY` that workers never receive, unless the explicit opt-out is configured.
+Worker pods can reach the primary API over the pod network, so the runtime chart gives the primary a generated (or `apiAuth.existingSecret`) `MINDROOM_API_KEY` that workers never receive, unless the explicit opt-out is configured.
 
 ### Keeping worker versions matched
 
@@ -18410,6 +18571,7 @@ Open `config.yaml` in your editor, chosen from `$EDITOR`, then `$VISUAL`, then `
 ### config validate
 
 Check `config.yaml` against the schema, report errors readably, and warn about missing provider API keys.
+It also loads the configured plugins and fails on [automation](https://docs.mindroom.chat/scheduling/#automations) names no loaded plugin provides or that two register.
 
 ### config path
 

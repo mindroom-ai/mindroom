@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from mindroom.automations.registry import iter_module_automations
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
+    from mindroom.automations.registry import CheckFn
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
@@ -66,6 +68,7 @@ class _Plugin:
     hooks_module_path: Path | None
     skill_dirs: list[Path]
     discovered_hooks: tuple[HookCallback, ...]
+    discovered_automations: tuple[CheckFn, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +415,7 @@ def _materialize_plugin(
     if hooks_module is None and plugin.hooks_module_path is None:
         hooks_module = tools_module
     discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
+    discovered_automations = tuple(iter_module_automations(hooks_module)) if hooks_module is not None else ()
     return _Plugin(
         name=plugin.name,
         root=plugin.root,
@@ -422,6 +426,7 @@ def _materialize_plugin(
         hooks_module_path=plugin.hooks_module_path,
         skill_dirs=plugin.skill_dirs,
         discovered_hooks=discovered_hooks,
+        discovered_automations=discovered_automations,
     )
 
 

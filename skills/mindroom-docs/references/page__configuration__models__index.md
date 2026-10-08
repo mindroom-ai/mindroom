@@ -70,7 +70,7 @@ models:
 
   haiku:
     provider: anthropic
-    id: claude-haiku-4-5
+    id: claude-haiku-5-5
     context_window: 200000
 
   # OpenAI

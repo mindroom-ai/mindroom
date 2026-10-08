@@ -1572,6 +1572,7 @@ async def test_unmentioned_managed_attachment_settles_before_unavailable_thread_
     plugin = SimpleNamespace(
         name="managed-ingress-observer",
         discovered_hooks=(received,),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path="./plugins/managed-ingress-observer"),
         plugin_order=0,
     )

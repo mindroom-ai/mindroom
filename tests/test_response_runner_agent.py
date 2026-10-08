@@ -59,7 +59,8 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -3341,7 +3342,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
             model.decision = RuntimeError("Decision provider unavailable")
         typesafe_calls: list[bytes] = []
 
-        async def post(_self: SystemOneClient, body: bytes) -> bytes:
+        async def post(_self: JudgmentClient, body: bytes) -> bytes:
             typesafe_calls.append(body)
             if action == "sync_restart":
                 raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
@@ -3350,13 +3351,13 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 raise RuntimeError(msg)
             return json.dumps(
                 {
-                    "model": PINNED_MODEL,
+                    "model": _PINNED_MODEL,
                     "answers": {"participation": {"type": "noul", "noul": 0.95 if action == "respond" else 0.05}},
                     "usage": {"input_tokens": 100, "output_tokens": 1},
                 },
             ).encode()
 
-        monkeypatch.setattr(SystemOneClient, "_post", post)
+        monkeypatch.setattr(JudgmentClient, "_post", post)
         judge = ParticipationModel(
             asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
             if action == "sync_restart"

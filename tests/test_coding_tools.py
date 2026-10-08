@@ -914,6 +914,21 @@ class TestFindFiles:
         assert ".hidden_file.txt" not in result
         assert ".hidden_dir" not in result
 
+    def test_find_searches_a_named_dot_directory(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A dot directory named in path or in the pattern's leading directories is searched, not hidden."""
+        staging = tmp_base / ".mindroom" / "runs" / "r1" / "memory"
+        staging.mkdir(parents=True)
+        (staging / "people.md").write_text("x")
+        (staging / ".draft.md").write_text("x")
+
+        by_path = tools.find_files("*.md", path=".mindroom/runs/r1/memory")
+        by_pattern = tools.find_files(".mindroom/runs/*/memory/*.md")
+
+        for result in (by_path, by_pattern):
+            assert ".mindroom/runs/r1/memory/people.md" in result
+            assert ".draft.md" not in result
+        assert ".mindroom" not in tools.find_files("**/*.md")
+
     def test_find_batches_gitignore_checks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """find_files should use one batched git check-ignore invocation."""
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)

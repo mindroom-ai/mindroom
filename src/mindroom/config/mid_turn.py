@@ -11,7 +11,9 @@ class MidTurnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    judgment: JudgmentConfig = Field(description="LLM model alias or TypeSafe backend that makes the decision")
+    judgment: JudgmentConfig = Field(
+        description="LLM model alias, TypeSafe, or OpenAI Decisions backend that makes the decision",
+    )
     instructions: str = Field(
         default="",
         description="Extra guidance for the finish-or-wrap-up decision",

@@ -154,6 +154,7 @@ def _plugin(
     return SimpleNamespace(
         name=name,
         discovered_hooks=tuple(callbacks),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path=f"./plugins/{name}", settings=settings or {}),
         plugin_order=plugin_order,
     )

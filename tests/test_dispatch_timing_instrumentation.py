@@ -225,6 +225,7 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
             SimpleNamespace(
                 name="tool-policy",
                 discovered_hooks=(before,),
+                discovered_automations=(),
                 entry_config=PluginEntryConfig(path="./plugins/tool-policy", settings={}),
                 plugin_order=0,
             ),
@@ -287,6 +288,7 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
             SimpleNamespace(
                 name="tool-policy",
                 discovered_hooks=(before, after),
+                discovered_automations=(),
                 entry_config=PluginEntryConfig(path="./plugins/tool-policy", settings={}),
                 plugin_order=0,
             ),
