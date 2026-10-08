@@ -24,7 +24,7 @@ _UNTOUCHED_NS = 1_000_000_000 * 1_000_000_000
 # Names that break unquoted or option-like path handling.
 _ODD_NAMES = ("with space [x] *.md", "-leading-dash", "back\\slash", " padded ", "it's")
 # The only commands on PATH when the scripts run: what the sync uses, plus touch for the test seed.
-_TOOLS = ("sh", "cp", "mkdir", "rm", "find", "stat", "cmp", "readlink", "chmod", "chown", "id", "touch")
+_TOOLS = ("sh", "cp", "mkdir", "rm", "find", "stat", "md5sum", "awk", "readlink", "chmod", "chown", "id", "touch")
 
 type Snapshot = dict[str, tuple[str, int, bytes | str | None]]
 
@@ -323,7 +323,7 @@ def test_sync_falls_back_to_a_full_copy_for_names_with_newlines(
     assert _snapshot(target) == _snapshot(source)
 
 
-@pytest.mark.parametrize("missing", ["find", "cmp"])
+@pytest.mark.parametrize("missing", ["find", "md5sum", "awk"])
 def test_sync_falls_back_to_a_full_copy_when_the_image_lacks_a_tool(
     bundle_inits: dict[str, dict[str, Any]],
     tool_dir: Path,
@@ -465,6 +465,86 @@ def test_a_failed_copy_fails_the_init_before_the_seed_runs(
     assert not marker.exists()
 
 
+def _wrapped_tools(tool_dir: Path, bin_dir: Path, tool: str, check: str) -> Path:
+    """Copy tool_dir into bin_dir with tool running the shell code check before the real tool."""
+    bin_dir.mkdir()
+    for path in tool_dir.iterdir():
+        (bin_dir / path.name).symlink_to(path)
+    (bin_dir / tool).unlink()
+    # Running the tool through its own name keeps multi-call binaries such as BusyBox working.
+    (bin_dir / tool).write_text(f'#!{tool_dir / "sh"}\n{check}\nexec "{tool_dir / tool}" "$@"\n')
+    (bin_dir / tool).chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize(
+    ("tool", "check"),
+    [
+        ("awk", 'case " $* " in *" want=remove "*) exit 2 ;; esac'),
+        ("awk", 'case " $* " in *" want=copy "*) exit 2 ;; esac'),
+        ("awk", 'case " $* " in *" want=dirs "*) exit 2 ;; esac'),
+        ("stat", "case $2 in %a*) exit 1 ;; esac"),
+    ],
+    ids=["remove-plan", "copy-plan", "dirs-plan", "directory-stat"],
+)
+def test_a_failing_planner_fails_the_init_before_the_seed_runs(
+    bundle_inits: dict[str, dict[str, Any]],
+    tool_dir: Path,
+    tmp_path: Path,
+    tool: str,
+    check: str,
+) -> None:
+    """Plans feed while loops, whose status would hide a failure there and leave a half-updated target."""
+    source = _make_source(tmp_path / "bundle")
+    target = tmp_path / "seeded"
+    marker = tmp_path / "seed-ran"
+    _run(bundle_inits["seeded"], tool_dir, source, target, cwd=tmp_path)
+    marker.unlink()
+    _change_content(source)
+    _change_directory_mode(source)
+    tools = _wrapped_tools(tool_dir, tmp_path / "bin", tool, check)
+
+    completed = _run(bundle_inits["seeded"], tools, source, target, cwd=tmp_path, check=False)
+
+    assert completed.returncode != 0
+    assert not marker.exists()
+
+
+def test_checksums_that_look_like_numbers_compare_as_text(
+    bundle_inits: dict[str, dict[str, Any]],
+    tool_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Both contents have MD5 sums of the form 0e<digits>, which awk would compare as the number 0."""
+    source = _make_source(tmp_path / "bundle")
+    (source / "config.yaml").write_text("240610708")
+    target = tmp_path / "storage" / "sync"
+    _run(bundle_inits["sync"], tool_dir, source, target)
+    (source / "config.yaml").write_text("314282422")
+
+    _run(bundle_inits["sync"], tool_dir, source, target)
+
+    assert (target / "config.yaml").read_text() == "314282422"
+
+
+def test_sync_falls_back_to_a_full_copy_when_find_cannot_batch(
+    bundle_inits: dict[str, dict[str, Any]],
+    tool_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """A BusyBox find built without -exec {} + gets the full copy instead of failing."""
+    tools = _wrapped_tools(tool_dir, tmp_path / "bin", "find", 'case " $* " in *" {} + "*) exit 1 ;; esac')
+    source = _make_source(tmp_path / "bundle")
+    target = tmp_path / "sync"
+    target.mkdir()
+    (target / "stale.md").write_text("stale\n")
+
+    completed = _run(bundle_inits["sync"], tools, source, target)
+
+    assert "its find has no -exec {} +" in completed.stderr
+    assert _snapshot(target) == _snapshot(source)
+
+
 def test_overwrite_false_copies_over_the_target_without_removing_anything(
     bundle_inits: dict[str, dict[str, Any]],
     tool_dir: Path,
@@ -498,3 +578,47 @@ def test_bundle_paths_reach_the_script_as_arguments(tmp_path: Path) -> None:
     assert init["command"] == ["sh", "-ec"]
     assert init["args"][1:] == ["content-bundle-odd", "/bundle/it's", target]
     assert "touch" not in init["args"][0]
+
+
+def _counting_tools(tool_dir: Path, bin_dir: Path, log: Path) -> Path:
+    """Copy tool_dir into bin_dir with every tool but sh logging its name to log before it runs."""
+    bin_dir.mkdir()
+    (bin_dir / "sh").symlink_to(tool_dir / "sh")
+    for tool in tool_dir.iterdir():
+        if tool.name != "sh":
+            # Running the tool through its own name keeps multi-call binaries such as BusyBox working.
+            (bin_dir / tool.name).write_text(f'#!{tool_dir / "sh"}\necho {tool.name} >>"{log}"\nexec "{tool}" "$@"\n')
+            (bin_dir / tool.name).chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize("change", [None, _change_content, _delete_file], ids=["unchanged", "content", "deleted"])
+def test_the_number_of_processes_does_not_grow_with_the_number_of_files(
+    bundle_inits: dict[str, dict[str, Any]],
+    tool_dir: Path,
+    tmp_path: Path,
+    change: Callable[[Path], None] | None,
+) -> None:
+    """Listing and checksumming run in batches, so a restart of a ten times larger bundle starts the same processes."""
+    counts = []
+    for files in (10, 100):
+        root = tmp_path / str(files)
+        source = _make_source(root / "bundle")
+        for index in range(files):
+            (source / "docs" / f"page-{index}.md").write_text(f"page {index}\n")
+        target = root / "storage" / "sync"
+        log = root / "calls.log"
+        tools = _counting_tools(tool_dir, root / "bin", log)
+        _run(bundle_inits["sync"], tools, source, target)
+        log.unlink()
+        if change:
+            change(source)
+
+        _run(bundle_inits["sync"], tools, source, target)
+
+        assert _snapshot(target) == _snapshot(source)
+        calls = log.read_text().split()
+        counts.append({tool: calls.count(tool) for tool in sorted(set(calls))})
+    assert counts[0] == counts[1]
+    assert counts[0]["md5sum"] == 2
+    assert counts[0]["stat"] <= 4
