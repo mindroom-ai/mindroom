@@ -58,7 +58,7 @@ _MAX_INDEX_BYTES = 8 << 20
 _DONE_LINE = "DREAM: DONE"
 # Exactly APPROVE, or REJECT with a reason after an em dash, en dash, or hyphen; anything else, such as
 # "APPROVE-WITH-CHANGES" or "APPROVE once fixed", is a rejection.
-_VERDICT = re.compile(r"VERDICT:\s*(?:(?P<approve>APPROVE)\.?|REJECT(?:\s*[\u2014\u2013-]+\s*(?P<reason>.*))?)")
+_VERDICT = re.compile(r"VERDICT:\s*(?:(?P<approve>APPROVE)|REJECT(?:\s*[\u2014\u2013-]+\s*(?P<reason>.*))?)")
 
 # An input's version: its modification time and size.
 type _Version = tuple[int, int]
@@ -456,13 +456,13 @@ def _read_optional(root: Path, path: str) -> str | None:
 
 
 def _last_line(text: str | None) -> str:
-    """Return the last non-blank line without the code, emphasis, list, or quote marks a model may add to it."""
+    """Return the last non-blank line without the code, emphasis, list, or quote marks a model may add, or one closing period."""
     lines = [
         stripped
         for line in (text or "").splitlines()
         if (stripped := line.replace("`", "").replace("*", "").strip().lstrip("->").strip())
     ]
-    return lines[-1] if lines else ""
+    return lines[-1].removesuffix(".").rstrip() if lines else ""
 
 
 def _patch(run: _Run, proposal: _Proposal) -> str:
@@ -558,7 +558,7 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
     if timed_out:
         approved, reason = False, "the review did not finish within an hour"
     elif match := _VERDICT.fullmatch(_last_line(_read_optional(run.root, f"{run.run_dir}/verdict.md"))):
-        approved, reason = match["approve"] is not None, (match["reason"] or "").strip().rstrip(".")
+        approved, reason = match["approve"] is not None, match["reason"] or ""
     else:
         approved, reason = False, "the review did not end with one of the two verdict lines"
     if not approved:
