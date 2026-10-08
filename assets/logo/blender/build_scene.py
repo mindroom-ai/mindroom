@@ -4,7 +4,7 @@
 
 Run from the repository root:
 
-    blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render hero studio
+    blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render hero
 
 The SVG logo is an orthographic drawing of a real object.
 The named 2D corners from ../artwork.py are lifted back into 3D here,
@@ -24,7 +24,7 @@ from mathutils import Matrix, Vector
 HERE = Path(__file__).resolve().parent
 SWAY_FRAMES = 120
 SWAY_DEGREES = 30.0  # The M only reads from the front, so the loop sways instead of turning fully.
-SHOTS = {"hero": "hero", "studio": "studio", "sway": "studio"}  # Shot name -> camera set.
+SHOTS = {"hero": "hero", "sway": "studio"}  # Shot name -> camera set; the sway uses the perspective studio set.
 
 # Projection implied by the drawing. One cube edge along a horizontal axis is
 # drawn 154 px across and 96 px down, so the camera looks down at asin(96/154).

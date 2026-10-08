@@ -11,7 +11,6 @@ From the hero camera the model reproduces the SVG silhouette; from other angles 
 | `build_scene.py` | Builds the geometry, materials, lights, cameras, and render settings from scratch. |
 | `mindroom-logo.blend` | Saved scene with live boolean and bevel modifiers, ready to edit or animate. |
 | `hero.png` | Orthographic render on the SVG background and navy frame, 1024 × 1024. |
-| `studio.png` | Perspective three-quarter view on a glossy navy floor, 1024 × 1024. |
 | `sway.mp4` | Seamless ±30° sway loop starting from the hero pose, 120 frames at 30 fps. |
 | `crystal.py` | Restyles the model as framed crystal or ice legs, glowing white, around a tesseract and renders its effects. |
 | `crystal.blend` | Saved crystal scene for the still. |
@@ -25,12 +24,12 @@ From the hero camera the model reproduces the SVG silhouette; from other angles 
 From the repository root, with Blender 5.2 or newer on `PATH`:
 
 ```sh
-blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render hero studio
+blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render hero
 ```
 
 The script always rebuilds and saves the `.blend` first; `--render` selects which shots to render afterwards.
 Use `--resolution` and `--samples` for quick previews, and `--output-dir` or `--blend` to write elsewhere.
-Rendering uses Cycles on the CPU; both stills take a few minutes on a 12-core machine.
+Rendering uses Cycles on the CPU; the still takes a few minutes on a 12-core machine.
 
 The sway loop renders numbered PNG frames, which `ffmpeg` joins into a video:
 
