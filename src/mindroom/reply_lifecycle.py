@@ -96,6 +96,8 @@ _NOTE_INTERRUPTED = "interrupted"
 _NOTE_DELIVERY_FAILED = "delivery_failed"
 _NOTE_APPROVAL_FAILED = "approval_failed"
 _NOTE_ERROR = "error"
+# What a reply ended by a state the rules do not model shows; the error note has no text of its own.
+_UNMODELED_ERROR_TEXT = "⚠️ Error: this reply could not continue. Please try again."
 
 FailureDisposition = Literal["cancelled_by_user", "failed"]
 
@@ -471,7 +473,7 @@ def _unmodeled(reply: Reply, span: Span | None, *, reason: str, now_ns: int) -> 
         effects += [FenceApproval(reply.approval_id, "failed"), WakeApproval(reply.approval_id)]
     else:
         effects.append(SettleSources(reply.last_span_id))
-    owed = OwedWrite(reply.last_span_id, _NOTE_ERROR)
+    owed = OwedWrite(reply.last_span_id, _NOTE_ERROR, _UNMODELED_ERROR_TEXT)
     updated = _set_state(_stop_applied(updated), ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=spans, effects=tuple(effects), unmodeled=reason)
 

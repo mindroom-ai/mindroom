@@ -27,6 +27,7 @@ from mindroom.reply_lifecycle import (
     WriteFacts,
     WriteStage,
 )
+from mindroom.reply_presentation import NoteKind, note_segment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -147,6 +148,10 @@ def test_claim_with_a_live_span_ends_the_reply_instead_of_raising() -> None:
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
     assert CancelSpan(span.span_id) in transition.effects
+    owed = transition.reply.owed_write
+    assert owed is not None
+    # The owed note renders, as the gateway renders it before sending.
+    assert note_segment(NoteKind(owed.note), owed.text).text.startswith("⚠️ Error:")
 
 
 def test_claim_on_a_terminal_reply_without_an_edit_runs_nothing() -> None:
@@ -2167,7 +2172,7 @@ def test_an_unmodeled_event_ends_the_reply_failed_and_settles_its_sources() -> N
     assert transition.unmodeled == "test"
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
-    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_ERROR)
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_ERROR, rl._UNMODELED_ERROR_TEXT)
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.FAILED
     assert transition.effects == (CancelSpan(span.span_id), SettleSources(span.span_id))
 
