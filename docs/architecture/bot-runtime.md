@@ -31,13 +31,14 @@ For a streaming requester, the resumed run edits the paused reply with throttled
 That progress closes before the approval lifecycle delivers the durable final edit, publishes a further pause, or settles a failure or stop, and closing waits until no progress edit is in flight, even when a stop arrives meanwhile.
 `FinalDeliveryOutcome` exposes terminal run identity from the frozen delivery payload through its typed contract, keeping live and recovered history linkage consistent.
 
-`ResponseSources` captures immutable pending events, logical sources, discovery aliases, and the selected edit receipt for one request.
+`ResponseSources` captures immutable pending events, logical sources, and discovery aliases for one request.
 Once a reply span claims the request, the span's records own its sources and the reply's event, and an approval continuation holds the pending sources of the span whose pause created it (see [Reply messages](reply-messages.md#ownership)).
-Current `TurnRecord` selection governs edits selected before execution, the reply governs whether a Stop came after an edit, and the outbox alone owns frozen payloads, acknowledgement, and retirement.
+The turn record holds an edit's text once its regeneration claims the reply, and the outbox alone owns frozen payloads, acknowledgement, and retirement.
 `response_sources.py` owns the immutable runtime values, and `event_journal/legacy_response_attempts.py` owns the one-time adoption of approval continuation identity from released stores.
 
-`EditRegenerator` owns the edited-message replay workflow.
-It is still coupled to the current persistence split, but its workflow boundary is real.
+`EditRegenerator` owns edits of answered messages: it regenerates the reply to the latest message of a conversation while no approval holds that reply, stopping the reply first while it streams (see [Reply messages](reply-messages.md#claims)).
+It runs the regeneration on a runner-owned task, so the room's event lane waits only for the regeneration's claim.
+An edit of a message still waiting in its coalescing queue changes that message's text in the queue instead.
 
 `TurnStore` owns source-redaction tombstoning and answers which events a conversation's history derives from are redacted; each response removes that history from the scope it opens before using it.
 The projection learns about a redaction through journal admission; the Matrix callback records the exact tombstone and joins it to retained physical revision owners.
@@ -49,7 +50,7 @@ When no turn records a room for the event, the tombstone is written only if the 
 `TurnController` is the real turn owner now, but it is still too large.
 `TurnPolicy` is pure now, but `ResponseRunner` still owns too much execution detail.
 `IngressHookRunner` is a thin hook adapter with a vague name.
-`TurnStore` gives the runtime one durable turn boundary, while saved run metadata remains an import source for requested rows removed by ledger compaction.
+`TurnStore` gives the runtime one durable turn boundary.
 `MessageTarget` still combines conversation identity and delivery placement.
 
 ## Target Runtime Vocabulary
@@ -304,14 +305,11 @@ Consumer-owned side effects remain responsible for their own replay semantics; f
 `!config set` uses a separate Matrix-backed `preview -> decision -> execution -> result` journal because its mutation begins only after the requester reacts to the preview.
 
 `TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
-One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.
+One codec projects that schema into the versioned handled-turn ledger and the source, prompt, and revision metadata saved with each Agno run.
 Interactive-selection discovery aliases remain separate from canonical source identity, so recovery can index every triggering event without making one message look coalesced.
 Coalesced router relays persist each human discovery alias on its physical source metadata so later edits and redactions update the owned prompt.
 Per-source Matrix revision tuples identify the selected canonical prompt body.
-The owning turn's typed physical revision map retains edit ordering independently, so canonical refill may select a surviving original or older body while stale callbacks remain stale.
-`EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
-One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
-A drain asked to rebuild more than eight times in a row drops the edit with an error log instead of holding the room's event lane.
+The owning turn's typed physical revision map retains edit ordering independently, so stale callbacks remain stale.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
 An interrupted turn stays pending, and replay continues its reply in place.
 An interrupted edit regeneration also stays pending but starts over, because a newer edit may have replaced the prompt its stopped attempt answered; a regeneration's approved resume that was cut short continues below what it showed, as an interrupted turn does.
@@ -343,12 +341,7 @@ Replies to duplicate receipt events are verified against the router's exact Matr
 Approval creation and source-redaction admission serialize on the existing room-membership row, so creation cannot acquire a source that deletion already settled.
 Recovery can finish a failing approval whose INITIAL was already retired only after card expiration; `event_journal/legacy_approval_recovery.py` proves no FINAL debt and exact tombstones for its acknowledged response and every owned source inside the current owner's transaction.
 That cleanup settles journal ownership without sending replacement text or recording tool success.
-Saved run metadata remains intentionally redundant so older turns removed by ledger compaction can still be restored for edits.
-`TurnStore` returns any present ledger record unchanged without opening model session storage.
-Run metadata supplies a complete candidate only when the requested ledger identity is absent.
-Import publication waits for conflicting provisional writes, rechecks the requested source or discovery alias, and returns any concurrent owner unchanged.
-An occupied recovered physical source remains authoritative, while any collision confined to a recovered discovery alias declines the historical import.
-`TurnStore` immediately writes an imported record into the ledger, so every later load uses journal authority.
+An edit loads its turn from the ledger alone; a turn the ledger forgot regenerates nothing.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
 Conversation lookups use an index derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.
 Each alias publication, committed replacement, and rollback updates those indexes under the same lock as the primary record map; startup and retention rebuild them from that map.
@@ -356,7 +349,7 @@ The indexes retain references to existing records and add no durable schema or s
 Preparation still scales with the selected conversation's retained records.
 Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
 One process must own one agent's records; the database merges delivery acknowledgements with ledger writes for that owner, without coordinating independent runtimes against the same storage path.
-Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
+Unversioned pre-user ledger turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned in the same transaction that withholds the redacted body, and every projection install path consults that tombstone table.
 Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
@@ -368,14 +361,12 @@ Exact edit tombstones invalidate those revisions while preserving the original s
 Consumed-history metadata retains physical revision IDs through compaction; only legacy records lacking that provenance use retained source ownership to invalidate an ambiguous compacted summary.
 Registration and tombstone reconciliation share ledger conflict keys, and unsettled physical edits pin their owners through retention.
 Retention also keeps every turn record that carries a redaction tombstone for a conversation, because history cleanup derives from it once a departure has dropped the journal's tombstone or for history older than the journal.
-Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts.
 The revision map remains ledger-owned; model runs carry consumption provenance.
-A regeneration's span carries the edit it selected; the turn record takes those revisions and prompts in the transaction that settles the span's sources with its answer, and internal prompts and ledger metadata never enter the Matrix payload.
+An edit's regeneration writes the edit's revisions and prompts to the turn record when it claims the reply, and internal prompts and ledger metadata never enter the Matrix payload.
 Reply settlement and ordinary ledger writes claim the same existing canonical rows before merging, so a delayed cached write cannot erase a committed answer before cache publication or restart.
 Cache publication uses the actual committed record; final-delivery recovery resends the frozen row without another model call.
-Coalesced regeneration refills invalidated slots through strict paginated reads proving source, requester, and visible revision, including sidecars.
-An exact principal/room/source projection tombstone proves canonical deletion during refill, allowing the edit owner to reconcile cleanup and rebuild surviving sources before the room FIFO reaches the deletion callback; missing unproven data still blocks generation.
-The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.
+A coalesced turn regenerates only while the ledger still holds every source's text; one whose deleted revision left a slot empty regenerates nothing.
+The locked edit preparation gate ends a regeneration whose snapshot a newer revision or a deletion invalidated.
 The source-preparation callback receives the actual request history both at early admission and after the final locked history and payload refresh, so context-only revisions are registered before consumption.
 Physical snapshot validation follows awaited tombstone reconciliation and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
 Redacted replay may remain in local session storage until the history scope holding it next serves a response; responses do not receive it, while approval continuations, manual compaction, and voice-call turns do not run the check.

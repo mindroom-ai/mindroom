@@ -191,7 +191,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if transition.row is not None:
             reply = self.model.reply
             assert reply is not None
-            # P4: a reply writes only for its current span, or for its last when it writes its own note.
+            # I17: a reply writes only for its current span, or for its last when it writes its own note.
             assert transition.row.span_id in {reply.current_span_id, reply.last_span_id}, (transition.row, reply)
             span = self.model.spans[transition.row.span_id]
             creates = reply.event_id is None and transition.row.stage is not WriteStage.EDIT
@@ -226,7 +226,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                     for source in settled.sources.pending:
                         if source in self.model.settled:
                             continue
-                        # P3: no source is answered twice.
+                        # I17: no source is answered twice.
                         assert source not in self.model.answered, (source, settled)
                         self.model.answered.add(source)
                 self._settle(span_id)
@@ -294,7 +294,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if transition.outcome is Outcome.DEFERRED and edit is not None and edit not in self.model.deferred:
             # An approval's claim is retried by its recovery and a replay by journal replay; an edit waits here.
             self.model.deferred.append(edit)
-        # One turn has one reply: no claim starts another.
+        # I17: one turn has one reply, so no claim starts another.
         assert transition.reply is None or reply is None or transition.reply.reply_id == reply.reply_id, transition
         transition = self._apply(transition)
         if transition.claimed is not None and approval is not None:
@@ -1177,7 +1177,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     @invariant()
     def a_finished_reply_shows_its_end(self) -> None:
-        """P5: once a finished reply owes nothing, the newest write Matrix took ends it.
+        """I15: once a finished reply owes nothing, the newest write Matrix took ends it.
 
         A refused FINAL is replaced by its note; a note Matrix refused cannot be
         resent, so the reply stops owing it. A room the bot left owes nothing.

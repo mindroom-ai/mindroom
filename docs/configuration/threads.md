@@ -214,6 +214,10 @@ With `defer_reaction` set, each message that can wait gets that reaction once.
 
 ## Message Edits
 
-When a user edits a message that already received an agent response, the agent regenerates its reply for the updated content and edits its previous reply in place.
+When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
+If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
+A message edited while it still waits for the agent to start on it is answered as edited.
+Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
+While a reply waits for a tool approval, an edit of its message does not change it.
 Edits by agents never trigger regeneration.
 When another agent's reply finishes with a mention of this agent, it reaches this agent as a new message.
