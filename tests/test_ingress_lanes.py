@@ -1169,19 +1169,21 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             await bot._turn_controller.handle_text_event(room, first)
             await asyncio.wait_for(first_locked.wait(), timeout=1.0)
 
-            # Matrix sync callbacks run as independent tasks; the answer's
-            # callback parks on the active turn while later ingress arrives.
+            # The answer's callback hands the selection to a runner-owned task and returns while the active turn
+            # still holds this conversation.
             answer_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, answer))
-            await asyncio.wait_for(ack_sent.wait(), timeout=1.0)
+            await asyncio.wait_for(answer_task, timeout=1.0)
             await bot._turn_controller.handle_text_event(room, other_thread)
 
             await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
             assert not release_first_response.is_set()
+            assert "$f1" not in generated
 
             release_first_response.set()
-            await asyncio.wait_for(answer_task, timeout=1.0)
             await bot._coalescing_gate.drain_all()
             await bot._response_runner.drain_inbox_responses()
+            assert ack_sent.is_set()
+            assert "$f1" in generated
     finally:
         release_first_response.set()
         if answer_task is not None and not answer_task.done():

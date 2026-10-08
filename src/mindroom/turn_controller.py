@@ -755,18 +755,17 @@ class TurnController:
                 source_event_id=prepared_event.event_id,
             )
             if selection is not None:
-                # A consumed interactive answer never enters the gate, and its
-                # response may wait behind this conversation's active turn; the
-                # sender's lane slot must settle now, not at response completion.
-                await reservation_owner.release()
-                source_handed_off = await self._handle_interactive_selection(
+                # As a reaction's answer does, the response runs on a runner-owned task behind this conversation's
+                # earlier messages, so neither its run nor an approval it waits for holds the room's event lane.
+                await self.enqueue_interactive_selection(
+                    reservation_owner,
                     room,
                     selection=selection,
-                    transport_sender_id=envelope.origin.transport_sender_id,
                     requester_user_id=envelope.requester_id,
+                    user_id=envelope.origin.transport_sender_id,
                     source_event_id=prepared_event.event_id,
                 )
-                return _IngressAdmissionOutcome.DEFERRED if source_handed_off else _IngressAdmissionOutcome.CONSUMED
+                return _IngressAdmissionOutcome.DEFERRED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
             if (turn_claim := reservation_owner.pending_turn_claim) is not None:
                 self.deps.turn_store.release_pending_turn_claim(turn_claim)

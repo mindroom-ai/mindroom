@@ -2974,6 +2974,9 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
+        # The selection runs as a reaction's does, on a runner-owned task behind the conversation's earlier messages.
+        await bot._coalescing_gate.drain_all()
+        await bot._response_runner.drain_inbox_responses()
 
     interactive_questions.claim_interactive_text.assert_awaited_once()
     mock_dispatch_text.assert_not_awaited()

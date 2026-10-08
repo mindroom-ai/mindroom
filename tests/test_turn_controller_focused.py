@@ -155,6 +155,17 @@ _THREAD_ROOT = "$root:localhost"
 
 
 @dataclass
+class _ImmediateLifecycleReservation:
+    """A response lifecycle an idle conversation grants at once."""
+
+    async def wait_until_acquired(self) -> None:
+        return None
+
+    async def release(self) -> None:
+        return None
+
+
+@dataclass
 class _RecordingResponseRunner:
     """Typed ResponseRunner stand-in that records the execution-seam requests.
 
@@ -193,6 +204,9 @@ class _RecordingResponseRunner:
         """Wait through a replacement when a focused test closes admission."""
         assert self.admission_waiter is not None
         return await self.admission_waiter()
+
+    async def reserve_response_lifecycle(self, response_envelope: MessageEnvelope) -> _ImmediateLifecycleReservation:  # noqa: ARG002
+        return _ImmediateLifecycleReservation()
 
     def reserve_waiting_human_message(
         self,
@@ -4844,6 +4858,8 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
         _room_with_members(config, "general"),
         event,
     )
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
 
     assert outcome is TurnDispatchOutcome.DEFERRED
     assert len(harness.runner.requests) == 1
