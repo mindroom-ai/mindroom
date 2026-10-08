@@ -64,7 +64,7 @@ _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME = "_agents"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
 # Securing one dormant worker store takes several filesystem round trips, which on network
-# storage with a thousand workers made the primary's first credential access take seconds.
+# storage with thousands of workers made the primary's first credential access take seconds.
 _WORKER_STORE_HARDENING_CONCURRENCY = 16
 _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
 _AES_GCM_NONCE_SIZE = 12
