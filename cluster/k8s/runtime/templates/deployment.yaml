@@ -107,7 +107,8 @@ spec:
         {{- if hasKey $bundle "overwrite" -}}
         {{- $overwrite = $bundle.overwrite -}}
         {{- end -}}
-        - name: {{ printf "content-bundle-%s" $bundle.name | trunc 63 | trimSuffix "-" }}
+        {{- $containerName := printf "content-bundle-%s" $bundle.name | trunc 63 | trimSuffix "-" -}}
+        - name: {{ $containerName }}
           image: {{ $bundle.image | quote }}
           imagePullPolicy: {{ default "IfNotPresent" $bundle.imagePullPolicy }}
           command:
@@ -115,15 +116,13 @@ spec:
             - -ec
           args:
             - |-
-              set -eu
-              {{- if $overwrite }}
-              rm -rf {{ $targetPath | quote }}
-              {{- end }}
-              mkdir -p {{ $targetPath | quote }}
-              cp -a {{ printf "%s/." $sourcePath | quote }} {{ printf "%s/" $targetPath | quote }}
+              {{- include "mindroom-runtime.contentBundleCopyScript" $overwrite | nindent 14 }}
               {{- if and $bundle.seed $bundle.seed.enabled }}
               {{ include "mindroom-runtime.contentBundleSeedCommand" (list $bundle) }}
               {{- end }}
+            - {{ $containerName | quote }}
+            - {{ $sourcePath | quote }}
+            - {{ $targetPath | quote }}
           volumeMounts:
             - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
               mountPath: {{ $.Values.storage.mountPath }}

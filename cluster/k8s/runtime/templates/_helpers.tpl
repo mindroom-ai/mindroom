@@ -218,6 +218,91 @@ image digest and the selected image directory. root is the directory the transpo
 {{- toJson $bootstrap -}}
 {{- end -}}
 
+{{- /*
+Content-bundle init script; takes the bundle's overwrite flag and receives the source and target paths as $1 and $2.
+With overwrite, the target ends up exactly like rm -rf followed by cp -a: entries the source lacks are removed,
+and only entries whose type, symlink target, content, mode, or (when cp -a can preserve it) ownership differ are
+rewritten, so a restart on network storage copies only what changed. Listings are line-based, so a name with a
+newline in either tree falls back to the full copy. It needs only POSIX sh and BusyBox-compatible tools.
+*/ -}}
+{{- define "mindroom-runtime.contentBundleCopyScript" -}}
+set -eu
+{{- if . }}
+src=$1
+dst=$2
+nl='
+'
+kind() {
+  if [ -L "$1" ]; then k=l
+  elif [ -d "$1" ]; then k=d
+  elif [ -f "$1" ]; then k=f
+  elif [ -e "$1" ]; then k=o
+  else k=-
+  fi
+}
+if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
+mkdir -p "$dst"
+if [ -n "$(find "$src" "$dst" -name "*$nl*")" ]; then
+  echo "$0: a name contains a newline, so $dst is replaced by a full copy" >&2
+  rm -rf "$dst"
+  mkdir -p "$dst"
+  cp -a "$src/." "$dst/"
+else
+  sources=$(cd "$src" && find .)
+  targets=$(cd "$dst" && find .)
+  # cp -a keeps ownership only where chown works, so compare it only then (root without NFS root squashing).
+  own=
+  if [ "$(id -u)" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
+  # Remove target entries that are missing from the source, of another type, special, or a different symlink.
+  gone=
+  printf '%s\n' "$targets" | while IFS= read -r p; do
+    case $p in .|"$gone"/*) continue ;; esac
+    kind "$src/$p"; sk=$k
+    kind "$dst/$p"
+    case $sk$k in
+      dd|ff) continue ;;
+      ll) [ "$(readlink "$src/$p")" != "$(readlink "$dst/$p")" ] || continue ;;
+    esac
+    rm -rf "$dst/$p"
+    gone=$p
+  done
+  # Copy missing entries whole, recopy differing files, and fix differing directory modes and owners.
+  new=
+  printf '%s\n' "$sources" | while IFS= read -r p; do
+    case $p in "$new"/*) continue ;; esac
+    s=$src/$p
+    d=$dst/$p
+    kind "$d"
+    case $k in
+      -)
+        cp -a "$s" "$d"
+        new=$p
+        ;;
+      d)
+        m=$(stat -c "%a$own" "$s" "$d")
+        if [ "${m%"$nl"*}" != "${m#*"$nl"}" ]; then
+          set -- ${m%"$nl"*}
+          [ -z "$own" ] || chown "$2:$3" "$d"
+          # The leading zeros make GNU chmod clear a directory's setgid bit too.
+          chmod "00$1" "$d"
+        fi
+        ;;
+      f)
+        m=$(stat -c "%s %a$own" "$s" "$d")
+        if [ "${m%"$nl"*}" != "${m#*"$nl"}" ] || ! cmp -s "$s" "$d"; then
+          rm -f "$d"
+          cp -a "$s" "$d"
+        fi
+        ;;
+    esac
+  done
+fi
+{{- else }}
+mkdir -p "$2"
+cp -a "$1/." "$2/"
+{{- end }}
+{{- end -}}
+
 {{- define "mindroom-runtime.contentBundleSeedCommand" -}}
 {{- $bundle := index . 0 -}}
 {{- range $argIndex, $arg := $bundle.seed.command -}}

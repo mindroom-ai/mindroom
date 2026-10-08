@@ -532,13 +532,11 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
     )
     assert team_config["imagePullPolicy"] == "IfNotPresent"
     assert team_config["command"] == ["sh", "-ec"]
-    assert team_config["args"] == [
-        "set -eu\n"
-        'rm -rf "/app/agent_data/content-bundles/team-config"\n'
-        'mkdir -p "/app/agent_data/content-bundles/team-config"\n'
-        'cp -a "/bundle/." "/app/agent_data/content-bundles/team-config/"\n'
-        '"/app/agent_data/content-bundles/team-config/scripts/seed-content.sh"',
-    ]
+    team_config_script, *team_config_args = team_config["args"]
+    assert team_config_args == ["content-bundle-team-config", "/bundle", "/app/agent_data/content-bundles/team-config"]
+    # The seed runs after the sync, which tests/test_runtime_chart_content_bundles.py executes.
+    assert team_config_script.startswith("set -eu\nsrc=$1\ndst=$2\n")
+    assert team_config_script.endswith('\nfi\n"/app/agent_data/content-bundles/team-config/scripts/seed-content.sh"')
     assert team_config["volumeMounts"] == [
         {
             "name": "storage",
@@ -546,9 +544,10 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
         },
     ]
     assert policy_pack["args"] == [
-        "set -eu\n"
-        'mkdir -p "/app/agent_data/content-bundles/policy-pack"\n'
-        'cp -a "/bundle/." "/app/agent_data/content-bundles/policy-pack/"',
+        'set -eu\nmkdir -p "$2"\ncp -a "$1/." "$2/"',
+        "content-bundle-policy-pack",
+        "/bundle",
+        "/app/agent_data/content-bundles/policy-pack",
     ]
 
 
@@ -724,7 +723,7 @@ def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, sour
     revision = hashlib.sha256(f"{_BOOTSTRAP_BUNDLE_DIGEST}:{image_dir}".encode()).hexdigest()
     assert command[command.index("--bootstrap-config-bundle-revision") + 1] == revision
     transport = _init_container(deployment, "content-bundle-team-config")
-    assert '"/app/agent_data/config-source/"' in transport["args"][0]
+    assert transport["args"][2:] == ["/bundle", "/app/agent_data/config-source"]
 
 
 def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> None:
