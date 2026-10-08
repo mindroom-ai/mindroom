@@ -14738,7 +14738,7 @@ agents:
 
 ### What MindRoom guarantees
 
-Plugin automations follow the same [scheduling rules](https://docs.mindroom.chat/scheduling/#automations) as the built-ins, and their turns are [not auto-flushed](https://docs.mindroom.chat/memory/#file-auto-flush-worker) either.
+The rules for [scheduling](https://docs.mindroom.chat/scheduling/#automations) and [memory auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) apply to plugin automations as they do to the built-ins.
 For plugin code, MindRoom also guarantees:
 
 - Checks and steps run off the event loop, so ordinary replies and other agents are not held back by them.

@@ -558,7 +558,7 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
     if timed_out:
         approved, reason = False, "the review did not finish within an hour"
     elif match := _VERDICT.fullmatch(_last_line(_read_optional(run.root, f"{run.run_dir}/verdict.md"))):
-        approved, reason = match["approve"] is not None, (match["reason"] or "").strip()
+        approved, reason = match["approve"] is not None, match["reason"] or ""
     else:
         approved, reason = False, "the review did not end with one of the two verdict lines"
     if not approved:
