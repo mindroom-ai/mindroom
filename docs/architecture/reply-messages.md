@@ -56,7 +56,7 @@ Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`
 ## Rules and outcomes
 
 A rule returns one outcome: `applied`, `stale` (the span is no longer current), `duplicate` (already true), `deferred` (earlier writes are unresolved), `recompute` (a Stop, deletion, or departure committed after the caller rendered), or `stopped`.
-A rule that meets a state it does not model never raises: it ends the reply `failed` with the error note owed, cancels its current span, settles the sources or fails the approval that holds them, and the store logs `reply_unmodeled` with the reason; a claim reports such a refusal as nothing to run.
+A rule that meets a state it does not model never raises: on a reply that has not ended it ends the reply `failed` with the error note owed, cancels its current span, and settles the sources or fails the approval that holds them; a reply that already ended keeps its end, a stray second create is redacted, and a refused row of an older span is stale; the store logs `reply_unmodeled` with the reason, and a claim reports such a refusal as nothing to run.
 Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered when the reply answered them, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen.
 
 Callers render a payload from the reply's revision before the transaction; a rule that would choose different content returns `recompute`, writes nothing, and the caller renders again.
@@ -144,21 +144,24 @@ The behavior below follows from deliberate decisions; a change that would restor
 
 ### Decisions
 
-- A restart continues the interrupted reply in place below what it showed; it never starts a second message.
-- An approval pauses its reply and holds that agent's conversation, never the room's event lane.
+- A restart continues an interrupted reply in place below what it showed, and a retried regeneration rewrites the same message; neither starts a second message, given an upgrade that runs while no reply is in flight.
+- An approval pauses and holds its reply, and later messages in the conversation are answered while it waits; a CLI approval that waits in place keeps its conversation for the wait; no approval holds the room's event lane.
 - An edit regenerates only the reply to the latest message of its conversation, and only when that reply showed something, no approval holds it, and it is not `gone`; any other edit changes no reply.
 - An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
 - A regeneration that wrote nothing keeps the finished answer it was replacing.
-- A rule that meets a state it does not model ends the reply `failed` with the error note instead of raising.
-- An upgrade from an earlier release runs while no reply is in flight: only replies paused for an approval are adopted, and older, replaced, or unprovable continuations are discarded with their sources settled unanswered.
+- A rule that meets a state it does not model never raises: the reply's current work ends `failed` with the error note, while a reply that already ended keeps its end and a stray second create is redacted with the first left bound.
+- A restart keeps a side-effecting tool call from running twice by telling the model which calls already ran, not by blocking the call. A model can still repeat one rarely (a fast model did in up to 1 of 24 real-model runs), which the owner accepted, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
+- An upgrade from an earlier release runs while no reply is in flight: only replies paused for an approval are adopted, and older, replaced, or unprovable continuations are discarded with their cards and their sources settled unanswered.
 
 ### Accepted limitations
 
 Edits:
 
-- An edit made after its message left the coalescing queue but before the reply showed anything changes no reply; the turn answers the original text.
+- An edit of a message that no longer waits in the coalescing queue, made before its reply showed anything, changes no reply; the turn answers the original text. This includes a message still waiting for media or voice before it reaches the queue.
 - An edit applied to a message still in the coalescing queue lives in memory, so a crash before the flush answers the original text.
-- A Stop on the old answer between the edit stopping it and the regeneration's claim does nothing, because the stopped reply already ended; the regeneration shows its own Stop button once it claims.
+- A coalesced turn whose messages come from more than one requester, or carry a delegated speaker, never regenerates; an edit of an earlier message of the latest coalesced turn regenerates the whole turn.
+- A regeneration whose history was redacted meanwhile is suppressed instead of rebuilt.
+- A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply's exit applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
 - When the stopped reply's terminal row is still unresolved, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps its cancelled note.
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
 - While a deferred claim stays blocked by an unresolved row, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves.
@@ -166,19 +169,22 @@ Edits:
 
 Tool calls and the restart account:
 
-- The account of an interrupted attempt's tool calls is an instruction to the model, not an enforcement: in real-model A/B runs a fast model still repeated a finished side-effecting call in up to 1 of 24 runs.
 - A call cut short stays recorded as started, and the model is told to check whether it took effect before repeating it.
 - In a team, only the leader reads the account.
 
 Delivery and recovery:
 
+- A failure before anything was delivered shows the error note while the turn keeps replaying, so one that recurs on every attempt keeps retrying, and each retry backs off that room's event lane.
 - A reply row written while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed; after a homeserver outage, an answer near the event size limit can then be refused and end with the delivery-failed note.
-- A failure that recurs deterministically before delivery releases the span every time, so the turn keeps replaying with backoff and shows its placeholder.
-- A continuation the upgrade discards leaves its Matrix message showing that it waits for approval.
+- A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message.
+- A continuation the upgrade discards leaves its Matrix message as it was, which can still show that it waits for approval.
+- Deleting every source of a reply an approval holds keeps the reply and its approval cards (see [Approvals](#approvals)).
+- A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed (see [Lifetime](#lifetime)).
+- A note Matrix refused for good is not sent again (I15).
 
 Journal writes:
 
-- Every progress edit is a journal write recorded before the edit is sent; writes queued together commit in one transaction, and how often edits are sent follows the stream throttle.
+- Every progress edit is a journal write recorded before the edit is sent; up to 64 writes queued together commit in one transaction, and how often edits are sent follows the stream throttle.
 - An error that aborts the whole SQLite transaction, such as a full disk, fails every write in that batch; no caller is told a write landed that did not.
 - The writer task runs with the context of the first write it served, so log lines a batch emits carry that caller's bound log context.
 
