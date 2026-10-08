@@ -7566,8 +7566,8 @@ async def test_model_source_audit_accepts_a_declined_edit_only_after_a_later_mes
         observed={4: frozenset({orig})},
     )
     auditor.source_revision_markers = {"$a": {"$edit": edited}}
-    auditor.pending_edit_markers = {"$a": {"$edit": edited}}
-    auditor.oracle.declined_edit_sources = frozenset({"$a"})
+    # MindRoom settled the edit without a regeneration span.
+    auditor.declined_edits = lambda: frozenset({"$edit"})  # type: ignore[method-assign]
     try:
         record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
         _write_ledger(ledger_path, {"$a": record})

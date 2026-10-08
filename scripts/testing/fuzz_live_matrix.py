@@ -5489,6 +5489,19 @@ def _latency_summary(latencies: Collection[float]) -> dict[str, float]:
     }
 
 
+class _LazyDeclinedEdits:
+    """The auditor's declined edits, read from the journal only when an audit first asks about one."""
+
+    def __init__(self, auditor: FinalStateAuditor) -> None:
+        self._auditor = auditor
+        self._edits: frozenset[str] | None = None
+
+    def __contains__(self, edit_id: object) -> bool:
+        if self._edits is None:
+            self._edits = self._auditor.declined_edits()
+        return edit_id in self._edits
+
+
 @dataclass(frozen=True, slots=True)
 class _SentRecord:
     """One authored event, retaining ancestry for live proofs and final canonical-state auditing."""
@@ -6699,12 +6712,7 @@ class FinalStateAuditor:
                 set(expected_sources),
             ),
         )
-        # Edits MindRoom settled without regenerating anything, as it does for an older message's edit.
-        declined = {
-            edit_id
-            for source_id in self.oracle.declined_edit_sources
-            for edit_id in self.pending_edit_markers.get(source_id, {})
-        }
+        declined = _LazyDeclinedEdits(self)
         authored = {record.event_id: record for record in sent_records}
         for source_event_id, record in records.items():
             if record.response_event_id is None:
@@ -6767,6 +6775,20 @@ class FinalStateAuditor:
         if problems:
             msg = f"model source-revision audit failed: {problems}"
             raise AssertionError(msg)
+
+    def declined_edits(self) -> frozenset[str]:
+        """Return the edits MindRoom settled without regenerating a reply, as it does for an older message's edit."""
+        if self.ledger_path is None or not self.ledger_path.exists():
+            return frozenset()
+        snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
+        return frozenset(
+            edit_id
+            for revisions in self.source_revision_markers.values()
+            for edit_id in revisions
+            if (row := snapshot.sources.get(edit_id)) is not None
+            and row.state == "settled"
+            and edit_id not in snapshot.regenerated_edits
+        )
 
     def _later_message_in_conversation(
         self,
