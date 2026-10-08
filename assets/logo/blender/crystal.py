@@ -515,13 +515,9 @@ def fill_level(
 
 def crystallize(scene: bpy.types.Scene, *, frozen: bool) -> None:
     """Swap the logo look for solid crystal, an open navy frame, and the tesseract's light."""
-    for name in ("hero-set", "studio-set"):
-        bpy.data.collections[name].hide_render = True
+    bpy.data.collections["hero-set"].hide_render = True
     for name in ("key", "sky", "spill-left", "spill-right"):
         bpy.data.objects.remove(bpy.data.objects[name])
-    pivot = bpy.data.objects["logo-pivot"]  # Effects animate the camera and the tesseract, not the model.
-    pivot.driver_remove("rotation_euler", 2)
-    pivot.rotation_euler = (0.0, 0.0, 0.0)
 
     glass = crystal_glass(frozen=frozen)
     for side in ("left", "right"):

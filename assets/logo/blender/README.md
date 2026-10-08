@@ -11,7 +11,6 @@ From the hero camera the model reproduces the SVG silhouette; from other angles 
 | `build_scene.py` | Builds the geometry, materials, lights, cameras, and render settings from scratch. |
 | `mindroom-logo.blend` | Saved scene with live boolean and bevel modifiers, ready to edit or animate. |
 | `hero.png` | Orthographic render on the SVG background and navy frame, 1024 × 1024. |
-| `sway.mp4` | Seamless ±30° sway loop starting from the hero pose, 120 frames at 30 fps. |
 | `crystal.py` | Restyles the model as framed crystal or ice legs, glowing white, around a tesseract and renders its effects. |
 | `crystal.blend` | Saved crystal scene for the still. |
 | `crystal.png` | Clear crystal M on a dark mirror floor from the logo's viewpoint, 2160 × 2160. |
@@ -25,21 +24,12 @@ From the hero camera the model reproduces the SVG silhouette; from other angles 
 From the repository root, with Blender 5.2 or newer on `PATH`:
 
 ```sh
-blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render hero
+blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render
 ```
 
-The script always rebuilds and saves the `.blend` first; `--render` selects which shots to render afterwards.
+The script always rebuilds and saves the `.blend` first; `--render` also renders the hero still afterwards.
 Use `--resolution` and `--samples` for quick previews, and `--output-dir` or `--blend` to write elsewhere.
 Rendering uses Cycles on the CPU; the still takes a few minutes on a 12-core machine.
-
-The sway loop renders numbered PNG frames, which `ffmpeg` joins into a video:
-
-```sh
-blender --background --factory-startup --python assets/logo/blender/build_scene.py -- \
-  --render sway --resolution 1024 --samples 128 --output-dir /tmp/mindroom-logo
-ffmpeg -framerate 30 -i /tmp/mindroom-logo/sway/frame-%04d.png \
-  -c:v libx264 -pix_fmt yuv420p -crf 18 assets/logo/blender/sway.mp4
-```
 
 ## Crystal look and effects
 
@@ -56,7 +46,13 @@ blender --background --factory-startup --python assets/logo/blender/crystal.py -
 
 Add `--frozen` to either command for frosted, cracked ice instead of clear crystal.
 
-Each effect writes 120 numbered frames, four seconds at 30 fps, and the reveal writes 165, all for the same `ffmpeg` command as the sway loop.
+Each effect writes 120 numbered frames, four seconds at 30 fps, and the reveal writes 165; `ffmpeg` joins them into a video:
+
+```sh
+ffmpeg -framerate 30 -i /tmp/mindroom-crystal/reveal/frame-%04d.png \
+  -c:v libx264 -pix_fmt yuv420p -crf 16 assets/logo/blender/crystal-reveal.mp4
+```
+
 On a 12-core CPU the clear still takes about 1.5 minutes at these settings, and `--frozen` takes about three times as long.
 The committed renders are larger: the still is 2160 × 2160 at 1024 samples, the reveal 1440 × 1440 and the other effects 1080 × 1080 at 128 samples, rendered on a GPU together with the CPU.
 The first run downloads the CC0 [Poly Haven](https://polyhaven.com/a/studio_small_09) studio HDRI into `~/.cache/mindroom-logo/`.
@@ -102,7 +98,7 @@ The right wing mirrors the left across the vertical plane through the cube's fro
 Taken literally, the drawing places both towers a full unit behind the cube at its height, each hovering just above its lower block.
 The strip the SVG paints as a block's cap is the block's top, seen through that gap.
 The model keeps that layout, so the M exists only from the logo's angle and the parts drift apart elsewhere.
-The lock-in effect turns that into a reveal, and the sway loop stays within ±30° of the hero pose.
+The lock-in and reveal effects turn that into a reveal: the camera swings into the one angle where the M forms.
 
 ## Look development
 
@@ -121,9 +117,6 @@ The SVG paints each face by the light that reaches it, and the materials follow 
 Cycles light linking keeps the key light and softbox off the amber panes, so the cube stays evenly gold.
 The Khronos PBR Neutral view transform preserves brand colors while rolling off the bright core.
 Its shadow toe would darken the flat backdrop, so the staging shaders add that offset back; the backdrop and outline display as the exact SVG colors.
-
-For the sway loop, the model, its boolean cutters, and the core light are parented to `logo-pivot`, whose rotation follows a sine of the frame number.
-Frame 1 is the unrotated hero orientation, so the stills are unaffected.
 
 ## Glass modeling notes
 

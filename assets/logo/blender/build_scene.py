@@ -4,7 +4,7 @@
 
 Run from the repository root:
 
-    blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render hero
+    blender --background --factory-startup --python assets/logo/blender/build_scene.py -- --render
 
 The SVG logo is an orthographic drawing of a real object.
 The named 2D corners from ../artwork.py are lifted back into 3D here,
@@ -22,9 +22,6 @@ import bpy
 from mathutils import Matrix, Vector
 
 HERE = Path(__file__).resolve().parent
-SWAY_FRAMES = 120
-SWAY_DEGREES = 30.0  # The M only reads from the front, so the loop sways instead of turning fully.
-SHOTS = {"hero": "hero", "sway": "studio"}  # Shot name -> camera set; the sway uses the perspective studio set.
 
 # Projection implied by the drawing. One cube edge along a horizontal axis is
 # drawn 154 px across and 96 px down, so the camera looks down at asin(96/154).
@@ -466,35 +463,8 @@ def backdrop_material() -> bpy.types.Material:
     return material
 
 
-def floor_material() -> bpy.types.Material:
-    """Glossy navy studio floor that fades into the sky's horizon color."""
-    material, tree = node_material("studio-floor")
-    nodes, links = tree.nodes, tree.links
-    output = nodes.new("ShaderNodeOutputMaterial")
-    paint = nodes.new("ShaderNodeBsdfPrincipled")
-    paint.inputs["Base Color"].default_value = srgb("#0a2236")
-    paint.inputs["Roughness"].default_value = 0.3
-    horizon = nodes.new("ShaderNodeEmission")
-    horizon.inputs["Color"].default_value = srgb("#0f3a5e")
-    coords = nodes.new("ShaderNodeTexCoord")
-    distance = nodes.new("ShaderNodeVectorMath")
-    distance.operation = "LENGTH"
-    links.new(coords.outputs["Object"], distance.inputs[0])
-    fade = nodes.new("ShaderNodeMapRange")
-    fade.interpolation_type = "SMOOTHSTEP"
-    fade.inputs["From Min"].default_value = 5.0
-    fade.inputs["From Max"].default_value = 16.0
-    links.new(distance.outputs["Value"], fade.inputs["Value"])
-    mix = nodes.new("ShaderNodeMixShader")
-    links.new(fade.outputs["Result"], mix.inputs["Fac"])
-    links.new(paint.outputs["BSDF"], mix.inputs[1])
-    links.new(horizon.outputs["Emission"], mix.inputs[2])
-    links.new(mix.outputs["Shader"], output.inputs["Surface"])
-    return material
-
-
 def build_materials() -> dict[str, bpy.types.Material]:
-    """Create every material used by the logo and its sets."""
+    """Create every material used by the logo and its hero set."""
     teal = {
         "color": srgb("#a5d6e0"),
         "roughness": 0.06,
@@ -514,7 +484,6 @@ def build_materials() -> dict[str, bpy.types.Material]:
         ),
         "core": emission_material("core-light", srgb("#ffe6b0"), 40.0),
         "backdrop": backdrop_material(),
-        "floor": floor_material(),
         "outline": staging_material("logo-frame", srgb("#082b43")),
     }
 
@@ -659,22 +628,6 @@ def build_lights(frame: bpy.types.Object, wings: list[bpy.types.Object]) -> list
     return [core, *spills]
 
 
-def add_sway(scene: bpy.types.Scene, logo: bpy.types.Collection, lights: list[bpy.types.Object]) -> None:
-    """Sway the model and its own lights in a seamless loop that starts at the hero pose."""
-    pivot = bpy.data.objects.new("logo-pivot", None)
-    logo.objects.link(pivot)
-    for obj in [*logo.all_objects, *lights]:
-        if obj is not pivot:
-            obj.parent = pivot
-    amplitude = math.radians(SWAY_DEGREES)
-    pivot.driver_add(
-        "rotation_euler",
-        2,
-    ).driver.expression = f"{amplitude:.6f} * sin((frame - 1) * 2 * pi / {SWAY_FRAMES})"
-    scene.frame_start, scene.frame_end = 1, SWAY_FRAMES
-    scene.render.fps = 30
-
-
 def build_hero_set(materials: dict[str, bpy.types.Material]) -> None:
     """The SVG's orthographic camera, background, and navy outline."""
     hero = new_collection("hero-set")
@@ -688,24 +641,6 @@ def build_hero_set(materials: dict[str, bpy.types.Material]) -> None:
     screen_polygon("hero-backdrop", margin, 8.0, materials["backdrop"], hero)
     # The SVG's navy outline is staging for the hero shot, not part of the model.
     camera_only(screen_polygon("hero-logo-frame", STRUCTURAL_FRAME, 7.9, materials["outline"], hero))
-
-
-def build_studio_set(materials: dict[str, bpy.types.Material]) -> None:
-    """A perspective three-quarter camera above a glossy floor."""
-    studio = new_collection("studio-set")
-    camera = add_camera("studio-camera", studio)
-    camera.data.lens = 85.0
-    camera.data.clip_end = 200.0
-    target = Vector((0.3, 0.3, (FOOT_Z[0] + H) / 2))
-    azimuth, elevation = math.radians(60.0), math.radians(22.0)
-    view = Vector(
-        (math.cos(azimuth) * math.cos(elevation), math.sin(azimuth) * math.cos(elevation), math.sin(elevation)),
-    )
-    camera.location = target + 11.0 * view
-    camera.rotation_euler = (-view).to_track_quat("-Z", "Y").to_euler()
-    bm = bmesh.new()
-    add_box(bm, (-30.0, -30.0, FOOT_Z[0] - 0.01), (30.0, 30.0, FOOT_Z[0]))
-    mesh_object("studio-floor", bm, materials["floor"], studio)
 
 
 def configure_render(scene: bpy.types.Scene) -> None:
@@ -733,7 +668,7 @@ def configure_render(scene: bpy.types.Scene) -> None:
 
 
 def build_scene() -> None:
-    """Assemble the logo, lights, both camera sets, and render settings."""
+    """Assemble the logo, lights, the hero camera set, and render settings."""
     bpy.ops.wm.read_factory_settings(use_empty=True)
     scene = bpy.context.scene
     materials = build_materials()
@@ -745,9 +680,8 @@ def build_scene() -> None:
         for name, mirror in [("left", False), ("right", True)]
         for obj in build_wing(name, materials, logo, cutters, mirror=mirror)
     ]
-    add_sway(scene, logo, build_lights(frame, wings))
+    build_lights(frame, wings)
     build_hero_set(materials)
-    build_studio_set(materials)
     scene.world = build_world()
     scene.camera = bpy.data.objects["hero-camera"]
     configure_render(scene)
@@ -796,28 +730,20 @@ def build_compositor(scene: bpy.types.Scene) -> None:
     scene.render.use_compositing = True
 
 
-def render(shot: str, output_dir: Path, resolution: int, samples: int) -> None:
-    """Render a still, or the sway loop as numbered PNG frames."""
+def render(output_dir: Path, resolution: int, samples: int) -> None:
+    """Render the hero still."""
     scene = bpy.context.scene
-    for name in set(SHOTS.values()):
-        bpy.data.collections[f"{name}-set"].hide_render = name != SHOTS[shot]
-    scene.camera = bpy.data.objects[f"{SHOTS[shot]}-camera"]
     scene.render.resolution_x = scene.render.resolution_y = resolution
     scene.cycles.samples = samples
-    if shot == "sway":
-        scene.render.filepath = str(output_dir / "sway" / "frame-")
-        bpy.ops.render.render(animation=True)
-        scene.frame_set(scene.frame_start)
-    else:
-        scene.render.filepath = str(output_dir / f"{shot}.png")
-        bpy.ops.render.render(write_still=True)
+    scene.render.filepath = str(output_dir / "hero.png")
+    bpy.ops.render.render(write_still=True)
 
 
 def main() -> None:
     """Parse arguments after Blender's `--`, build, save, and render."""
     argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--render", nargs="*", default=[], choices=list(SHOTS), help="Shots to render.")
+    parser.add_argument("--render", action="store_true", help="Render the hero still after saving the scene.")
     parser.add_argument("--resolution", type=int, default=1024)
     parser.add_argument("--samples", type=int, default=512)
     parser.add_argument("--output-dir", type=Path, default=HERE)
@@ -831,8 +757,8 @@ def main() -> None:
     args.blend.parent.mkdir(parents=True, exist_ok=True)
     bpy.context.preferences.filepaths.save_version = 0  # No .blend1 backup beside the source.
     bpy.ops.wm.save_as_mainfile(filepath=str(args.blend), compress=True)
-    for shot in args.render:
-        render(shot, args.output_dir, args.resolution, args.samples)
+    if args.render:
+        render(args.output_dir, args.resolution, args.samples)
 
 
 if __name__ == "__main__":
