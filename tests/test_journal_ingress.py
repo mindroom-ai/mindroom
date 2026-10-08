@@ -1039,16 +1039,17 @@ class TestStreamingProgressIsTransport:
         assert visible.content["body"] == "first question"
         assert visible.revision_event_id == "$fix"
 
-    async def test_a_crash_mid_stream_leaves_the_placeholder_until_cleanup_speaks(
+    async def test_a_crash_mid_stream_leaves_the_placeholder_until_a_terminal_edit_lands(
         self,
         alice: PrincipalStore,
     ) -> None:
         """The row a crash leaves behind is the placeholder, and that is correct.
 
         No intermediate body was durable, so there is nothing to half-restore.
-        Startup stale-stream cleanup rewrites the visible message with a
-        terminal status, and that echo reduces like any other terminal edit —
-        which is what makes skipping progress safe rather than lossy.
+        The replay that continues the reply, or the restart note that ends it,
+        rewrites the visible message with a terminal status, and that echo
+        reduces like any other terminal edit — which is what makes skipping
+        progress safe rather than lossy.
         """
         progress = [
             stream_event(

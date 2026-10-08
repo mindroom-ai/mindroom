@@ -116,7 +116,7 @@ A terminal row Matrix refused for good, a reply's only message included, ends th
 
 ## Lifetime
 
-Each bot instance writes a fresh generation for its principal at start, then adopts the replies an earlier release left paused for approval once, discarding older continuations of one reply and those it cannot model with their sources settled unanswered, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
+Each bot instance writes a fresh generation for its principal at start, then adopts the replies an earlier release left paused for approval once, discarding older continuations of one reply with their sources settled unanswered (the schema upgrade already discarded those whose identity it could not prove or that a newer edit's answer replaced), then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
 A membership departure ends the room's replies `gone` inside the departure fence and cancels their spans afterwards.
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
@@ -168,6 +168,7 @@ Edits:
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
 - While a deferred claim stays blocked by an unresolved row, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves.
 - After a restart, a regeneration may be told about tool calls the attempt before the edit made, which errs toward not repeating a side effect.
+- A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming reply, so the reply keeps its partial answer with the cancelled note.
 
 Tool calls and the restart account:
 
