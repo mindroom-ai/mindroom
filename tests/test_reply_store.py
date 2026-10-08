@@ -36,6 +36,7 @@ from mindroom.reply_lifecycle import (
 )
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.stop import SpanRegistry
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
@@ -589,6 +590,106 @@ async def test_permanent_failure_of_a_terminal_row_applies_its_rule(journal_stor
     span_after = await principal.replies.span("span-1")
     assert span_after is not None
     assert span_after.outcome is SpanOutcome.COMPLETED
+
+
+async def test_the_note_of_a_refused_only_create_is_sent_as_the_replys_message(
+    journal_store: EventJournalStore,
+) -> None:
+    """A reply whose only create Matrix refused for good shows its delivery-failed note as a message of its own."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    enqueued = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "answer"},
+    )
+    assert enqueued is not None
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    await principal.record_permanent_matrix_delivery_failure(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        reason="too large",
+    )
+    failed = await principal.replies.load("reply-1")
+    assert failed is not None
+    assert failed.event_id is None
+    assert failed.owed_write is not None
+
+    note = await principal.enqueue_reply_row(
+        request=ReplyRowRequest(
+            reply_id="reply-1",
+            span_id=failed.owed_write.span_id,
+            decide=lambda current, owner: rl.flush_owed_write(
+                current,
+                owner,
+                shown="note",
+                prepared_revision=failed.revision,
+                span_has_final=True,
+                now_ns=60,
+            ),
+        ),
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "note"},
+    )
+    assert note is not None
+    assert note.stage is rl.WriteStage.EDIT
+    claimed = await principal.claim_matrix_delivery(delivery_id=note.delivery_id, stage=DeliveryStage.EDIT)
+    assert claimed is not None, "the note waits for an event no row will ever create"
+    assert claimed.edits_event_id is None
+    await principal.acknowledge_matrix_delivery(
+        delivery_id=note.delivery_id,
+        stage=DeliveryStage.EDIT,
+        event_id="$note",
+        delivered_projections=(),
+    )
+    stored = await principal.replies.load("reply-1")
+    assert stored is not None
+    assert stored.state is ReplyState.FAILED
+    assert stored.event_id == "$note"
+    assert stored.owed_write is None
+    assert not await principal.replies.has_unresolved_rows("reply-1")
+
+
+async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took_over(
+    journal_store: EventJournalStore,
+) -> None:
+    """A superseded attempt ran no model, so the next replay still lists what the attempt before it ran."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, first = await _claimed(principal)
+    runtime = reply_scope.ReplyRuntime(
+        store=principal,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+    )
+    await runtime.record_tool_call(
+        span_id=first.span_id,
+        call_id="call-1",
+        entry=ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+        now_ns=20,
+    )
+    lost = replace(first, outcome=SpanOutcome.LOST, ended_at_ns=30)
+    superseded = replace(
+        first,
+        span_id="span-2",
+        kind=SpanKind.REPLAY,
+        claimed_at_ns=40,
+        outcome=SpanOutcome.SUPERSEDED,
+        ended_at_ns=50,
+    )
+    current = replace(first, span_id="span-3", kind=SpanKind.REPLAY, claimed_at_ns=60)
+    await _apply(
+        journal_store,
+        rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply, spans=(lost, superseded, current)),
+    )
+
+    handle = reply_scope.SpanHandle(runtime=runtime, span=current, reply=reply, base=Presentation())
+    calls = await runtime.interrupted_tool_calls(handle)
+
+    assert [call.tool_name for call in calls] == ["counter"]
 
 
 async def test_a_departure_ends_the_rooms_replies_and_refuses_their_rows(journal_store: EventJournalStore) -> None:
