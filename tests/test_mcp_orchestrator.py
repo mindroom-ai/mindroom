@@ -671,6 +671,68 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
 
 
 @pytest.mark.asyncio
+async def test_mcp_catalog_restart_replays_unfinished_startup_maintenance_with_live_bots(tmp_path: Path) -> None:
+    """Startup room setup must not keep retrying a bot that a catalog restart replaced."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    orchestrator.config = config
+    orchestrator.running = True
+    old_bot = MagicMock(spec=AgentBot, running=True)
+    new_bot = MagicMock(spec=AgentBot, running=True)
+    orchestrator.agent_bots = {"code": old_bot}
+    old_bot_stopped = asyncio.Event()
+    old_setup_started = asyncio.Event()
+    setup_calls: list[list[object]] = []
+
+    async def setup_rooms(bots: list[object]) -> None:
+        setup_calls.append(list(bots))
+        if old_bot in bots:
+            old_setup_started.set()
+            await old_bot_stopped.wait()
+            msg = "Matrix client is not ready for room lifecycle work"
+            raise RuntimeError(msg)
+
+    async def stop_entities(*_args: object, **_kwargs: object) -> None:
+        old_bot.running = False
+        old_bot_stopped.set()
+
+    async def create_and_start(*_args: object, **_kwargs: object) -> EntityStartResults:
+        orchestrator.agent_bots["code"] = new_bot
+        return EntityStartResults(started_bots=[new_bot])
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", side_effect=stop_entities),
+        patch.object(orchestrator, "_cancel_bot_start_task", new=AsyncMock()),
+        patch.object(orchestrator, "_create_and_start_entities", side_effect=create_and_start),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as recover,
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        patch.object(orchestrator._computer_runtime, "bind_if_ready"),
+        patch.object(
+            orchestrator._approval_recovery,
+            "mark_startup_runtime_support_ready",
+            new=AsyncMock(),
+        ) as mark_runtime_support_ready,
+    ):
+        orchestrator._startup_maintenance.start([old_bot], config, startup_cutoff_ms=123456)
+        original_task = orchestrator._startup_maintenance.task
+        try:
+            await asyncio.wait_for(old_setup_started.wait(), timeout=1.0)
+            await orchestrator._handle_mcp_catalog_change("demo")
+            replayed_task = orchestrator._startup_maintenance.task
+            assert original_task is not None and original_task.cancelled()
+            assert replayed_task is not None and replayed_task is not original_task
+            await asyncio.wait_for(replayed_task, timeout=1.0)
+        finally:
+            await orchestrator._startup_maintenance.cancel()
+
+    assert setup_calls[-1] == [new_bot]
+    assert recover.await_args.args[0] == [new_bot]
+    mark_runtime_support_ready.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_stays_unbound_on_failure(
     tmp_path: Path,
 ) -> None:

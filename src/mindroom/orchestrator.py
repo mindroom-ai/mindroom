@@ -1661,14 +1661,16 @@ class _MultiAgentOrchestrator:
             self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
             room_membership_policy_configured = self.agent_reply_memberships.needs_refresh(config)
             if room_membership_policy_configured:
-                set_runtime_starting("Establishing Matrix room memberships")
-                await self._startup_maintenance.wait_for_rooms_and_memberships()
+                set_runtime_starting("Waiting for the router's first Matrix sync")
 
             if runtime_shutdown_event.is_set():
                 return
 
-            # Publish semantic callbacks only after room-backed reply grants and
-            # the router's initial owned sync have both been established.
+            # Publish semantic callbacks once the router's initial owned sync has
+            # rebuilt room-backed reply grants from Matrix. Room setup keeps
+            # running in the background: a grant room it has not joined or
+            # created yet stays pending, and its sources replay after setup
+            # refreshes the grants.
             sync_ready = await self._wait_for_initial_membership_sync(
                 runtime_shutdown_event,
                 room_membership_policy_configured=room_membership_policy_configured,
@@ -1948,36 +1950,45 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
-            self._permanently_failed_entities.difference_update(changed_entities)
-            self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
-            self._computer_runtime.unbind_for_entity_changes(changed_entities)
-            for entity_name in changed_entities:
-                await self._cancel_bot_start_task(entity_name)
-            await self._stop_runtime_entities(
-                changed_entities,
-                restart_entities=changed_entities,
-            )
-            start_results = await self._create_and_start_entities(
-                changed_entities,
-                self.config,
-                start_sync_tasks=True,
-            )
-            self._schedule_ready_turn_dispatch_recovery()
-            if start_results.started_bots:
-                await self._setup_rooms_and_memberships(start_results.started_bots)
-            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
-            self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
-            for entity_name in start_results.retryable_entities:
-                await self._schedule_bot_start_retry(entity_name)
-            if start_results.permanently_failed_entities:
-                await self._approval_recovery.reconcile_unavailable_entities(
-                    start_results.permanently_failed_entities,
+            # Startup maintenance holds the bots it started with, so replay it with the replacements.
+            replay_startup_maintenance = await self._startup_maintenance.cancel()
+            try:
+                self._permanently_failed_entities.difference_update(changed_entities)
+                self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
+                self._computer_runtime.unbind_for_entity_changes(changed_entities)
+                for entity_name in changed_entities:
+                    await self._cancel_bot_start_task(entity_name)
+                await self._stop_runtime_entities(
+                    changed_entities,
+                    restart_entities=changed_entities,
                 )
-                logger.warning(
-                    "MCP catalog restart left some bots disabled",
-                    server_id=server_id,
-                    entities=start_results.permanently_failed_entities,
+                start_results = await self._create_and_start_entities(
+                    changed_entities,
+                    self.config,
+                    start_sync_tasks=True,
                 )
+                self._schedule_ready_turn_dispatch_recovery()
+                if start_results.started_bots:
+                    await self._setup_rooms_and_memberships(start_results.started_bots)
+                self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+                self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+                for entity_name in start_results.retryable_entities:
+                    await self._schedule_bot_start_retry(entity_name)
+                if start_results.permanently_failed_entities:
+                    await self._approval_recovery.reconcile_unavailable_entities(
+                        start_results.permanently_failed_entities,
+                    )
+                    logger.warning(
+                        "MCP catalog restart left some bots disabled",
+                        server_id=server_id,
+                        entities=start_results.permanently_failed_entities,
+                    )
+            finally:
+                if replay_startup_maintenance and self.running and self.config is not None:
+                    self._startup_maintenance.restart_after_runtime_replacement(
+                        config=self.config,
+                        running_bots=self._running_startup_maintenance_bots,
+                    )
 
     async def _reconcile_post_update_rooms(
         self,
@@ -2156,7 +2167,7 @@ class _MultiAgentOrchestrator:
         finally:
             await self._script_runtime.complete_worker_replacement()
             if replay_startup_maintenance and self.running and self.config is not None:
-                self._startup_maintenance.restart_after_config_reload(
+                self._startup_maintenance.restart_after_runtime_replacement(
                     config=self.config,
                     running_bots=self._running_startup_maintenance_bots,
                 )
