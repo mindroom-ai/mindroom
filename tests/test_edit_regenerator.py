@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -30,7 +30,7 @@ from tests.conftest import make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Coroutine
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -244,12 +244,8 @@ def _harness(
             # The reply records own the answer from then on, which is what a later edit regenerates.
             reply_for_sources.return_value = _reply(event_id=event_id)
 
-    def start_regeneration(request: ResponseRequest, after: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
-        async def run() -> None:
-            await regenerate(request)
-            await after()
-
-        task = asyncio.create_task(run())
+    def track_inbox_response(response: Coroutine[Any, Any, None], **_ownership: object) -> asyncio.Task[None]:
+        task = asyncio.create_task(response)
         regenerations.append(task)
         return task
 
@@ -261,7 +257,8 @@ def _harness(
             resolver=resolver,
             turn_store=turn_store,
             ingress_hook_runner=ingress_hook_runner,
-            start_regeneration=start_regeneration,
+            generate_response=regenerate,
+            track_inbox_response=track_inbox_response,
             settle_sources=AsyncMock(),
             stop_reply=AsyncMock(),
             receipt_order=AsyncMock(return_value=receipt_order),
@@ -595,13 +592,8 @@ async def test_an_edit_whose_regeneration_runs_nothing_is_settled_by_it(tmp_path
     harness = _harness(tmp_path, turn_record=_turn_record())
     event, event_info = _edit_event()
 
-    # A refusal is the regeneration ending without signalling a claim.
-    def refuse(_request: ResponseRequest, after: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
-        task = asyncio.create_task(after())
-        harness.regenerations.append(task)
-        return task
-
-    harness.regenerator.deps = replace(harness.regenerator.deps, start_regeneration=refuse)
+    # A refusal is the response ending without signalling a claim.
+    harness.regenerator.deps = replace(harness.regenerator.deps, generate_response=AsyncMock(return_value=None))
 
     assert await _handle_edit(harness, event, event_info) is True
     harness.settle_sources.assert_awaited_once_with((event.event_id,))

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
@@ -22,7 +22,7 @@ from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
     import nio
 
@@ -41,6 +41,20 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class _TrackInboxResponse(Protocol):
+    """Own one response task off the room's event lane, as ``ResponseRunner.track_inbox_response`` does."""
+
+    def __call__(
+        self,
+        response: Coroutine[Any, Any, None],
+        *,
+        name: str,
+        room_id: str,
+        recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
+        source_event_ids: tuple[str, ...] = (),
+    ) -> asyncio.Task[None]: ...
+
+
 @dataclass(frozen=True)
 class EditRegeneratorDeps:
     """Collaborators needed for edit-triggered regeneration."""
@@ -51,9 +65,9 @@ class EditRegeneratorDeps:
     resolver: ConversationResolver
     turn_store: TurnStore
     ingress_hook_runner: IngressHookRunner
-    # Runs a regeneration on a runner-owned task, off the room's event lane, then the callback it is given unless the
-    # task was cancelled.
-    start_regeneration: Callable[[ResponseRequest, Callable[[], Awaitable[None]]], asyncio.Task[None]]
+    # Runs one regeneration through the bot's response path.
+    generate_response: Callable[[ResponseRequest], Awaitable[object]]
+    track_inbox_response: _TrackInboxResponse
     # Settles sources nothing will answer, as the room's lane does for an event it ignores.
     settle_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     # Records a Stop on a reply that still runs, as a Stop reaction would.
@@ -338,5 +352,23 @@ class EditRegenerator:
             if not claimed and not handoff.is_set():
                 await self.deps.settle_sources(request.sources.pending_event_ids)
 
-        self.deps.start_regeneration(replace(request, on_reply_claimed=on_claimed), settle_unless_owned)
+        async def regenerate() -> None:
+            try:
+                await self.deps.generate_response(replace(request, on_reply_claimed=on_claimed))
+            except asyncio.CancelledError:
+                # Cancelled, as at shutdown, the edit stays pending, so a restart regenerates again.
+                raise
+            except Exception:
+                await settle_unless_owned()
+                raise
+            await settle_unless_owned()
+
+        self.deps.track_inbox_response(
+            regenerate(),
+            name=f"edit_regeneration:{request.correlation_id}",
+            room_id=request.response_envelope.target.room_id,
+            # The edit stays pending until a span settles it, so a restart regenerates again.
+            recovery_proof_ready=lambda: True,
+            source_event_ids=request.sources.pending_event_ids,
+        )
         return True

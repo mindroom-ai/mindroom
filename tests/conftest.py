@@ -2538,7 +2538,7 @@ def journal_edit_regenerator_deps(bot: RuntimeBot, principal: PrincipalStore) ->
         )
 
     return {
-        "start_regeneration": bot._start_regeneration,
+        "generate_response": bot._run_regenerated_response,
         "reply_for_sources": principal.replies.for_sources,
         "later_human_message": later_human_message,
     }
@@ -2550,27 +2550,9 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
     store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
-    unknown = set(changes) - regenerator_field_names - store_field_names - {"generate_response"}
+    unknown = set(changes) - regenerator_field_names - store_field_names
     assert not unknown, f"not an edit regenerator or turn store collaborator: {sorted(unknown)}"
     rebuilt_changes = {name: value for name, value in changes.items() if name in regenerator_field_names}
-    if "generate_response" in changes:
-        generate_response = cast("Callable[[ResponseRequest], Awaitable[object]]", changes["generate_response"])
-        runner = unwrap_extracted_collaborator(bot._response_runner)
-
-        def start_regeneration(request: ResponseRequest, after: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
-            async def regenerate() -> None:
-                await generate_response(request)
-                await after()
-
-            return runner.track_inbox_response(
-                regenerate(),
-                name=f"edit_regeneration:{request.correlation_id}",
-                room_id=request.response_envelope.target.room_id,
-                recovery_proof_ready=lambda: True,
-                source_event_ids=request.sources.pending_event_ids,
-            )
-
-        rebuilt_changes["start_regeneration"] = start_regeneration
     if "receipt_order" not in rebuilt_changes:
         receipt_orders = count(1)
 
