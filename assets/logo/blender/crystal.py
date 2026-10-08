@@ -652,6 +652,7 @@ def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
         energy=600.0, color=srgb("#bfeaf2"), size=2.5,
     )  # fmt: skip
     link_lights(rig["behind"], [floor], "behind-receivers")
+    rig["behind"].visible_glossy = False  # The floor would mirror the panel itself as a bright blob in front of the M.
     for side, sign in [("left", -1), ("right", 1)]:
         rig[f"rim-{side}"] = add_light(
             f"rim-{side}", "AREA", collection, location=center - 2.0 * level + 3.5 * sign * right + Vector((0, 0, 1.0)),
@@ -884,18 +885,29 @@ def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
     bpy.data.materials["azure-crystal"].node_tree.nodes["frost-front"].outputs["Value"].default_value = front
 
 
-def widescreen(scene: bpy.types.Scene, camera: bpy.types.Object, width: int) -> None:
-    """Frame the logo's view for a 16:9 desktop: the M smaller, a little above center, with room around it."""
-    scene.render.resolution_x, scene.render.resolution_y = width, width * 9 // 16
-    camera.data.sensor_fit = "VERTICAL"  # The view keeps its height; the wider frame adds space at the sides.
-    camera.data.ortho_scale *= 1.6
-    camera.data.shift_y = 0.07  # Lower would bring the floor's bright far reflection into the frame.
+def widescreen(scene: bpy.types.Scene, camera: bpy.types.Object, width: int, height: int) -> None:
+    """Frame the logo's view for a wide desktop: the M at half the height, a little above center.
+
+    The framing holds for any aspect ratio; a wider screen only adds dark space at the sides.
+    """
+    scene.render.resolution_x, scene.render.resolution_y = width, height
+    camera.data.sensor_fit = "VERTICAL"
+    camera.data.ortho_scale *= 1.2
+    camera.data.shift_y = 0.006  # Puts the cube's center at 54% of the height.
 
 
-def render(effect: str, output_dir: Path, resolution: int, samples: int, *, frozen: bool = False) -> None:
+def render(
+    effect: str,
+    output_dir: Path,
+    resolution: int,
+    samples: int,
+    *,
+    frozen: bool = False,
+    height: int | None = None,
+) -> None:
     """Build and render one effect: a still PNG, or numbered frames in a folder.
 
-    The wallpaper is the still framed for a 16:9 desktop, `resolution` pixels wide.
+    The wallpaper is the still framed for a desktop `resolution` pixels wide and `height` tall, 16:9 by default.
     """
     rig = build(frozen=frozen or effect == "reveal")  # The reveal starts in ice and melts.
     scene = bpy.context.scene
@@ -906,7 +918,7 @@ def render(effect: str, output_dir: Path, resolution: int, samples: int, *, froz
     if effect in ("still", "wallpaper"):
         scene.render.image_settings.color_depth = "16"  # The dark gradients band at 8 bits per channel.
         if effect == "wallpaper":
-            widescreen(scene, rig["camera"], resolution)
+            widescreen(scene, rig["camera"], resolution, height or resolution * 9 // 16)
         scene.render.filepath = str(output_dir / ("crystal.png" if effect == "still" else "crystal-wallpaper.png"))
         bpy.ops.render.render(write_still=True)
         return
@@ -932,9 +944,10 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=HERE)
     parser.add_argument("--blend", type=Path, help="Also save the scene of the last effect here.")
     parser.add_argument("--frozen", action="store_true", help="Frosted, cracked ice instead of clear crystal.")
+    parser.add_argument("--height", type=int, help="Wallpaper height in pixels; 16:9 to the resolution by default.")
     args = parser.parse_args(argv)
     for effect in args.render:
-        render(effect, args.output_dir, args.resolution, args.samples, frozen=args.frozen)
+        render(effect, args.output_dir, args.resolution, args.samples, frozen=args.frozen, height=args.height)
     if args.blend:
         bpy.context.preferences.filepaths.save_version = 0
         bpy.ops.wm.save_as_mainfile(filepath=str(args.blend), compress=True)

@@ -16,14 +16,15 @@ From the repository root, with Blender 5.2 or newer on `PATH`:
 blender --background --factory-startup --python assets/logo/blender/crystal.py -- \
   --render still --resolution 2160 --samples 1024 --output-dir /tmp/mindroom-crystal
 blender --background --factory-startup --python assets/logo/blender/crystal.py -- \
-  --render wallpaper --resolution 5120 --samples 512 --output-dir /tmp/mindroom-crystal
+  --render wallpaper --resolution 5120 --height 2160 --samples 512 --output-dir /tmp/mindroom-crystal
 blender --background --factory-startup --python assets/logo/blender/crystal.py -- \
   --render reveal lock-in ignition hyperspin --resolution 1080 --samples 128 --output-dir /tmp/mindroom-crystal
 ffmpeg -framerate 30 -i /tmp/mindroom-crystal/reveal/frame-%04d.png \
   -c:v libx264 -pix_fmt yuv420p -crf 16 /tmp/mindroom-crystal/crystal-reveal.mp4
 ```
 
-The still writes `crystal.png` and the wallpaper, the same view framed for a 16:9 desktop, writes `crystal-wallpaper.png`, both as 16-bit PNGs so the dark gradients do not band.
+The still writes `crystal.png` and the wallpaper writes `crystal-wallpaper.png`, both as 16-bit PNGs so the dark gradients do not band.
+The wallpaper frames the same view for a desktop of `--resolution` by `--height` pixels, 16:9 unless `--height` is given, with the M at half the height and a little above center.
 Each effect writes numbered frames into a folder of its own name, 120 frames (four seconds at 30 fps) or 165 for the reveal.
 Add `--frozen` for frosted, cracked ice instead of clear crystal; the reveal always starts in ice and melts.
 `--blend PATH` also saves the scene of the last effect for editing.
