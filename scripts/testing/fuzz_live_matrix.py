@@ -4205,10 +4205,22 @@ class LiveMatrixClient:
         return user_id
 
     async def join_room(self) -> None:
-        """Join every managed public room."""
+        """Join every managed public room.
+
+        MindRoom records a managed room before it makes the room public, so a
+        join that arrives in between is refused until the join rule lands.
+        """
         for room_id in self.room_ids:
             encoded_room = quote(room_id, safe="")
-            await self._request("POST", f"/_matrix/client/v3/join/{encoded_room}", json_body={})
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    await self._request("POST", f"/_matrix/client/v3/join/{encoded_room}", json_body={})
+                    break
+                except RuntimeError as exc:
+                    if "cannot join a room that is not `public`" not in str(exc) or time.monotonic() >= deadline:
+                        raise
+                    await asyncio.sleep(0.2)
 
     async def create_public_room(self) -> None:
         """Create and select one disposable world-readable public room."""
