@@ -885,15 +885,15 @@ def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
     bpy.data.materials["azure-crystal"].node_tree.nodes["frost-front"].outputs["Value"].default_value = front
 
 
-def widescreen(scene: bpy.types.Scene, camera: bpy.types.Object, width: int, height: int) -> None:
-    """Frame the logo's view for a wide desktop: the M at half the height, a little above center.
+def frame_screen(scene: bpy.types.Scene, camera: bpy.types.Object, width: int, height: int) -> None:
+    """Frame the logo's view for a screen of any shape: the cube at its center, the M about half its shorter side.
 
-    The framing holds for any aspect ratio; a wider screen only adds dark space at the sides.
+    Landscape screens add dark space at the sides, portrait screens above and below.
     """
     scene.render.resolution_x, scene.render.resolution_y = width, height
-    camera.data.sensor_fit = "VERTICAL"
+    camera.data.sensor_fit = "VERTICAL" if width >= height else "HORIZONTAL"
     camera.data.ortho_scale *= 1.2
-    camera.data.shift_y = 0.006  # Puts the cube's center at 54% of the height.
+    camera.data.shift_y = 0.047  # In units of the fitted side: moves the view's center onto the cube.
 
 
 def render(
@@ -907,7 +907,7 @@ def render(
 ) -> None:
     """Build and render one effect: a still PNG, or numbered frames in a folder.
 
-    The wallpaper is the still framed for a desktop `resolution` pixels wide and `height` tall, 16:9 by default.
+    The wallpaper is the still framed for a screen `resolution` pixels wide and `height` tall, 16:9 by default.
     """
     rig = build(frozen=frozen or effect == "reveal")  # The reveal starts in ice and melts.
     scene = bpy.context.scene
@@ -918,7 +918,7 @@ def render(
     if effect in ("still", "wallpaper"):
         scene.render.image_settings.color_depth = "16"  # The dark gradients band at 8 bits per channel.
         if effect == "wallpaper":
-            widescreen(scene, rig["camera"], resolution, height or resolution * 9 // 16)
+            frame_screen(scene, rig["camera"], resolution, height or resolution * 9 // 16)
         scene.render.filepath = str(output_dir / ("crystal.png" if effect == "still" else "crystal-wallpaper.png"))
         bpy.ops.render.render(write_still=True)
         return
