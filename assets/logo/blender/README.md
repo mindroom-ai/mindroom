@@ -67,6 +67,7 @@ The look rests on a few choices:
 - The set is dark: a glossy navy floor, an HDRI for reflections that fades out toward the horizon, a high back light, rim strips, and a cool pool on the floor behind the letter for the glass to refract.
 - Each tower and foot sits in a navy frame like the cube's, around a white light that fades from its center, so the legs glow from within.
 - `--frozen` turns the crystal into ice: a paler tint, patchy frost, a hammered surface, and thin fracture planes of dense scattering along the edges of large Voronoi cells.
+  Each of these fades with distance behind a thaw front, which the reveal sweeps outward from the cube to melt the ice.
 - The cube is a tesseract: a slimmer navy frame (`CUBE_BEAM = 0.11`) around an inner cube of gold filaments, joined corner to corner by struts.
   Panes are left out because they mirror the azure towers over the gold, and the core light skips the frame so its beams stay dark.
 
@@ -78,7 +79,7 @@ At angle 0 the near cell matches the navy frame and the far cell is the glowing 
   When the camera arrives and the M forms, a flash bursts from the center: the core floods the scene with light, haze around the letter shows its rays streaming out through the frame, and the exposure and lens streaks flare before fading within about half a second.
 - **Ignition** lights a spark at the center, traces the inner cube's edges, grows the struts outward, fills in the light, and finally wakes the glow in the legs.
 - **Hyperspin** turns the tesseract once in 4D; the gold inner cube grows through the frame while the outer cell shrinks inward, and the loop is seamless.
-- **Reveal** builds to a climax during the lock-in glide: light rises in the unlit legs from the floor, crosses into the cube as the outer cube traces on and the struts grow inward, and closes the inner cube just as the camera arrives; then a long flash swells, holds while its rays spread, and slowly settles.
+- **Reveal** builds to a climax during the lock-in glide, always starting in ice: light rises in the unlit legs from the floor, crosses into the cube as the outer cube traces on and the struts grow inward, and closes the inner cube just as the camera arrives; then a long flash swells, holds while its rays spread, and melts the ice into clear crystal from the cube outward as it settles.
 
 ## How the SVG becomes 3D
 

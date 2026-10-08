@@ -86,10 +86,20 @@ def crystal_glass(*, frozen: bool) -> bpy.types.Material:
 
 
 def frost(tree: bpy.types.NodeTree, glass: bpy.types.Node, scatter: bpy.types.Node) -> None:
-    """Turn the crystal into ice: a paler tint, patchy frost, a hammered surface, and fracture planes."""
+    """Turn the crystal into ice: a paler tint, patchy frost, a hammered surface, and fracture planes.
+
+    Every ingredient is weighted by the thaw mask, so a front sweeping out from the cube melts the ice back
+    into the clear crystal; by default the front sits far inside the cube and everything stays frozen.
+    """
     nodes, links = tree.nodes, tree.links
-    glass.inputs["Base Color"].default_value = logo.srgb("#a6dcf2")
     coords = nodes.new("ShaderNodeTexCoord")
+    ice = thaw_mask(tree, coords)
+    tint = nodes.new("ShaderNodeMix")
+    tint.data_type = "RGBA"
+    tint.inputs["A"].default_value = glass.inputs["Base Color"].default_value
+    tint.inputs["B"].default_value = logo.srgb("#a6dcf2")
+    links.new(ice, tint.inputs["Factor"])
+    links.new(tint.outputs["Result"], glass.inputs["Base Color"])
     patches = nodes.new("ShaderNodeTexNoise")
     patches.inputs["Scale"].default_value = 4.0
     patches.inputs["Detail"].default_value = 6.0
@@ -100,14 +110,14 @@ def frost(tree: bpy.types.NodeTree, glass: bpy.types.Node, scatter: bpy.types.No
     roughness.inputs["To Min"].default_value = 0.02
     roughness.inputs["To Max"].default_value = 0.16
     links.new(patches.outputs["Fac"], roughness.inputs["Value"])
-    links.new(roughness.outputs["Result"], glass.inputs["Roughness"])
+    links.new(scaled(tree, roughness.outputs["Result"], ice), glass.inputs["Roughness"])
     grain = nodes.new("ShaderNodeTexNoise")
     grain.inputs["Scale"].default_value = 18.0
     grain.inputs["Detail"].default_value = 4.0
     links.new(coords.outputs["Object"], grain.inputs["Vector"])
     relief = nodes.new("ShaderNodeBump")
-    relief.inputs["Strength"].default_value = 0.06
     relief.inputs["Distance"].default_value = 0.02
+    links.new(scaled(tree, ice, 0.06), relief.inputs["Strength"])
     links.new(grain.outputs["Fac"], relief.inputs["Height"])
     links.new(relief.outputs["Normal"], glass.inputs["Normal"])
     # Fractures are thin sheets of dense white scattering along the edges of large Voronoi cells.
@@ -123,9 +133,55 @@ def frost(tree: bpy.types.NodeTree, glass: bpy.types.Node, scatter: bpy.types.No
     links.new(cells.outputs["Distance"], fractures.inputs["Value"])
     density = nodes.new("ShaderNodeMath")
     density.inputs[1].default_value = scatter.inputs["Density"].default_value
-    links.new(fractures.outputs["Result"], density.inputs[0])
+    links.new(scaled(tree, fractures.outputs["Result"], ice), density.inputs[0])
     links.new(density.outputs["Value"], scatter.inputs["Density"])
-    scatter.inputs["Color"].default_value = logo.srgb("#f2fbff")
+    haze = nodes.new("ShaderNodeMix")
+    haze.data_type = "RGBA"
+    haze.inputs["A"].default_value = scatter.inputs["Color"].default_value
+    haze.inputs["B"].default_value = logo.srgb("#f2fbff")
+    links.new(ice, haze.inputs["Factor"])
+    links.new(haze.outputs["Result"], scatter.inputs["Color"])
+
+
+def thaw_mask(tree: bpy.types.NodeTree, coords: bpy.types.Node) -> bpy.types.NodeSocket:
+    """1 where the ice still stands, 0 inside the "frost-front" radius around the cube, with a soft edge."""
+    nodes, links = tree.nodes, tree.links
+    front = nodes.new("ShaderNodeValue")
+    front.name = "frost-front"
+    front.outputs["Value"].default_value = -100.0  # Far inside the cube: nothing has melted.
+    offset = nodes.new("ShaderNodeVectorMath")
+    offset.operation = "SUBTRACT"
+    offset.inputs[1].default_value = logo.CUBE_CENTER
+    links.new(coords.outputs["Object"], offset.inputs[0])
+    distance = nodes.new("ShaderNodeVectorMath")
+    distance.operation = "LENGTH"
+    links.new(offset.outputs["Vector"], distance.inputs[0])
+    beyond = nodes.new("ShaderNodeMath")
+    beyond.operation = "SUBTRACT"
+    links.new(distance.outputs["Value"], beyond.inputs[0])
+    links.new(front.outputs["Value"], beyond.inputs[1])
+    edge = nodes.new("ShaderNodeMapRange")
+    edge.interpolation_type = "SMOOTHSTEP"
+    edge.inputs["From Min"].default_value = -0.3
+    edge.inputs["From Max"].default_value = 0.0
+    links.new(beyond.outputs["Value"], edge.inputs["Value"])
+    return edge.outputs["Result"]
+
+
+def scaled(
+    tree: bpy.types.NodeTree,
+    value: bpy.types.NodeSocket,
+    factor: bpy.types.NodeSocket | float,
+) -> bpy.types.NodeSocket:
+    """A math node multiplying `value` by a socket or a constant."""
+    product = tree.nodes.new("ShaderNodeMath")
+    product.operation = "MULTIPLY"
+    tree.links.new(value, product.inputs[0])
+    if isinstance(factor, float):
+        product.inputs[1].default_value = factor
+    else:
+        tree.links.new(factor, product.inputs[1])
+    return product.outputs["Value"]
 
 
 def lacquer() -> bpy.types.Material:
@@ -724,11 +780,12 @@ def hyperspin(rig: dict[str, bpy.types.Object], frame: int) -> None:
 
 
 def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
-    """While the camera swings in, light fills the legs and converges on the core; it flashes as the M forms.
+    """While the camera swings in, light fills the frozen legs and converges on the core; it flashes as the M forms.
 
-    Shortly after the glide starts, light rises in the unlit legs from the floor up, crosses into the cube
+    Shortly after the glide starts, light rises in the unlit ice from the floor up, crosses into the cube
     as the outer cube traces on and the struts grow inward, and closes the inner cube just as the camera
-    arrives. The flash then swells, holds while its rays spread outward, and slowly settles.
+    arrives. The flash then swells, holds while its rays spread outward, and melts the ice into clear
+    crystal from the cube outward as it settles. Build the scene frozen for this effect.
     """
     glide(rig, frame)
     fill = ease((frame - 7) / 48)
@@ -756,11 +813,14 @@ def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
         surface=4.0 * (1 - lit) if fill > 0 else 0.0,
     )
     update_tesseract(0.0, progress, inward=True)
+    # The flash melts the ice: a thaw front spreads from the cube through the legs into clear crystal.
+    front = 3.4 * ease(since / 30) if since >= 0 else -100.0  # Past the farthest foot corner, 2.94 out.
+    bpy.data.materials["azure-crystal"].node_tree.nodes["frost-front"].outputs["Value"].default_value = front
 
 
 def render(effect: str, output_dir: Path, resolution: int, samples: int, *, frozen: bool = False) -> None:
     """Build and render one effect: a still PNG, or numbered frames in a folder."""
-    rig = build(frozen=frozen)
+    rig = build(frozen=frozen or effect == "reveal")  # The reveal starts in ice and melts.
     scene = bpy.context.scene
     scene.render.resolution_x = scene.render.resolution_y = resolution
     scene.cycles.samples = samples
