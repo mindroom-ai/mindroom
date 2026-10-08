@@ -181,10 +181,8 @@ def discard_continuation(
     A click on one of its cards then finds no card and does nothing.
     """
     if cards:
-        transaction.execute(
-            "DELETE FROM approval_cards WHERE principal_id = ? AND continuation_id = ?",
-            (principal_id, approval_id),
-        )
+        # The router's principal owns the cards, not the continuation's; the approval id names them alone.
+        transaction.execute("DELETE FROM approval_cards WHERE continuation_id = ?", (approval_id,))
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),

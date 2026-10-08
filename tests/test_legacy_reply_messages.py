@@ -234,8 +234,23 @@ async def test_older_approvals_of_one_reply_are_discarded_with_their_sources_set
         sources=ResponseSources(("$edit",), ("$source",)),
     )
     await _main_continuation(principal, newer, text="Rereading")
+    # The router published the older approval's card, under its own principal.
+    await journal_store.backend.write(
+        lambda transaction: transaction.execute(
+            "INSERT INTO approval_cards (principal_id, delivery_id, continuation_id, continuation_generation,"
+            " tool_call_id, membership_epoch) VALUES (?, ?, ?, ?, ?, ?)",
+            ("router@alice", "$card", "approval-1", 1, "call-1", 1),
+        ),
+    )
 
     await _adopt(principal)
+    cards = await journal_store.backend.read(
+        lambda transaction: transaction.fetchall(
+            "SELECT delivery_id FROM approval_cards WHERE continuation_id = ?",
+            ("approval-1",),
+        ),
+    )
+    assert cards == ()
     reply = await principal.replies.for_event("$reply")
     assert reply is not None
     assert (reply.state, reply.approval_id) == (rl.ReplyState.PAUSED, "approval-2")
