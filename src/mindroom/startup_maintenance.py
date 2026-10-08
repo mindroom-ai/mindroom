@@ -57,13 +57,13 @@ class StartupMaintenanceController:
         await cancel_logged_task(task)
         return should_replay
 
-    def restart_after_config_reload(
+    def restart_after_runtime_replacement(
         self,
         *,
         config: Config,
         running_bots: _RunningBots,
     ) -> None:
-        """Replay canceled startup maintenance after config reload completes."""
+        """Replay canceled startup maintenance with the bots running after a replacement."""
         if self.startup_cutoff_ms is None or self.task is not None:
             return
         bots = running_bots()

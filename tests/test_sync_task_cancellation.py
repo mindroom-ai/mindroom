@@ -3105,6 +3105,77 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             await old_maintenance_task
 
 
+@pytest.mark.asyncio
+async def test_config_reload_during_post_readiness_room_setup_replays_it_with_live_bots(tmp_path: Path) -> None:
+    """Room setup still running after readiness restarts with the bots a reload left running."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities=set(),
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+    router_bot = MagicMock(spec=AgentBot, running=True)
+    old_bot = MagicMock(spec=AgentBot, running=True)
+    new_bot = MagicMock(spec=AgentBot, running=True)
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": old_bot}
+    orchestrator.config = current_config
+    orchestrator.running = True
+    orchestrator._runtime_ready_event.set()
+    old_setup_started = asyncio.Event()
+    setup_calls: list[list[object]] = []
+
+    async def setup_rooms(bots: list[object]) -> None:
+        setup_calls.append(list(bots))
+        if old_bot in bots:
+            old_setup_started.set()
+            await asyncio.Event().wait()
+
+    async def replace_general_bot(_plan: ConfigUpdatePlan) -> None:
+        # Stands in for any apply step that replaces a bot the first setup pass holds.
+        old_bot.running = False
+        orchestrator.agent_bots["general"] = new_bot
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator, "_update_unchanged_bots", side_effect=replace_general_bot),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as recover,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        patch.object(orchestrator._computer_runtime, "bind_if_ready"),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
+    ):
+        orchestrator._startup_maintenance.start([router_bot, old_bot], current_config, startup_cutoff_ms=123456)
+        first_maintenance_task = orchestrator._startup_maintenance.task
+        assert first_maintenance_task is not None
+        try:
+            await asyncio.wait_for(old_setup_started.wait(), timeout=1.0)
+            await orchestrator.config_reload._update_config()
+            replayed_task = orchestrator._startup_maintenance.task
+            assert replayed_task is not None
+            assert replayed_task is not first_maintenance_task
+            await asyncio.wait_for(replayed_task, timeout=1.0)
+        finally:
+            await orchestrator._startup_maintenance.cancel()
+
+    assert first_maintenance_task.cancelled()
+    assert setup_calls == [[router_bot, old_bot], [router_bot, new_bot]]
+    assert recover.await_args.args[:2] == ([router_bot, new_bot], new_config)
+
+
 def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -> None:
     """Startup maintenance replay should keep router before other running bots."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
