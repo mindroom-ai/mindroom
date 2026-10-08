@@ -30,10 +30,10 @@ sys.path.insert(0, str(HERE))
 
 import build_scene as logo  # noqa: E402
 
-FRAMES = 120  # Four seconds at 30 fps.
+FRAMES = 120  # Four seconds at 30 fps; the reveal runs twice as long.
 LOCK_IN_HOLD = 30  # Frames held on the finished logo after the camera locks in.
 LOCK_FRAME = FRAMES - LOCK_IN_HOLD  # The camera arrives, the M forms, and a flash bursts from the center.
-EFFECTS = ("still", "lock-in", "ignition", "hyperspin")
+EFFECTS = ("still", "lock-in", "ignition", "hyperspin", "reveal")
 HDRI = "studio_small_09"  # CC0 studio lighting from Poly Haven, used for reflections.
 HDRI_URL = f"https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/{HDRI}_2k.hdr"
 HDRI_CACHE = Path.home() / ".cache" / "mindroom-logo" / "hdri" / f"{HDRI}_2k.hdr"
@@ -651,6 +651,29 @@ def hyperspin(rig: dict[str, bpy.types.Object], frame: int) -> None:
     update_tesseract(2 * math.pi * (frame - 1) / FRAMES)
 
 
+def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
+    """The three effects as one: glide in through the dark, ignite in the flash, then one hyperspin.
+
+    A small spark grows at the center while the camera closes in on the unlit letter. When the M forms,
+    the flash ignites it: the inner cube, the struts, and the outer cube shoot out from the core in quick
+    succession, light fills in, and the legs wake. The tesseract then turns once in 4D and lands on the logo.
+    """
+    glide(rig, frame)
+    since = frame - LOCK_FRAME
+    burst = flash(rig, since)
+    lit = ease(since / 10)
+    shine(
+        rig,
+        core=lit + 6 * burst,
+        spark=max(0.4 * ease((frame - 30) / 60), lit) + 6 * burst,
+        lantern=lit,
+        filaments=1 + 3 * burst,
+        legs=ease((since - 2) / 16) * (1 + 2 * burst),
+    )
+    progress = {"inner": ease(since / 6), "strut": ease((since - 3) / 6), "outer": ease((since - 6) / 6)}
+    update_tesseract(2 * math.pi * max(frame - FRAMES, 0) / FRAMES, progress)
+
+
 def render(effect: str, output_dir: Path, resolution: int, samples: int, *, frozen: bool = False) -> None:
     """Build and render one effect: a still PNG, or numbered frames in a folder."""
     rig = build(frozen=frozen)
@@ -667,6 +690,7 @@ def render(effect: str, output_dir: Path, resolution: int, samples: int, *, froz
         "lock-in": (lock_in, FRAMES),
         "ignition": (ignition, FRAMES),
         "hyperspin": (hyperspin, FRAMES),
+        "reveal": (reveal, 2 * FRAMES),
     }[effect]
     for frame in range(1, length + 1):
         step(rig, frame)

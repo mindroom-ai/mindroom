@@ -51,12 +51,12 @@ ffmpeg -framerate 30 -i /tmp/mindroom-logo/sway/frame-%04d.png \
 blender --background --factory-startup --python assets/logo/blender/crystal.py -- \
   --render still --resolution 1080 --samples 256 --blend assets/logo/blender/crystal.blend
 blender --background --factory-startup --python assets/logo/blender/crystal.py -- \
-  --render hyperspin ignition lock-in --resolution 960 --samples 48 --output-dir /tmp/mindroom-crystal
+  --render hyperspin ignition lock-in reveal --resolution 960 --samples 48 --output-dir /tmp/mindroom-crystal
 ```
 
 Add `--frozen` to either command for frosted, cracked ice instead of clear crystal.
 
-Each effect writes 120 numbered frames, four seconds at 30 fps, for the same `ffmpeg` command as the sway loop.
+Each effect writes 120 numbered frames, four seconds at 30 fps, and the reveal writes 240, all for the same `ffmpeg` command as the sway loop.
 On a 12-core CPU the clear still takes about 1.5 minutes, and `--frozen` takes about three times as long.
 The first run downloads the CC0 [Poly Haven](https://polyhaven.com/a/studio_small_09) studio HDRI into `~/.cache/mindroom-logo/`.
 
@@ -78,6 +78,7 @@ At angle 0 the near cell matches the navy frame and the far cell is the glowing 
   When the camera arrives and the M forms, a flash bursts from the center: the core floods the scene with light, haze around the letter shows its rays streaming out through the frame, and the exposure and lens streaks flare before fading within about half a second.
 - **Ignition** lights a spark at the center, traces the inner cube's edges, grows the struts outward, fills in the light, and finally wakes the glow in the legs.
 - **Hyperspin** turns the tesseract once in 4D; the gold inner cube grows through the frame while the outer cell shrinks inward, and the loop is seamless.
+- **Reveal** combines the three: the camera glides in toward a small spark on the unlit letter, the flash ignites the tesseract and the legs as the M forms, and one hyperspin lands back on the logo.
 
 ## How the SVG becomes 3D
 
