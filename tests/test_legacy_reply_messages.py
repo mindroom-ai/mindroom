@@ -280,21 +280,6 @@ async def test_a_failing_approval_whose_note_was_delivered_is_adopted_paused_and
     assert not await principal.is_pending("$source")
 
 
-async def test_a_stored_superseded_approval_is_discarded_at_adoption(journal_store: EventJournalStore) -> None:
-    """An approval an earlier release superseded and never cleaned up is dropped, its source settled."""
-    principal = journal_store.principal(PRINCIPAL)
-    await admit(principal, "$source")
-    await _row(principal, "$source", DeliveryStage.INITIAL, "Thinking...", status="pending", acknowledged="$reply")
-    await _main_continuation(principal, replace(_continuation("failing"), failure_reason="superseded"))
-
-    assert (
-        await principal.adopt_legacy_replies(entity_name=ENTITY, presentations=LEGACY_PRESENTATIONS, now_ns=NOW) == ()
-    )
-    assert await principal.approval_continuation("approval-1") is None
-    assert not await principal.is_pending("$source")
-    assert await principal.replies.for_event("$reply") is None
-
-
 async def test_an_adopted_regeneration_resumes_as_any_paused_reply(journal_store: EventJournalStore) -> None:
     """A paused regeneration main left pauses its reply like any other once adopted."""
     principal = journal_store.principal(PRINCIPAL)

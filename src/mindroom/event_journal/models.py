@@ -134,10 +134,6 @@ class DeliveryProjectionPendingError(RuntimeError):
     """An interactive source arrived before a visible delivery was projected."""
 
 
-# The failure reason an earlier release gave an approval an edit superseded; reply classification discards such rows.
-SUPERSEDED_FAILURE_REASON = "superseded"
-
-
 class DeliveryStage(StrEnum):
     """The delivery points that must survive a crash.
 

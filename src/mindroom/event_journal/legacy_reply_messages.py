@@ -18,7 +18,6 @@ from mindroom import reply_lifecycle as rl
 
 from . import approval_continuations, journal, reply_messages
 from .legacy_response_attempts import discard_continuation
-from .models import SUPERSEDED_FAILURE_REASON
 from .replies import AppliedTransition, apply
 
 if TYPE_CHECKING:
@@ -97,10 +96,10 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # Last legacy release: v2026.10.208; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans.
 # Handling: once per principal at bot start, before owner_lost, the newest continuation of each reply pauses it, and
-# its approval runtime resumes or settles it as any paused reply. Older continuations of the same reply, and ones an
-# earlier release superseded, are discarded with their cards and their sources settled unanswered. A paused edit
-# regeneration resumes as any paused reply; the edited text it selected stays out of its turn record, which only a
-# later edit of a coalesced sibling reads. An upgrade runs while no reply is in flight, so nothing else is adopted.
+# its approval runtime resumes or settles it as any paused reply. Older continuations of the same reply are
+# discarded with their cards and their sources settled unanswered. A paused edit regeneration resumes as any paused
+# reply; the edited text it selected stays out of its turn record, which only a later edit of a coalesced sibling
+# reads. An upgrade runs while no reply is in flight, so nothing else is adopted.
 # Coverage: tests/test_legacy_reply_messages.py.
 def classify(
     transaction: Transaction,
@@ -162,9 +161,6 @@ def _newest_continuations(
             continue
         event_id = continuation.response_event_id
         if reply_messages.for_event(transaction, principal_id, event_id) is not None:
-            continue
-        if continuation.state == "failing" and continuation.failure_reason == SUPERSEDED_FAILURE_REASON:
-            _discard(transaction, principal_id, continuation, why="superseded_by_an_earlier_release")
             continue
         older = newest.get(event_id)
         if older is not None:
