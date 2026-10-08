@@ -193,6 +193,9 @@ class ResponseAttemptRunner:
                 raise
             except Exception as error:
                 self.deps.logger.exception("Error during response generation", error=str(error))
+                # What failed around the attempt, such as recording its Stop button, must not leave the attempt
+                # running after its span ends, where a Stop no longer reaches it.
+                await self._forward_cancel_to_attempt_task(task, asyncio.CancelledError())
                 raise
 
             return message_id

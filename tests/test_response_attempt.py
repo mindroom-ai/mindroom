@@ -146,6 +146,43 @@ async def test_response_attempt_adds_the_reply_stop_button_for_online_user(
 
 
 @pytest.mark.asyncio
+async def test_a_stop_button_failure_cancels_the_attempt_before_it_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure recording the Stop button must not leave generation running after its span ends."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, span = _runner(show_stop_button=True)
+    monkeypatch.setattr(response_attempt_module, "is_user_online", AsyncMock(return_value=True))
+    generating = asyncio.Event()
+    attempt_tasks: list[asyncio.Task[None] | None] = []
+
+    async def failing_stop_button(_message_id: str) -> None:
+        await generating.wait()
+        msg = "journal unavailable"
+        raise RuntimeError(msg)
+
+    async def response_function(_message_id: str | None) -> None:
+        attempt_tasks.append(asyncio.current_task())
+        generating.set()
+        await asyncio.Event().wait()
+
+    with pytest.raises(RuntimeError, match="journal unavailable"):
+        await runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                span=SpanAttempt(register=span.registered.append, add_stop_button=failing_stop_button),
+                existing_event_id="$thinking",
+                user_id="@user:localhost",
+            ),
+        )
+
+    (attempt,) = attempt_tasks
+    assert attempt is not None
+    assert attempt.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
     """Cancelling the awaiting chain must cancel the attempt task with the same provenance."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
