@@ -456,11 +456,11 @@ def _read_optional(root: Path, path: str) -> str | None:
 
 
 def _last_line(text: str | None) -> str:
-    """Return the last non-blank line without the code, emphasis, list, or quote marks or closing period a model may add."""
+    """Return the last non-blank line without the code, emphasis, list, or quote marks a model may add, or one closing period."""
     lines = [
         stripped
         for line in (text or "").splitlines()
-        if (stripped := line.replace("`", "").replace("*", "").strip().lstrip("->").strip().rstrip(".").rstrip())
+        if (stripped := line.replace("`", "").replace("*", "").strip().lstrip("->").strip().removesuffix(".").rstrip())
     ]
     return lines[-1] if lines else ""
 
