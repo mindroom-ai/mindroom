@@ -1544,7 +1544,6 @@ class DeliveryGateway:
                 shown,
                 approval_id=approval_id,
                 state=state,
-                span_has_final=False,
             )
             rendered = render(shown, state=state.value)
             try:

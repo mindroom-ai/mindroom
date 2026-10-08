@@ -1353,7 +1353,6 @@ def approval_failure_note(
     shown: str,
     state: ReplyState,
     prepared_revision: int,
-    span_has_final: bool,
     now_ns: int,
 ) -> Transition:
     """Write a failed approval's note, the reply's terminal write, while its continuation settles.
@@ -1377,11 +1376,10 @@ def approval_failure_note(
     expected = _expected_terminal_state(reply, state)
     if state is not expected:
         return _unchanged(Outcome.RECOMPUTE, reply)
-    stage = WriteStage.EDIT if span_has_final else WriteStage.FINAL
     updated = _set_state(reply, state, now_ns, presentation=shown)
     if state is ReplyState.CANCELLED:
         updated = _stop_applied(updated)
-    updated, row = _row(updated, span, stage, shown=shown)
+    updated, row = _row(updated, span, WriteStage.FINAL, shown=shown)
     return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
 
 

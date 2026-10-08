@@ -1204,7 +1204,6 @@ def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> No
         shown="failed",
         state=ReplyState.FAILED,
         prepared_revision=reply.revision,
-        span_has_final=False,
         now_ns=NOW,
     )
     assert note.reply is not None
@@ -1799,7 +1798,6 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
         shown="approval failed",
         state=ReplyState.FAILED,
         prepared_revision=removed.reply.revision,
-        span_has_final=False,
         now_ns=NOW,
     )
     assert noted.reply is not None

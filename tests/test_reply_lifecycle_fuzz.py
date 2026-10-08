@@ -837,6 +837,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             assert reply is not None
         last = self._last()
         assert last is not None
+        if last.delivery_id in self.model.finals:
+            # The gateway resends the note a FINAL already holds instead of writing another.
+            return
         cancelled = continuation.disposition == "cancelled_by_user" or reply.unapplied_stop
         requested = ReplyState.CANCELLED if cancelled else ReplyState.FAILED
         self._apply(
@@ -847,7 +850,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 shown="approval failed",
                 state=rl._expected_terminal_state(reply, requested),
                 prepared_revision=reply.revision,
-                span_has_final=last.delivery_id in self.model.finals,
                 now_ns=self._now(),
             ),
         )

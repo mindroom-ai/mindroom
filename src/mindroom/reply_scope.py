@@ -811,15 +811,14 @@ def approval_note_write(
     *,
     approval_id: str,
     state: rl.ReplyState,
-    span_has_final: bool,
 ) -> ReplyWrite:
-    """Return the note a failed approval shows on the reply it paused, before its finish ends the reply."""
+    """Return the terminal note a failed approval shows on the reply it paused, before its finish ends the reply."""
     encoded = encode_presentation(shown)
     revision = reply.revision
     return ReplyWrite(
         reply_id=reply.reply_id,
         span=span,
-        stage=rl.WriteStage.EDIT if span_has_final else rl.WriteStage.FINAL,
+        stage=rl.WriteStage.FINAL,
         shown=shown,
         decide=lambda current, owner: rl.approval_failure_note(
             current,
@@ -828,7 +827,6 @@ def approval_note_write(
             shown=encoded,
             state=state,
             prepared_revision=revision,
-            span_has_final=span_has_final,
             now_ns=time.time_ns(),
         ),
     )
