@@ -23,6 +23,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks.ingress import HookIngressPolicy
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
 from mindroom.turn_store import TurnStore
@@ -597,6 +598,23 @@ async def test_an_edit_whose_regeneration_runs_nothing_is_settled_by_it(tmp_path
 
     assert await _handle_edit(harness, event, event_info) is True
     harness.settle_sources.assert_awaited_once_with((event.event_id,))
+
+
+@pytest.mark.asyncio
+async def test_an_edit_whose_regeneration_a_replaced_runtime_refuses_stays_pending(tmp_path: Path) -> None:
+    """A runtime being replaced refuses the regeneration without settling the edit, so the replacement answers it."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event()
+    harness.regenerator.deps = replace(
+        harness.regenerator.deps,
+        generate_response=AsyncMock(side_effect=ResponseAdmissionRefusedError),
+    )
+
+    assert await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID) is True
+    (refused,) = await asyncio.gather(*harness.regenerations, return_exceptions=True)
+
+    assert isinstance(refused, ResponseAdmissionRefusedError)
+    harness.settle_sources.assert_not_awaited()
 
 
 @pytest.mark.asyncio

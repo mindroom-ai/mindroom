@@ -15,6 +15,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.reply_lifecycle import ReplyState
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -355,8 +356,9 @@ class EditRegenerator:
         async def regenerate() -> None:
             try:
                 await self.deps.generate_response(replace(request, on_reply_claimed=on_claimed))
-            except asyncio.CancelledError:
-                # Cancelled, as at shutdown, the edit stays pending, so a restart regenerates again.
+            except (asyncio.CancelledError, ResponseAdmissionRefusedError):
+                # Cancelled, as at shutdown, or refused by a runtime being replaced, the edit stays pending, so a
+                # restart or the replacement regenerates again.
                 raise
             except Exception:
                 await settle_unless_owned()
