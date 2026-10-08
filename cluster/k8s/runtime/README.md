@@ -255,7 +255,8 @@ The chart does not clone repositories or download release assets at pod startup.
 Private registry access should use normal Kubernetes image pull credentials through `imagePullSecrets`.
 
 Each bundle image must be pinned by digest and must contain a POSIX shell, `cp`, and `mkdir`, because the chart runs the bundle image as a copy init container.
-Because `overwrite` defaults to true, bundle images also need `rm`, `find`, `cmp`, `stat`, `chmod`, `chown`, `id`, and `readlink` unless every bundle sets `overwrite: false`; BusyBox provides all of them.
+Because `overwrite` defaults to true, bundle images also need `rm` unless every bundle sets `overwrite: false`.
+Images that also contain `find`, `cmp`, `stat`, `readlink`, `chmod`, `chown`, and `id`, as BusyBox does, are updated in place on restart; other images get a full copy on every start.
 Package content under `/bundle` by default:
 
 ```dockerfile
@@ -284,8 +285,9 @@ contentBundles:
 ```
 
 If `targetPath` is omitted, the chart copies to `/app/agent_data/content-bundles/<name>`.
-By default the init container makes the target path an exact copy of the bundle, as if it removed the path and copied the bundle again.
-It deletes entries the bundle no longer contains and rewrites only entries whose type, symlink target, content, mode, or owner changed, so a restart copies only what changed and unchanged files keep their timestamps.
+By default the init container makes the target path match the bundle: the same files, directories, symlinks, contents, and modes, as if it removed the path and copied the bundle again.
+It deletes entries the bundle no longer contains and rewrites only entries whose type, symlink target, content, mode, or owner changed, so a restart copies only what changed.
+Unchanged files keep their timestamps, and hard links between bundle files become separate copies.
 With `overwrite: false`, it copies the bundle over the target path and removes nothing.
 `seed.command` runs after the copy and should point at a short script or executable supplied by the bundle instead of embedding deployment-specific shell in Helm values.
 The script runs in the same bundle image, with MindRoom storage mounted at `storage.mountPath`.

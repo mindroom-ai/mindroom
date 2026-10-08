@@ -220,10 +220,13 @@ image digest and the selected image directory. root is the directory the transpo
 
 {{- /*
 Content-bundle init script; takes the bundle's overwrite flag and receives the source and target paths as $1 and $2.
-With overwrite, the target ends up exactly like rm -rf followed by cp -a: entries the source lacks are removed,
-and only entries whose type, symlink target, content, mode, or (when cp -a can preserve it) ownership differ are
-rewritten, so a restart on network storage copies only what changed. Listings are line-based, so a name with a
-newline in either tree falls back to the full copy. It needs only POSIX sh and BusyBox-compatible tools.
+With overwrite, the target ends up with the same entries, types, contents, modes, symlink targets, and (where cp -a
+can preserve them) owners as after rm -rf and cp -a, but only entries that differ are rewritten, so a restart on
+network storage copies only what changed. Unlike a full copy, unchanged files keep their timestamps, directory
+timestamps and symlink owners are not synced, and hard links between files become separate copies.
+An image missing a tool the sync uses, or a name with a newline in either tree (listings are line-based),
+falls back to the full copy. Directory modes and owners are applied last, deepest first, so copying into a
+directory that ends up read-only still works. It needs only POSIX sh and BusyBox-compatible tools.
 */ -}}
 {{- define "mindroom-runtime.contentBundleCopyScript" -}}
 set -eu
@@ -240,16 +243,23 @@ kind() {
   else k=-
   fi
 }
+writable() { [ -w "$1" ] || chmod u+w "$1"; }
 if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
 mkdir -p "$dst"
-if [ -n "$(find "$src" "$dst" -name "*$nl*")" ]; then
-  echo "$0: a name contains a newline, so $dst is replaced by a full copy" >&2
+reason=
+for tool in find stat cmp readlink chmod chown id; do
+  command -v "$tool" >/dev/null || reason="the image has no $tool"
+done
+[ -n "$reason" ] || [ -z "$(find "$src" "$dst" -name "*$nl*")" ] || reason="a name contains a newline"
+if [ -n "$reason" ]; then
+  echo "$0: $reason, so $dst is replaced by a full copy" >&2
   rm -rf "$dst"
   mkdir -p "$dst"
   cp -a "$src/." "$dst/"
 else
   sources=$(cd "$src" && find .)
   targets=$(cd "$dst" && find .)
+  directories=$(cd "$src" && find . -depth -type d)
   # cp -a keeps ownership only where chown works, so compare it only then (root without NFS root squashing).
   own=
   if [ "$(id -u)" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
@@ -261,40 +271,42 @@ else
     kind "$dst/$p"
     case $sk$k in
       dd|ff) continue ;;
-      ll) [ "$(readlink "$src/$p")" != "$(readlink "$dst/$p")" ] || continue ;;
+      ll) [ "$(readlink "$src/$p"; echo .)" != "$(readlink "$dst/$p"; echo .)" ] || continue ;;
     esac
+    writable "$dst/${p%/*}"
+    [ "$k" != d ] || chmod -R u+w "$dst/$p"
     rm -rf "$dst/$p"
     gone=$p
   done
-  # Copy missing entries whole, recopy differing files, and fix differing directory modes and owners.
+  # Copy missing entries whole, and recopy files whose size, mode, owner, or content differ.
   new=
   printf '%s\n' "$sources" | while IFS= read -r p; do
     case $p in "$new"/*) continue ;; esac
     s=$src/$p
     d=$dst/$p
     kind "$d"
-    case $k in
-      -)
+    if [ "$k" = - ]; then
+      writable "$dst/${p%/*}"
+      cp -a "$s" "$d"
+      new=$p
+    elif [ "$k" = f ]; then
+      m=$(stat -c "%s %a$own" "$s" "$d")
+      if [ "${m%"$nl"*}" != "${m#*"$nl"}" ] || ! cmp -s "$s" "$d"; then
+        writable "$dst/${p%/*}"
+        rm -f "$d"
         cp -a "$s" "$d"
-        new=$p
-        ;;
-      d)
-        m=$(stat -c "%a$own" "$s" "$d")
-        if [ "${m%"$nl"*}" != "${m#*"$nl"}" ]; then
-          set -- ${m%"$nl"*}
-          [ -z "$own" ] || chown "$2:$3" "$d"
-          # The leading zeros make GNU chmod clear a directory's setgid bit too.
-          chmod "00$1" "$d"
-        fi
-        ;;
-      f)
-        m=$(stat -c "%s %a$own" "$s" "$d")
-        if [ "${m%"$nl"*}" != "${m#*"$nl"}" ] || ! cmp -s "$s" "$d"; then
-          rm -f "$d"
-          cp -a "$s" "$d"
-        fi
-        ;;
-    esac
+      fi
+    fi
+  done
+  # Fix directory modes and owners deepest first; directories cp -a just created already match.
+  printf '%s\n' "$directories" | while IFS= read -r p; do
+    m=$(stat -c "%a$own" "$src/$p" "$dst/$p")
+    if [ "${m%"$nl"*}" != "${m#*"$nl"}" ]; then
+      set -- ${m%"$nl"*}
+      [ -z "$own" ] || chown "$2:$3" "$dst/$p"
+      # The leading zeros make GNU chmod clear a directory's setgid bit too.
+      chmod "00$1" "$dst/$p"
+    fi
   done
 fi
 {{- else }}
