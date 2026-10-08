@@ -3427,13 +3427,10 @@ class ResponseRunner:
         if handle is None or handle.exited or handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
             return
         now_ns = time.time_ns()
+        # The rules leave a resume span's end to its approval, whether a Stop or a failure ended it.
         await self.deps.delivery_gateway.end_reply_span(
             handle,
-            lambda reply, span: (
-                rl.stopped(reply, span, None, now_ns=now_ns)
-                if reply.unapplied_stop
-                else rl.fail(reply, span, None, phase="delivery", now_ns=now_ns)
-            ),
+            lambda reply, span: rl.fail(reply, span, None, phase="delivery", now_ns=now_ns),
         )
 
     async def _claim_owned_approval(

@@ -45,6 +45,7 @@ It records its delivery id, the journal sources it answers, the bot generation t
 At most one span is current per reply.
 
 A tool call (`reply_tool_calls`) is recorded on the span the calling task runs, as started before the tool runs and as completed with its result once it returns, whether or not the reply shows tool calls.
+The start is recorded only while that span runs as its reply's current span and no Stop waits for it; otherwise the tool does not run, so a Stop committed before the start stops even a synchronous tool whose worker thread the Stop's cancellation cannot reach.
 A call cut short stays started, since it may have taken effect.
 
 Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`, and `reply_sequence`; the stage is `initial` (the create), `final` (the span's terminal write), or `edit`.
@@ -110,11 +111,14 @@ A restart leaves a reply an approval holds to approval recovery, including a spa
 
 ## Interrupted responses
 
-A response that a Stop, a restart, an interruption, or a failure ends before its answer's own terminal write ends its span through one table, `interrupted_end` in `reply_scope.py`:
+A cancellation, or a failure the response settles as its outcome, that ends a response before its answer's own terminal write ends its span through one table, `interrupted_end` in `reply_scope.py`:
 
 - A recorded Stop ends the reply `cancelled` with the cancel note, whatever stopped the response.
-- Before delivery starts, the sources stay pending for a retry: an interruption that showed nothing leaves Matrix untouched, and anything else shows its restart, interruption, or error note while the retry runs.
-- Once delivery started, the reply ends `failed` with that note.
+- An interruption of a reply that has no event yet leaves Matrix untouched, and its sources stay pending for a retry.
+- Otherwise, before delivery starts, the reply shows its restart, interruption, or error note while its sources retry; once delivery started, it ends `failed` with that note.
+
+A regeneration that wrote nothing keeps the answer it was replacing in every case.
+Exceptions raised before the response settles take the exception path instead: a preparation failure after the placeholder ends the reply `failed` with the error note through `dispatch_failed`, a membership or revision change supersedes the span so its sources replay, and any other exception releases the span for a retry.
 
 ## Abandoned regenerations
 
