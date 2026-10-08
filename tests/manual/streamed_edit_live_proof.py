@@ -218,6 +218,18 @@ async def prove_restart_delivery_count(
     )
 
 
+async def _await_room_baselines(stack: ManagedTuwunelStack) -> None:
+    """Wait until the agent has committed its joined-room baseline.
+
+    A room's first timeline is history to the agent and never starts a reply,
+    so a message sent before this point goes unanswered.
+    """
+    async with asyncio.timeout(60):
+        while not await asyncio.to_thread(stack.managed_room_baseline_ready):
+            stack.require_runtime_alive()
+            await asyncio.sleep(0.1)
+
+
 async def run_proof(stack: ManagedTuwunelStack) -> Findings:
     """Run every observation against one disposable stack."""
     findings = Findings()
@@ -226,6 +238,7 @@ async def run_proof(stack: ManagedTuwunelStack) -> Findings:
         await client.register()
         await client.join_room()
         await client.sync_incremental(timeout_ms=0, allow_limited=True)
+        await _await_room_baselines(stack)
         await prove_streamed_edit_fallback(stack, client, findings)
         await prove_restart_delivery_count(stack, client, findings)
     finally:
