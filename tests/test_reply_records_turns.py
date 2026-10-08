@@ -1309,6 +1309,37 @@ async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(
     assert (finished.type, finished.tool_name, finished.result_preview) == ("tool_call_completed", "counter", "1")
 
 
+async def test_a_tool_result_stands_when_recording_its_finish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A journal failure after the tool ran never replaces its result; the call stays recorded as started."""
+    bot = await _streaming_bot(tmp_path)
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="general")
+    runtime = bot._reply_runtime
+    record_tool_call = runtime.record_tool_call
+
+    async def failing_finish(*, span_id: str, call_id: str, entry: ToolTraceEntry, now_ns: int) -> None:
+        if entry.type == "tool_call_completed":
+            msg = "journal unavailable"
+            raise RuntimeError(msg)
+        await record_tool_call(span_id=span_id, call_id=call_id, entry=entry, now_ns=now_ns)
+
+    monkeypatch.setattr(runtime, "record_tool_call", failing_finish)
+    results: list[object] = []
+
+    async def answer(*_args: object, **_kwargs: object) -> str:
+        results.append(await bridge("counter", AsyncMock(return_value="1"), {}))
+        return "Counted."
+
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+
+    assert results == ["1"]
+    reply = await _reply(bot)
+    (recorded,) = await runtime._span_tool_calls((reply.last_span_id,))
+    assert (recorded.type, recorded.tool_name) == ("tool_call_started", "counter")
+
+
 async def test_a_replay_is_told_which_tool_calls_its_stopped_attempt_made_though_it_showed_none(
     tmp_path: Path,
 ) -> None:

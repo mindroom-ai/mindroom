@@ -22,6 +22,7 @@ from uuid import uuid4
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation, TurnCompleted
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
+from mindroom.logging_config import get_logger
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     Presentation,
@@ -168,6 +169,8 @@ def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
     return UnfinishedStreamedReply(visible_text=work.text, tool_trace=work.tool_trace)
 
 
+logger = get_logger(__name__)
+
 # A span that ended this way left its turn to a later span, which its tool calls may already have served.
 _INTERRUPTED_OUTCOMES = frozenset(
     {rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED, rl.SpanOutcome.PAUSED, rl.SpanOutcome.SUPERSEDED},
@@ -201,12 +204,17 @@ class _SpanToolCalls:
         if isinstance(result, BaseException):
             result = f"{type(result).__name__}: {result}"
         _, entry = format_tool_combined(tool_name, dict(args), result)
-        await self.runtime.record_tool_call(
-            span_id=handle.span_id,
-            call_id=call_id,
-            entry=entry,
-            now_ns=self.runtime.clock(),
-        )
+        try:
+            await self.runtime.record_tool_call(
+                span_id=handle.span_id,
+                call_id=call_id,
+                entry=entry,
+                now_ns=self.runtime.clock(),
+            )
+        except Exception:
+            # The tool already ran, so its outcome stands: the call stays recorded as started, which a replay is
+            # told to check before repeating it.
+            logger.warning("tool_call_finish_not_recorded", tool_name=tool_name, call_id=call_id, exc_info=True)
 
 
 class ClaimRefused(Enum):

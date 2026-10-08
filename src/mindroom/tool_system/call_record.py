@@ -18,7 +18,7 @@ class _ToolCallRecorder(Protocol):
         ...
 
     async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
-        """Record that a call returned, or raised ``result``."""
+        """Record that a call returned, or raised ``result``; never raises, since the call already ran."""
         ...
 
 
