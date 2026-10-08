@@ -4,8 +4,9 @@ Agno Agent preserves ``list[Message]`` input as roleful provider messages, while
 Agno Team currently flattens that same shape through ``get_text_from_message``.
 This throwaway monkey-patch mirrors the Agent message-builder path until Agno
 Team has the same upstream behavior.
-Both builders also remove ordinary inline payloads from persisted history while
-retaining marked, bounded tool images for replay.
+Both builders, and the builders that resume paused runs, also remove ordinary
+inline payloads from persisted history while retaining marked, bounded tool
+images for replay.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from agno.agent import _messages as agent_messages
 from agno.models.message import Message
 from agno.run.messages import RunMessages
 from agno.team import _messages as team_messages
+from agno.team import _run as team_run
 from agno.utils.log import log_warning
 
 from mindroom.history.message_content import project_history_media_for_replay
@@ -36,10 +38,14 @@ from mindroom.history.message_content import project_history_media_for_replay
 # aggregate-bounded set of viewed tool images and disclosing replay omissions.
 # Upstream issue: No matching issue identified; this is an application replay policy
 # that currently requires wrapping Agno's private Agent/Team message builders.
+# Approval continuations rebuild history through separate private builders, so they
+# need the same filter before Agno refreshes offloaded media for the resumed request.
 # Upstream PR: None identified; the roleful-input PR above does not cover this behavior.
-# Remove when: A supported message-preparation hook can apply the same history filter;
-# retain the filtering policy when removing private builder interception.
+# Remove when: A supported message-preparation hook can apply the same history filter
+# to new and continued runs; retain the filtering policy when removing private builder interception.
 # Coverage: tests/test_agno_compat_message_builder.py::test_persisted_history_media_is_not_replayed;
+# tests/test_agno_compat_message_builder.py::test_agent_continuation_does_not_replay_persisted_history_media;
+# tests/test_agno_compat_message_builder.py::test_team_continuation_does_not_replay_persisted_history_media;
 # tests/test_agno_compat_message_builder.py::test_inline_media_cleanup_strips_every_kind_only_from_history;
 # tests/test_agno_compat_message_builder.py::test_viewed_image_replay_keeps_only_newest_four_and_discloses_omissions;
 # tests/test_agno_compat_message_builder.py::test_history_viewed_image_projection_enforces_aggregate_byte_limit.
@@ -89,6 +95,15 @@ def _strip_history_inline_media(run_messages: RunMessages) -> RunMessages:
     return run_messages
 
 
+def _without_history_inline_media(builder: _RunMessagesBuilder) -> _RunMessagesBuilder:
+    """Wrap one synchronous run-message builder with the history-media filter."""
+
+    def build(*args: object, **kwargs: object) -> RunMessages:
+        return _strip_history_inline_media(builder(*args, **kwargs))
+
+    return build
+
+
 def apply_patch() -> None:
     """Patch Agno Team run-message builders once per interpreter."""
     global _PATCHED
@@ -100,7 +115,6 @@ def apply_patch() -> None:
 
         original_team_get_run_messages = cast("_RunMessagesBuilder", team_messages._get_run_messages)
         original_team_aget_run_messages = cast("_AsyncRunMessagesBuilder", team_messages._aget_run_messages)
-        original_agent_get_run_messages = cast("_RunMessagesBuilder", agent_messages.get_run_messages)
         original_agent_aget_run_messages = cast("_AsyncRunMessagesBuilder", agent_messages.aget_run_messages)
 
         def _get_run_messages(*args: object, **kwargs: object) -> RunMessages:
@@ -123,14 +137,19 @@ def apply_patch() -> None:
             _append_input_messages(run_messages, cast("_RolefulInput", input_message))
             return _strip_history_inline_media(run_messages)
 
-        def _agent_get_run_messages(*args: object, **kwargs: object) -> RunMessages:
-            return _strip_history_inline_media(original_agent_get_run_messages(*args, **kwargs))
-
         async def _agent_aget_run_messages(*args: object, **kwargs: object) -> RunMessages:
             return _strip_history_inline_media(await original_agent_aget_run_messages(*args, **kwargs))
 
         team_messages._get_run_messages = cast("Any", _get_run_messages)
         team_messages._aget_run_messages = cast("Any", _aget_run_messages)
-        agent_messages.get_run_messages = cast("Any", _agent_get_run_messages)
+        agent_messages.get_run_messages = cast("Any", _without_history_inline_media(agent_messages.get_run_messages))
         agent_messages.aget_run_messages = cast("Any", _agent_aget_run_messages)
+        team_run._build_continue_run_messages = cast(
+            "Any",
+            _without_history_inline_media(team_run._build_continue_run_messages),
+        )
+        agent_messages._build_continue_run_messages = cast(
+            "Any",
+            _without_history_inline_media(agent_messages._build_continue_run_messages),
+        )
         _PATCHED = True
