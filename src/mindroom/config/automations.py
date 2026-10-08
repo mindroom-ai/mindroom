@@ -134,8 +134,8 @@ class PluginAutomation(_ScheduledAutomation):
     @classmethod
     def require_cron(cls, data: object) -> object:
         """Name the built-ins when an entry without a cron lands here, which usually means a misspelled built-in."""
-        if isinstance(data, Mapping) and "cron" not in data:
-            name = cast("Mapping[str, object]", data).get("name")
+        entry = cast("Mapping[str, object]", data) if isinstance(data, Mapping) else {}
+        if isinstance(name := entry.get("name"), str) and "cron" not in entry:
             msg = (
                 f"{name!r} is not a built-in automation ({', '.join(BUILTIN_AUTOMATION_NAMES)}), "
                 "and a plugin automation needs a cron"

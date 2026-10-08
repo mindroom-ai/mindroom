@@ -123,6 +123,13 @@ def test_a_misspelled_built_in_names_the_built_ins() -> None:
         _mind(automations=["dreamng"])
 
 
+def test_a_built_in_written_as_a_key_reports_the_missing_name() -> None:
+    """An entry without a name keeps the field errors that point at the fix."""
+    with pytest.raises(ValidationError) as excinfo:
+        _mind(automations=[{"dreaming": {"cron": "0 2 * * *"}}])
+    assert {"name", "dreaming"} <= {error["loc"][-1] for error in excinfo.value.errors()}
+
+
 def test_a_built_in_is_listed_once() -> None:
     """The same built-in cannot run twice for one agent."""
     with pytest.raises(ValidationError, match="Duplicate"):
