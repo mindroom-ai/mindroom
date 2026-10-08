@@ -4719,6 +4719,8 @@ class _SupersessionSnapshot:
     records: Mapping[str, TurnRecord]
     sources: Mapping[str, _SettledJournalSource]
     pending_deliveries: tuple[_PendingSupersessionDelivery, ...]
+    # Edit events a regeneration claimed a reply for.
+    regenerated_edits: frozenset[str] = frozenset()
 
 
 def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionSnapshot:
@@ -4756,10 +4758,16 @@ def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionS
             ):
                 msg = "malformed supersession outbox row"
                 raise AssertionError(msg)
+            regenerated = database.execute(
+                "SELECT span.delivery_id FROM reply_spans AS span WHERE span.principal_id = ? "
+                "AND span.kind = 'regeneration'",
+                (principal_id,),
+            ).fetchall()
             return _SupersessionSnapshot(
                 records,
                 sources,
                 tuple(_PendingSupersessionDelivery(*row) for row in pending),
+                frozenset(str(row[0]) for row in regenerated),
             )
     except sqlite3.Error as exc:
         msg = f"supersession journal snapshot failed: {exc}"
@@ -5857,16 +5865,14 @@ class FinalStateAuditor:
         snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
         decisions = _supersession_decisions(self.oracle.log_path)
         self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
-        # A message MindRoom never answered, such as one it superseded, has no reply to
-        # regenerate, so MindRoom settles each edit of it without any visible effect.
+        # MindRoom regenerates a reply only for an edit of the latest message of its conversation, while no
+        # approval holds that reply; it settles any other edit, such as one of a message it never answered,
+        # without a visible effect.
         self.oracle.declined_edit_sources = frozenset(
             source
             for source, edits in self.pending_edit_markers.items()
-            if source not in snapshot.records
-            and all(
-                (row := snapshot.sources.get(event_id)) is not None and row.state == "settled"
-                for event_id in (source, *edits)
-            )
+            if all((row := snapshot.sources.get(event_id)) is not None and row.state == "settled" for event_id in edits)
+            and snapshot.regenerated_edits.isdisjoint(edits)
         )
         # Final audit already validated this view; live polling must validate
         # with the same retained ancestry before joining durable ownership.

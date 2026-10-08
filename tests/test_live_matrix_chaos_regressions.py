@@ -765,7 +765,7 @@ async def test_ledger_refresh_settles_edit_debts_before_the_next_proof(tmp_path:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("variant", ["declined", "edit_unsettled", "old_answered"])
 async def test_settled_edit_of_superseded_source_is_a_declined_no_op(tmp_path: Path, variant: str) -> None:
-    """MindRoom settles an edit of a message it superseded without regenerating anything, so the edit owes nothing."""
+    """MindRoom settles an edit of a message a newer one followed without regenerating anything, so it owes nothing."""
     case = await _supersession_case(tmp_path, visible_old=False, old_record=variant == "old_answered")
     principal = case.journal.principal("general@@agent:example")
     edit = {
@@ -796,9 +796,10 @@ async def test_settled_edit_of_superseded_source_is_a_declined_no_op(tmp_path: P
     case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
     try:
         case.oracle.refresh_ledger_attributions(min_interval=0)
-        assert ("$old" in case.oracle.declined_edit_sources) is (variant == "declined")
+        # An older message's edit is declined whether MindRoom answered that message or superseded it.
+        assert ("$old" in case.oracle.declined_edit_sources) is (variant != "edit_unsettled")
         # A declined edit owes nothing, so it no longer blocks proof that MindRoom superseded the message.
-        assert ("$old" in case.oracle.supersession_proofs) is (variant == "declined")
+        assert ("$old" in case.oracle.supersession_proofs) is (variant != "edit_unsettled")
     finally:
         await case.journal.close()
 

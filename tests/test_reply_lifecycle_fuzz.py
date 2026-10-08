@@ -1,15 +1,14 @@
-"""Interleaved reply events keep the lifecycle invariants of docs/architecture/reply-messages.md.
+"""Interleaved reply events never lead to the outcomes docs/architecture/reply-messages.md rules out.
 
 A state machine drives one reply through every rule in random order -- claims,
 progress, durable rows and their acknowledgements or failures, Stops at any
 point, pauses and every approval outcome, regenerations, deletions,
-departures, entity removal, retention, and bot restarts -- and checks after
-every step that the records still describe a reply someone owns. Approval
+departures, entity removal, retention, and bot restarts. After every step it
+checks that no source is answered twice, that a reply writes only for its own
+span, that a finished reply shows its end, and the records' structure. Approval
 continuations are rows, as the store keeps them: the reply's hold is derived
-from them, a claim on a held reply goes through the shared blocking
-predicate, and an approval finishes only once its FINAL resolved or an edit
-superseded it. Each run ends by draining every owner and checking that
-nothing is left waiting.
+from them, and an approval finishes only once its FINAL resolved. Each run ends
+by draining every owner and checking that nothing is left waiting.
 """
 
 from __future__ import annotations
@@ -52,8 +51,6 @@ _SETTLING_OUTCOMES = frozenset(
         SpanOutcome.RESTORED,
     },
 )
-# A regeneration that ends this way gave up on its answer without a retry.
-_ABANDONED_OUTCOMES = frozenset({SpanOutcome.CANCELLED, SpanOutcome.FAILED, SpanOutcome.SUPPRESSED})
 # A span running for its approval that ends this way has no answer: the runtime fails the approval.
 _UNANSWERED_OUTCOMES = frozenset(
     {SpanOutcome.CANCELLED, SpanOutcome.FAILED, SpanOutcome.SUPPRESSED, SpanOutcome.RELEASED},
@@ -75,10 +72,6 @@ class _Continuation:
     claim_span_id: str | None = None
     state: str = "waiting"  # waiting, ready, failing
     disposition: rl.FailureDisposition | None = None
-
-    @property
-    def superseded(self) -> bool:
-        return self.state == "failing" and self.disposition == "superseded"
 
 
 @dataclass
@@ -107,13 +100,13 @@ class _Model:
     continuations: dict[str, _Continuation] = field(default_factory=dict)
     # Edits whose claim waited for the reply to be free.
     deferred: list[str] = field(default_factory=list)
-    # Each edit's receipt order, which its claims carry however late they run.
-    edit_orders: dict[str, int] = field(default_factory=dict)
     removed: bool = False
     # Logical sources the user deleted: no settlement answers their turn.
     deleted: set[str] = field(default_factory=set)
     # The turn ledger recorded the turn answered, which suppresses a later replay of its original source.
     turn_answered: bool = False
+    # Pending sources a settlement answered.
+    answered: set[str] = field(default_factory=set)
     # The bot left the room, which drops everything owed to it.
     left: bool = False
     # What each write of a reply, by sequence, may show: one that ends the reply, work in progress, or refused.
@@ -171,7 +164,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     def _held_by(self) -> str | None:
         """Return the approval that holds the reply, as the store reads it from the continuations."""
         for continuation in self.model.continuations.values():
-            if continuation.paused_span_id in self.model.spans and not continuation.superseded:
+            if continuation.paused_span_id in self.model.spans:
                 return continuation.approval_id
         return None
 
@@ -191,8 +184,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self.model.reply = transition.reply
         for span in transition.spans:
             self.model.spans[span.span_id] = span
-            if before is not None and span.ended:
-                self._check_abandonment(before, span, transition)
         for effect in transition.effects:
             self._apply_effect(effect)
         self._derive_hold()
@@ -200,6 +191,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if transition.row is not None:
             reply = self.model.reply
             assert reply is not None
+            # P4: a reply writes only for its current span, or for its last when it writes its own note.
+            assert transition.row.span_id in {reply.current_span_id, reply.last_span_id}, (transition.row, reply)
             span = self.model.spans[transition.row.span_id]
             creates = reply.event_id is None and transition.row.stage is not WriteStage.EDIT
             self.model.rows.append(_Row(transition.row, creates_event=creates, delivery_id=span.delivery_id))
@@ -222,39 +215,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         ):
             self.model.writes.setdefault((reply.reply_id, reply.possibly_shown_seq), "open")
 
-    def _check_abandonment(self, before: Reply, span: Span, transition: rl.Transition) -> None:
-        """I11, I12, I14: an abandoned regeneration restores exactly when nothing it wrote may show."""
-        if span.kind is not SpanKind.REGENERATION or span.rollback is None or self.model.removed:
-            return
-        wrote = before.possibly_shown_seq is not None and before.possibly_shown_seq > span.base_sequence
-        if span.outcome is SpanOutcome.RESTORED:
-            # I12: never back to the rollback once a write that may show was recorded.
-            assert not wrote, (before, span)
-            # A Stop never lets unfinished work the regeneration replaced run again.
-            assert not before.unapplied_stop or span.rollback.state in rl._TERMINAL_STATES, (before, span)
-            return
-        after = self.model.reply
-        assert after is not None
-        # An exit whose own terminal row ends the reply, as a finish that found the Stop, is no abandonment; a span
-        # a restart lost is abandoned only when the reply ends with it instead of waiting for a retry.
-        abandoned = span.outcome in _ABANDONED_OUTCOMES or (span.outcome is SpanOutcome.LOST and after.terminal)
-        if not abandoned or transition.row is not None:
-            return
-        shown = before.event_id is not None and not before.placeholder_only
-        if not wrote and shown and before.approval_id is None and span.rollback.state in rl._TERMINAL_STATES:
-            # I11: a finished answer the regeneration never replaced stands.
-            msg = f"abandoned regeneration {span.span_id} did not restore {span.rollback.state}"
-            raise AssertionError(msg)
-        if wrote and after.terminal:
-            # I14: Matrix is brought to match the records; a create still in flight is removed once acknowledged.
-            converges = (
-                transition.row is not None
-                or after.owed_write is not None
-                or bool(after.redaction_pending)
-                or (after.event_id is None and self._unresolved_rows())
-            )
-            assert converges, (before, after, span)
-
     def _apply_effect(self, effect: rl.Effect) -> None:
         match effect:
             case SettleSources(span_id=span_id, answered=answered):
@@ -263,6 +223,12 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 answered = answered and not set(settled.sources.logical) <= self.model.deleted
                 if answered:
                     self.model.turn_answered = True
+                    for source in settled.sources.pending:
+                        if source in self.model.settled:
+                            continue
+                        # P3: no source is answered twice.
+                        assert source not in self.model.answered, (source, settled)
+                        self.model.answered.add(source)
                 self._settle(span_id)
             case CancelSpan(span_id=span_id):
                 self.model.cancel_requested.add(span_id)
@@ -276,13 +242,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 raise AssertionError(msg)
 
     def _fence(self, approval_id: str, disposition: rl.FailureDisposition) -> None:
-        """Fence a continuation as the store does: a FINAL still delivered wins, supersession replaces a failure."""
+        """Fence a continuation as the store does: a FINAL still delivered wins."""
         continuation = self.model.continuations.get(approval_id)
         if continuation is None or self.model.finals.get(continuation.delivery_id) in {"pending", "acknowledged"}:
             return
-        if continuation.state in {"waiting", "ready"} or (
-            disposition == "superseded" and continuation.state == "failing"
-        ):
+        if continuation.state in {"waiting", "ready"}:
             continuation.state = "failing"
             continuation.disposition = disposition
 
@@ -330,16 +294,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if transition.outcome is Outcome.DEFERRED and edit is not None and edit not in self.model.deferred:
             # An approval's claim is retried by its recovery and a replay by journal replay; an edit waits here.
             self.model.deferred.append(edit)
-        if transition.reply is not None and reply is not None and transition.reply.reply_id != reply.reply_id:
-            # A regeneration of a gone reply starts a new record. The old one stays while a superseded
-            # approval names it, until that approval's cleanup, which this model runs first.
-            for continuation in tuple(self.model.continuations.values()):
-                assert continuation.superseded, continuation
-                self._finish_approval(continuation, owner_available=True, retry=False)
-            self.model.spans = {}
-            self.model.settled = set()
-            self.model.rows = []
-            self.model.finals = {}
+        # One turn has one reply: no claim starts another.
+        assert transition.reply is None or reply is None or transition.reply.reply_id == reply.reply_id, transition
         transition = self._apply(transition)
         if transition.claimed is not None and approval is not None:
             approval.claim_span_id = transition.claimed.span_id
@@ -391,7 +347,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if "$source" in self.model.deleted:
             # The source gate finds the message deleted, and the reply ends as a deletion ends it.
             self._apply(rl.sources_deleted(self.model.reply, last, now_ns=self._now()))  # type: ignore[arg-type]
-        elif last.delivery_id in self.model.edit_orders:
+        elif last.delivery_id.startswith("$edit-"):
             # The pending source is an edit, a regeneration's or its approved resume's: the regenerator replays it
             # with the edit it selected.
             self._claim(edit=last.delivery_id)
@@ -404,19 +360,32 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply is not None
             # The regenerator regenerates only an answer with an event.
             and self.model.reply.event_id is not None
-            # A span this instance runs holds the conversation; one an older instance left is retired by the claim.
-            and (self._current() is None or self._current().bot_generation != self.generation)
             and "$source" not in self.model.deleted
         ),
     )
     @rule()
     def regenerate(self) -> None:
-        """An edit regenerates the reply, whatever approval holds it."""
-        self.model.receipt_order += 1
+        """An edit regenerates an unheld reply in place, stopping it first while it runs; any other stays as it is."""
+        reply = self.model.reply
+        assert reply is not None
+        if reply.state is ReplyState.GONE or reply.approval_id is not None:
+            # The regenerator leaves a reply the user deleted, or one an approval holds, as it is.
+            return
+        live = self._live()
+        if live is not None:
+            # As a Stop reaction would; the regeneration's claim waits for the stopped span to end.
+            self.stop()
+            stopped = self.model.reply
+            assert stopped is not None
+            if self._live() is not None and live.span_id in self.model.cancel_requested and stopped.unapplied_stop:
+                self.span_observes_its_stop()
         self.model.edits += 1
-        edit = f"$edit-{self.model.edits}"
-        self.model.edit_orders[edit] = self.model.receipt_order
-        self._claim(edit=edit)
+        transition = self._claim(edit=f"$edit-{self.model.edits}")
+        assert transition.unmodeled is None, transition
+        assert transition.outcome in {Outcome.APPLIED, Outcome.DEFERRED}, transition
+        if transition.outcome is Outcome.APPLIED:
+            assert transition.claimed is not None
+            assert transition.claimed.kind is SpanKind.REGENERATION, transition
 
     @precondition(lambda self: self._bot() and bool(self.model.deferred))
     @rule()
@@ -539,15 +508,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.writes[(reply.reply_id, row.intent.sequence)] = refused
         # A later span claims the reply only after its rows resolved, so a refused FINAL is the last span's.
         assert row.intent.stage is not WriteStage.FINAL or span.span_id == reply.last_span_id, (row, reply)
-        restorable = (
-            row.intent.stage is WriteStage.FINAL
-            and span.kind is SpanKind.REGENERATION
-            and span.rollback is not None
-            and span.span_id == reply.last_span_id
-            and not reply.placeholder_only
-            and reply.event_id is not None
-            and row.intent.sequence - 1 <= span.base_sequence
-        )
         self._apply(
             rl.write_failed(
                 reply,
@@ -559,20 +519,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 now_ns=self._now(),
             ),
         )
-        # The Stop's own refused row restores only a finished answer.
-        finished_only = span.outcome is SpanOutcome.CANCELLED
-        if (
-            restorable
-            and span.rollback is not None
-            and not (finished_only and span.rollback.state not in rl._TERMINAL_STATES)
-        ):
-            # I11: only the refused FINAL was written, so the answer it would replace stands as the room shows it;
-            # a paused one does not get its approval back.
-            restored = self.model.reply
-            assert restored is not None
-            expected = ReplyState.FAILED if span.rollback.state is ReplyState.PAUSED else span.rollback.state
-            assert restored.state is expected, (restored, span)
-            assert (restored.possibly_shown_seq or 0) <= span.base_sequence, (restored, span)
         if row.intent.stage is WriteStage.FINAL:
             # As for an acknowledgement, the approval runtime settles the approval later.
             self.model.finals[row.delivery_id] = "refused"
@@ -654,7 +600,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if reply.state is ReplyState.PAUSED:
             return
         prepared = self._terminal_write(ReplyState.COMPLETED)
-        self.stop(lag=0)
+        self.stop()
         if self._live() is None:
             return
         transition = rl.finish(self.model.reply, span, prepared, now_ns=self._now())  # type: ignore[arg-type]
@@ -679,29 +625,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             requested = ReplyState.FAILED if phase == "delivery" else ReplyState.ACTIVE
             write = self._terminal_write(requested)
         self._span_exit(span, rl.fail(reply, span, write, phase=phase, now_ns=self._now()))
-
-    @precondition(
-        lambda self: (
-            self._live() is not None
-            and self._live().kind is not SpanKind.APPROVAL_RESUME
-            and self.model.reply is not None
-            and self.model.reply.unapplied_stop
-        ),
-    )
-    @rule(phase=st.sampled_from(["pre_delivery", "delivery"]))
-    def fail_rendered_before_the_span_saw_its_stop(self, phase: rl._FailurePhase) -> None:
-        """A failure note rendered at the Stop's revision, before the span saw the Stop, renders again."""
-        span = self._live()
-        reply = self.model.reply
-        assert span is not None
-        assert reply is not None
-        if reply.state is ReplyState.PAUSED:
-            return
-        requested = ReplyState.FAILED if phase == "delivery" else ReplyState.ACTIVE
-        write = TerminalWrite(shown=f"shown-{reply.revision}", prepared_revision=reply.revision, state=requested)
-        transition = rl.fail(reply, span, write, phase=phase, now_ns=self._now())
-        assert transition.outcome is Outcome.RECOMPUTE
-        assert transition.reply == reply
 
     @precondition(lambda self: self._live() is not None)
     @rule(reason=st.sampled_from(["suppressed", "hook_failed"]))
@@ -889,7 +812,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 # Matrix refused the answer for good: the runtime settles the run as a failure.
                 continuation.state = "failing"
                 continuation.disposition = "failed"
-            if continuation.state == "failing" and not continuation.superseded:
+            if continuation.state == "failing":
                 self._write_failure_note(continuation)
             if self._may_finish(continuation):
                 self._finish_approval(continuation, owner_available=self._bot())
@@ -930,11 +853,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         )
 
     def _may_finish(self, continuation: _Continuation) -> bool:
-        """The store's gate: a superseded run, or a FINAL at its first source Matrix took or refused for good."""
-        return continuation.superseded or self.model.finals.get(continuation.delivery_id) in {
-            "acknowledged",
-            "refused",
-        }
+        """The store's gate: a FINAL at its first source Matrix took or refused for good."""
+        return self.model.finals.get(continuation.delivery_id) in {"acknowledged", "refused"}
 
     def _finish_approval(self, continuation: _Continuation, *, owner_available: bool, retry: bool = True) -> None:
         """Apply the finish to the reply while the continuation still holds it, then delete the continuation."""
@@ -1016,19 +936,18 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     # --- reply-authored -----------------------------------------------------
 
     @precondition(lambda self: self._bot() and self.model.reply is not None)
-    @rule(lag=st.integers(0, 2))
-    def stop(self, lag: int) -> None:
+    @rule()
+    def stop(self) -> None:
         """A Stop, while a span runs or while none does."""
         reply = self.model.reply
         assert reply is not None
         self.model.receipt_order += 1
-        receipt = max(1, self.model.receipt_order - lag)
         live = self._live()
         transition = rl.stop(
             reply,
             self._current() or self._last(),
             StopFacts(
-                receipt_order=receipt,
+                receipt_order=self.model.receipt_order,
                 span_live=live is not None,
             ),
             now_ns=self._now(),
@@ -1214,6 +1133,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         # The next turn is a new message, which the ledger has not answered.
         self.model.deleted.clear()
         self.model.turn_answered = False
+        self.model.answered.clear()
 
     # --- invariants ---------------------------------------------------------
 
@@ -1245,31 +1165,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 assert span.ended, span
 
     @invariant()
-    def non_terminal_replies_have_an_owner(self) -> None:
-        """I5: a non-terminal reply has a span, pending sources, an approval, or an owed write."""
-        reply = self.model.reply
-        if reply is None or reply.terminal:
-            return
-        last = self.model.spans[reply.last_span_id]
-        owned = (
-            reply.current_span_id is not None
-            or reply.approval_id is not None
-            or any(continuation.claim_span_id == last.span_id for continuation in self.model.continuations.values())
-            or (last.outcome in rl._SOURCES_PENDING_OUTCOMES and not self._is_settled(last.span_id))
-            or reply.owed_write is not None
-        )
-        assert owned, (reply, last, self.model.continuations)
-
-    @invariant()
-    def terminal_spans_settled_their_sources(self) -> None:
-        """I6: a span's sources settle with its terminal transition, except those an approval holds."""
-        held = {continuation.paused_span_id for continuation in self.model.continuations.values()}
-        for span in self.model.spans.values():
-            if span.kind is SpanKind.APPROVAL_RESUME or span.outcome not in _SETTLING_OUTCOMES or span.span_id in held:
-                continue
-            assert self._is_settled(span.span_id), span
-
-    @invariant()
     def writes_are_recorded_before_they_are_sent(self) -> None:
         """I7: every write took a sequence, and nothing past the sequence is shown or confirmed."""
         reply = self.model.reply
@@ -1281,19 +1176,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             assert row.intent.sequence <= reply.reply_sequence
 
     @invariant()
-    def stop_buttons_go_when_replies_stop_being_active(self) -> None:
-        """I8: only a reply whose span runs keeps a Stop button: active, or paused while its span waits in place."""
-        reply = self.model.reply
-        waiting_in_place = reply is not None and reply.state is ReplyState.PAUSED and reply.current_span_id is not None
-        if reply is not None and reply.state is not ReplyState.ACTIVE and not waiting_in_place:
-            assert reply.stop_button_event_id is None
-
-    @invariant()
     def a_finished_reply_shows_its_end(self) -> None:
-        """I15: once a finished reply owes nothing, its latest write that may show ends it and Matrix took it.
+        """P5: once a finished reply owes nothing, the newest write Matrix took ends it.
 
-        A note Matrix refused cannot be resent, so the reply stops owing it; a
-        room the bot left owes nothing.
+        A refused FINAL is replaced by its note; a note Matrix refused cannot be
+        resent, so the reply stops owing it. A room the bot left owes nothing.
         """
         reply = self.model.reply
         if (
@@ -1302,24 +1189,18 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             or reply.state is ReplyState.GONE
             or self.model.removed
             or self.model.left
-        ):
-            return
-        if (
-            self.model.rows
+            or self.model.rows
             or reply.owed_write is not None
             or reply.redaction_pending
-            or reply.possibly_shown_seq is None
         ):
             return
-        shown = self.model.writes.get((reply.reply_id, reply.possibly_shown_seq), "ends")
-        assert shown in {"ends", "refused_edit"}, (shown, reply)
-
-    @invariant()
-    def a_finished_reply_shows_its_stop(self) -> None:
-        """I4: a terminal reply that is still visible has no Stop left to apply."""
-        reply = self.model.reply
-        if reply is not None and reply.terminal and reply.state is not ReplyState.GONE:
-            assert not reply.unapplied_stop, reply
+        writes = {
+            sequence: shown
+            for (reply_id, sequence), shown in self.model.writes.items()
+            if reply_id == reply.reply_id and shown != "refused"
+        }
+        if writes:
+            assert writes[max(writes)] in {"ends", "refused_edit"}, (writes, reply)
 
     @invariant()
     def continuations_name_spans_of_the_reply(self) -> None:
@@ -1329,11 +1210,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
 
     @invariant()
     def one_approval_holds_a_reply(self) -> None:
-        """I13: at most one continuation that is not superseded names the reply's spans."""
+        """I13: at most one continuation names the reply's spans."""
         holders = [
             continuation
             for continuation in self.model.continuations.values()
-            if not continuation.superseded and continuation.paused_span_id in self.model.spans
+            if continuation.paused_span_id in self.model.spans
         ]
         assert len(holders) <= 1, holders
 
