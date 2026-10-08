@@ -18,6 +18,7 @@ import itertools
 import math
 import sys
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 import bmesh
@@ -44,6 +45,17 @@ GOLD = "#ffc566"
 VIEW_DISTANCE_4D = 4.0
 FILAMENT = {"inner": 24.0, "strut": 8.0, "outer": 8.0}  # Emission strengths per edge family.
 LEG_GLOW = 10.0  # Emission strength at the center of each leg's white core.
+
+
+@dataclass
+class Rig:
+    """The scene objects the effects animate."""
+
+    camera: bpy.types.Object
+    core: bpy.types.Object  # The point light inside the cube's bead.
+    behind: bpy.types.Object  # The pool light behind the letter.
+    mount: bpy.types.Object  # The empty the studio lights hang on, turned with the lock-in camera.
+    haze: bpy.types.Object  # The flash's volume around the letter.
 
 
 def srgb(hex_color: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
@@ -250,7 +262,9 @@ def studio_world() -> bpy.types.World:
     """Studio HDRI for reflections and light; camera rays see plain navy instead."""
     if not HDRI_CACHE.exists():
         HDRI_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(HDRI_URL, HDRI_CACHE)  # noqa: S310 -- Fixed https URL.
+        partial = HDRI_CACHE.with_suffix(".part")  # An interrupted download never lands at the cache path.
+        urllib.request.urlretrieve(HDRI_URL, partial)  # noqa: S310 -- Fixed https URL.
+        partial.replace(HDRI_CACHE)
     world = bpy.data.worlds.new("studio")
     tree = world.node_tree
     nodes, links = tree.nodes, tree.links
@@ -630,8 +644,11 @@ def configure_render(scene: bpy.types.Scene) -> None:
     scene.render.use_compositing = True
 
 
-def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
-    """Mirror floor, a high back light, a cool pool behind the letter, and rim strips."""
+def studio(collection: bpy.types.Collection) -> tuple[bpy.types.Object, bpy.types.Object, list[bpy.types.Object]]:
+    """Mirror floor, a high back light, a cool pool behind the letter, and rim strips.
+
+    Returns the pool light, the mount the lights hang on, and the back and rim lights.
+    """
     floor_z = logo.FOOT_Z[0]
     bm = bmesh.new()
     logo.add_box(bm, (-30.0, -30.0, floor_z - 0.02), (30.0, 30.0, floor_z))
@@ -639,42 +656,51 @@ def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
     level = Vector((1.0, 1.0, 0.0)).normalized()  # Toward the hero camera, along the floor.
     right = Vector((-1.0, 1.0, 0.0)).normalized()
     center = Vector((0.3, 0.3, (floor_z + logo.H) / 2))
-    rig = {}
     # High enough that the floor does not mirror it back at the camera.
-    rig["back"] = add_light(
+    back = add_light(
         "back", "AREA", collection, location=center - 2.0 * level + Vector((0, 0, 5.5)), target=center,
         energy=1600.0, color=srgb("#f4fbff"), size=2.0,
     )  # fmt: skip
     # The glass refracts this pool on the floor behind it and glows.
     pool = center - 1.6 * level
-    rig["behind"] = add_light(
+    behind = add_light(
         "behind", "AREA", collection, location=pool + Vector((0, 0, 3.0)), target=pool - Vector((0, 0, 5)),
         energy=600.0, color=srgb("#bfeaf2"), size=2.5,
     )  # fmt: skip
-    link_lights(rig["behind"], [floor], "behind-receivers")
-    rig["behind"].visible_glossy = False  # The floor would mirror the panel itself as a bright blob in front of the M.
-    for side, sign in [("left", -1), ("right", 1)]:
-        rig[f"rim-{side}"] = add_light(
-            f"rim-{side}", "AREA", collection, location=center - 2.0 * level + 3.5 * sign * right + Vector((0, 0, 1.0)),
-            target=center, energy=900.0, color=srgb("#dff3ff"), shape="RECTANGLE", size=0.4, size_y=4.0,
-        )  # fmt: skip
+    link_lights(behind, [floor], "behind-receivers")
+    behind.visible_glossy = False  # The floor would mirror the panel itself as a bright blob in front of the M.
+    rims = [
+        add_light(
+            f"rim-{side}",
+            "AREA",
+            collection,
+            location=center - 2.0 * level + 3.5 * sign * right + Vector((0, 0, 1.0)),
+            target=center,
+            energy=900.0,
+            color=srgb("#dff3ff"),
+            shape="RECTANGLE",
+            size=0.4,
+            size_y=4.0,
+        )
+        for side, sign in [("left", -1), ("right", 1)]
+    ]
     # The floor mirrors the back light and the low rims as white streaks from some angles;
     # they only exist to light the glass.
-    for name in ("back", "rim-left", "rim-right"):
-        link_lights(rig[name], [floor], f"{name}-skips-floor", exclude=True)
-    # The lights hang on a rig that the lock-in turns with the camera, so the look holds from any side.
+    keys = [back, *rims]
+    for light in keys:
+        link_lights(light, [floor], f"{light.name}-skips-floor", exclude=True)
+    # The lights hang on a mount that the lock-in turns with the camera, so the look holds from any side.
     mount = bpy.data.objects.new("light-rig", None)
     collection.objects.link(mount)
     mount.location = (center.x, center.y, 0.0)
-    for light in rig.values():
+    for light in [*keys, behind]:
         light.visible_camera = False
         light.parent = mount
         light.location -= mount.location
-    rig["mount"] = mount
-    return rig
+    return behind, mount, keys
 
 
-def flash_haze(collection: bpy.types.Collection, rig: dict[str, bpy.types.Object]) -> bpy.types.Object:
+def flash_haze(collection: bpy.types.Collection, keys: list[bpy.types.Object]) -> bpy.types.Object:
     """Air around the letter that only the core lights; during the flash it shows rays streaming from the center."""
     material, tree = node_material("flash-haze")
     nodes, links = tree.nodes, tree.links
@@ -704,14 +730,14 @@ def flash_haze(collection: bpy.types.Collection, rig: dict[str, bpy.types.Object
     logo.add_box(bm, (-2.5, -2.5, logo.FOOT_Z[0] + 0.01), (3.5, 3.5, logo.H + 2.5))
     box = logo.mesh_object("flash-haze", bm, material, collection)
     box.hide_render = True  # Shown only while the flash lasts.
-    for name in ("back", "rim-left", "rim-right"):  # The behind light already reaches only the floor.
-        receivers = rig[name].light_linking.receiver_collection
+    for light in keys:  # The pool light already reaches only the floor.
+        receivers = light.light_linking.receiver_collection
         receivers.objects.link(box)
         receivers.collection_objects[len(receivers.objects) - 1].light_linking.link_state = "EXCLUDE"
     return box
 
 
-def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
+def build(*, frozen: bool = False) -> Rig:
     """Build the model and stage it, in clear crystal or frosted ice."""
     bpy.ops.wm.read_factory_settings(use_empty=True)
     logo.CUBE_BEAM = 0.11  # Slimmer beams open the frame enough to see the inner cube.
@@ -724,13 +750,11 @@ def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
     build_tesseract(collection)
     leg_frames(collection)
     leg_glow(collection)
-    rig = studio(collection)
-    rig["core"] = core
+    behind, mount, keys = studio(collection)
     camera = logo.logo_camera("crystal-camera", collection)
     camera.data.clip_end = 300.0
-    scene.camera = rig["camera"] = camera
-    rig["haze"] = flash_haze(collection, rig)
-    return rig
+    scene.camera = camera
+    return Rig(camera=camera, core=core, behind=behind, mount=mount, haze=flash_haze(collection, keys))
 
 
 # ---------------------------------------------------------------- effects
@@ -742,9 +766,9 @@ def ease(s: float) -> float:
     return s * s * (3 - 2 * s)
 
 
-def glide(rig: dict[str, bpy.types.Object], frame: int) -> None:
+def glide(rig: Rig, frame: int) -> None:
     """Swing the camera from a low, wide, off-axis view into the logo's single viewpoint, arriving at LOCK_FRAME."""
-    camera = rig["camera"]
+    camera = rig.camera
     camera.data.type = "PERSP"
     camera.data.sensor_width = 36.0
     s = ease((frame - 1) / (LOCK_FRAME - 1))
@@ -759,16 +783,16 @@ def glide(rig: dict[str, bpy.types.Object], frame: int) -> None:
     # The pool behind the letter is only for the glass to refract from the logo's angle;
     # seen from low and close it would sit on the floor in plain view.
     # The studio's reflections likewise come up as the glass turns toward the logo's view.
-    rig["behind"].data.energy = 600.0 * s**3
+    rig.behind.data.energy = 600.0 * s**3
     world = bpy.context.scene.world.node_tree.nodes
     world["studio-light"].inputs["Strength"].default_value = 0.7 * (0.25 + 0.75 * s**2)
     turn = azimuth - math.radians(45.0)
-    rig["mount"].rotation_euler = (0.0, 0.0, turn)
+    rig.mount.rotation_euler = (0.0, 0.0, turn)
     world["hdri-turn"].inputs["Rotation"].default_value = (0.0, 0.0, turn)
 
 
 def shine(
-    rig: dict[str, bpy.types.Object],
+    rig: Rig,
     *,
     core: float = 1.0,
     spark: float = 1.0,
@@ -782,7 +806,7 @@ def shine(
 
     The legs glow up to the height `level`, with a band of strength `surface` where the light meets the dark.
     """
-    rig["core"].data.energy = 700.0 * core
+    rig.core.data.energy = 700.0 * core
     bpy.data.objects["cube-core"].hide_render = spark <= 0  # Unlit, the bead would show as a black dot.
     materials = bpy.data.materials
     materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * spark
@@ -797,13 +821,13 @@ def shine(
     glow["glow-surface"].inputs["To Min"].default_value = surface
 
 
-def flash(rig: dict[str, bpy.types.Object], burst: float, *, reach: float = 2.2) -> None:
+def flash(rig: Rig, burst: float, *, reach: float = 2.2) -> None:
     """The camera's side of a burst of strength `burst`: rays in the haze, lens glare, and exposure.
 
     The haze thins out to nothing at `reach` units from the cube; growing it spreads the light outward.
     """
     quiet = burst < 0.02
-    rig["haze"].hide_render = quiet
+    rig.haze.hide_render = quiet
     haze = bpy.data.materials["flash-haze"].node_tree.nodes["haze-density"]
     haze.inputs["To Min"].default_value = 0.15 * burst
     haze.inputs["From Max"].default_value = reach
@@ -814,12 +838,12 @@ def flash(rig: dict[str, bpy.types.Object], burst: float, *, reach: float = 2.2)
     lens["flash-beams"].inputs["Strength"].default_value = 0.5 * burst
     if not quiet:
         bpy.context.view_layer.update()  # The beams need the camera's new pose to find the core on screen.
-        core = world_to_camera_view(scene, rig["camera"], logo.CUBE_CENTER)
+        core = world_to_camera_view(scene, rig.camera, logo.CUBE_CENTER)
         lens["flash-beams"].inputs["Sun Position"].default_value = (core.x, core.y)
     scene.view_settings.exposure = 0.3 * burst
 
 
-def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
+def lock_in(rig: Rig, frame: int) -> None:
     """Glide into the logo's single viewpoint, then flash from the center as the M forms."""
     glide(rig, frame)
     since = frame - LOCK_FRAME
@@ -828,7 +852,7 @@ def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
     shine(rig, core=1 + 6 * burst, spark=1 + 6 * burst, filaments=1 + 3 * burst, legs=1 + 2 * burst)
 
 
-def ignition(rig: dict[str, bpy.types.Object], frame: int) -> None:
+def ignition(rig: Rig, frame: int) -> None:
     """A spark at the center, the inner cube traces on, struts reach the frame, light fills in, and the legs wake."""
     light = ease((frame - 50) / 40)
     shine(rig, core=light, spark=ease((frame - 10) / 12), lantern=light, legs=ease((frame - 72) / 30))
@@ -840,13 +864,13 @@ def ignition(rig: dict[str, bpy.types.Object], frame: int) -> None:
     update_tesseract(0.0, progress)
 
 
-def hyperspin(rig: dict[str, bpy.types.Object], frame: int) -> None:
+def hyperspin(rig: Rig, frame: int) -> None:
     """One full turn in the x-w plane: the inner cube passes through the outer one and back, looping."""
     del rig
     update_tesseract(2 * math.pi * (frame - 1) / FRAMES)
 
 
-def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
+def reveal(rig: Rig, frame: int) -> None:
     """While the camera swings in, light fills the frozen legs and converges on the core; it flashes as the M forms.
 
     Shortly after the glide starts, light rises in the unlit ice from the floor up, crosses into the cube
@@ -918,7 +942,7 @@ def render(
     if effect in ("still", "wallpaper"):
         scene.render.image_settings.color_depth = "16"  # The dark gradients band at 8 bits per channel.
         if effect == "wallpaper":
-            frame_screen(scene, rig["camera"], resolution, height or resolution * 9 // 16)
+            frame_screen(scene, rig.camera, resolution, height or resolution * 9 // 16)
         scene.render.filepath = str(output_dir / ("crystal.png" if effect == "still" else "crystal-wallpaper.png"))
         bpy.ops.render.render(write_still=True)
         return
@@ -949,6 +973,8 @@ def main() -> None:
     for effect in args.render:
         render(effect, args.output_dir, args.resolution, args.samples, frozen=args.frozen, height=args.height)
     if args.blend:
+        args.blend.parent.mkdir(parents=True, exist_ok=True)
+        bpy.ops.file.pack_all()  # Embeds the HDRI, so the scene keeps its lighting away from this cache.
         bpy.context.preferences.filepaths.save_version = 0
         bpy.ops.wm.save_as_mainfile(filepath=str(args.blend), compress=True)
 
