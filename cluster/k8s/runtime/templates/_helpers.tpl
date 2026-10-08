@@ -224,6 +224,8 @@ With overwrite, the target ends up with the same entries, types, contents, modes
 can preserve them) owners as after rm -rf and cp -a, but only entries that differ are rewritten, so a restart on
 network storage copies only what changed. Unlike a full copy, unchanged files keep their timestamps, directory
 timestamps and symlink owners are not synced, and hard-link relationships between files are not guaranteed to be preserved.
+Every start compares both trees in full, but with one stat and one md5sum batch per tree instead of processes per
+file, so the number of processes grows with the changes and symlinks, not with the files.
 An image missing a tool the sync uses, or a name with a newline in either tree (listings are line-based),
 falls back to the full copy. Directory modes and owners are applied last, deepest first, so copying into a
 directory that ends up read-only still works. It needs only POSIX sh and BusyBox-compatible tools.
@@ -249,7 +251,7 @@ writable() { if [ "$uid" = 0 ] || [ ! -w "$1" ]; then chmod u+w "$1" 2>/dev/null
 if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
 mkdir -p "$dst"
 reason=
-for tool in find stat cmp readlink chmod chown id; do
+for tool in find stat md5sum awk readlink chmod chown id; do
   command -v "$tool" >/dev/null || reason="the image has no $tool"
 done
 [ -n "$reason" ] || [ -z "$(find "$src" "$dst" -name "*$nl*")" ] || reason="a name contains a newline"
@@ -260,17 +262,71 @@ if [ -n "$reason" ]; then
   mkdir -p "$dst"
   cp -a "$src/." "$dst/"
 else
-  sources=$(cd "$src" && find .)
-  targets=$(cd "$dst" && find .)
-  directories=$(cd "$src" && find . -depth -type d)
   uid=$(id -u)
   # cp -a keeps ownership only where chown works, so compare it only then (root without NFS root squashing).
   own=
   if [ "$uid" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
+  # Listings of "<hex type and mode> <uid> <gid> <size> ./path" and "<md5>  ./path"; an unreadable file has no
+  # checksum, so it counts as changed and a copy from an unreadable source fails below.
+  sums() { cd "$1" && find . -type f -exec md5sum {} + 2>/dev/null || :; }
+  stats() { cd "$1" && shift && find . "$@" -exec stat -c '%f %u %g %s %n' {} +; }
+  source_stats=$(stats "$src")
+  source_sums=$(sums "$src")
+  target_stats=$(stats "$dst")
+  target_sums=$(sums "$dst")
+  # Reads source stats, source sums, target stats, and target sums, separated by "/" lines, and prints what a pass
+  # visits: target entries that may have to go (remove), source entries that may have to be copied (copy), or source
+  # directories, deepest first, whose mode or owner differs (dirs). Symlinks are always visited, since only
+  # readlink compares their targets. GNU md5sum escapes a name with a backslash and marks the line with one.
+  plan() {
+    printf '%s\n' "$2" / "$3" / "$4" / "$5" | awk -v want="$1" -v own="$own" '
+      function name(line, fields) {
+        while (fields--) line = substr(line, index(line, " ") + 1)
+        return line
+      }
+      function unescape(s, out, c, i) {
+        for (i = 1; i <= length(s); i++) {
+          c = substr(s, i, 1)
+          if (c == "\\") { c = substr(s, ++i, 1); c = (c == "n") ? "\n" : ((c == "r") ? "\r" : c) }
+          out = out c
+        }
+        return out
+      }
+      $0 == "/" { part++; next }
+      $0 == "" { next }
+      part % 2 == 0 {
+        side = part ? "d" : "s"; p = name($0, 4)
+        if (part) target[++m] = p; else source[++n] = p
+        type[side p] = substr($1, 1, length($1) - 3); mode[side p] = substr($1, length($1) - 2)
+        owner[side p] = $2 " " $3; size[side p] = $4
+        next
+      }
+      {
+        side = part == 1 ? "s" : "d"; sum = $1; p = name($0, 2)
+        if (sum ~ /^\\/) { sum = substr(sum, 2); p = unescape(p) }
+        sums[side p] = sum
+      }
+      END {
+        if (want == "remove") for (i = 1; i <= m; i++) {
+          p = target[i]
+          if (p != "." && (!(("s" p) in type) || type["s" p] != type["d" p] || type["d" p] !~ /^[84]$/)) print p
+        }
+        if (want == "copy") for (i = 1; i <= n; i++) {
+          p = source[i]; t = type["s" p]
+          if (p == "." || t == "4" && type["d" p] == "4") continue
+          if (t != "8" || type["d" p] != "8" || mode["s" p] != mode["d" p] || size["s" p] != size["d" p] ||
+            own != "" && owner["s" p] != owner["d" p] || !(("s" p) in sums) || sums["s" p] != sums["d" p]) print p
+        }
+        if (want == "dirs") for (i = n; i > 0; i--) {
+          p = source[i]
+          if (type["s" p] == "4" && (mode["s" p] != mode["d" p] || own != "" && owner["s" p] != owner["d" p])) print p
+        }
+      }'
+  }
   # Remove target entries that are missing from the source, of another type, special, or a different symlink.
   gone=
-  printf '%s\n' "$targets" | while IFS= read -r p; do
-    case $p in .|"$gone"/*) continue ;; esac
+  plan remove "$source_stats" "$source_sums" "$target_stats" "$target_sums" | while IFS= read -r p; do
+    case $p in "$gone"/*) continue ;; esac
     kind "$src/$p"; sk=$k
     kind "$dst/$p"
     case $sk$k in
@@ -284,33 +340,20 @@ else
   done
   # Copy missing entries whole, and recopy files whose size, mode, owner, or content differ.
   new=
-  printf '%s\n' "$sources" | while IFS= read -r p; do
+  plan copy "$source_stats" "$source_sums" "$target_stats" "$target_sums" | while IFS= read -r p; do
     case $p in "$new"/*) continue ;; esac
-    s=$src/$p
-    d=$dst/$p
-    kind "$d"
-    if [ "$k" = - ]; then
-      writable "$dst/${p%/*}"
-      cp -a "$s" "$d"
-      new=$p
-    elif [ "$k" = f ]; then
-      m=$(stat -c "%s %a$own" "$s" "$d")
-      if [ "${m%"$nl"*}" != "${m#*"$nl"}" ] || ! cmp -s "$s" "$d"; then
-        writable "$dst/${p%/*}"
-        rm -f "$d"
-        cp -a "$s" "$d"
-      fi
-    fi
+    kind "$dst/$p"
+    case $k in -|f) writable "$dst/${p%/*}" ;; *) continue ;; esac
+    [ "$k" = - ] || rm -f "$dst/$p"
+    cp -a "$src/$p" "$dst/$p"
+    [ "$k" != - ] || new=$p
   done
-  # Fix directory modes and owners deepest first; directories cp -a just created already match.
-  printf '%s\n' "$directories" | while IFS= read -r p; do
-    m=$(stat -c "%a$own" "$src/$p" "$dst/$p")
-    if [ "${m%"$nl"*}" != "${m#*"$nl"}" ]; then
-      set -- ${m%"$nl"*}
-      [ -z "$own" ] || chown "$2:$3" "$dst/$p"
-      # The leading zeros make GNU chmod clear a directory's setgid bit too.
-      chmod "00$1" "$dst/$p"
-    fi
+  # Fix directory modes and owners deepest first, including parents that writable changed.
+  plan dirs "$source_stats" "" "$(stats "$dst" -type d)" "" | while IFS= read -r p; do
+    set -- $(stat -c "%a$own" "$src/$p")
+    [ -z "$own" ] || chown "$2:$3" "$dst/$p"
+    # The leading zeros make GNU chmod clear a directory's setgid bit too.
+    chmod "00$1" "$dst/$p"
   done
 fi
 {{- else }}

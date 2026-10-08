@@ -256,7 +256,7 @@ Private registry access should use normal Kubernetes image pull credentials thro
 
 Each bundle image must be pinned by digest and must contain a POSIX shell, `cp`, and `mkdir`, because the chart runs the bundle image as a copy init container.
 Because `overwrite` defaults to true, bundle images also need `rm` unless every bundle sets `overwrite: false`.
-Images that also contain `find`, `cmp`, `stat`, `readlink`, `chmod`, `chown`, and `id`, as BusyBox does, are updated in place on restart; other images get a full copy on every start.
+Images that also contain `find`, `stat`, `md5sum`, `awk`, `readlink`, `chmod`, `chown`, and `id`, as BusyBox does, are updated in place on restart; other images get a full copy on every start.
 Package content under `/bundle` by default:
 
 ```dockerfile
@@ -287,6 +287,7 @@ contentBundles:
 If `targetPath` is omitted, the chart copies to `/app/agent_data/content-bundles/<name>`.
 By default the init container makes the target path match the bundle: the same files, directories, symlinks, contents, and modes, as if it removed the path and copied the bundle again.
 It deletes entries the bundle no longer contains and rewrites only entries whose type, symlink target, content, mode, or owner changed, so a restart copies only what changed.
+It compares the trees with one `stat` and one `md5sum` batch per tree, so a restart starts no processes per file.
 Unchanged files keep their timestamps, and hard-link relationships between bundle files are not guaranteed to be preserved.
 With `overwrite: false`, it copies the bundle over the target path and removes nothing.
 `seed.command` runs after the copy and should point at a short script or executable supplied by the bundle instead of embedding deployment-specific shell in Helm values.

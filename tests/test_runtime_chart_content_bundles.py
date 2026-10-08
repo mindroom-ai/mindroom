@@ -24,7 +24,7 @@ _UNTOUCHED_NS = 1_000_000_000 * 1_000_000_000
 # Names that break unquoted or option-like path handling.
 _ODD_NAMES = ("with space [x] *.md", "-leading-dash", "back\\slash", " padded ", "it's")
 # The only commands on PATH when the scripts run: what the sync uses, plus touch for the test seed.
-_TOOLS = ("sh", "cp", "mkdir", "rm", "find", "stat", "cmp", "readlink", "chmod", "chown", "id", "touch")
+_TOOLS = ("sh", "cp", "mkdir", "rm", "find", "stat", "md5sum", "awk", "readlink", "chmod", "chown", "id", "touch")
 
 type Snapshot = dict[str, tuple[str, int, bytes | str | None]]
 
@@ -323,7 +323,7 @@ def test_sync_falls_back_to_a_full_copy_for_names_with_newlines(
     assert _snapshot(target) == _snapshot(source)
 
 
-@pytest.mark.parametrize("missing", ["find", "cmp"])
+@pytest.mark.parametrize("missing", ["find", "md5sum", "awk"])
 def test_sync_falls_back_to_a_full_copy_when_the_image_lacks_a_tool(
     bundle_inits: dict[str, dict[str, Any]],
     tool_dir: Path,
@@ -498,3 +498,47 @@ def test_bundle_paths_reach_the_script_as_arguments(tmp_path: Path) -> None:
     assert init["command"] == ["sh", "-ec"]
     assert init["args"][1:] == ["content-bundle-odd", "/bundle/it's", target]
     assert "touch" not in init["args"][0]
+
+
+def _counting_tools(tool_dir: Path, bin_dir: Path, log: Path) -> Path:
+    """Copy tool_dir into bin_dir with every tool but sh logging its name to log before it runs."""
+    bin_dir.mkdir()
+    (bin_dir / "sh").symlink_to(tool_dir / "sh")
+    for tool in tool_dir.iterdir():
+        if tool.name != "sh":
+            # Running the tool through its own name keeps multi-call binaries such as BusyBox working.
+            (bin_dir / tool.name).write_text(f'#!{tool_dir / "sh"}\necho {tool.name} >>"{log}"\nexec "{tool}" "$@"\n')
+            (bin_dir / tool.name).chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize("change", [None, _change_content, _delete_file], ids=["unchanged", "content", "deleted"])
+def test_the_number_of_processes_does_not_grow_with_the_number_of_files(
+    bundle_inits: dict[str, dict[str, Any]],
+    tool_dir: Path,
+    tmp_path: Path,
+    change: Callable[[Path], None] | None,
+) -> None:
+    """Listing and checksumming run in batches, so a restart of a ten times larger bundle starts the same processes."""
+    counts = []
+    for files in (10, 100):
+        root = tmp_path / str(files)
+        source = _make_source(root / "bundle")
+        for index in range(files):
+            (source / "docs" / f"page-{index}.md").write_text(f"page {index}\n")
+        target = root / "storage" / "sync"
+        log = root / "calls.log"
+        tools = _counting_tools(tool_dir, root / "bin", log)
+        _run(bundle_inits["sync"], tools, source, target)
+        log.unlink()
+        if change:
+            change(source)
+
+        _run(bundle_inits["sync"], tools, source, target)
+
+        assert _snapshot(target) == _snapshot(source)
+        calls = log.read_text().split()
+        counts.append({tool: calls.count(tool) for tool in sorted(set(calls))})
+    assert counts[0] == counts[1]
+    assert counts[0]["md5sum"] == 2
+    assert counts[0]["stat"] <= 4
