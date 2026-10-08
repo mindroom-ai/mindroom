@@ -460,9 +460,9 @@ def _last_line(text: str | None) -> str:
     lines = [
         stripped
         for line in (text or "").splitlines()
-        if (stripped := line.replace("`", "").replace("*", "").strip().lstrip("->").strip().removesuffix(".").rstrip())
+        if (stripped := line.replace("`", "").replace("*", "").strip().lstrip("->").strip())
     ]
-    return lines[-1] if lines else ""
+    return lines[-1].removesuffix(".").rstrip() if lines else ""
 
 
 def _patch(run: _Run, proposal: _Proposal) -> str:

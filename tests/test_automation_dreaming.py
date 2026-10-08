@@ -623,6 +623,7 @@ def test_a_verdict_the_dream_left_behind_never_counts(tmp_path: Path) -> None:
         ("Looks fine to me.", False, "the review did not end with one of the two verdict lines"),
         ("VERDICT: APPROVE", True, "the review did not finish within an hour"),
         ("VERDICT: APPROVE...", False, "the review did not end with one of the two verdict lines"),
+        ("VERDICT: APPROVE\n.", False, "the review did not end with one of the two verdict lines"),
         (
             "VERDICT: APPROVE-WITH-CHANGES - remove the unsupported claim first",
             False,
