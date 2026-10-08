@@ -243,8 +243,9 @@ kind() {
   else k=-
   fi
 }
-# BusyBox test -w is always true for root, which root-squashed NFS does not honour, so root always adds u+w.
-writable() { if [ "$uid" = 0 ] || [ ! -w "$1" ]; then chmod u+w "$1"; fi; }
+# BusyBox test -w is always true for root, which root-squashed NFS does not honour, so root always tries u+w.
+# Best effort: a parent we may not chmod can still be writable, and the copy or removal reports a real denial.
+writable() { if [ "$uid" = 0 ] || [ ! -w "$1" ]; then chmod u+w "$1" 2>/dev/null || :; fi; }
 if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
 mkdir -p "$dst"
 reason=

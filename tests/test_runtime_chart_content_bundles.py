@@ -412,6 +412,35 @@ def test_root_without_permission_override_updates_read_only_directories(
     assert _snapshot(target) == _snapshot(source)
 
 
+def test_root_updates_a_writable_parent_it_may_not_chmod(
+    bundle_inits: dict[str, dict[str, Any]],
+    tool_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """A writable parent owned by someone else refuses chmod on root-squashed NFS; that must not abort the update."""
+    unshare = shutil.which("unshare")
+    if unshare is None or subprocess.run([unshare, "-r", "true"], check=False).returncode:
+        pytest.skip("needs unshare with unprivileged user namespaces")
+    real = (tool_dir / "chmod").resolve()
+    real_chmod = f'"{real}" chmod' if real.name == "busybox" else f'"{real}"'
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in tool_dir.iterdir():
+        (bin_dir / tool.name).symlink_to(tool.resolve())
+    (bin_dir / "chmod").unlink()
+    (bin_dir / "chmod").write_text(f'#!{bin_dir / "sh"}\n[ "$1" != u+w ] || exit 1\nexec {real_chmod} "$@"\n')
+    (bin_dir / "chmod").chmod(0o755)
+    source = _make_source(tmp_path / "bundle")
+    target = tmp_path / "sync"
+    (source / "docs").chmod(0o777)
+    _run(bundle_inits["sync"], bin_dir, source, target, wrapper=(unshare, "-r"))
+
+    (source / "docs" / "guide.md").unlink()
+    (source / "docs" / "added.md").write_text("added\n")
+    _run(bundle_inits["sync"], bin_dir, source, target, wrapper=(unshare, "-r"))
+    assert _snapshot(target) == _snapshot(source)
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can read the unreadable file")
 def test_a_failed_copy_fails_the_init_before_the_seed_runs(
     bundle_inits: dict[str, dict[str, Any]],
