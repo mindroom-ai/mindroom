@@ -716,11 +716,13 @@ async def test_mcp_catalog_restart_replays_unfinished_startup_maintenance_with_l
         ) as mark_runtime_support_ready,
     ):
         orchestrator._startup_maintenance.start([old_bot], config, startup_cutoff_ms=123456)
+        original_task = orchestrator._startup_maintenance.task
         try:
             await asyncio.wait_for(old_setup_started.wait(), timeout=1.0)
             await orchestrator._handle_mcp_catalog_change("demo")
             replayed_task = orchestrator._startup_maintenance.task
-            assert replayed_task is not None
+            assert original_task is not None and original_task.cancelled()
+            assert replayed_task is not None and replayed_task is not original_task
             await asyncio.wait_for(replayed_task, timeout=1.0)
         finally:
             await orchestrator._startup_maintenance.cancel()
