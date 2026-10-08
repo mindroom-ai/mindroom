@@ -557,8 +557,8 @@ def ease(s: float) -> float:
     return s * s * (3 - 2 * s)
 
 
-def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
-    """Glide from a low, wide, off-axis view into the logo's single viewpoint, then flash as the M forms."""
+def glide(rig: dict[str, bpy.types.Object], frame: int) -> None:
+    """Swing the camera from a low, wide, off-axis view into the logo's single viewpoint, arriving at LOCK_FRAME."""
     camera = rig["camera"]
     camera.data.type = "PERSP"
     camera.data.sensor_width = 36.0
@@ -580,20 +580,39 @@ def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
     turn = azimuth - math.radians(45.0)
     rig["mount"].rotation_euler = (0.0, 0.0, turn)
     world["hdri-turn"].inputs["Rotation"].default_value = (0.0, 0.0, turn)
-    # The moment the M forms, a flash bursts from the center: the core floods the scene with light,
-    # the haze shows its rays streaming out through the frame, and the camera overexposes and streaks.
-    since = frame - LOCK_FRAME
-    burst = math.exp(-since / 4) if since >= 0 else 0.0
-    rig["core"].data.energy = 700.0 * (1 + 6 * burst)
+
+
+def shine(
+    rig: dict[str, bpy.types.Object],
+    *,
+    core: float = 1.0,
+    spark: float = 1.0,
+    lantern: float = 1.0,
+    filaments: float = 1.0,
+    legs: float = 1.0,
+) -> None:
+    """Set the core light, its bead, the lantern, the filaments, and the leg glow as multiples of their resting levels."""
+    rig["core"].data.energy = 700.0 * core
     materials = bpy.data.materials
-    materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * (1 + 6 * burst)
+    materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * spark
+    materials["lantern"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 0.6 * lantern
     for family, strength in FILAMENT.items():
-        glow = materials[f"filament-{family}"].node_tree.nodes["Emission"]
-        glow.inputs["Strength"].default_value = strength * (1 + 3 * burst)
-    materials["leg-glow"].node_tree.nodes["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * (1 + 2 * burst)
+        materials[f"filament-{family}"].node_tree.nodes["Emission"].inputs["Strength"].default_value = (
+            strength * filaments
+        )
+    materials["leg-glow"].node_tree.nodes["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * legs
+
+
+def flash(rig: dict[str, bpy.types.Object], since: int) -> float:
+    """The camera's side of the burst `since` frames after the M forms: rays in the haze, lens glare, exposure.
+
+    Returns the burst's strength, which peaks at 1 on the lock frame and fades within about half a second,
+    so callers can flare the lights with it.
+    """
+    burst = math.exp(-since / 4) if since >= 0 else 0.0
     quiet = burst < 0.02
     rig["haze"].hide_render = quiet
-    materials["flash-haze"].node_tree.nodes["haze-density"].inputs["To Min"].default_value = 0.15 * burst
+    bpy.data.materials["flash-haze"].node_tree.nodes["haze-density"].inputs["To Min"].default_value = 0.15 * burst
     scene = bpy.context.scene
     lens = scene.compositing_node_group.nodes
     lens["flash-streaks"].mute = lens["flash-beams"].mute = quiet
@@ -601,20 +620,23 @@ def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
     lens["flash-beams"].inputs["Strength"].default_value = 0.5 * burst
     if not quiet:
         bpy.context.view_layer.update()  # The beams need the camera's new pose to find the core on screen.
-        core = world_to_camera_view(scene, camera, logo.CUBE_CENTER)
+        core = world_to_camera_view(scene, rig["camera"], logo.CUBE_CENTER)
         lens["flash-beams"].inputs["Sun Position"].default_value = (core.x, core.y)
     scene.view_settings.exposure = 0.3 * burst
+    return burst
+
+
+def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
+    """Glide into the logo's single viewpoint, then flash from the center as the M forms."""
+    glide(rig, frame)
+    burst = flash(rig, frame - LOCK_FRAME)
+    shine(rig, core=1 + 6 * burst, spark=1 + 6 * burst, filaments=1 + 3 * burst, legs=1 + 2 * burst)
 
 
 def ignition(rig: dict[str, bpy.types.Object], frame: int) -> None:
     """A spark at the center, the inner cube traces on, struts reach the frame, light fills in, and the legs wake."""
-    spark = ease((frame - 10) / 12)
     light = ease((frame - 50) / 40)
-    legs = ease((frame - 72) / 30)
-    bpy.data.materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * spark
-    rig["core"].data.energy = 700.0 * light
-    bpy.data.materials["lantern"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 0.6 * light
-    bpy.data.materials["leg-glow"].node_tree.nodes["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * legs
+    shine(rig, core=light, spark=ease((frame - 10) / 12), lantern=light, legs=ease((frame - 72) / 30))
     progress = {
         "inner": ease((frame - 22) / 30),
         "strut": ease((frame - 46) / 24),
@@ -641,8 +663,12 @@ def render(effect: str, output_dir: Path, resolution: int, samples: int, *, froz
         scene.render.filepath = str(output_dir / "crystal.png")
         bpy.ops.render.render(write_still=True)
         return
-    step = {"lock-in": lock_in, "ignition": ignition, "hyperspin": hyperspin}[effect]
-    for frame in range(1, FRAMES + 1):
+    step, length = {
+        "lock-in": (lock_in, FRAMES),
+        "ignition": (ignition, FRAMES),
+        "hyperspin": (hyperspin, FRAMES),
+    }[effect]
+    for frame in range(1, length + 1):
         step(rig, frame)
         scene.render.filepath = str(output_dir / effect / f"frame-{frame:04d}.png")
         bpy.ops.render.render(write_still=True)
