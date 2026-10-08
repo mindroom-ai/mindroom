@@ -10,6 +10,7 @@ payloads for the revision it knows and learn when a Stop changed it.
 
 from __future__ import annotations
 
+import json
 import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -35,7 +36,14 @@ from mindroom.reply_presentation import (
 )
 from mindroom.stop import SpanRegistry
 from mindroom.streaming import ProgressPermission, UnfinishedStreamedReply
-from mindroom.tool_system.events import remap_visible_tool_marker_indices
+from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.events import (
+    ToolTraceEntry,
+    deserialize_tool_trace,
+    format_tool_combined,
+    remap_visible_tool_marker_indices,
+    serialize_tool_trace,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -161,6 +169,45 @@ def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
     return UnfinishedStreamedReply(visible_text=work.text, tool_trace=work.tool_trace)
 
 
+# A span that ended this way left its turn to a later span, which its tool calls may already have served.
+_INTERRUPTED_OUTCOMES = frozenset({rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED, rl.SpanOutcome.PAUSED})
+
+
+@dataclass(frozen=True)
+class _SpanToolCalls:
+    """Records each tool call on the span the calling task runs, before the tool runs."""
+
+    runtime: ReplyRuntime
+
+    async def started(self, tool_name: str, args: Mapping[str, object]) -> str | None:
+        handle = current_span()
+        if handle is None:
+            return None
+        call_id = _new_id()
+        _, entry = format_tool_combined(tool_name, dict(args), None)
+        await self.runtime.record_tool_call(
+            span_id=handle.span_id,
+            call_id=call_id,
+            entry=replace(entry, type="tool_call_started"),
+            now_ns=self.runtime.clock(),
+        )
+        return call_id
+
+    async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+        handle = current_span()
+        if handle is None:
+            return
+        if isinstance(result, BaseException):
+            result = f"{type(result).__name__}: {result}"
+        _, entry = format_tool_combined(tool_name, dict(args), result)
+        await self.runtime.record_tool_call(
+            span_id=handle.span_id,
+            call_id=call_id,
+            entry=entry,
+            now_ns=self.runtime.clock(),
+        )
+
+
 class ClaimRefused(Enum):
     """Why a claim opened no span."""
 
@@ -213,6 +260,32 @@ class ReplyRuntime:
         for effect in effects:
             if isinstance(effect, rl.CancelSpan):
                 self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
+
+    async def record_tool_call(self, *, span_id: str, call_id: str, entry: ToolTraceEntry, now_ns: int) -> None:
+        """Record one tool call a span made, as it starts and again once it returned."""
+        (encoded,) = serialize_tool_trace((entry,))
+        await self.store.replies.record_tool_call(
+            span_id=span_id,
+            call_id=call_id,
+            entry_json=json.dumps(encoded),
+            now_ns=now_ns,
+        )
+
+    async def _span_tool_calls(self, span_ids: tuple[str, ...]) -> tuple[ToolTraceEntry, ...]:
+        """Return the tool calls these spans recorded, in the order they started."""
+        stored = await self.store.replies.tool_calls(span_ids)
+        return tuple(deserialize_tool_trace([json.loads(entry) for entry in stored]))
+
+    async def interrupted_tool_calls(self, handle: SpanHandle) -> tuple[ToolTraceEntry, ...]:
+        """Return the tool calls of the attempts this span takes over: the latest spans that left its turn unanswered."""
+        interrupted: list[str] = []
+        for span in reversed(await self.store.replies.spans(handle.reply_id)):
+            if span.span_id == handle.span_id:
+                continue
+            if span.outcome not in _INTERRUPTED_OUTCOMES:
+                break
+            interrupted.append(span.span_id)
+        return await self._span_tool_calls(tuple(reversed(interrupted)))
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
@@ -325,7 +398,8 @@ class ReplyRuntime:
         slot = SpanSlot()
         token = _current_slot.set(slot)
         try:
-            yield slot
+            with recording_tool_calls(_SpanToolCalls(self)):
+                yield slot
         finally:
             _current_slot.reset(token)
             if slot.handle is not None:

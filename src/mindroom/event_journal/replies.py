@@ -793,6 +793,25 @@ class ReplyStore:
             lambda transaction: reply_spans.for_reply(transaction, self._principal_id, reply_id),
         )
 
+    async def record_tool_call(self, *, span_id: str, call_id: str, entry_json: str, now_ns: int) -> None:
+        """Record a tool call a span made, before the tool runs and again once it returned."""
+        await self._backend.write(
+            lambda transaction: reply_spans.record_tool_call(
+                transaction,
+                self._principal_id,
+                span_id=span_id,
+                call_id=call_id,
+                entry_json=entry_json,
+                now_ns=now_ns,
+            ),
+        )
+
+    async def tool_calls(self, span_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Return the recorded tool calls of these spans, in the order they started."""
+        return await self._backend.read(
+            lambda transaction: reply_spans.tool_calls(transaction, self._principal_id, span_ids),
+        )
+
     async def write_generation(self, generation: str, *, now_ns: int) -> None:
         """Make one bot instance the owner of this principal's replies."""
         await self._backend.write(

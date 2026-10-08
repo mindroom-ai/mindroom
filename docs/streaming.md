@@ -106,7 +106,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
-The agent is told which visible tool calls already finished so it does not repeat side effects; calls hidden by `show_tool_calls: false` cannot be passed on, so it is only warned that they may have run.
+The agent is told which tool calls already finished, and which were still running, so it does not repeat side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
 
 ## Large Messages
 

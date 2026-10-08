@@ -1932,6 +1932,7 @@ def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(t
     replayed = runner._with_recorded_interrupted_attempt(
         _plain_request(_target(), source_event_id="$source"),
         cast("SpanHandle", handle),
+        (),
     )
 
     account = html.unescape(replayed.model_prompt or "")

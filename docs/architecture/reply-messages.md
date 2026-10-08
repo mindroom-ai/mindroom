@@ -26,7 +26,7 @@ Every fact about an AI reply has one owner and one writer; other stores hold onl
 
 | Store | Owns |
 |---|---|
-| Reply records (`reply_messages`, `reply_spans`, `reply_span_sources`) | Everything about an AI reply: its event, state, presentation and tool-call visibility, the Stop and whether it applied, each span's sources and their settlement, redactions including deleted sources, and the bot instance and outcome of the span that claims an approval. |
+| Reply records (`reply_messages`, `reply_spans`, `reply_span_sources`, `reply_tool_calls`) | Everything about an AI reply: its event, state, presentation and tool-call visibility, the Stop and whether it applied, each span's sources and their settlement, each tool call a span made, redactions including deleted sources, and the bot instance and outcome of the span that claims an approval. |
 | Turn ledger (`turn_records`) | User-message and turn facts: sources, aliases, prompts and revisions (an edit's once its regeneration claims the reply), tombstones, requester, history scope, conversation target, voice and command checkpoints, `completed` ("this agent answered this message", agent-scoped across re-logins), and `response_event_id` for turns that are not AI replies, such as commands, rejections, router notices, and a dispatch failure's notice sent before any reply existed. |
 | Journal | Whether each event is pending or settled: the work queue of one Matrix identity. |
 | Agent history (Agno session runs) | The conversation the model sees, with each run's sources and the event that shows its answer; a regeneration prunes the run it replaces once it claims the reply. |
@@ -43,6 +43,9 @@ The approval that holds it is read with it from the continuations and never writ
 A span (`reply_spans`, `reply_span_sources`) is one execution that writes a reply: `turn`, `replay`, `regeneration`, or `approval_resume`.
 It records its delivery id, the journal sources it answers, the bot generation that claimed it, the reply's write sequence at claim, a rollback snapshot for regenerations, and its outcome once it ends: `completed`, `cancelled`, `failed`, `paused`, `released`, `superseded`, `lost`, `suppressed`, or `restored` (a regeneration that put the old answer back).
 At most one span is current per reply.
+
+A tool call (`reply_tool_calls`) is recorded on the span the calling task runs, as started before the tool runs and as completed with its result once it returns, whether or not the reply shows tool calls.
+A call cut short stays started, since it may have taken effect.
 
 Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`, and `reply_sequence`; the stage is `initial` (the create), `final` (the span's terminal write), or `edit`.
 `pending_reply_stops` holds a Stop on an event no reply is bound to yet.
@@ -79,6 +82,7 @@ The create, each pause, and every terminal update are durable rows, recorded wit
 Each progress edit is a direct edit recorded first by `write_ahead`, which raises the confirmed sequence of the previous edit.
 A note a rule decides without a payload (an ownerless Stop, a restart, a settlement without an answer) is an owed write that `settle_reply_debt` renders and enqueues.
 Recovery renders from the possibly-shown presentation, so a restart continues below what the reply may already show.
+A replay, or a regeneration retried after one, tells the model which tool calls the attempts it takes over recorded, those spans that ended `lost`, `released`, or `paused` since the reply's last answer, so it does not repeat a finished call.
 
 ## Stop
 

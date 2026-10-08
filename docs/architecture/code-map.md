@@ -244,6 +244,7 @@ Matrix sync callback
 | `desktop/startup_errors.py` | Translates desktop startup failures into actionable protocol errors and recovery advice |
 | `desktop/native_entry.py` | Starts the packaged native desktop helper |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
+| `tool_system/call_record.py` | Context-scoped recorder the tool hook bridge tells of each tool call before it runs, which reply spans persist |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
 | `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |

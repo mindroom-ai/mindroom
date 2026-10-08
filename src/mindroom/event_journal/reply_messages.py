@@ -308,14 +308,15 @@ def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: i
     reply_ids = tuple(str(row["reply_id"]) for row in rows)
     if reply_ids:
         placeholders = ", ".join("?" for _ in reply_ids)
-        transaction.execute(
-            f"""
-            DELETE FROM reply_span_sources WHERE principal_id = ? AND span_id IN (
-                SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})
+        for table in ("reply_span_sources", "reply_tool_calls"):
+            transaction.execute(
+                f"""
+                DELETE FROM {table} WHERE principal_id = ? AND span_id IN (
+                    SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})
+                )
+                """,  # noqa: S608 - fixed table names and placeholders
+                (principal_id, principal_id, *reply_ids),
             )
-            """,  # noqa: S608 - fixed placeholders
-            (principal_id, principal_id, *reply_ids),
-        )
         transaction.execute(
             f"DELETE FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
             (principal_id, *reply_ids),

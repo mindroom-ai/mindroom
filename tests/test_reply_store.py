@@ -1193,9 +1193,10 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
 
 
 async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_store: EventJournalStore) -> None:
-    """Retention drops an old finished reply and its spans; one still owing Matrix a note is kept."""
+    """Retention drops an old finished reply with its spans and their tool calls; one still owing Matrix a note is kept."""
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
+    await principal.replies.record_tool_call(span_id=span.span_id, call_id="call", entry_json="{}", now_ns=60)
     ended = rl.sources_settled_without_reply(replace(reply, event_id="$reply"), span, now_ns=100)
     await _apply(journal_store, ended)
     assert ended.reply is not None
@@ -1208,6 +1209,7 @@ async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_
 
     assert await principal.replies.load(reply.reply_id) is None
     assert await principal.replies.span(span.span_id) is None
+    assert await principal.replies.tool_calls((span.span_id,)) == ()
     assert await principal.replies.for_sources(("$source",)) is None
 
 

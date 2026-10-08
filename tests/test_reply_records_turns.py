@@ -16,13 +16,15 @@ from mindroom import reply_lifecycle as rl
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
-from mindroom.hooks import FinalResponseDraft, ResponseDraft
+from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
+from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnStore
@@ -1269,6 +1271,68 @@ async def test_a_replay_of_an_attempt_that_showed_only_its_placeholder_is_warned
         assert account.startswith("A previous attempt at replying to the current message was interrupted")
         assert "what that attempt did is unknown" in account
         assert _sent_bodies(restarted)[-1] == "The complete report."
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(tmp_path: Path) -> None:
+    """A tool call the model makes is on the reply's records before the tool runs, whatever the reply shows."""
+    bot = await _streaming_bot(tmp_path)
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="general")
+    seen_before_run: list[tuple[ToolTraceEntry, ...]] = []
+
+    async def counter() -> str:
+        reply = await _reply(bot)
+        seen_before_run.append(await bot._reply_runtime._span_tool_calls((reply.last_span_id,)))
+        return "1"
+
+    async def answer(*_args: object, **_kwargs: object) -> str:
+        await bridge("counter", counter, {})
+        return "Counted."
+
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+
+    reply = await _reply(bot)
+    ((started,),) = seen_before_run
+    assert (started.type, started.tool_name) == ("tool_call_started", "counter")
+    (finished,) = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
+    assert (finished.type, finished.tool_name, finished.result_preview) == ("tool_call_completed", "counter", "1")
+
+
+async def test_a_replay_is_told_which_tool_calls_its_stopped_attempt_made_though_it_showed_none(
+    tmp_path: Path,
+) -> None:
+    """Hidden or unstreamed tool calls still reach the replayed turn, so it does not repeat a finished one."""
+    restarted, response = await _restarted_after_partial(tmp_path, None)
+    stopped = await _reply(restarted)
+    await restarted._reply_runtime.record_tool_call(
+        span_id=stopped.last_span_id,
+        call_id="call-1",
+        entry=ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+        now_ns=1,
+    )
+    prompts: list[str] = []
+
+    async def answer(*_args: object, **kwargs: object) -> str:
+        prompts.append(html.unescape(str(kwargs["model_prompt"])))
+        return "The complete report."
+
+    runner = unwrap_extracted_collaborator(restarted._response_runner)
+    try:
+        with patch_response_runner_module(
+            ai_response=AsyncMock(side_effect=answer),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        (prompt,) = prompts
+        account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
+        assert account.startswith("Your previous attempt at replying to the current message was interrupted")
+        assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in account
+        assert "what that attempt did is unknown" not in account
     finally:
         response.cancel()
         with suppress(asyncio.CancelledError):

@@ -533,6 +533,7 @@ depends_on = [
     "mindroom.reply_presentation",
     "mindroom.stop",
     "mindroom.streaming",
+    "mindroom.tool_system.call_record",
     "mindroom.tool_system.events",
 ]
 
@@ -4805,9 +4806,18 @@ path = "mindroom.tool_system.tool_calls"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
+path = "mindroom.tool_system.call_record"
+depends_on = []
+visibility = [
+    "mindroom.reply_scope",
+    "mindroom.tool_system.tool_hooks",
+]
+
+[[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.tool_system.agno_compat_tool_hooks",
+    "mindroom.tool_system.call_record",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",

@@ -504,6 +504,18 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS reply_tool_calls (
+        principal_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        -- The call as a tool trace entry, recorded started before the tool
+        -- runs and replaced by its completed entry once the tool returns.
+        entry_json TEXT NOT NULL,
+        recorded_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, span_id, call_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS reply_span_sources (
         principal_id TEXT NOT NULL,
         span_id TEXT NOT NULL,

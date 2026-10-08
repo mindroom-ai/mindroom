@@ -215,3 +215,39 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
         """,
         (span.outcome.value, span.ended_at_ns, principal_id, span.span_id),
     )
+
+
+def record_tool_call(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    span_id: str,
+    call_id: str,
+    entry_json: str,
+    now_ns: int,
+) -> None:
+    """Record or update one tool call a span made, keeping when it was first recorded."""
+    transaction.execute(
+        """
+        INSERT INTO reply_tool_calls (principal_id, span_id, call_id, entry_json, recorded_at_ns)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, span_id, call_id) DO UPDATE SET entry_json = excluded.entry_json
+        """,
+        (principal_id, span_id, call_id, entry_json, now_ns),
+    )
+
+
+def tool_calls(transaction: Transaction, principal_id: str, span_ids: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the recorded tool calls of these spans, in the order they started."""
+    if not span_ids:
+        return ()
+    placeholders = ", ".join("?" for _ in span_ids)
+    rows = transaction.fetchall(
+        f"""
+        SELECT entry_json FROM reply_tool_calls
+        WHERE principal_id = ? AND span_id IN ({placeholders})
+        ORDER BY recorded_at_ns, call_id
+        """,  # noqa: S608 - fixed placeholders
+        (principal_id, *span_ids),
+    )
+    return tuple(str(row["entry_json"]) for row in rows)

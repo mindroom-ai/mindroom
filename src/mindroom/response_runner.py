@@ -247,6 +247,12 @@ _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "it lists as still running may have finished too. Calls hidden from the conversation or made just before it "
     "stopped may be missing, so before repeating any tool call with side effects, check whether it already took effect."
 )
+_RECORDED_ATTEMPT_INSTRUCTION = (
+    "Your previous attempt at replying to the current message was interrupted by a restart before it finished. "
+    "It made the tool calls below: those listed as finished already ran, and those listed as still running may "
+    "have finished too. Do not repeat a finished tool call with side effects, and before repeating one that was "
+    "still running, check whether it already took effect."
+)
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
     "is unknown. Before repeating any tool call with side effects, check whether it already took effect."
@@ -3950,39 +3956,58 @@ class ResponseRunner:
         )
         return request
 
-    def _with_interrupted_attempt(self, request: ResponseRequest) -> ResponseRequest:
-        """Continue a replayed turn below what its stopped attempt already showed and ran.
+    async def _with_interrupted_attempt(self, request: ResponseRequest) -> ResponseRequest:
+        """Tell a replayed turn, or a retried regeneration, what its stopped attempts showed and ran.
 
         A restart, whether a crash, an orderly shutdown, an entity replacement
         or an approved run cut short, leaves the reply streaming and its sources
         pending, so replay claims that reply. Its records say what the stopped
-        attempt may have shown: that stays in the message with the new attempt
-        streaming below it, and the same account goes into the new attempt's
-        prompt, where later turns keep it.
+        attempt may have shown, which stays in the message with the new attempt
+        streaming below it, and every tool call it made, shown or not. The same
+        account goes into the new attempt's prompt, where later turns keep it.
         """
         handle = current_span()
-        return request if handle is None else self._with_recorded_interrupted_attempt(request, handle)
-
-    def _with_recorded_interrupted_attempt(self, request: ResponseRequest, handle: SpanHandle) -> ResponseRequest:
-        """Tell a replay what its stopped attempt may have shown, from the reply's records."""
-        if handle.span.kind is not rl.SpanKind.REPLAY:
+        if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
             return request
-        unfinished = handle.resumed
+        recorded = await handle.runtime.interrupted_tool_calls(handle)
+        return self._with_recorded_interrupted_attempt(request, handle, recorded)
+
+    def _with_recorded_interrupted_attempt(
+        self,
+        request: ResponseRequest,
+        handle: SpanHandle,
+        recorded: tuple[ToolTraceEntry, ...],
+    ) -> ResponseRequest:
+        """Tell a new attempt what its stopped attempts showed and which tool calls they made, from the reply's records."""
+        unfinished = handle.resumed if handle.span.kind is rl.SpanKind.REPLAY else None
+        tools = recorded or (() if unfinished is None else unfinished.tool_trace)
+        completed_tools, interrupted_tools = _split_delivery_tool_trace(tools)
         if unfinished is not None:
-            completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
             attempt = render_stopped_attempt(
                 partial_text=strip_team_display(unfinished.partial_text),
                 completed_tools=completed_tools,
                 interrupted_tools=interrupted_tools,
             )
             instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
-        else:
+        elif tools:
+            # It showed none of its work, but it recorded each tool call before the tool ran.
+            attempt = render_stopped_attempt(
+                partial_text="",
+                completed_tools=completed_tools,
+                interrupted_tools=interrupted_tools,
+            )
+            instruction = f"{_RECORDED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+        elif handle.span.kind is rl.SpanKind.REPLAY:
             # The attempt showed nothing of its work, which is not proof it did none.
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
+        else:
+            # A regeneration nothing interrupted, or whose interrupted attempt made no tool call.
+            return request
         self.deps.logger.info(
             "interrupted_attempt_resumed",
             response_event_id=_existing_event_id(request),
             attempt_shown=unfinished is not None,
+            recorded_tool_calls=len(recorded),
         )
         account = render_enrichment_block([EnrichmentItem(key="interrupted_attempt", text=instruction)])
         model_prompt = request.model_prompt if request.model_prompt is not None else request.prompt
@@ -4111,7 +4136,7 @@ class ResponseRunner:
         prepared_request = await self._prepare_locked_source(request, resolved_target=resolved_target)
         if prepared_request is None:
             return None
-        return self._with_interrupted_attempt(prepared_request)
+        return await self._with_interrupted_attempt(prepared_request)
 
     async def _begin_locked_turn(
         self,
