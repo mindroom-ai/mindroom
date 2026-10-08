@@ -30,10 +30,10 @@ sys.path.insert(0, str(HERE))
 
 import build_scene as logo  # noqa: E402
 
-FRAMES = 120  # Four seconds at 30 fps; the reveal runs twice as long.
+FRAMES = 120  # Four seconds at 30 fps.
 LOCK_IN_HOLD = 30  # Frames held on the finished logo after the camera locks in.
 LOCK_FRAME = FRAMES - LOCK_IN_HOLD  # The camera arrives, the M forms, and a flash bursts from the center.
-IGNITE_FRAME = 180  # In the reveal, the light that filled the legs reaches the core and flashes.
+REVEAL_FRAMES = LOCK_FRAME + 75  # The reveal's glide, its flash, and a second of rest: five and a half seconds.
 EFFECTS = ("still", "lock-in", "ignition", "hyperspin", "reveal")
 HDRI = "studio_small_09"  # CC0 studio lighting from Poly Haven, used for reflections.
 HDRI_URL = f"https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/{HDRI}_2k.hdr"
@@ -660,6 +660,7 @@ def shine(
     The legs glow up to the height `level`, with a band of strength `surface` where the light meets the dark.
     """
     rig["core"].data.energy = 700.0 * core
+    bpy.data.objects["cube-core"].hide_render = spark <= 0  # Unlit, the bead would show as a black dot.
     materials = bpy.data.materials
     materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * spark
     materials["lantern"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 0.6 * lantern
@@ -723,16 +724,16 @@ def hyperspin(rig: dict[str, bpy.types.Object], frame: int) -> None:
 
 
 def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
-    """Glide in through the dark, fill the legs with light, converge on the core, and flash.
+    """While the camera swings in, light fills the legs and converges on the core; it flashes as the M forms.
 
-    After the camera locks in on the unlit letter, light rises in the legs from the floor up, crosses into
-    the cube as the outer cube traces on and the struts grow inward, and closes the inner cube. The moment
-    it reaches the core, the flash swells, holds, spreads its rays outward, and slowly settles.
+    Shortly after the glide starts, light rises in the unlit legs from the floor up, crosses into the cube
+    as the outer cube traces on and the struts grow inward, and closes the inner cube just as the camera
+    arrives. The flash then swells, holds while its rays spread outward, and slowly settles.
     """
     glide(rig, frame)
-    fill = ease((frame - LOCK_FRAME - 6) / 54)
-    since = frame - IGNITE_FRAME
-    # The light arrives at the frame a second before the flash and closes the inner cube just in time.
+    fill = ease((frame - 7) / 48)
+    since = frame - LOCK_FRAME
+    # The light arrives at the frame a second before the lock and closes the inner cube just in time.
     progress = {"outer": ease((since + 36) / 18), "strut": ease((since + 24) / 14), "inner": ease((since + 14) / 12)}
     if since < 0:
         burst = 0.0
@@ -773,7 +774,7 @@ def render(effect: str, output_dir: Path, resolution: int, samples: int, *, froz
         "lock-in": (lock_in, FRAMES),
         "ignition": (ignition, FRAMES),
         "hyperspin": (hyperspin, FRAMES),
-        "reveal": (reveal, 2 * FRAMES),
+        "reveal": (reveal, REVEAL_FRAMES),
     }[effect]
     for frame in range(1, length + 1):
         step(rig, frame)
