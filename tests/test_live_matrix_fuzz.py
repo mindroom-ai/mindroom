@@ -7554,6 +7554,74 @@ async def test_model_source_audit_rejects_pre_edit_revision(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_model_source_audit_accepts_a_declined_edit_only_after_a_later_message(tmp_path: Path) -> None:
+    """An edit MindRoom declined leaves the answer on its old revision, which is right once another message followed."""
+    ledger_path = tmp_path / "event_journal.db"
+    orig = _source_marker("op:1", ORIGINAL_REVISION)
+    edited = _source_marker("op:1", "edit:5")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        source_current_markers={"$a": edited},
+        observed={4: frozenset({orig})},
+    )
+    auditor.source_revision_markers = {"$a": {"$edit": edited}}
+    auditor.pending_edit_markers = {"$a": {"$edit": edited}}
+    auditor.oracle.declined_edit_sources = frozenset({"$a"})
+    try:
+        record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        _write_ledger(ledger_path, {"$a": record})
+        thread = {"rel_type": "m.thread", "event_id": "$a", "m.in_reply_to": {"event_id": "$a"}}
+        source = {"event_id": "$a", "sender": "@user:example", "type": "m.room.message", "origin_server_ts": 10}
+        later = {
+            "event_id": "$b",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 20,
+            "content": {"body": "next", "msgtype": "m.text", "m.relates_to": thread},
+        }
+        events = {
+            "$a": {**source, "content": {"body": "original", "msgtype": "m.text"}},
+            "$edit": {
+                "event_id": "$edit",
+                "sender": "@user:example",
+                "type": "m.room.message",
+                "origin_server_ts": 30,
+                "content": {"m.relates_to": {"rel_type": "m.replace", "event_id": "$a"}},
+            },
+            "$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4)),
+        }
+        sent = [
+            _SentRecord(
+                "$a",
+                "!room:example",
+                "m.room.message",
+                sender="@user:example",
+                content=events["$a"]["content"],
+            ),
+            _SentRecord(
+                "$edit",
+                "!room:example",
+                "m.room.message",
+                sender="@user:example",
+                content=events["$edit"]["content"],
+            ),
+        ]
+        with pytest.raises(AssertionError, match="no later message followed it"):
+            auditor._assert_model_saw_current_sources(events, sent_records=sent)
+
+        auditor._assert_model_saw_current_sources(
+            {**events, "$b": later},
+            sent_records=[
+                *sent,
+                _SentRecord("$b", "!room:example", "m.room.message", sender="@user:example", content=later["content"]),
+            ],
+        )
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
 async def test_model_source_audit_rejects_coalesced_missing_one_source(tmp_path: Path) -> None:
     """A coalesced response missing ONE current source marker fails."""
     ledger_path = tmp_path / "event_journal.db"

@@ -6106,6 +6106,7 @@ class FinalStateAuditor:
                 records=records,
                 redacted_source_event_ids=redacted_sources,
                 redacted_targets=redacted,
+                sent_records=sent_records,
             )
             ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records, redacted_targets=redacted))
         else:
@@ -6663,6 +6664,7 @@ class FinalStateAuditor:
         records: Mapping[str, TurnRecord] | None = None,
         redacted_source_event_ids: Collection[str] = (),
         redacted_targets: Mapping[str, str] | None = None,
+        sent_records: Collection[_SentRecord] = (),
     ) -> None:
         """Every response-backed turn must be generated from its sources' current bodies.
 
@@ -6697,6 +6699,13 @@ class FinalStateAuditor:
                 set(expected_sources),
             ),
         )
+        # Edits MindRoom settled without regenerating anything, as it does for an older message's edit.
+        declined = {
+            edit_id
+            for source_id in self.oracle.declined_edit_sources
+            for edit_id in self.pending_edit_markers.get(source_id, {})
+        }
+        authored = {record.event_id: record for record in sent_records}
         for source_event_id, record in records.items():
             if record.response_event_id is None:
                 continue
@@ -6715,10 +6724,29 @@ class FinalStateAuditor:
                     if self.source_current_markers[covered] not in observed and call_id is not None
                     else None
                 )
-                or self.source_current_markers[covered]
+                or self._answered_source_marker(covered, observed, declined, events, redacted_targets or {})
                 for covered in live_sources
                 if covered in self.source_current_markers
             }
+            for covered in live_sources & set(self.source_current_markers):
+                current = self.source_current_markers[covered]
+                current_edit = next(
+                    (
+                        edit
+                        for edit, marker in self.source_revision_markers.get(covered, {}).items()
+                        if marker == current
+                    ),
+                    None,
+                )
+                if (
+                    current not in observed
+                    and current_edit in declined
+                    and not self._later_message_in_conversation(covered, events, authored)
+                ):
+                    problems.append(
+                        f"edit {current_edit} of {expected_sources.get(covered, covered)} regenerated nothing, "
+                        "though no later message followed it in its conversation",
+                    )
             redacted_markers = {
                 marker
                 for covered in covered_sources & harness_redacted
@@ -6739,6 +6767,60 @@ class FinalStateAuditor:
         if problems:
             msg = f"model source-revision audit failed: {problems}"
             raise AssertionError(msg)
+
+    def _later_message_in_conversation(
+        self,
+        source_id: str,
+        events: Mapping[str, Mapping[str, Any]],
+        authored: Mapping[str, _SentRecord],
+    ) -> bool:
+        """Return whether the fuzzer wrote another message in the source's conversation after it."""
+        root = self._source_thread_root(source_id, events, authored, seen=set())
+        source_ts = events.get(source_id, {}).get("origin_server_ts")
+        if root is None or not isinstance(source_ts, int):
+            return False
+        for event_id, record in authored.items():
+            event = events.get(event_id)
+            relation = (event or {}).get("content", {}).get("m.relates_to")
+            if (
+                event_id == source_id
+                or record.event_type != "m.room.message"
+                or event is None
+                or (isinstance(relation, dict) and relation.get("rel_type") == "m.replace")
+                or not isinstance(event.get("origin_server_ts"), int)
+                or event["origin_server_ts"] <= source_ts
+            ):
+                continue
+            if self._source_thread_root(event_id, events, authored, seen=set()) == root:
+                return True
+        return False
+
+    def _answered_source_marker(
+        self,
+        source_id: str,
+        observed: Collection[str],
+        declined: Collection[str],
+        events: Mapping[str, Mapping[str, Any]],
+        redacted_targets: Mapping[str, str],
+    ) -> str:
+        """Return the marker of the source's newest revision MindRoom answered.
+
+        That is its current revision, unless edits MindRoom declined, which
+        regenerate nothing, came after the newest one an answer used.
+        """
+        current = self.source_current_markers[source_id]
+        revisions = self.source_revision_markers.get(source_id, {})
+        current_edit = next((edit_id for edit_id, marker in revisions.items() if marker == current), None)
+        if current in observed or current_edit is None or current_edit not in declined:
+            return current
+        answered = [
+            (_replacement_order(edit_id, events[edit_id].get("origin_server_ts"), is_edit=True), marker)
+            for edit_id, marker in revisions.items()
+            if edit_id not in declined and edit_id not in redacted_targets and edit_id in events
+        ]
+        if answered:
+            return max(answered)[1]
+        return _source_marker(self.oracle.expected_sources[source_id], ORIGINAL_REVISION)
 
     def _historical_source_marker(
         self,
