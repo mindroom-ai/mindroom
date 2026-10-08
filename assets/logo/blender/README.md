@@ -14,9 +14,10 @@ From the hero camera the model reproduces the SVG silhouette; from other angles 
 | `sway.mp4` | Seamless ±30° sway loop starting from the hero pose, 120 frames at 30 fps. |
 | `crystal.py` | Restyles the model as framed crystal or ice legs, glowing white, around a tesseract and renders its effects. |
 | `crystal.blend` | Saved crystal scene for the still. |
-| `crystal.png` | Crystal M on a dark mirror floor from the logo's viewpoint, 1080 × 1080. |
-| `crystal-lock-in.mp4` | The camera glides from a scattered view into the one viewpoint where the M forms. |
-| `crystal-ignition.mp4` | A spark at the center; the inner cube traces on and its struts reach the frame. |
+| `crystal.png` | Clear crystal M on a dark mirror floor from the logo's viewpoint, 2160 × 2160. |
+| `crystal-reveal.mp4` | Light fills the frozen M while the camera swings in, flashes as the M forms, and melts the ice; 1440 × 1440. |
+| `crystal-lock-in.mp4` | The camera glides from a scattered view into the one viewpoint where the M forms, and it flashes. |
+| `crystal-ignition.mp4` | A spark at the center; the inner cube traces on, its struts reach the frame, and the legs wake. |
 | `crystal-hyperspin.mp4` | The tesseract turns once in 4D, the inner cube passing through the outer one; it loops. |
 
 ## Rebuild
@@ -35,7 +36,7 @@ The sway loop renders numbered PNG frames, which `ffmpeg` joins into a video:
 
 ```sh
 blender --background --factory-startup --python assets/logo/blender/build_scene.py -- \
-  --render sway --resolution 512 --samples 64 --output-dir /tmp/mindroom-logo
+  --render sway --resolution 1024 --samples 128 --output-dir /tmp/mindroom-logo
 ffmpeg -framerate 30 -i /tmp/mindroom-logo/sway/frame-%04d.png \
   -c:v libx264 -pix_fmt yuv420p -crf 18 assets/logo/blender/sway.mp4
 ```
@@ -56,7 +57,8 @@ blender --background --factory-startup --python assets/logo/blender/crystal.py -
 Add `--frozen` to either command for frosted, cracked ice instead of clear crystal.
 
 Each effect writes 120 numbered frames, four seconds at 30 fps, and the reveal writes 165, all for the same `ffmpeg` command as the sway loop.
-On a 12-core CPU the clear still takes about 1.5 minutes, and `--frozen` takes about three times as long.
+On a 12-core CPU the clear still takes about 1.5 minutes at these settings, and `--frozen` takes about three times as long.
+The committed renders are larger: the still is 2160 × 2160 at 1024 samples, the reveal 1440 × 1440 and the other effects 1080 × 1080 at 128 samples, rendered on a GPU together with the CPU.
 The first run downloads the CC0 [Poly Haven](https://polyhaven.com/a/studio_small_09) studio HDRI into `~/.cache/mindroom-logo/`.
 
 The look rests on a few choices:
