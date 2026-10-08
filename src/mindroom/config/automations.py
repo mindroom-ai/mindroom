@@ -130,6 +130,19 @@ class PluginAutomation(_ScheduledAutomation):
     cron: str = Field(description="When to check, in the configured timezone")
     options: dict[str, Any] = Field(default_factory=dict, description="Settings the plugin's automation reads")
 
+    @model_validator(mode="before")
+    @classmethod
+    def require_cron(cls, data: object) -> object:
+        """Name the built-ins when an entry without a cron lands here, which usually means a misspelled built-in."""
+        if isinstance(data, Mapping) and "cron" not in data:
+            name = cast("Mapping[str, object]", data).get("name")
+            msg = (
+                f"{name!r} is not a built-in automation ({', '.join(BUILTIN_AUTOMATION_NAMES)}), "
+                "and a plugin automation needs a cron"
+            )
+            raise ValueError(msg)
+        return data
+
     @field_validator("name")
     @classmethod
     def reject_builtin_name(cls, value: str) -> str:

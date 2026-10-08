@@ -560,17 +560,26 @@ def test_a_daily_note_the_run_edited_is_not_due_again(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "verdict",
-    ["- VERDICT: APPROVE", "VERDICT: APPROVE.", "**VERDICT:** APPROVE", "> VERDICT: APPROVE"],
+    ("done_line", "verdict"),
+    [
+        ("- DREAM: DONE", "- VERDICT: APPROVE"),
+        ("DREAM: DONE.", "VERDICT: APPROVE."),
+        ("**DREAM:** DONE", "**VERDICT:** APPROVE"),
+        ("> `DREAM: DONE`", "> VERDICT: APPROVE"),
+    ],
 )
-def test_a_verdict_line_with_markdown_marks_still_counts(tmp_path: Path, verdict: str) -> None:
-    """A copied bullet, bold label, or quote is read as the model meant it."""
+def test_completion_and_verdict_lines_with_markdown_marks_still_count(
+    tmp_path: Path,
+    done_line: str,
+    verdict: str,
+) -> None:
+    """A copied bullet, bold label, quote, code span, or closing period is read as the model meant it."""
     workspace = _workspace(tmp_path)
     workspace.write(EXPORT, "messages: [hello]\n")
     ask = _started(workspace)
     workspace.stage("memory/projects.md", PROJECTS + "- New fact.\n")
 
-    done = workspace.review(workspace.dream(ask, report="Done.\n**DREAM:** DONE\n"), verdict)
+    done = workspace.review(workspace.dream(ask, report=f"Done.\n{done_line}\n"), verdict)
 
     assert done.notice.startswith("✅ Dreaming applied")
 

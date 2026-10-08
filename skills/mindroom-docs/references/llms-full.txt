@@ -14738,12 +14738,14 @@ agents:
 
 ### What MindRoom guarantees
 
-- Checks and steps run off the event loop, and one agent runs one automation chain at a time; ordinary replies and other agents are not held back by it.
+Plugin automations follow the same [scheduling rules](https://docs.mindroom.chat/scheduling/#automations) as the built-ins, and their turns are [not auto-flushed](https://docs.mindroom.chat/memory/#file-auto-flush-worker) either.
+For plugin code, MindRoom also guarantees:
+
+- Checks and steps run off the event loop, so ordinary replies and other agents are not held back by them.
 - The one-hour limit applies to the agent's answer, not to a check or step that hangs.
 - `OSError` and `ValueError` from a check or step post a warning in the room and end the chain; other exceptions are logged.
-- Turns an automation starts are never auto-flushed into memory, and `automation_threads(runtime_paths)` from `mindroom.automations` returns the threads automations started, so an automation that reads exported conversations can skip them.
+- `automation_threads(runtime_paths)` from `mindroom.automations` returns the threads automations started, so an automation that reads exported conversations can skip them.
 - A chain finishes with the code that started it; after a plugin reload, the next fire uses the new code on the same schedule, but resources the old module kept, such as tasks in module-level variables, may already be cancelled.
-- Chains do not survive a restart, and a restart skips the occurrence it missed.
 
 ### Helpers the built-ins use
 
