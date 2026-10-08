@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
 import pytest_asyncio
@@ -97,6 +97,8 @@ if TYPE_CHECKING:
         TurnRecordStore,
     )
     from mindroom.event_journal.backend import Backend, Operation, Transaction
+    from mindroom.event_journal.postgres_backend import PostgresBackend
+    from mindroom.event_journal.write_queue import WriteOutcome
     from mindroom.history_recovery import RoomHistoryRecovery
 
 pytestmark = pytest.mark.asyncio
@@ -233,7 +235,7 @@ async def _release_writes_the_store_abandoned(
     for task in abandoned:
         task.cancel()
     while any(not task.done() for task in abandoned):
-        queue = backend._queue
+        queue = backend._writes._queue
         while queue is not None and not queue.empty():
             queue.get_nowait().future.cancel()
         await asyncio.sleep(0)
@@ -9514,7 +9516,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         writing = asyncio.create_task(backend.write(operation))
         # The write enqueues, and the writer has not resumed (or started) yet.
         await asyncio.sleep(0)
-        writer = backend._writer_task
+        writer = backend._writes._writer_task
         assert writer is not None
         writer.cancel()
         answered, abandoned = await asyncio.wait({writing}, timeout=_SETTLEMENT_WAIT_SECONDS)
@@ -9527,6 +9529,61 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         assert len(refusals) == 1
         assert isinstance(refusals[0], RuntimeError)
         assert str(refusals[0]) == "The event-journal writer stopped before running this write"
+
+
+class TestQueuedWritesCommitTogether:
+    """Writes queued behind a commit share the next one, each still atomic on its own."""
+
+    async def test_a_failing_write_rolls_back_alone_in_a_shared_commit(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """One commit covers the writes queued behind another; one that fails leaves the rest committed."""
+        backend = cast("SqliteBackend | PostgresBackend", journal_database().backend)
+        await backend.write(lambda transaction: transaction.execute("CREATE TABLE probe (n INTEGER)"))
+        writes = backend._writes
+        apply = writes.apply
+        batches: list[int] = []
+
+        def counted(operations: list[Operation[Any]]) -> list[WriteOutcome]:
+            batches.append(len(operations))
+            return apply(operations)
+
+        writes.apply = counted
+        started = threading.Event()
+        release = threading.Event()
+
+        def hold(_transaction: Transaction) -> None:
+            started.set()
+            release.wait()
+
+        def insert(n: int) -> Operation[int]:
+            def operation(transaction: Transaction) -> int:
+                transaction.execute("INSERT INTO probe (n) VALUES (?)", (n,))
+                if n == 2:
+                    message = "abandon this write"
+                    raise RuntimeError(message)
+                return n
+
+            return operation
+
+        try:
+            holding = asyncio.create_task(backend.write(hold))
+            assert await asyncio.to_thread(started.wait, _SETTLEMENT_WAIT_SECONDS), "the held write never ran"
+            queued = [asyncio.create_task(backend.write(insert(n))) for n in (1, 2, 3)]
+            # Each write is queued once its task first runs.
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        await holding
+        outcomes = await asyncio.gather(*queued, return_exceptions=True)
+        rows = await backend.read(lambda transaction: transaction.fetchall("SELECT n FROM probe ORDER BY n"))
+
+        assert outcomes[0] == 1
+        assert isinstance(outcomes[1], RuntimeError)
+        assert outcomes[2] == 3
+        assert [row["n"] for row in rows] == [1, 3]
+        assert batches == [1, 3], "the writes queued behind the held one did not share one commit"
 
 
 class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:

@@ -62,6 +62,7 @@ Matrix sync callback
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
+| `event_journal/write_queue.py` | The one writer task each backend's writes queue for, from any event loop; the writes queued at once commit in one transaction |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
 | `reply_lifecycle.py` | Pure rules for durable reply records: every event that changes a reply, its spans, rows, and effects (see [Reply Messages](reply-messages.md)) |
 | `reply_presentation.py` | Reply presentation model, its JSON codec, and rendering into a body, trace, and terminal wire status |

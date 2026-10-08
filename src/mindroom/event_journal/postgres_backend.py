@@ -24,6 +24,7 @@ from .legacy_schema import (
 )
 from .offloading import ThreadOffload, settled
 from .schema import OUTBOX_TABLE, POSTGRES_DIALECT, render, schema_statements
+from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -95,10 +96,9 @@ class PostgresBackend:
     database_url: str = field(repr=False)
     _writer: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
     _recovery_reader: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
-    _writer_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _writes: WriteQueue = field(init=False, repr=False)
     _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] | None = field(default=None, init=False, repr=False)
     _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
-    _closed: bool = field(default=False, init=False, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     # The session whose advisory lock claims this journal for one runtime;
     # the server releases the lock when the session ends.
@@ -128,6 +128,11 @@ class PostgresBackend:
             raise
         backend._pool = [backend._connect() for _ in range(_POOL_SIZE)]
         backend._recovery_reader = backend._connect()
+        backend._writes = WriteQueue(
+            apply=backend._apply_write,
+            offload=backend._offload,
+            task_name="event_journal_postgres_writer",
+        )
         return backend
 
     def _readers_queue(self) -> asyncio.Queue[psycopg.Connection[tuple[Any, ...]]]:
@@ -188,39 +193,33 @@ class PostgresBackend:
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:
-        """Run one operation in a serialized write transaction and commit it.
+        """Queue one operation for the writer task and await its commit."""
+        return await self._writes.write(operation)
 
-        The lock is what makes the shared writer connection safe, so it may not
-        be released while a statement is still executing on that connection.
-        A bare ``await asyncio.to_thread`` released it on cancellation: the next
-        write then ran inside the cancelled one's still-open transaction, and
-        whichever of the two reached ``commit`` or ``rollback`` first decided
-        the fate of both.
-        """
-        if self._closed:
-            msg = "The event-journal store is closed"
-            raise RuntimeError(msg)
-
-        def apply() -> T:
-            return self._apply_write(operation)
-
-        async with self._writer_lock:
-            # Waiting for the lock is a suspension, so the store may have been
-            # closed since the check above and this connection may be gone.
-            if self._closed:
-                msg = "The event-journal store is closed"
-                raise RuntimeError(msg)
-            return await self._offload.run(apply)
-
-    def _apply_write[T](self, operation: Operation[T]) -> T:
+    def _apply_write(self, operations: list[Operation[Any]]) -> list[WriteOutcome]:
+        """Commit queued writes in one transaction, each in a savepoint so one that fails rolls back alone."""
         try:
             with self._writer.cursor(row_factory=dict_row) as cursor:
-                result = operation(_PostgresTransaction(cursor))
+                outcomes = [self._apply_one(cursor, operation) for operation in operations]
         except BaseException:
             self._writer.rollback()
             raise
         self._writer.commit()
-        return result
+        return outcomes
+
+    def _apply_one(self, cursor: psycopg.Cursor[dict[str, Any]], operation: Operation[Any]) -> WriteOutcome:
+        cursor.execute("SAVEPOINT journal_write")
+        try:
+            result = operation(_PostgresTransaction(cursor))
+        except Exception as error:
+            if self._writer.broken:
+                # The error took the connection, and the batch with it.
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT journal_write")
+            cursor.execute("RELEASE SAVEPOINT journal_write")
+            return WriteOutcome(error=error)
+        cursor.execute("RELEASE SAVEPOINT journal_write")
+        return WriteOutcome(result=result)
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one operation on a pooled reader.
@@ -229,9 +228,8 @@ class PostgresBackend:
         stopped. Returning it while a cancelled read's thread was still using
         it handed a live connection to the next reader.
         """
-        if self._closed:
-            msg = "The event-journal store is closed"
-            raise RuntimeError(msg)
+        if self._writes.closed:
+            raise RuntimeError(CLOSED_MESSAGE)
         connection = await self._readers_queue().get()
 
         def apply() -> T:
@@ -240,18 +238,16 @@ class PostgresBackend:
         try:
             # An exhausted pool makes the line above a suspension, so the store
             # may have been closed while this read waited for a connection.
-            if self._closed:
-                msg = "The event-journal store is closed"
-                raise RuntimeError(msg)
+            if self._writes.closed:
+                raise RuntimeError(CLOSED_MESSAGE)
             return await self._offload.run(apply)
         finally:
             self._readers_queue().put_nowait(connection)
 
     async def recovery_read[T](self, operation: Operation[T]) -> T:
         """Run a committed-state handoff proof on its reserved reader."""
-        if self._closed:
-            msg = "The event-journal store is closed"
-            raise RuntimeError(msg)
+        if self._writes.closed:
+            raise RuntimeError(CLOSED_MESSAGE)
 
         def apply() -> T:
             try:
@@ -277,14 +273,15 @@ class PostgresBackend:
     async def close(self) -> None:
         """Close admission once and await the one owned connection teardown.
 
-        Setting the closed flag first stops any further statement from
-        starting; draining then waits for the ones already on worker threads,
-        because closing a connection under a running statement is how psycopg
-        reports someone else's cancellation as this caller's broken connection.
+        Closing admission first stops any further statement from starting;
+        stopping the writer and draining then wait for the ones already on
+        worker threads, because closing a connection under a running statement
+        is how psycopg reports someone else's cancellation as this caller's
+        broken connection.
         """
         close_task = self._close_task
         if close_task is None:
-            self._closed = True
+            self._writes.close()
             close_task = asyncio.create_task(
                 self._finish_close(),
                 name="event_journal_postgres_close",
@@ -337,6 +334,7 @@ class PostgresBackend:
 
     async def _finish_close(self) -> None:
         """Finish the teardown every close waiter shares; the hold goes last, once nothing can write."""
+        await self._writes.stop()
         try:
             await asyncio.gather(
                 self._offload.drain(),

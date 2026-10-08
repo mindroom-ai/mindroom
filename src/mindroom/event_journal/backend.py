@@ -41,7 +41,7 @@ class Backend(Protocol):
     """A durable store that can run read and write transactions."""
 
     async def write[T](self, operation: Operation[T]) -> T:
-        """Run one operation in a serialized write transaction and commit it."""
+        """Run one operation atomically through the serialized writer and await its commit."""
         ...
 
     async def read[T](self, operation: Operation[T]) -> T:

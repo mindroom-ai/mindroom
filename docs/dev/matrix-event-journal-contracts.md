@@ -303,8 +303,9 @@ Acknowledgement and the terminal turn record commit in **one** transaction, and 
 
 ## Storage concurrency
 
-SQLite uses one writer task and a command queue.
-The writer opens `synchronous = FULL`; readers use `NORMAL`.
+Both backends serialize writes through one writer task and a command queue that accepts writes from any event loop, including the loop a synchronous tool's hooks run on.
+The writes queued at once commit in one transaction, each in a savepoint of its own, so one commit covers the batch and a write that fails rolls back alone.
+The SQLite writer opens `synchronous = FULL`; readers use `NORMAL`.
 Writer and reader connections use WAL-compatible settings and an explicit `busy_timeout`.
 
 PostgreSQL implements the same behavioural contract without a second application protocol.
