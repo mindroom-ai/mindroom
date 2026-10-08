@@ -243,7 +243,8 @@ kind() {
   else k=-
   fi
 }
-writable() { [ -w "$1" ] || chmod u+w "$1"; }
+# BusyBox test -w is always true for root, which root-squashed NFS does not honour, so root always adds u+w.
+writable() { if [ "$uid" = 0 ] || [ ! -w "$1" ]; then chmod u+w "$1"; fi; }
 if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
 mkdir -p "$dst"
 reason=
@@ -253,6 +254,7 @@ done
 [ -n "$reason" ] || [ -z "$(find "$src" "$dst" -name "*$nl*")" ] || reason="a name contains a newline"
 if [ -n "$reason" ]; then
   echo "$0: $reason, so $dst is replaced by a full copy" >&2
+  chmod -R u+w "$dst" 2>/dev/null || :
   rm -rf "$dst"
   mkdir -p "$dst"
   cp -a "$src/." "$dst/"
@@ -260,9 +262,10 @@ else
   sources=$(cd "$src" && find .)
   targets=$(cd "$dst" && find .)
   directories=$(cd "$src" && find . -depth -type d)
+  uid=$(id -u)
   # cp -a keeps ownership only where chown works, so compare it only then (root without NFS root squashing).
   own=
-  if [ "$(id -u)" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
+  if [ "$uid" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
   # Remove target entries that are missing from the source, of another type, special, or a different symlink.
   gone=
   printf '%s\n' "$targets" | while IFS= read -r p; do
@@ -274,7 +277,7 @@ else
       ll) [ "$(readlink "$src/$p"; echo .)" != "$(readlink "$dst/$p"; echo .)" ] || continue ;;
     esac
     writable "$dst/${p%/*}"
-    [ "$k" != d ] || chmod -R u+w "$dst/$p"
+    [ "$k" != d ] || chmod -R u+w "$dst/$p" 2>/dev/null || :
     rm -rf "$dst/$p"
     gone=$p
   done

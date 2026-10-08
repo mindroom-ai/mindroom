@@ -78,11 +78,12 @@ def _run(
     *,
     cwd: Path | None = None,
     check: bool = True,
+    wrapper: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run the rendered init command with the source and target paths swapped for local trees."""
     script, name, *_paths = init["args"]
     completed = subprocess.run(
-        [str(tool_dir / "sh"), *init["command"][1:], script, name, str(source), str(target)],
+        [*wrapper, str(tool_dir / "sh"), *init["command"][1:], script, name, str(source), str(target)],
         check=False,
         capture_output=True,
         text=True,
@@ -382,6 +383,33 @@ def test_sync_fills_directories_that_end_up_read_only_without_root(
         source.chmod(0o555)
         _run(bundle_inits["sync"], tool_dir, source, target)
         assert _snapshot(target) == _snapshot(source)
+
+
+def test_root_without_permission_override_updates_read_only_directories(
+    bundle_inits: dict[str, dict[str, Any]],
+    tool_dir: Path,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Root on root-squashed NFS gets no permission override; BusyBox test -w still reports true for it."""
+    unshare, setpriv = shutil.which("unshare"), shutil.which("setpriv")
+    drop = "--bounding-set=-dac_override,-dac_read_search,-fowner,-chown"
+    wrapper = (unshare or "unshare", "-r", setpriv or "setpriv", "--inh-caps=-all", drop)
+    if None in (unshare, setpriv) or subprocess.run([*wrapper, "true"], check=False).returncode:
+        pytest.skip("needs unshare and setpriv with unprivileged user namespaces")
+    request.addfinalizer(lambda: subprocess.run(["chmod", "-R", "u+w", str(tmp_path)], check=False))
+    source = _make_source(tmp_path / "bundle")
+    docs = source / "docs"
+    target = tmp_path / "sync"
+    docs.chmod(0o555)
+    _run(bundle_inits["sync"], tool_dir, source, target, wrapper=wrapper)
+
+    docs.chmod(0o755)
+    (docs / "guide.md").unlink()
+    (docs / "added.md").write_text("added\n")
+    docs.chmod(0o555)
+    _run(bundle_inits["sync"], tool_dir, source, target, wrapper=wrapper)
+    assert _snapshot(target) == _snapshot(source)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can read the unreadable file")
