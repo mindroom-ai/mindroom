@@ -25,12 +25,15 @@ from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.logging_config import get_logger
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
+    NoteKind,
     Presentation,
     Segment,
     after_restart,
     continued_by,
     decode_presentation,
     encode_presentation,
+    format_error_note,
+    note_segment,
     render_body,
     shown_work,
     with_answer,
@@ -49,6 +52,7 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
+    from mindroom.cancellation import CancelSource
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.replies import PostCommitEffect
     from mindroom.matrix_delivery import ReplyRowEnqueuer
@@ -838,6 +842,42 @@ def approval_note_write(
             now_ns=time.time_ns(),
         ),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class NotedEnd:
+    """A span end that writes its terminal row: what the reply showed, plus one note."""
+
+    state: rl.ReplyState
+    note: Segment
+
+
+def interrupted_end(
+    reply: rl.Reply,
+    *,
+    cancel_source: CancelSource | None,
+    failure_reason: str | None,
+    delivery_started: bool,
+    confirms: rl.ProgressConfirmation | None,
+) -> NotedEnd | Decide:
+    """Return how a span ends when its response was stopped, interrupted, or failed.
+
+    ``cancel_source`` is ``None`` for a failure. A recorded Stop ends the reply
+    cancelled, as the rules decide for every exit. Once delivery started, the
+    reply ends failed with its note. Before that its sources stay for a retry:
+    an interruption that showed nothing leaves Matrix untouched, and anything
+    else shows its note while the retry runs, so a failure that recurs on every
+    attempt never leaves the reply showing only its placeholder.
+    """
+    if reply.unapplied_stop:
+        return NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))
+    if cancel_source is None:
+        note = note_segment(NoteKind.ERROR, format_error_note(failure_reason or "interrupted"))
+    else:
+        note = note_segment(NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED)
+    if cancel_source is not None and reply.event_id is None:
+        return lambda current, span: rl.release(current, span, now_ns=time.time_ns(), confirms=confirms)
+    return NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)
 
 
 def resumed_note_write(handle: SpanHandle, shown: Presentation) -> ReplyWrite:

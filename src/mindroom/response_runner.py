@@ -98,7 +98,6 @@ from mindroom.reply_presentation import (
     Presentation,
     current_answer,
     decode_presentation,
-    format_error_note,
     note_segment,
     render_body,
 )
@@ -3255,31 +3254,12 @@ class ResponseRunner:
         confirms = handle.unconfirmed_progress
         now_ns = time.time_ns()
         if isinstance(error, asyncio.CancelledError):
-            cancel_source = classify_cancel_source(error)
-            reply = await handle.runtime.store.replies.load(handle.reply_id)
-            if cancel_source == "user_stop" and reply is not None and reply.unapplied_stop:
-                await gateway.end_reply_span_with_note(
-                    handle,
-                    target,
-                    state=rl.ReplyState.CANCELLED,
-                    note=note_segment(NoteKind.CANCELLED),
-                )
-                return
-            if reply is not None and reply.event_id is not None:
-                # An early placeholder shows why it stopped; the sources stay for the retry.
-                await gateway.end_reply_span_with_note(
-                    handle,
-                    target,
-                    state=rl.ReplyState.ACTIVE,
-                    note=note_segment(
-                        NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED,
-                    ),
-                )
-                return
-            # Other cancellations leave the sources for a retry, without touching Matrix.
-            await gateway.end_reply_span(
+            await gateway.end_interrupted_span(
                 handle,
-                lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
+                target,
+                cancel_source=classify_cancel_source(error),
+                failure_reason=None,
+                delivery_started=False,
             )
             return
         if isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError)):
@@ -4042,7 +4022,7 @@ class ResponseRunner:
             )
             source_deleted = await self._sources_deleted(request, resolved_target)
             if handle is not None and not handle.exited:
-                await self._end_span_for_terminal_source(handle, resolved_target, source_deleted=source_deleted)
+                await self._end_span_for_terminal_source(handle, source_deleted=source_deleted)
             elif (
                 # Before the claim, the reply an earlier attempt left ends through its records.
                 not await self.deps.delivery_gateway.settle_unclaimed_reply(
@@ -4063,34 +4043,16 @@ class ResponseRunner:
         redacted = await self.deps.replies.store.redacted_event_ids(target.room_id, (driving, *logical))
         return redacted.issuperset(logical) or (driving not in logical and driving in redacted)
 
-    async def _end_span_for_terminal_source(
-        self,
-        handle: SpanHandle,
-        target: MessageTarget,
-        *,
-        source_deleted: bool,
-    ) -> None:
-        """End a claimed span whose source became terminal before it ran."""
-        gateway = self.deps.delivery_gateway
+    async def _end_span_for_terminal_source(self, handle: SpanHandle, *, source_deleted: bool) -> None:
+        """End a claimed span whose source became terminal before it ran; the rule decides a recorded Stop too."""
         now_ns = time.time_ns()
-        if source_deleted:
-            await gateway.end_reply_span(
-                handle,
-                lambda reply, span: rl.sources_deleted(reply, span, now_ns=now_ns),
-            )
-            return
-        reply = await handle.runtime.store.replies.load(handle.reply_id)
-        if reply is not None and reply.unapplied_stop:
-            await gateway.end_reply_span_with_note(
-                handle,
-                target,
-                state=rl.ReplyState.CANCELLED,
-                note=note_segment(NoteKind.CANCELLED),
-            )
-            return
-        await gateway.end_reply_span(
+        await self.deps.delivery_gateway.end_reply_span(
             handle,
-            lambda reply, span: rl.sources_settled_without_reply(reply, span, now_ns=now_ns),
+            lambda reply, span: (
+                rl.sources_deleted(reply, span, now_ns=now_ns)
+                if source_deleted
+                else rl.sources_settled_without_reply(reply, span, now_ns=now_ns)
+            ),
         )
 
     async def _prepare_admitted_locked_turn(
@@ -4417,42 +4379,15 @@ class ResponseRunner:
                 lambda reply, span: rl.suppress(reply, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
             )
             return outcome
-        if outcome.terminal_status == "cancelled" and outcome.resolved_cancel_source == "user_stop":
-            noted = await gateway.end_reply_span_with_note(
-                handle,
-                target,
-                state=rl.ReplyState.CANCELLED,
-                note=note_segment(NoteKind.CANCELLED),
-            )
-            return replace(noted, cancel_source=outcome.cancel_source, failure_reason=outcome.failure_reason)
-        if outcome.terminal_status == "error" and not delivery_started:
-            # The reply shows the error while its sources are retried, so a failure that recurs on every attempt
-            # never leaves it showing only its placeholder; a regeneration keeps the answer it was replacing.
-            noted = await gateway.end_reply_span_with_note(
-                handle,
-                target,
-                state=rl.ReplyState.ACTIVE,
-                note=note_segment(NoteKind.ERROR, format_error_note(outcome.failure_reason or "interrupted")),
-            )
-            return replace(noted, terminal_status="error", failure_reason=outcome.failure_reason)
-        if outcome.terminal_status == "cancelled":
-            reply = await handle.runtime.store.replies.load(handle.reply_id)
-            if reply is not None and reply.event_id is None:
-                # Interrupted before anything was visible: nothing to note, and the sources are retried.
-                await gateway.end_reply_span(
-                    handle,
-                    lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
-                )
-                return outcome
-        note = (
-            note_segment(NoteKind.RESTART)
-            if outcome.resolved_cancel_source == "sync_restart"
-            else note_segment(NoteKind.INTERRUPTED)
-            if outcome.terminal_status == "cancelled"
-            else note_segment(NoteKind.ERROR, format_error_note(outcome.failure_reason or ""))
+        noted = await gateway.end_interrupted_span(
+            handle,
+            target,
+            cancel_source=outcome.resolved_cancel_source if outcome.terminal_status == "cancelled" else None,
+            failure_reason=outcome.failure_reason,
+            delivery_started=delivery_started,
         )
-        # A non-user interruption or an error during delivery ends the reply with its note.
-        noted = await gateway.end_reply_span_with_note(handle, target, state=rl.ReplyState.FAILED, note=note)
+        if noted is None:
+            return outcome
         return replace(
             noted,
             terminal_status=outcome.terminal_status,

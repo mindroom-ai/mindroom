@@ -104,12 +104,14 @@ from mindroom.reply_presentation import (
     with_trailing_note,
 )
 from mindroom.reply_scope import (
+    NotedEnd,
     ReplyWrite,
     ReplyWriteRefusedError,
     SpanHandle,
     approval_note_write,
     current_span,
     initial_write,
+    interrupted_end,
     owed_note_write,
     resumed_note_write,
     terminal_write,
@@ -130,7 +132,6 @@ from mindroom.streaming import (
     cancel_source_from_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
-    format_stream_error_note,
     interactive_response_for_visible_body,
     send_streaming_response,
     stream_progress_edits,
@@ -154,7 +155,7 @@ if TYPE_CHECKING:
     )
     from mindroom.hooks import MessageEnvelope
     from mindroom.response_sources import ResponseSources
-    from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.streaming import CancelSource, ProgressPublisher, StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
@@ -1338,6 +1339,33 @@ class DeliveryGateway:
         """Apply a span exit that writes nothing itself, then settle what it left owed."""
         await handle.runtime.decide(handle, decide)
         await self.settle_reply_debt(handle.reply_id)
+
+    async def end_interrupted_span(
+        self,
+        handle: SpanHandle,
+        target: MessageTarget,
+        *,
+        cancel_source: CancelSource | None,
+        failure_reason: str | None,
+        delivery_started: bool,
+    ) -> FinalDeliveryOutcome | None:
+        """End a span whose response was stopped, interrupted, or failed, as ``interrupted_end`` decides.
+
+        Returns the outcome of the terminal row it wrote, or ``None`` when the span ended without one.
+        """
+        reply = await self.deps.outbox.replies.load(handle.reply_id)
+        assert reply is not None, "a span's reply exists while the span ends"
+        end = interrupted_end(
+            reply,
+            cancel_source=cancel_source,
+            failure_reason=failure_reason,
+            delivery_started=delivery_started,
+            confirms=handle.unconfirmed_progress,
+        )
+        if isinstance(end, NotedEnd):
+            return await self.end_reply_span_with_note(handle, target, state=end.state, note=end.note)
+        await self.end_reply_span(handle, end)
+        return None
 
     async def end_reply_span_with_note(
         self,
@@ -2648,24 +2676,19 @@ class DeliveryGateway:
         """End a resumed reply's continuation that stopped before streaming anything below it."""
         stream_outcome = request.stream_transport_outcome
         failure_reason = stream_outcome.failure_reason or "interrupted"
-        if (
-            stream_outcome.terminal_status == "cancelled"
-            and cancel_source_from_failure_reason(failure_reason) == "user_stop"
-        ):
-            outcome = await self.end_reply_span_with_note(
-                handle,
-                request.target,
-                state=ReplyState.CANCELLED,
-                note=note_segment(NoteKind.CANCELLED),
-            )
-        else:
-            # The note shows below the recovered content and the sources stay for a retry.
-            outcome = await self.end_reply_span_with_note(
-                handle,
-                request.target,
-                state=ReplyState.ACTIVE,
-                note=note_segment(NoteKind.ERROR, format_stream_error_note(failure_reason)),
-            )
+        # The note shows below the recovered content, and the sources stay for a retry unless a Stop ended the reply.
+        outcome = await self.end_interrupted_span(
+            handle,
+            request.target,
+            cancel_source=(
+                cancel_source_from_failure_reason(failure_reason)
+                if stream_outcome.terminal_status == "cancelled"
+                else None
+            ),
+            failure_reason=failure_reason,
+            delivery_started=False,
+        )
+        assert outcome is not None, "a resumed reply has its event, so its end writes a note"
         return replace(outcome, terminal_status=stream_outcome.terminal_status, failure_reason=failure_reason)
 
     async def finalize_streamed_response(

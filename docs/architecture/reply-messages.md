@@ -108,6 +108,14 @@ Its finish, release, or discard applies the reply rule while the continuation st
 A release hands the run's sources back to replay, unless a Stop is recorded: the reply then ends cancelled instead of replaying what the user stopped.
 A restart leaves a reply an approval holds to approval recovery, including a span approved in place that an older instance ran.
 
+## Interrupted responses
+
+A response that a Stop, a restart, an interruption, or a failure ends before its answer's own terminal write ends its span through one table, `interrupted_end` in `reply_scope.py`:
+
+- A recorded Stop ends the reply `cancelled` with the cancel note, whatever stopped the response.
+- Before delivery starts, the sources stay pending for a retry: an interruption that showed nothing leaves Matrix untouched, and anything else shows its restart, interruption, or error note while the retry runs.
+- Once delivery started, the reply ends `failed` with that note.
+
 ## Abandoned regenerations
 
 A regeneration abandoned without an answer or a retry restores the finished answer it was replacing only when it recorded no write Matrix may show, counting unacknowledged writes.
