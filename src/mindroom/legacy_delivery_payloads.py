@@ -33,7 +33,7 @@ def _inline_final_result(payload: Mapping[str, object]) -> dict[str, object] | N
 
 # LEGACY_COMPAT: Version-only FINAL outcome markers in Matrix payloads.
 # Legacy format: io.mindroom.final_delivery = {"version": 2} on a FINAL payload, beside the outcome in result_json.
-# Last legacy release: v2026.10.208 (written since v2026.8.89); replacement: the unreleased durable reply messages
+# Last legacy release: v2026.10.210 (written since v2026.8.89); replacement: the unreleased durable reply messages
 # write no wire marker.
 # Handling: A marker carries no outcome, so the local result_json decides, and sanitizing keeps the marker in place.
 # Coverage: tests/test_event_journal_store.py::TestOutbox::test_a_compatibility_marker_does_not_replace_the_local_result.
