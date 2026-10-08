@@ -352,8 +352,11 @@ def test_sync_fills_directories_that_end_up_read_only_without_root(
     tool_dir: Path,
     tmp_path: Path,
     scenario: str,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Directory modes are applied after the copies, so read-only bundle directories do not block a non-root init."""
+    # Let pytest delete the read-only trees afterwards.
+    request.addfinalizer(lambda: subprocess.run(["chmod", "-R", "u+w", str(tmp_path)], check=False))
     source = _make_source(tmp_path / "bundle")
     docs = source / "docs"
     target = tmp_path / "sync"

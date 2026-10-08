@@ -223,7 +223,7 @@ Content-bundle init script; takes the bundle's overwrite flag and receives the s
 With overwrite, the target ends up with the same entries, types, contents, modes, symlink targets, and (where cp -a
 can preserve them) owners as after rm -rf and cp -a, but only entries that differ are rewritten, so a restart on
 network storage copies only what changed. Unlike a full copy, unchanged files keep their timestamps, directory
-timestamps and symlink owners are not synced, and hard links between files become separate copies.
+timestamps and symlink owners are not synced, and hard-link relationships between files are not guaranteed to be preserved.
 An image missing a tool the sync uses, or a name with a newline in either tree (listings are line-based),
 falls back to the full copy. Directory modes and owners are applied last, deepest first, so copying into a
 directory that ends up read-only still works. It needs only POSIX sh and BusyBox-compatible tools.

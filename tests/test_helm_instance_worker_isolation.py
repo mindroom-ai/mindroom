@@ -6,6 +6,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -60,6 +61,8 @@ def _run_helm_template(
 ) -> subprocess.CompletedProcess[str]:
     helm = shutil.which("helm")
     if helm is None:
+        if os.environ.get("CI"):
+            pytest.fail("helm must be available in CI, where the pytest workflow runs these checks")
         pytest.skip("helm is required for rendered chart checks")
     return subprocess.run(
         [
