@@ -176,7 +176,7 @@ Tool calls and the restart account:
 
 Delivery and recovery:
 
-- A failure before anything was delivered shows the error note while the turn keeps replaying, so one that recurs on every attempt keeps retrying, and each retry backs off that room's event lane.
+- A failure before anything was delivered shows the error note while the turn keeps replaying, so one that recurs on every attempt keeps retrying, and each retry backs off that room's event lane; a regeneration keeps showing the answer it was replacing, without a note, while it retries.
 - A reply row written while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed; after a homeserver outage, an answer near the event size limit can then be refused and end with the delivery-failed note.
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message.
 - A continuation the upgrade discards leaves its Matrix message as it was, which can still show that it waits for approval.
