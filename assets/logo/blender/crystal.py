@@ -34,7 +34,7 @@ FRAMES = 120  # Four seconds at 30 fps.
 LOCK_IN_HOLD = 30  # Frames held on the finished logo after the camera locks in.
 LOCK_FRAME = FRAMES - LOCK_IN_HOLD  # The camera arrives, the M forms, and a flash bursts from the center.
 REVEAL_FRAMES = LOCK_FRAME + 75  # The reveal's glide, its flash, and a second of rest: five and a half seconds.
-EFFECTS = ("still", "lock-in", "ignition", "hyperspin", "reveal")
+EFFECTS = ("still", "wallpaper", "lock-in", "ignition", "hyperspin", "reveal")
 HDRI = "studio_small_09"  # CC0 studio lighting from Poly Haven, used for reflections.
 HDRI_URL = f"https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/{HDRI}_2k.hdr"
 HDRI_CACHE = Path.home() / ".cache" / "mindroom-logo" / "hdri" / f"{HDRI}_2k.hdr"
@@ -884,16 +884,30 @@ def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
     bpy.data.materials["azure-crystal"].node_tree.nodes["frost-front"].outputs["Value"].default_value = front
 
 
+def widescreen(scene: bpy.types.Scene, camera: bpy.types.Object, width: int) -> None:
+    """Frame the logo's view for a 16:9 desktop: the M smaller, a little above center, with room around it."""
+    scene.render.resolution_x, scene.render.resolution_y = width, width * 9 // 16
+    camera.data.sensor_fit = "VERTICAL"  # The view keeps its height; the wider frame adds space at the sides.
+    camera.data.ortho_scale *= 1.6
+    camera.data.shift_y = 0.07  # Lower would bring the floor's bright far reflection into the frame.
+
+
 def render(effect: str, output_dir: Path, resolution: int, samples: int, *, frozen: bool = False) -> None:
-    """Build and render one effect: a still PNG, or numbered frames in a folder."""
+    """Build and render one effect: a still PNG, or numbered frames in a folder.
+
+    The wallpaper is the still framed for a 16:9 desktop, `resolution` pixels wide.
+    """
     rig = build(frozen=frozen or effect == "reveal")  # The reveal starts in ice and melts.
     scene = bpy.context.scene
     scene.render.resolution_x = scene.render.resolution_y = resolution
     scene.cycles.samples = samples
     scene.cycles.adaptive_threshold = 0.02  # The denoiser cleans up the rest; frames stay affordable.
     scene.render.use_persistent_data = True  # Frames reuse the scene and resync only what changed.
-    if effect == "still":
-        scene.render.filepath = str(output_dir / "crystal.png")
+    if effect in ("still", "wallpaper"):
+        scene.render.image_settings.color_depth = "16"  # The dark gradients band at 8 bits per channel.
+        if effect == "wallpaper":
+            widescreen(scene, rig["camera"], resolution)
+        scene.render.filepath = str(output_dir / ("crystal.png" if effect == "still" else "crystal-wallpaper.png"))
         bpy.ops.render.render(write_still=True)
         return
     step, length = {
