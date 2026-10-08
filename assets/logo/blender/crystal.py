@@ -16,6 +16,7 @@ effects as numbered PNG frames for ffmpeg.
 import argparse
 import itertools
 import math
+import os
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -262,7 +263,9 @@ def studio_world() -> bpy.types.World:
     """Studio HDRI for reflections and light; camera rays see plain navy instead."""
     if not HDRI_CACHE.exists():
         HDRI_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        partial = HDRI_CACHE.with_suffix(".part")  # An interrupted download never lands at the cache path.
+        # Each process downloads to its own file, so neither an interrupted download nor a parallel first run
+        # leaves a partial file at the cache path.
+        partial = HDRI_CACHE.parent / f"{HDRI_CACHE.name}.{os.getpid()}.part"
         urllib.request.urlretrieve(HDRI_URL, partial)  # noqa: S310 -- Fixed https URL.
         partial.replace(HDRI_CACHE)
     world = bpy.data.worlds.new("studio")
