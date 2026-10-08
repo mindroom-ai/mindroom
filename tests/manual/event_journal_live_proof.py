@@ -72,6 +72,7 @@ class DisposableTuwunel:
     instance_name: str = field(default_factory=lambda: f"jrnl{secrets.token_hex(4)}")
     homeserver: str = ""
     server_name: str = ""
+    registration_token: str = ""
     _created: bool = False
 
     def start(self) -> None:
@@ -82,6 +83,13 @@ class DisposableTuwunel:
         instance = registry["instances"][self.instance_name]
         self.homeserver = f"http://127.0.0.1:{int(instance['matrix_port'])}"
         self.server_name = f"m-{instance['domain']}"
+        # The instance's homeserver admits new accounts only with the token deploy.py generated for it.
+        env_file = INSTANCE_REGISTRY.parent / "envs" / f"{self.instance_name}.env"
+        self.registration_token = next(
+            value.strip()
+            for key, _, value in (line.partition("=") for line in env_file.read_text(encoding="utf-8").splitlines())
+            if key.strip() == "MATRIX_REGISTRATION_TOKEN"
+        )
         _run("just", "local-instances-start-matrix", self.instance_name)
         self._wait_ready()
 
@@ -121,19 +129,28 @@ class _Account:
     password: str
 
 
-async def _register(homeserver: str) -> _Account:
+async def _register(homeserver: str, registration_token: str) -> _Account:
     """Register one disposable account and return a logged-in client."""
     username = f"jrnl{secrets.token_hex(6)}"
     password = secrets.token_urlsafe(24)
-    client = nio.AsyncClient(homeserver, f"@{username}:unused")
-    response = await client.register(username, password)
-    if not isinstance(response, nio.RegisterResponse):
-        msg = f"registration failed: {response}"
-        raise TypeError(msg)
-    client.user_id = response.user_id
-    client.access_token = response.access_token
-    client.device_id = response.device_id
-    return _Account(client=client, user_id=response.user_id, password=password)
+    payload: dict[str, object] = {
+        "auth": {"type": "m.login.registration_token", "token": registration_token},
+        "username": username,
+        "password": password,
+    }
+    async with httpx.AsyncClient(timeout=30) as http:
+        response = await http.post(f"{homeserver}/_matrix/client/v3/register", json=payload)
+        session = response.json().get("session") if response.status_code == httpx.codes.UNAUTHORIZED else None
+        if isinstance(session, str):
+            # Token registration is interactive: the first request only opens the session.
+            payload["auth"] = {"type": "m.login.registration_token", "token": registration_token, "session": session}
+            response = await http.post(f"{homeserver}/_matrix/client/v3/register", json=payload)
+        response.raise_for_status()
+        registered = response.json()
+    client = nio.AsyncClient(homeserver, registered["user_id"])
+    client.access_token = registered["access_token"]
+    client.device_id = registered["device_id"]
+    return _Account(client=client, user_id=registered["user_id"], password=password)
 
 
 async def _login_another_device(account: _Account) -> nio.AsyncClient:
@@ -582,10 +599,10 @@ async def _admit_from_server(
     await store.settle(event_id)
 
 
-async def run_proof(homeserver: str) -> Findings:
+async def run_proof(homeserver: str, registration_token: str) -> Findings:
     """Run every live observation against one homeserver."""
     findings = Findings()
-    account = await _register(homeserver)
+    account = await _register(homeserver, registration_token)
     client, user_id = account.client, account.user_id
     with tempfile.TemporaryDirectory(prefix="journal-live-proof-") as directory:
         store_root = EventJournalStore.open_sqlite(Path(directory) / "journal.db")
@@ -619,18 +636,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Start a disposable Tuwunel, run the proof, and report."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--homeserver", help="Use an already running homeserver instead")
+    parser.add_argument("--registration-token", default="", help="The running homeserver's registration token")
     parser.add_argument("--keep", action="store_true", help="Leave the disposable server running")
     arguments = parser.parse_args(argv)
 
     if arguments.homeserver:
-        findings = asyncio.run(run_proof(arguments.homeserver))
+        findings = asyncio.run(run_proof(arguments.homeserver, arguments.registration_token))
         return 0 if findings.ok else 1
 
     server = DisposableTuwunel()
     try:
         server.start()
         print(f"Tuwunel ready at {server.homeserver}")
-        findings = asyncio.run(run_proof(server.homeserver))
+        findings = asyncio.run(run_proof(server.homeserver, server.registration_token))
     finally:
         if arguments.keep:
             print(f"Leaving {server.instance_name} running at {server.homeserver}")

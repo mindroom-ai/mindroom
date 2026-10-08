@@ -221,7 +221,7 @@ async def prove_restart_delivery_count(
 async def run_proof(stack: ManagedTuwunelStack) -> Findings:
     """Run every observation against one disposable stack."""
     findings = Findings()
-    client = LiveMatrixClient(stack.homeserver, stack.room_id)
+    client = LiveMatrixClient(stack.homeserver, stack.room_id, registration_token=stack.registration_token)
     try:
         await client.register()
         await client.join_room()
