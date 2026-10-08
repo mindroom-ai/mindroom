@@ -2123,10 +2123,12 @@ def _enqueue_reply_row(
     row = transition.row
     stage = DeliveryStage(row.stage.value)
     edits_event_id = None if stage is DeliveryStage.INITIAL else reply.event_id
+    # A row waits for the reply's event only while an earlier row may still create it. With none left, as when
+    # Matrix refused the only create for good, the row creates the event itself.
     edit_target_pending = (
         edits_event_id is None
         and stage is not DeliveryStage.INITIAL
-        and (stage is DeliveryStage.EDIT or replies.has_unresolved_rows(transaction, principal_id, reply.reply_id))
+        and replies.has_unresolved_rows(transaction, principal_id, reply.reply_id)
     )
     row_fields = {
         "reply_id": reply.reply_id,
