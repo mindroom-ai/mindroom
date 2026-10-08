@@ -658,7 +658,6 @@ class ResponseRequest:
     # Settles the turn's sources when they became terminal before any reply existed to settle them.
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
-    sync_restart_retry_source_event_id: str | None = None
     # Records and settles a turn that ended before any reply span existed to settle it.
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
     # Set only after another durable owner can finish the source.
@@ -3129,11 +3128,7 @@ class ResponseRunner:
                     early_placeholder=early_placeholder,
                     locked_operation=locked_operation,
                 ),
-                signal_queued_message=(
-                    signal_queued_message
-                    and request.sync_restart_retry_source_event_id is None
-                    and not _is_silent_schedule_response(request)
-                ),
+                signal_queued_message=signal_queued_message and not _is_silent_schedule_response(request),
             )
         except Exception as error:
             mapped = _post_lock_error(error, early_placeholder, reply_owned=span_claimed())

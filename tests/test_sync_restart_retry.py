@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -35,7 +34,7 @@ pytestmark = pytest.mark.asyncio
 
 def _retry() -> ResponseRequest:
     """Return the edit regenerator's retry of the regeneration ``$edit`` drives."""
-    return replace(_regeneration(answer_event_id="$sent1"), sync_restart_retry_source_event_id="$event")
+    return _regeneration(answer_event_id="$sent1")
 
 
 async def _answered(tmp_path: Path) -> AgentBot:

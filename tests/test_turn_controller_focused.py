@@ -3947,7 +3947,6 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
         await harness.deliver(room, event)
 
-    assert harness.runner.requests[0].sync_restart_retry_source_event_id is None
     assert harness.turn_store.is_handled(event.event_id) is True
 
 

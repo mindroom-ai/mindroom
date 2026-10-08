@@ -937,14 +937,8 @@ class TestAgentBot(AgentBotTestBase):
         assert result == "$reject"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("retry_source", "expected_memory_calls"), [(None, 1), ("$event", 0)])
-    async def test_generate_team_response_queues_memory_before_helper_failure(
-        self,
-        tmp_path: Path,
-        retry_source: str | None,
-        expected_memory_calls: int,
-    ) -> None:
-        """Initial edits queue memory, while restart retries reuse that durable input."""
+    async def test_generate_team_response_queues_memory_before_helper_failure(self, tmp_path: Path) -> None:
+        """A team response queues its memory save before the helper runs, so a failing helper keeps it."""
 
         async def fake_store_conversation_memory(*args: object, **kwargs: object) -> None:
             store_calls.append((args, kwargs))
@@ -966,7 +960,7 @@ class TestAgentBot(AgentBotTestBase):
             return task
 
         async def fail_helper(*_args: object, **_kwargs: object) -> str:
-            assert any(name.startswith("memory_save_team_") for name in scheduled_names) is (retry_source is None)
+            assert any(name.startswith("memory_save_team_") for name in scheduled_names)
             msg = "boom"
             raise RuntimeError(msg)
 
@@ -1026,15 +1020,14 @@ class TestAgentBot(AgentBotTestBase):
                         user_id="@alice:localhost",
                         agent_name=bot.agent_name,
                     ),
-                    sync_restart_retry_source_event_id=retry_source,
                 ),
             )
 
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert len(store_calls) == expected_memory_calls
-        assert sum(name.startswith("memory_save_team_") for name in scheduled_names) == expected_memory_calls
+        assert len(store_calls) == 1
+        assert sum(name.startswith("memory_save_team_") for name in scheduled_names) == 1
 
     @pytest.mark.asyncio
     async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(

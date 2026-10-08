@@ -780,7 +780,11 @@ class AgentBot:
                 resolver=self._conversation_resolver,
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
-                start_regeneration=self._start_regeneration,
+                generate_response=self._run_regenerated_response,
+                track_inbox_response=lambda response, **ownership: self._response_runner.track_inbox_response(
+                    response,
+                    **ownership,
+                ),
                 settle_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
                 stop_reply=self._stop_reply_for_edit,
                 receipt_order=self._journal_dispatcher.receipt_order,
@@ -2846,33 +2850,6 @@ class AgentBot:
         """Run one edit-regenerated turn through this bot's response path."""
         return await self._response_runner.generate_response(request)
 
-    def _start_regeneration(
-        self,
-        request: ResponseRequest,
-        after: Callable[[], Awaitable[None]],
-    ) -> asyncio.Task[None]:
-        """Run an edit's regeneration on a runner-owned task, off the room's event lane, then ``after``."""
-
-        async def regenerate() -> None:
-            try:
-                await self._run_regenerated_response(request)
-            except asyncio.CancelledError:
-                # Cancelled, as at shutdown, its edit stays pending, so a restart regenerates again.
-                raise
-            except Exception:
-                await after()
-                raise
-            await after()
-
-        return self._response_runner.track_inbox_response(
-            regenerate(),
-            name=f"edit_regeneration:{request.correlation_id}",
-            room_id=request.response_envelope.target.room_id,
-            # Its edit stays pending until its span settles it, so a restart regenerates again.
-            recovery_proof_ready=lambda: True,
-            source_event_ids=request.sources.pending_event_ids,
-        )
-
     async def _stop_reply_for_edit(self, reply: Reply, receipt_order: int) -> None:
         """Stop a reply that still runs before an edit regenerates it, as a Stop reaction would."""
         assert reply.event_id is not None, "an edit regenerates only a reply that showed something"
@@ -3020,23 +2997,22 @@ class TeamBot(AgentBot):
             target=target,
             user_id=request.user_id,
         )
-        if request.sync_restart_retry_source_event_id is None:
-            with tool_execution_identity(execution_identity):
-                create_background_task(
-                    store_conversation_memory(
-                        memory_prompt,
-                        agent_names,
-                        self.storage_path,
-                        session_id,
-                        self.config,
-                        self.runtime_paths,
-                        memory_thread_history,
-                        request.user_id,
-                        execution_identity=execution_identity,
-                    ),
-                    name=f"memory_save_team_{session_id}",
-                    owner=self._runtime_view,
-                )
+        with tool_execution_identity(execution_identity):
+            create_background_task(
+                store_conversation_memory(
+                    memory_prompt,
+                    agent_names,
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    self.runtime_paths,
+                    memory_thread_history,
+                    request.user_id,
+                    execution_identity=execution_identity,
+                ),
+                name=f"memory_save_team_{session_id}",
+                owner=self._runtime_view,
+            )
 
         return await self._response_runner.generate_team_response_helper(
             replace(
