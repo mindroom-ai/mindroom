@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 # LEGACY_COMPAT: Approval continuations whose reply identity lived outside the continuation.
 # Legacy format: approval_continuations without a span_id column. Every release kept a continuation's entity in its
-# entity_name column and its pending sources in approval_continuation_sources; v2026.10.201 kept its entity, room, visible event, logical and discovery sources, and
+# entity_name column and its pending sources in approval_continuation_sources; v2026.9.138 through v2026.10.208 kept its entity, room, visible event, logical and discovery sources, and
 # edit receipt order in response_attempts and response_attempt_sources, keyed by its first pending source;
 # v2026.9.137 and earlier kept room_id, response_event_id, and any prepared edit record in context_json.
 # Last legacy release: v2026.10.208; replacement: the unreleased durable reply messages name the paused span in
@@ -102,7 +102,7 @@ def _attempt_identity(transaction: Transaction, principal_id: str, driving: str)
 # Legacy format: a continuation whose response attempt a newer attempt of the same reply, room, membership, entity, and
 # logical sources superseded with a higher edit receipt order and an acknowledged answer FINAL editing the same event,
 # while its own FINAL holds no answer and it is failing or no approved resume advanced it to a later pause;
-# v2026.10.201 retired such an approval's failure without a note.
+# v2026.9.138 through v2026.10.208 retired such an approval's failure without a note.
 # Last legacy release: v2026.10.208; replacement: the unreleased durable reply messages never let an edit regenerate a
 # reply an approval holds.
 # Handling: the upgrade discards it with its cards and settles its sources unanswered, so the newer answer stands and
