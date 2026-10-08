@@ -170,7 +170,9 @@ def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
 
 
 # A span that ended this way left its turn to a later span, which its tool calls may already have served.
-_INTERRUPTED_OUTCOMES = frozenset({rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED, rl.SpanOutcome.PAUSED})
+_INTERRUPTED_OUTCOMES = frozenset(
+    {rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED, rl.SpanOutcome.PAUSED, rl.SpanOutcome.SUPERSEDED},
+)
 
 
 @dataclass(frozen=True)
