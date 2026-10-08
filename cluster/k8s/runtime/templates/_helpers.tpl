@@ -254,7 +254,7 @@ reason=
 for tool in find stat md5sum awk readlink chmod chown id; do
   command -v "$tool" >/dev/null || reason="the image has no $tool"
 done
-[ -n "$reason" ] || find "$dst" -prune -exec stat {} + >/dev/null 2>[ -n "$reason" ] || find "$src" -prune -exec stat {} + >/dev/null 2>&11 || reason="its find has no -exec {} +"
+[ -n "$reason" ] || find "$dst" -prune -exec stat {} + >/dev/null 2>&1 || reason="its find has no -exec {} +"
 [ -n "$reason" ] || [ -z "$(find "$src" "$dst" -name "*$nl*")" ] || reason="a name contains a newline"
 if [ -n "$reason" ]; then
   echo "$0: $reason, so $dst is replaced by a full copy" >&2
