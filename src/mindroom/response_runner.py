@@ -3326,7 +3326,7 @@ class ResponseRunner:
 
         ``None`` means no span opened: the reply cannot be claimed yet, and the
         claim retries the sources once what blocks it resolves; or nothing runs
-        for them, as when the reply already answered the edit or a Stop covers it.
+        for them, as when the reply already answered the edit or a Stop ended it.
         """
         replies = self.deps.replies
         slot = current_slot()

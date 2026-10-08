@@ -4858,6 +4858,8 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
         _room_with_members(config, "general"),
         event,
     )
+    # The queue and the runner-owned task own the answer, so a retry of its source is not refused as claimed.
+    assert harness.turn_store.has_live_turn_claim(event.event_id) is False
     await harness.gate.drain_all()
     await harness.runner.settle_inbox_responses()
 

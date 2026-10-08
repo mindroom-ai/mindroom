@@ -756,7 +756,11 @@ class TurnController:
             )
             if selection is not None:
                 # As a reaction's answer does, the response runs on a runner-owned task behind this conversation's
-                # earlier messages, so neither its run nor an approval it waits for holds the room's event lane.
+                # earlier messages, so neither its run nor an approval it waits for holds the room's event lane. The
+                # queue and that task own the source from here, so a retry of it must not meet this turn's claim.
+                if (turn_claim := reservation_owner.pending_turn_claim) is not None:
+                    self.deps.turn_store.release_pending_turn_claim(turn_claim)
+                    reservation_owner.pending_turn_claim = None
                 await self.enqueue_interactive_selection(
                     reservation_owner,
                     room,
