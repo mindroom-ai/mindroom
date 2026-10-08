@@ -33,6 +33,7 @@ import build_scene as logo  # noqa: E402
 FRAMES = 120  # Four seconds at 30 fps; the reveal runs twice as long.
 LOCK_IN_HOLD = 30  # Frames held on the finished logo after the camera locks in.
 LOCK_FRAME = FRAMES - LOCK_IN_HOLD  # The camera arrives, the M forms, and a flash bursts from the center.
+IGNITE_FRAME = 180  # In the reveal, the light that filled the legs reaches the core and flashes.
 EFFECTS = ("still", "lock-in", "ignition", "hyperspin", "reveal")
 HDRI = "studio_small_09"  # CC0 studio lighting from Poly Haven, used for reflections.
 HDRI_URL = f"https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/{HDRI}_2k.hdr"
@@ -271,8 +272,16 @@ def rod(bm: bmesh.types.BMesh, a: Vector, b: Vector, radius: float) -> None:
     )
 
 
-def tesseract_meshes(angle: float, progress: dict[str, float] | None = None) -> dict[str, bmesh.types.BMesh]:
-    """Filament meshes per edge family; `progress` draws each family partway, for tracing on."""
+def tesseract_meshes(
+    angle: float,
+    progress: dict[str, float] | None = None,
+    *,
+    inward: bool = False,
+) -> dict[str, bmesh.types.BMesh]:
+    """Filament meshes per edge family; `progress` draws each family partway, for tracing on.
+
+    Struts trace outward from the inner cell, or inward from the frame when `inward` is set.
+    """
     points, edges = tesseract(angle)
     progress = progress or {}
     meshes = {family: bmesh.new() for family in FILAMENT}
@@ -281,8 +290,8 @@ def tesseract_meshes(angle: float, progress: dict[str, float] | None = None) -> 
         share = progress.get(family, 1.0)
         if share > 0:
             start, end = points[a], points[b]
-            if family == "strut" and a[3] > 0:
-                start, end = end, start  # Struts grow outward from the inner cell.
+            if family == "strut" and (a[3] > 0) != inward:
+                start, end = end, start
             rod(meshes[family], start, start.lerp(end, share), radii[family])
     if progress.get("inner", 1.0) > 0:
         for corner, point in points.items():
@@ -303,9 +312,9 @@ def lantern_mesh(angle: float) -> bmesh.types.BMesh:
     return bm
 
 
-def update_tesseract(angle: float, progress: dict[str, float] | None = None) -> None:
+def update_tesseract(angle: float, progress: dict[str, float] | None = None, *, inward: bool = False) -> None:
     """Rebuild the filament and lantern meshes in place."""
-    for family, bm in tesseract_meshes(angle, progress).items():
+    for family, bm in tesseract_meshes(angle, progress, inward=inward).items():
         mesh = bpy.data.objects[f"tesseract-{family}"].data
         bm.to_mesh(mesh)
         bm.free()
@@ -362,6 +371,17 @@ def leg_frames(collection: bpy.types.Collection) -> None:
 
 def leg_glow(collection: bpy.types.Collection) -> None:
     """A white light inside each leg: an emitting volume that fades from the center toward the faces."""
+    material = leg_glow_material()
+    inset = Vector((0.02, 0.02, 0.02))
+    for i, (lo, hi) in enumerate(leg_boxes()):
+        bm = bmesh.new()
+        logo.add_box(bm, lo + inset, hi - inset)
+        core = logo.mesh_object(f"leg-glow-{i}", bm, material, collection)
+        core.visible_shadow = False
+
+
+def leg_glow_material() -> bpy.types.Material:
+    """Volume-only white emission, strongest at each leg's center and cut off above a fill level."""
     material, tree = node_material("leg-glow")
     nodes, links = tree.nodes, tree.links
     coords = nodes.new("ShaderNodeTexCoord")
@@ -382,14 +402,56 @@ def leg_glow(collection: bpy.types.Collection) -> None:
     links.new(distance.outputs["Value"], falloff.inputs["Value"])
     glow = nodes.new("ShaderNodeEmission")
     glow.inputs["Color"].default_value = logo.srgb("#f2fbff")
-    links.new(falloff.outputs["Result"], glow.inputs["Strength"])
+    links.new(fill_level(tree, coords, falloff.outputs["Result"]), glow.inputs["Strength"])
     links.new(glow.outputs["Emission"], output(tree).inputs["Volume"])
-    inset = Vector((0.02, 0.02, 0.02))
-    for i, (lo, hi) in enumerate(leg_boxes()):
-        bm = bmesh.new()
-        logo.add_box(bm, lo + inset, hi - inset)
-        core = logo.mesh_object(f"leg-glow-{i}", bm, material, collection)
-        core.visible_shadow = False
+    return material
+
+
+def fill_level(
+    tree: bpy.types.NodeTree,
+    coords: bpy.types.Node,
+    strength: bpy.types.NodeSocket,
+) -> bpy.types.NodeSocket:
+    """Keep `strength` only below the "glow-level" height, plus a bright "glow-surface" band where it ends.
+
+    This lets light rise in the legs like a liquid; at the default level, far above the letter, nothing changes.
+    """
+    nodes, links = tree.nodes, tree.links
+    level = nodes.new("ShaderNodeValue")
+    level.name = "glow-level"
+    level.outputs["Value"].default_value = 100.0  # Far above the letter: fully lit.
+    height = nodes.new("ShaderNodeSeparateXYZ")
+    links.new(coords.outputs["Object"], height.inputs["Vector"])
+    above = nodes.new("ShaderNodeMath")
+    above.operation = "SUBTRACT"
+    links.new(height.outputs["Z"], above.inputs[0])
+    links.new(level.outputs["Value"], above.inputs[1])
+    below = nodes.new("ShaderNodeMapRange")
+    below.interpolation_type = "SMOOTHSTEP"
+    below.inputs["From Min"].default_value = -0.12
+    below.inputs["From Max"].default_value = 0.0
+    below.inputs["To Min"].default_value = 1.0
+    below.inputs["To Max"].default_value = 0.0
+    links.new(above.outputs["Value"], below.inputs["Value"])
+    filled = nodes.new("ShaderNodeMath")
+    filled.operation = "MULTIPLY"
+    links.new(strength, filled.inputs[0])
+    links.new(below.outputs["Result"], filled.inputs[1])
+    gap = nodes.new("ShaderNodeMath")
+    gap.operation = "ABSOLUTE"
+    links.new(above.outputs["Value"], gap.inputs[0])
+    surface = nodes.new("ShaderNodeMapRange")
+    surface.name = "glow-surface"
+    surface.interpolation_type = "SMOOTHSTEP"
+    surface.inputs["From Min"].default_value = 0.0
+    surface.inputs["From Max"].default_value = 0.05
+    surface.inputs["To Min"].default_value = 0.0
+    surface.inputs["To Max"].default_value = 0.0
+    links.new(gap.outputs["Value"], surface.inputs["Value"])
+    total = nodes.new("ShaderNodeMath")
+    links.new(filled.outputs["Value"], total.inputs[0])
+    links.new(surface.outputs["Result"], total.inputs[1])
+    return total.outputs["Value"]
 
 
 # ---------------------------------------------------------------- scene
@@ -590,8 +652,13 @@ def shine(
     lantern: float = 1.0,
     filaments: float = 1.0,
     legs: float = 1.0,
+    level: float = 100.0,
+    surface: float = 0.0,
 ) -> None:
-    """Set the core light, its bead, the lantern, the filaments, and the leg glow as multiples of their resting levels."""
+    """Set the core light, its bead, the lantern, the filaments, and the leg glow as multiples of their resting levels.
+
+    The legs glow up to the height `level`, with a band of strength `surface` where the light meets the dark.
+    """
     rig["core"].data.energy = 700.0 * core
     materials = bpy.data.materials
     materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0 * spark
@@ -600,19 +667,22 @@ def shine(
         materials[f"filament-{family}"].node_tree.nodes["Emission"].inputs["Strength"].default_value = (
             strength * filaments
         )
-    materials["leg-glow"].node_tree.nodes["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * legs
+    glow = materials["leg-glow"].node_tree.nodes
+    glow["glow-falloff"].inputs["To Min"].default_value = LEG_GLOW * legs
+    glow["glow-level"].outputs["Value"].default_value = level
+    glow["glow-surface"].inputs["To Min"].default_value = surface
 
 
-def flash(rig: dict[str, bpy.types.Object], since: int) -> float:
-    """The camera's side of the burst `since` frames after the M forms: rays in the haze, lens glare, exposure.
+def flash(rig: dict[str, bpy.types.Object], burst: float, *, reach: float = 2.2) -> None:
+    """The camera's side of a burst of strength `burst`: rays in the haze, lens glare, and exposure.
 
-    Returns the burst's strength, which peaks at 1 on the lock frame and fades within about half a second,
-    so callers can flare the lights with it.
+    The haze thins out to nothing at `reach` units from the cube; growing it spreads the light outward.
     """
-    burst = math.exp(-since / 4) if since >= 0 else 0.0
     quiet = burst < 0.02
     rig["haze"].hide_render = quiet
-    bpy.data.materials["flash-haze"].node_tree.nodes["haze-density"].inputs["To Min"].default_value = 0.15 * burst
+    haze = bpy.data.materials["flash-haze"].node_tree.nodes["haze-density"]
+    haze.inputs["To Min"].default_value = 0.15 * burst
+    haze.inputs["From Max"].default_value = reach
     scene = bpy.context.scene
     lens = scene.compositing_node_group.nodes
     lens["flash-streaks"].mute = lens["flash-beams"].mute = quiet
@@ -623,13 +693,14 @@ def flash(rig: dict[str, bpy.types.Object], since: int) -> float:
         core = world_to_camera_view(scene, rig["camera"], logo.CUBE_CENTER)
         lens["flash-beams"].inputs["Sun Position"].default_value = (core.x, core.y)
     scene.view_settings.exposure = 0.3 * burst
-    return burst
 
 
 def lock_in(rig: dict[str, bpy.types.Object], frame: int) -> None:
     """Glide into the logo's single viewpoint, then flash from the center as the M forms."""
     glide(rig, frame)
-    burst = flash(rig, frame - LOCK_FRAME)
+    since = frame - LOCK_FRAME
+    burst = math.exp(-since / 4) if since >= 0 else 0.0  # Instant, gone within about half a second.
+    flash(rig, burst)
     shine(rig, core=1 + 6 * burst, spark=1 + 6 * burst, filaments=1 + 3 * burst, legs=1 + 2 * burst)
 
 
@@ -652,26 +723,38 @@ def hyperspin(rig: dict[str, bpy.types.Object], frame: int) -> None:
 
 
 def reveal(rig: dict[str, bpy.types.Object], frame: int) -> None:
-    """The three effects as one: glide in through the dark, ignite in the flash, then one hyperspin.
+    """Glide in through the dark, fill the legs with light, converge on the core, and flash.
 
-    A small spark grows at the center while the camera closes in on the unlit letter. When the M forms,
-    the flash ignites it: the inner cube, the struts, and the outer cube shoot out from the core in quick
-    succession, light fills in, and the legs wake. The tesseract then turns once in 4D and lands on the logo.
+    After the camera locks in on the unlit letter, light rises in the legs from the floor up, crosses into
+    the cube as the outer cube traces on and the struts grow inward, and closes the inner cube. The moment
+    it reaches the core, the flash swells, holds, spreads its rays outward, and slowly settles.
     """
     glide(rig, frame)
-    since = frame - LOCK_FRAME
-    burst = flash(rig, since)
-    lit = ease(since / 10)
+    fill = ease((frame - LOCK_FRAME - 6) / 54)
+    since = frame - IGNITE_FRAME
+    # The light arrives at the frame a second before the flash and closes the inner cube just in time.
+    progress = {"outer": ease((since + 36) / 18), "strut": ease((since + 24) / 14), "inner": ease((since + 14) / 12)}
+    if since < 0:
+        burst = 0.0
+    elif since < 3:
+        burst = ease(since / 3)  # A quick swell rather than a cut.
+    elif since < 12:
+        burst = 1.0
+    else:
+        burst = math.exp(-(since - 12) / 12)
+    flash(rig, 0.55 * burst, reach=0.8 + 0.05 * max(since, 0))
+    lit = ease(since / 6)
     shine(
         rig,
-        core=lit + 6 * burst,
-        spark=max(0.4 * ease((frame - 30) / 60), lit) + 6 * burst,
+        core=lit + 3 * burst,
+        spark=lit + 5 * burst,
         lantern=lit,
         filaments=1 + 3 * burst,
-        legs=ease((since - 2) / 16) * (1 + 2 * burst),
+        legs=1 + 2 * burst,
+        level=logo.FOOT_Z[0] + fill * (logo.H - logo.FOOT_Z[0] + 0.2),
+        surface=4.0 * (1 - lit) if fill > 0 else 0.0,
     )
-    progress = {"inner": ease(since / 6), "strut": ease((since - 3) / 6), "outer": ease((since - 6) / 6)}
-    update_tesseract(2 * math.pi * max(frame - FRAMES, 0) / FRAMES, progress)
+    update_tesseract(0.0, progress, inward=True)
 
 
 def render(effect: str, output_dir: Path, resolution: int, samples: int, *, frozen: bool = False) -> None:

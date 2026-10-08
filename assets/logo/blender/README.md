@@ -78,7 +78,7 @@ At angle 0 the near cell matches the navy frame and the far cell is the glowing 
   When the camera arrives and the M forms, a flash bursts from the center: the core floods the scene with light, haze around the letter shows its rays streaming out through the frame, and the exposure and lens streaks flare before fading within about half a second.
 - **Ignition** lights a spark at the center, traces the inner cube's edges, grows the struts outward, fills in the light, and finally wakes the glow in the legs.
 - **Hyperspin** turns the tesseract once in 4D; the gold inner cube grows through the frame while the outer cell shrinks inward, and the loop is seamless.
-- **Reveal** combines the three: the camera glides in toward a small spark on the unlit letter, the flash ignites the tesseract and the legs as the M forms, and one hyperspin lands back on the logo.
+- **Reveal** builds to a climax: the camera locks in on the unlit letter, light rises in the legs from the floor, crosses into the cube as the outer cube traces on and the struts grow inward, and closes the inner cube; the moment it reaches the core, a long flash swells, holds while its rays spread, and slowly settles.
 
 ## How the SVG becomes 3D
 
