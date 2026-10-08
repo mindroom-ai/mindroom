@@ -287,7 +287,7 @@ contentBundles:
 If `targetPath` is omitted, the chart copies to `/app/agent_data/content-bundles/<name>`.
 By default the init container makes the target path match the bundle: the same files, directories, symlinks, contents, and modes, as if it removed the path and copied the bundle again.
 It deletes entries the bundle no longer contains and rewrites only entries whose type, symlink target, content, mode, or owner changed, so a restart copies only what changed.
-It compares the trees with one `stat` and one `md5sum` batch per tree, so a restart starts no processes per file.
+It compares the trees with one `stat` and one `md5sum` batch per tree, so the number of processes a restart starts grows with the changes and symlinks, not with the files.
 Unchanged files keep their timestamps, and hard-link relationships between bundle files are not guaranteed to be preserved.
 With `overwrite: false`, it copies the bundle over the target path and removes nothing.
 `seed.command` runs after the copy and should point at a short script or executable supplied by the bundle instead of embedding deployment-specific shell in Helm values.

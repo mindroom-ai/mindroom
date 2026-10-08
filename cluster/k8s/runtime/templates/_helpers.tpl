@@ -254,6 +254,7 @@ reason=
 for tool in find stat md5sum awk readlink chmod chown id; do
   command -v "$tool" >/dev/null || reason="the image has no $tool"
 done
+[ -n "$reason" ] || find "$src" -prune -exec stat {} + >/dev/null 2>&1 || reason="its find has no -exec {} +"
 [ -n "$reason" ] || [ -z "$(find "$src" "$dst" -name "*$nl*")" ] || reason="a name contains a newline"
 if [ -n "$reason" ]; then
   echo "$0: $reason, so $dst is replaced by a full copy" >&2
@@ -304,7 +305,8 @@ else
       {
         side = part == 1 ? "s" : "d"; sum = $1; p = name($0, 2)
         if (sum ~ /^\\/) { sum = substr(sum, 2); p = unescape(p) }
-        sums[side p] = sum
+        # The prefix keeps checksums such as 0e1... and 0e2... from comparing equal as numbers.
+        sums[side p] = "x" sum
       }
       END {
         if (want == "remove") for (i = 1; i <= m; i++) {
@@ -323,9 +325,12 @@ else
         }
       }'
   }
+  # Plans are assigned on their own, so a failing planner stops the init; a while loop's status would hide it.
+  removals=$(plan remove "$source_stats" "$source_sums" "$target_stats" "$target_sums")
+  copies=$(plan copy "$source_stats" "$source_sums" "$target_stats" "$target_sums")
   # Remove target entries that are missing from the source, of another type, special, or a different symlink.
   gone=
-  plan remove "$source_stats" "$source_sums" "$target_stats" "$target_sums" | while IFS= read -r p; do
+  [ -z "$removals" ] || printf '%s\n' "$removals" | while IFS= read -r p; do
     case $p in "$gone"/*) continue ;; esac
     kind "$src/$p"; sk=$k
     kind "$dst/$p"
@@ -340,7 +345,7 @@ else
   done
   # Copy missing entries whole, and recopy files whose size, mode, owner, or content differ.
   new=
-  plan copy "$source_stats" "$source_sums" "$target_stats" "$target_sums" | while IFS= read -r p; do
+  [ -z "$copies" ] || printf '%s\n' "$copies" | while IFS= read -r p; do
     case $p in "$new"/*) continue ;; esac
     kind "$dst/$p"
     case $k in -|f) writable "$dst/${p%/*}" ;; *) continue ;; esac
@@ -349,8 +354,11 @@ else
     [ "$k" != - ] || new=$p
   done
   # Fix directory modes and owners deepest first, including parents that writable changed.
-  plan dirs "$source_stats" "" "$(stats "$dst" -type d)" "" | while IFS= read -r p; do
-    set -- $(stat -c "%a$own" "$src/$p")
+  target_dirs=$(stats "$dst" -type d)
+  dirs=$(plan dirs "$source_stats" "" "$target_dirs" "")
+  [ -z "$dirs" ] || printf '%s\n' "$dirs" | while IFS= read -r p; do
+    m=$(stat -c "%a$own" "$src/$p")
+    set -- $m
     [ -z "$own" ] || chown "$2:$3" "$dst/$p"
     # The leading zeros make GNU chmod clear a directory's setgid bit too.
     chmod "00$1" "$dst/$p"
