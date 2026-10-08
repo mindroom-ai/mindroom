@@ -1662,13 +1662,15 @@ class _MultiAgentOrchestrator:
             room_membership_policy_configured = self.agent_reply_memberships.needs_refresh(config)
             if room_membership_policy_configured:
                 set_runtime_starting("Establishing Matrix room memberships")
-                await self._startup_maintenance.wait_for_rooms_and_memberships()
 
             if runtime_shutdown_event.is_set():
                 return
 
-            # Publish semantic callbacks only after room-backed reply grants and
-            # the router's initial owned sync have both been established.
+            # Publish semantic callbacks once the router's initial owned sync has
+            # rebuilt room-backed reply grants from Matrix. Room setup keeps
+            # running in the background: a grant room it has not joined or
+            # created yet stays pending, and its sources replay after setup
+            # refreshes the grants.
             sync_ready = await self._wait_for_initial_membership_sync(
                 runtime_shutdown_event,
                 room_membership_policy_configured=room_membership_policy_configured,

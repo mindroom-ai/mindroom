@@ -2811,10 +2811,10 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic_dispatch(  # noqa: PLR0915
+async def test_start_runtime_publishes_after_router_sync_without_waiting_for_room_setup(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
-    """Owned joins need ingestion while semantic work waits for published grants."""
+    """Semantic work waits for the router's grant refresh, not for startup room setup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config, source_fingerprint=None)
@@ -2894,21 +2894,20 @@ async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic
             assert orchestrator._response_admission_gate.closed
             assert not orchestrator._response_admission_gate.close_if_idle()
 
-            # An early frame completion cannot release semantic callbacks while
-            # setup still owns the initial membership publication.
-            await orchestrator.handle_bot_ready(router_bot)
+            # Another responder's first frame cannot publish semantic callbacks
+            # before the router's first frame has rebuilt reply grants.
             await orchestrator.handle_bot_ready(general_bot)
-            await asyncio.sleep(0)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(runtime_ready.wait(), timeout=0.05)
             router_bot.release_pending_turn_journal_replay.assert_not_called()
             general_bot.release_pending_turn_journal_replay.assert_not_called()
+            assert orchestrator._response_admission_gate.closed
 
-            setup_can_finish.set()
+            await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
             await asyncio.sleep(0)
 
-            setup_finished = call_order.index("setup_finished")
-            assert call_order.index("sync_started:router") < setup_finished
-            assert call_order.index("sync_started:general") < setup_finished
+            assert "setup_finished" not in call_order
             router_bot.release_pending_turn_journal_replay.assert_called()
             general_bot.release_pending_turn_journal_replay.assert_called()
             assert not orchestrator._response_admission_gate.closed
