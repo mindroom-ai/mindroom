@@ -136,10 +136,11 @@ A reply finding is a defect only when it reaches one of these outcomes on a real
 3. One message gets two visible answers.
 4. An answer lands on the wrong turn or in the wrong room.
 5. A reply shows "Thinking…" or a partial answer forever after a restart, Stop, edit, or approval.
-6. A tool runs without its approval, or a side-effecting call runs twice for one request.
+6. A tool runs without its approval, or MindRoom itself runs a tool call a second time.
 7. A Stop is ignored: the agent starts new tool calls or keeps answering after the user stopped the reply.
 
-Sequences that need two or more independent faults or a precise interleaving are accepted limitations, not defects.
+Sequences that need two or more independent faults are accepted limitations, not defects.
+A race is a defect when ordinary use can hit it, such as a Stop, an edit, and a restart close together; it is an accepted limitation only when it needs internal steps to land in a window ordinary use does not reach.
 The behavior below follows from deliberate decisions; a change that would restore what they removed needs a new decision, not a fix.
 
 ### Decisions
@@ -150,7 +151,7 @@ The behavior below follows from deliberate decisions; a change that would restor
 - An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
 - A regeneration that wrote nothing keeps the finished answer it was replacing.
 - A rule that meets a state it does not model never raises: the reply's current work ends `failed` with the error note, while a reply that already ended keeps its end and a stray second create is redacted with the first left bound.
-- A restart keeps a side-effecting tool call from running twice by telling the model which calls already ran, not by blocking the call. A model can still repeat one rarely (a fast model did in up to 1 of 24 real-model runs), which the owner accepted, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
+- After a restart the model is told which tool calls already ran, and nothing blocks a repeated call, so the model can still repeat one rarely (a fast model did in up to 1 of 24 real-model runs), which the owner accepted, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
 - An upgrade from an earlier release runs while no reply is in flight: only replies paused for an approval are adopted, and older, replaced, or unprovable continuations are discarded with their cards and their sources settled unanswered.
 
 ### Accepted limitations

@@ -179,6 +179,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if transition.outcome is Outcome.RECOMPUTE:
             msg = "rendered from the current revision, yet asked to recompute"
             raise AssertionError(msg)
+        # The fallback for unmodeled events is for programming mistakes; every
+        # sequence this machine can produce is supported, so none may reach it.
+        assert transition.unmodeled is None, transition
         before = self.model.reply
         if transition.reply is not None:
             self.model.reply = transition.reply
@@ -381,7 +384,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self.span_observes_its_stop()
         self.model.edits += 1
         transition = self._claim(edit=f"$edit-{self.model.edits}")
-        assert transition.unmodeled is None, transition
         assert transition.outcome in {Outcome.APPLIED, Outcome.DEFERRED}, transition
         if transition.outcome is Outcome.APPLIED:
             assert transition.claimed is not None
