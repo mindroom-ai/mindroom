@@ -6,10 +6,10 @@ Run from the repository root:
 
     blender --background --factory-startup --python assets/logo/blender/crystal.py -- --render still
 
-The geometry comes from build_scene.py. This script makes the glass solid, sets
-each leg in a navy frame around a soft white light, turns the central cube into a
+The geometry comes from model.py. This script dresses it in crystal, sets each
+leg in a navy frame around a soft white light, turns the central cube into a
 hypercube (an inner cube joined to the frame by struts, projected from real 4D
-vertices), stages it on a dark mirror floor, and renders a still or one of three
+vertices), stages it on a dark mirror floor, and renders a still or one of four
 effects as numbered PNG frames for ffmpeg.
 """
 
@@ -28,7 +28,7 @@ from mathutils import Matrix, Vector
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import build_scene as logo  # noqa: E402
+import model as logo  # noqa: E402
 
 FRAMES = 120  # Four seconds at 30 fps.
 LOCK_IN_HOLD = 30  # Frames held on the finished logo after the camera locks in.
@@ -46,9 +46,18 @@ FILAMENT = {"inner": 24.0, "strut": 8.0, "outer": 8.0}  # Emission strengths per
 LEG_GLOW = 10.0  # Emission strength at the center of each leg's white core.
 
 
+def srgb(hex_color: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
+    """Convert an sRGB hex color to linear RGBA."""
+    channels = [int(hex_color.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return (*linear, alpha)
+
+
 def node_material(name: str) -> tuple[bpy.types.Material, bpy.types.NodeTree]:
-    """Create an empty node material with an output node."""
-    material, tree = logo.node_material(name)
+    """Create a node material that holds only an output node."""
+    material = bpy.data.materials.new(name)
+    tree = material.node_tree
+    tree.nodes.clear()
     tree.nodes.new("ShaderNodeOutputMaterial")
     return material, tree
 
@@ -63,16 +72,16 @@ def crystal_glass(*, frozen: bool) -> bpy.types.Material:
     material, tree = node_material("azure-crystal")
     nodes, links = tree.nodes, tree.links
     glass = nodes.new("ShaderNodeBsdfPrincipled")
-    glass.inputs["Base Color"].default_value = logo.srgb("#6cc6ee")
+    glass.inputs["Base Color"].default_value = srgb("#6cc6ee")
     glass.inputs["Roughness"].default_value = 0.0
     glass.inputs["IOR"].default_value = 1.52
     glass.inputs["Transmission Weight"].default_value = 1.0
     links.new(glass.outputs["BSDF"], output(tree).inputs["Surface"])
     absorb = nodes.new("ShaderNodeVolumeAbsorption")
-    absorb.inputs["Color"].default_value = logo.srgb("#40e1f5")
+    absorb.inputs["Color"].default_value = srgb("#40e1f5")
     absorb.inputs["Density"].default_value = 1.0
     scatter = nodes.new("ShaderNodeVolumeScatter")
-    scatter.inputs["Color"].default_value = logo.srgb("#5ec8f0")
+    scatter.inputs["Color"].default_value = srgb("#5ec8f0")
     scatter.inputs["Density"].default_value = 0.6
     scatter.inputs["Anisotropy"].default_value = 0.4
     volume = nodes.new("ShaderNodeAddShader")
@@ -97,7 +106,7 @@ def frost(tree: bpy.types.NodeTree, glass: bpy.types.Node, scatter: bpy.types.No
     tint = nodes.new("ShaderNodeMix")
     tint.data_type = "RGBA"
     tint.inputs["A"].default_value = glass.inputs["Base Color"].default_value
-    tint.inputs["B"].default_value = logo.srgb("#a6dcf2")
+    tint.inputs["B"].default_value = srgb("#a6dcf2")
     links.new(ice, tint.inputs["Factor"])
     links.new(tint.outputs["Result"], glass.inputs["Base Color"])
     patches = nodes.new("ShaderNodeTexNoise")
@@ -138,7 +147,7 @@ def frost(tree: bpy.types.NodeTree, glass: bpy.types.Node, scatter: bpy.types.No
     haze = nodes.new("ShaderNodeMix")
     haze.data_type = "RGBA"
     haze.inputs["A"].default_value = scatter.inputs["Color"].default_value
-    haze.inputs["B"].default_value = logo.srgb("#f2fbff")
+    haze.inputs["B"].default_value = srgb("#f2fbff")
     links.new(ice, haze.inputs["Factor"])
     links.new(haze.outputs["Result"], scatter.inputs["Color"])
 
@@ -188,7 +197,7 @@ def lacquer() -> bpy.types.Material:
     """Glossy navy for the outer cube frame: dark, with crisp highlights on its edges."""
     material, tree = node_material("navy-lacquer")
     paint = tree.nodes.new("ShaderNodeBsdfPrincipled")
-    paint.inputs["Base Color"].default_value = logo.srgb("#0b2a45")
+    paint.inputs["Base Color"].default_value = srgb("#0b2a45")
     paint.inputs["Roughness"].default_value = 0.15
     tree.links.new(paint.outputs["BSDF"], output(tree).inputs["Surface"])
     return material
@@ -198,7 +207,7 @@ def emitter(name: str, color: str, strength: float, *, transparent: bool = False
     """Unlit glow; transparent emitters let what lies behind show through."""
     material, tree = node_material(name)
     glow = tree.nodes.new("ShaderNodeEmission")
-    glow.inputs["Color"].default_value = logo.srgb(color)
+    glow.inputs["Color"].default_value = srgb(color)
     glow.inputs["Strength"].default_value = strength
     surface = glow.outputs["Emission"]
     if transparent:
@@ -216,10 +225,10 @@ def mirror_floor() -> bpy.types.Material:
     material, tree = node_material("mirror-floor")
     nodes, links = tree.nodes, tree.links
     paint = nodes.new("ShaderNodeBsdfPrincipled")
-    paint.inputs["Base Color"].default_value = logo.srgb("#071420")
+    paint.inputs["Base Color"].default_value = srgb("#071420")
     paint.inputs["Roughness"].default_value = 0.15
     far = nodes.new("ShaderNodeEmission")
-    far.inputs["Color"].default_value = logo.srgb(NAVY)
+    far.inputs["Color"].default_value = srgb(NAVY)
     coords = nodes.new("ShaderNodeTexCoord")
     distance = nodes.new("ShaderNodeVectorMath")
     distance.operation = "LENGTH"
@@ -274,7 +283,7 @@ def studio_world() -> bpy.types.World:
     lighting.inputs["Strength"].default_value = 0.7
     links.new(overhead.outputs["Result"], lighting.inputs["Color"])
     backdrop = nodes.new("ShaderNodeBackground")
-    backdrop.inputs["Color"].default_value = logo.srgb(NAVY)
+    backdrop.inputs["Color"].default_value = srgb(NAVY)
     path = nodes.new("ShaderNodeLightPath")
     mix = nodes.new("ShaderNodeMixShader")
     links.new(path.outputs["Is Camera Ray"], mix.inputs["Fac"])
@@ -457,7 +466,7 @@ def leg_glow_material() -> bpy.types.Material:
     falloff.inputs["To Max"].default_value = 0.0
     links.new(distance.outputs["Value"], falloff.inputs["Value"])
     glow = nodes.new("ShaderNodeEmission")
-    glow.inputs["Color"].default_value = logo.srgb("#f2fbff")
+    glow.inputs["Color"].default_value = srgb("#f2fbff")
     links.new(fill_level(tree, coords, falloff.outputs["Result"]), glow.inputs["Strength"])
     links.new(glow.outputs["Emission"], output(tree).inputs["Volume"])
     return material
@@ -513,32 +522,94 @@ def fill_level(
 # ---------------------------------------------------------------- scene
 
 
-def crystallize(scene: bpy.types.Scene, *, frozen: bool) -> None:
-    """Swap the logo look for solid crystal, an open navy frame, and the tesseract's light."""
-    bpy.data.collections["hero-set"].hide_render = True
-    for name in ("key", "sky", "spill-left", "spill-right"):
-        bpy.data.objects.remove(bpy.data.objects[name])
+def add_light(
+    name: str,
+    kind: str,
+    collection: bpy.types.Collection,
+    *,
+    location: tuple[float, float, float] | Vector,
+    energy: float,
+    color: tuple = (1.0, 1.0, 1.0),
+    target: tuple[float, float, float] | Vector = (0.45, 0.45, -0.2),
+    **settings: object,
+) -> bpy.types.Object:
+    """Create a light pointing at `target`, by default the logo's center."""
+    light = bpy.data.lights.new(name, kind)
+    light.energy = energy
+    light.color = color[:3]
+    for key, value in settings.items():
+        setattr(light, key, value)
+    obj = bpy.data.objects.new(name, light)
+    obj.location = location
+    direction = Vector(target) - Vector(location)
+    obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+    collection.objects.link(obj)
+    return obj
 
-    glass = crystal_glass(frozen=frozen)
-    for side in ("left", "right"):
-        for part in ("tower", "foot"):
-            bpy.data.objects[f"{side}-{part}"].data.materials[0] = glass
-    frame = bpy.data.objects["cube-frame"]
-    frame.data.materials[0] = lacquer()
-    frame.modifiers["Bevel"].width = 0.02
-    frame.modifiers["Bevel"].segments = 4
-    # The hypercube needs an open frame: panes would mirror the azure towers over the gold.
-    bpy.data.objects["cube-panes"].hide_render = True
-    # The beams stay dark silhouettes; the filaments carry the glow.
-    excluded = bpy.data.collections["core-excluded"]
-    excluded.objects.link(frame)
-    excluded.collection_objects[len(excluded.objects) - 1].light_linking.link_state = "EXCLUDE"
-    core = bpy.data.objects["core"]
-    core.data.energy = 700.0
-    core.visible_glossy = False  # It lights the crystal; the filaments are what the glass reflects.
-    bpy.data.materials["core-light"].node_tree.nodes["Emission"].inputs["Strength"].default_value = 400.0
-    glow = scene.compositing_node_group
-    glow.nodes["Glare"].inputs["Threshold"].default_value = 2.0
+
+def link_lights(
+    light: bpy.types.Object,
+    receivers: list[bpy.types.Object],
+    name: str,
+    *,
+    exclude: bool = False,
+) -> None:
+    """Restrict a light to the given objects, or keep it off them, with Cycles light linking."""
+    collection = bpy.data.collections.new(name)
+    for obj in receivers:
+        collection.objects.link(obj)
+    if exclude:
+        for link in collection.collection_objects:
+            link.light_linking.link_state = "EXCLUDE"
+    light.light_linking.receiver_collection = collection
+
+
+def core_light(feet: list[bpy.types.Object], frame: bpy.types.Object) -> bpy.types.Object:
+    """A warm point light inside the cube's bead that lights the crystal around it."""
+    core = add_light(
+        "core",
+        "POINT",
+        logo.new_collection("lights"),
+        location=logo.CUBE_CENTER,
+        energy=700.0,
+        color=srgb("#ffd890"),
+        shadow_soft_size=0.25,
+    )
+    core.visible_transmission = False  # The bead shows where it is; the light itself stays unseen.
+    core.visible_glossy = False  # The glass reflects the filaments, not a hot spot.
+    # The feet stay cool, and the beams stay dark silhouettes while the filaments carry the glow.
+    link_lights(core, [*feet, frame], "core-excluded", exclude=True)
+    return core
+
+
+def configure_render(scene: bpy.types.Scene) -> None:
+    """Cycles settings for clean glass, the view transform, and the compositor's bloom and flash glare."""
+    scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
+    scene.cycles.use_adaptive_sampling = True
+    scene.cycles.use_denoising = True
+    scene.cycles.max_bounces = 32
+    scene.cycles.transmission_bounces = 32
+    scene.cycles.transparent_max_bounces = 32
+    scene.cycles.glossy_bounces = 8
+    scene.cycles.diffuse_bounces = 3
+    scene.cycles.volume_bounces = 2
+    scene.cycles.caustics_reflective = False
+    scene.cycles.caustics_refractive = False
+    scene.cycles.blur_glossy = 0.5
+    scene.view_settings.view_transform = (
+        "Khronos PBR Neutral"  # Keeps the navy and gold true while rolling off highlights.
+    )
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGB"
+    glow = bpy.data.node_groups.new("glow", "CompositorNodeTree")
+    glow.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+    layers = glow.nodes.new("CompositorNodeRLayers")
+    bloom = glow.nodes.new("CompositorNodeGlare")  # A soft bloom around the glowing filaments.
+    bloom.inputs["Type"].default_value = "Bloom"
+    bloom.inputs["Threshold"].default_value = 2.0
+    bloom.inputs["Strength"].default_value = 0.35
+    bloom.inputs["Size"].default_value = 0.6
     streaks = glow.nodes.new("CompositorNodeGlare")  # Lens streaks, muted until the lock-in flash.
     streaks.name = "flash-streaks"
     streaks.inputs["Type"].default_value = "Streaks"
@@ -550,10 +621,13 @@ def crystallize(scene: bpy.types.Scene, *, frozen: bool) -> None:
     beams.inputs["Threshold"].default_value = 1.5
     beams.inputs["Strength"].default_value = 0.0
     streaks.mute = beams.mute = True
-    glow.links.new(glow.nodes["Glare"].outputs["Image"], streaks.inputs["Image"])
+    out = glow.nodes.new("NodeGroupOutput")
+    glow.links.new(layers.outputs["Image"], bloom.inputs["Image"])
+    glow.links.new(bloom.outputs["Image"], streaks.inputs["Image"])
     glow.links.new(streaks.outputs["Image"], beams.inputs["Image"])
-    glow.links.new(beams.outputs["Image"], glow.nodes["Group Output"].inputs["Image"])
-    scene.world = studio_world()
+    glow.links.new(beams.outputs["Image"], out.inputs["Image"])
+    scene.compositing_node_group = glow
+    scene.render.use_compositing = True
 
 
 def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
@@ -567,26 +641,26 @@ def studio(collection: bpy.types.Collection) -> dict[str, bpy.types.Object]:
     center = Vector((0.3, 0.3, (floor_z + logo.H) / 2))
     rig = {}
     # High enough that the floor does not mirror it back at the camera.
-    rig["back"] = logo.add_light(
+    rig["back"] = add_light(
         "back", "AREA", collection, location=center - 2.0 * level + Vector((0, 0, 5.5)), target=center,
-        energy=1600.0, color=logo.srgb("#f4fbff"), size=2.0,
+        energy=1600.0, color=srgb("#f4fbff"), size=2.0,
     )  # fmt: skip
     # The glass refracts this pool on the floor behind it and glows.
     pool = center - 1.6 * level
-    rig["behind"] = logo.add_light(
+    rig["behind"] = add_light(
         "behind", "AREA", collection, location=pool + Vector((0, 0, 3.0)), target=pool - Vector((0, 0, 5)),
-        energy=600.0, color=logo.srgb("#bfeaf2"), size=2.5,
+        energy=600.0, color=srgb("#bfeaf2"), size=2.5,
     )  # fmt: skip
-    logo.link_lights(rig["behind"], [floor], "behind-receivers")
+    link_lights(rig["behind"], [floor], "behind-receivers")
     for side, sign in [("left", -1), ("right", 1)]:
-        rig[f"rim-{side}"] = logo.add_light(
+        rig[f"rim-{side}"] = add_light(
             f"rim-{side}", "AREA", collection, location=center - 2.0 * level + 3.5 * sign * right + Vector((0, 0, 1.0)),
-            target=center, energy=900.0, color=logo.srgb("#dff3ff"), shape="RECTANGLE", size=0.4, size_y=4.0,
+            target=center, energy=900.0, color=srgb("#dff3ff"), shape="RECTANGLE", size=0.4, size_y=4.0,
         )  # fmt: skip
     # The floor mirrors the back light and the low rims as white streaks from some angles;
     # they only exist to light the glass.
     for name in ("back", "rim-left", "rim-right"):
-        logo.link_lights(rig[name], [floor], f"{name}-skips-floor", exclude=True)
+        link_lights(rig[name], [floor], f"{name}-skips-floor", exclude=True)
     # The lights hang on a rig that the lock-in turns with the camera, so the look holds from any side.
     mount = bpy.data.objects.new("light-rig", None)
     collection.objects.link(mount)
@@ -621,7 +695,7 @@ def flash_haze(collection: bpy.types.Collection, rig: dict[str, bpy.types.Object
     thickness.inputs["To Max"].default_value = 0.0
     links.new(distance.outputs["Value"], thickness.inputs["Value"])
     haze = nodes.new("ShaderNodeVolumeScatter")
-    haze.inputs["Color"].default_value = logo.srgb("#fff3dc")
+    haze.inputs["Color"].default_value = srgb("#fff3dc")
     haze.inputs["Anisotropy"].default_value = 0.5  # Scattering forward makes the rays brightest toward the camera.
     links.new(thickness.outputs["Result"], haze.inputs["Density"])
     links.new(haze.outputs["Volume"], output(tree).inputs["Volume"])
@@ -638,25 +712,21 @@ def flash_haze(collection: bpy.types.Collection, rig: dict[str, bpy.types.Object
 
 def build(*, frozen: bool = False) -> dict[str, bpy.types.Object]:
     """Build the model and stage it, in clear crystal or frosted ice."""
-    logo.HOLLOW = False
-    logo.GLASS_BEVEL = (0.04, 6)
+    bpy.ops.wm.read_factory_settings(use_empty=True)
     logo.CUBE_BEAM = 0.11  # Slimmer beams open the frame enough to see the inner cube.
-    logo.build_scene()
     scene = bpy.context.scene
-    crystallize(scene, frozen=frozen)
+    frame, *wings = logo.build_model(crystal_glass(frozen=frozen), lacquer(), emitter("core-light", "#ffe6b0", 400.0))
+    core = core_light([wing for wing in wings if wing.name.endswith("-foot")], frame)
+    configure_render(scene)
+    scene.world = studio_world()
     collection = logo.new_collection("crystal-set")
     build_tesseract(collection)
     leg_frames(collection)
     leg_glow(collection)
     rig = studio(collection)
-    rig["core"] = bpy.data.objects["core"]
-    camera = logo.add_camera("crystal-camera", collection)
-    hero = bpy.data.objects["hero-camera"]
-    camera.data.type = "ORTHO"
-    camera.data.ortho_scale = hero.data.ortho_scale
+    rig["core"] = core
+    camera = logo.logo_camera("crystal-camera", collection)
     camera.data.clip_end = 300.0
-    camera.location = hero.location.copy()
-    camera.rotation_euler = hero.rotation_euler.copy()
     scene.camera = rig["camera"] = camera
     rig["haze"] = flash_haze(collection, rig)
     return rig
@@ -683,7 +753,7 @@ def glide(rig: dict[str, bpy.types.Object], frame: int) -> None:
     view = Vector(
         (math.cos(azimuth) * math.cos(elevation), math.sin(azimuth) * math.cos(elevation), math.sin(elevation)),
     )
-    camera.location = logo.HERO_TARGET + (1024.0 / logo.PX_PER_UNIT * camera.data.lens / 36.0) * view
+    camera.location = logo.VIEW_TARGET + (1024.0 / logo.PX_PER_UNIT * camera.data.lens / 36.0) * view
     camera.rotation_euler = (-view).to_track_quat("-Z", "Y").to_euler()
     # The pool behind the letter is only for the glass to refract from the logo's angle;
     # seen from low and close it would sit on the floor in plain view.

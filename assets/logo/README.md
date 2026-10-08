@@ -38,7 +38,7 @@ The `logo-mark-movable-cube.svg` export is the static framed mark with an openin
 | `social-preview.png` | AI-rendered ivory social card with a centered glass M and lowercase wordmark. |
 | `social-preview.prompt.md` | Sunburst model and prompts used for the social artwork. |
 | `menu-bar.svg` | Optional monochrome outline variant of the M. |
-| [`blender/`](blender/README.md) | 3D Blender model rebuilt from the same vertices, with a hero render, plus a crystal-tesseract restyle and its effects, including the melting reveal. |
+| [`blender/`](blender/README.md) | 3D Blender model rebuilt from the same vertices, rendered as crystal around a glowing tesseract, with a still and animated effects. |
 | `preview.html` | Browser preview with a pause/play control. |
 | `reference.png` | Cleaned raster design used as the lighting reference. |
 | `test_geometry.py` | Regression checks for closed junctions and angled terminal cuts. |
