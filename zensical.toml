@@ -49,6 +49,7 @@ nav = [
     { "Thread Exports" = "thread-exports.md" },
     { "Bug Reports" = "bug-reports.md" },
     { "Usage Tracking" = "usage.md" },
+    { "Budgets" = "budgets.md" },
   ] },
   { "Matrix" = [
     { "Matrix Integration" = "matrix.md" },
