@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from fastapi import HTTPException
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.auth import public_origin, require_same_origin
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
@@ -15,12 +16,28 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
 if TYPE_CHECKING:
+    from fastapi import Request
+
     from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 CONNECTIONS_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
+
+
+def require_connections_same_origin(request: Request, runtime_paths: RuntimePaths) -> None:
+    """Reject Connections mutations that are cross-origin or not served over an HTTPS public origin."""
+    public_url = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
+    expected = public_origin(public_url)
+    if expected is None or not expected.startswith("https://"):
+        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
+    require_same_origin(
+        request,
+        expected,
+        detail="Connection changes require a same-origin request",
+        headers=CONNECTIONS_HEADERS,
+    )
 
 
 @dataclass(frozen=True)

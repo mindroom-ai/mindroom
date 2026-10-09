@@ -11,10 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.auth import public_origin, require_connections_user, require_same_origin
+from mindroom.api.auth import require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
+    require_connections_same_origin,
     resolve_connection_agent,
     resolve_connection_user,
 )
@@ -206,19 +207,6 @@ def _require_management(context: _Connections, agent_name: str, provider_id: str
     return context.providers[provider_id]
 
 
-def _require_same_origin(request: Request, context: _Connections) -> None:
-    public_url = context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
-    expected = public_origin(public_url)
-    if expected is None or not expected.startswith("https://"):
-        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
-    require_same_origin(
-        request,
-        expected,
-        detail="Connection changes require a same-origin request",
-        headers=CONNECTIONS_HEADERS,
-    )
-
-
 @router.get("")
 async def catalog(context: _ConnectionsContext) -> ConnectionsCatalog:
     """List allowed services without waiting for any upstream account status."""
@@ -302,7 +290,7 @@ async def connect(
     _body: _EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start existing OAuth state handling with an authorized agent target."""
-    _require_same_origin(request, context)
+    require_connections_same_origin(request, context.runtime_paths)
     provider = _require_management(context, agent_name, provider_id)
     if oauth_provider_service_account_configured(provider, context.runtime_paths):
         raise HTTPException(
@@ -329,7 +317,7 @@ async def disconnect(
     _body: _EmptyMutation,
 ) -> dict[str, str]:
     """Reset the authorized agent's scoped provider credentials."""
-    _require_same_origin(request, context)
+    require_connections_same_origin(request, context.runtime_paths)
     _require_management(context, agent_name, provider_id)
     try:
         return await oauth.disconnect(provider_id, request, agent_name=agent_name)
