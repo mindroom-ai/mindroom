@@ -17,8 +17,9 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.message_target import MessageTarget
@@ -715,6 +716,26 @@ async def test_thread_model_tool_can_switch_after_current_tool_call() -> None:
     assert payload["model"] == "large"
     assert payload["when"] == "after-toolcall"
     assert payload["note"] == "The current response will continue with the new model after this tool call."
+    assert _stored_model(context.runtime_paths, THREAD_ID) == "large"
+
+
+@pytest.mark.asyncio
+async def test_over_budget_switch_continues_this_response_on_the_fallback() -> None:
+    """A mid-response switch to a priced model must not bypass the requester's budget."""
+    context = _make_tool_context()
+    context.config.models["large"].pricing = ModelPricing(input=5, output=30)
+    context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
+    context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+
+    with tool_runtime_context(context):
+        payload = json.loads(
+            await ThreadModelTools().switch_thread_model("large", when="after-toolcall"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["model"] == "cheap"
+    assert payload["requested_model"] == "large"
+    assert "budget" in payload["note"]
     assert _stored_model(context.runtime_paths, THREAD_ID) == "large"
 
 

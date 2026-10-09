@@ -7,6 +7,7 @@ from typing import Literal
 from agno.tools import Toolkit
 
 from mindroom.authorization import addressable_responder_names
+from mindroom.budgets.monitor import budget_model
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.thread_models import (
     clear_thread_model_override,
@@ -138,6 +139,33 @@ class ThreadModelTools(Toolkit):
             entity_names=self._addressable_entities(context),
             config=context.config,
         )
+        active_model_name = (
+            budget_model(
+                context.config,
+                context.runtime_paths,
+                context.budget_monitor,
+                context.requester_id,
+                model_name,
+            )
+            if when == "after-toolcall"
+            else model_name
+        )
+        if active_model_name != model_name:
+            model = context.config.models[active_model_name]
+            return self._payload(
+                "ok",
+                action="switch",
+                thread_id=thread_id,
+                model=active_model_name,
+                requested_model=model_name,
+                provider=model.provider,
+                model_id=model.id,
+                when=when,
+                note=(
+                    f"The requester's monthly budget is used up, so the current response continues with "
+                    f"`{active_model_name}`; `{model_name}` stays selected for this thread."
+                ),
+            )
         model = context.config.models[model_name]
         return self._payload(
             "ok",
