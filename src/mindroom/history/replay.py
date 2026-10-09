@@ -22,7 +22,7 @@ from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from mindroom.tool_dialect_types import without_wire_record
+from mindroom.tool_dialects.types import without_wire_record
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

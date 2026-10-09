@@ -11,7 +11,7 @@ from typing import Any
 
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, parse_edit_multiple_matches_error, split_read_output
 from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS, parse_background_handle_message, parse_kill_message
-from mindroom.tool_dialect_types import (
+from mindroom.tool_dialects.types import (
     ToolDialect,
     WireFunction,
     milliseconds_to_seconds,

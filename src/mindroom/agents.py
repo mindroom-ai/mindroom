@@ -16,7 +16,6 @@ from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
-from mindroom.agno_compat_tool_dialect import install_tool_dialect
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
@@ -39,7 +38,8 @@ from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_call_budget import install_model_call_cap
-from mindroom.tool_dialects import resolve_tool_dialect, wire_function_name
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.translation import resolve_tool_dialect, wire_function_name
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.tool_dialect_types import ToolDialect
+    from mindroom.tool_dialects.types import ToolDialect
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)

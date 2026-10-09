@@ -42,7 +42,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY
+from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,

@@ -12,12 +12,12 @@ from agno.models.message import Message
 from openai import AsyncOpenAI
 
 from mindroom.agents import _set_toolkit_approval_origin
-from mindroom.agno_compat_tool_dialect import install_tool_dialect
 from mindroom.codex_model import CodexResponses
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.openai_tool_search import request_params_with_deferred_tool_search
-from mindroom.tool_dialect_codex import CODEX_DIALECT
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.codex import CODEX_DIALECT
 
 if TYPE_CHECKING:
     from pathlib import Path

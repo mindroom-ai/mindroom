@@ -9,10 +9,10 @@ from agno.tools.function import Function
 
 from mindroom.config.models import ModelConfig
 from mindroom.shell_execution import _format_background_handle_message, _format_finished_status, _format_running_status
-from mindroom.tool_dialect_claude import CLAUDE_DIALECT
-from mindroom.tool_dialect_codex import CODEX_DIALECT
-from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError, WireFunction
-from mindroom.tool_dialects import canonical_tool_calls, resolve_tool_dialect, wire_tools
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
+from mindroom.tool_dialects.codex import CODEX_DIALECT
+from mindroom.tool_dialects.translation import canonical_tool_calls, resolve_tool_dialect, wire_tools
+from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, WireFunction
 from mindroom.tool_system.tool_access import ToolKey
 
 

@@ -59,7 +59,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.pre_model_preparation import prewarm_agent_model_client
 from mindroom.session_ids import create_session_id
 from mindroom.tool_approval import tool_may_require_approval
-from mindroom.tool_dialects import presents, resolve_tool_dialect
+from mindroom.tool_dialects.translation import presents, resolve_tool_dialect
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,

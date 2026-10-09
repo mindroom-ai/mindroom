@@ -12,14 +12,14 @@ from agno.tools.toolkit import Toolkit
 from anthropic import AsyncAnthropic
 
 from mindroom.agents import _set_toolkit_approval_origin
-from mindroom.agno_compat_tool_dialect import install_tool_dialect
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, _format_read_output
 from mindroom.shell_execution import _format_background_handle_message
-from mindroom.tool_dialect_claude import CLAUDE_DIALECT
-from mindroom.tool_dialect_types import DialectArgumentError, WireFunction
-from mindroom.tool_dialects import resolve_tool_dialect
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
+from mindroom.tool_dialects.translation import resolve_tool_dialect
+from mindroom.tool_dialects.types import DialectArgumentError, WireFunction
 from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE
 
 

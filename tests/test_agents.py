@@ -44,7 +44,6 @@ from mindroom.agents import (
     create_agent,
     get_agent_toolkit_names,
 )
-from mindroom.agno_compat_tool_dialect import _TOOL_DIALECT_MARKER
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -83,7 +82,8 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
-from mindroom.tool_dialects import resolve_tool_dialect
+from mindroom.tool_dialects.agno_compat_model import _TOOL_DIALECT_MARKER
+from mindroom.tool_dialects.translation import resolve_tool_dialect
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,

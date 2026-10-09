@@ -11,14 +11,14 @@ from agno.models.message import Message
 from agno.tools.function import Function
 
 from mindroom.config.models import ModelConfig
-from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
-from mindroom.tool_dialects import (
+from mindroom.tool_dialects.translation import (
     _resolve_tool_dialect_name,
     canonical_tool_calls,
     wire_function_name,
     wire_messages,
     wire_tools,
 )
+from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.tool_access import ToolKey
 

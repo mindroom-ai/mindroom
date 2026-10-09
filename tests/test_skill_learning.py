@@ -31,7 +31,6 @@ from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage
-from mindroom.agno_compat_tool_dialect import install_tool_dialect
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -55,7 +54,8 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
 from mindroom.synthetic_model import SyntheticModel
-from mindroom.tool_dialect_claude import CLAUDE_DIALECT
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity

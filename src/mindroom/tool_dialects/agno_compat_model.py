@@ -12,7 +12,7 @@ from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
 from mindroom.model_instance_checks import OPENAI_RESPONSES_CLASS, isinstance_of_loaded
-from mindroom.tool_dialects import canonical_tool_calls, wire_messages, wire_tools
+from mindroom.tool_dialects.translation import canonical_tool_calls, wire_messages, wire_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
     from agno.tools.function import Function, FunctionCall
 
-    from mindroom.tool_dialect_types import ToolDialect
+    from mindroom.tool_dialects.types import ToolDialect
 
 _TOOL_DIALECT_MARKER = "_mindroom_tool_dialect"
 # Set while a non-streamed invocation runs on wire-form messages, so a nested stream call does not render again.

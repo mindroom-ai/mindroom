@@ -52,7 +52,7 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY
+from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY
 from mindroom.usage_storage import quote_identifier
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,

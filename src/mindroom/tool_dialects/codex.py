@@ -20,7 +20,7 @@ from mindroom.shell_execution import (
     parse_kill_message,
     parse_unknown_handle_error,
 )
-from mindroom.tool_dialect_types import (
+from mindroom.tool_dialects.types import (
     DialectArgumentError,
     ToolDialect,
     WireFunction,
