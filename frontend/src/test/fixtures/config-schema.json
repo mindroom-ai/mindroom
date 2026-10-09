@@ -2994,6 +2994,19 @@
           "description": "Judge with the OpenAI Decisions API; uses the OpenAI API key",
           "title": "Provider",
           "type": "string"
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Credential service holding the OpenAI API key; defaults to the OpenAI provider credential, which may hold a proxy key that api.openai.com rejects",
+          "title": "Credentials Service"
         }
       },
       "required": [

@@ -340,3 +340,29 @@ async def test_evaluators_use_the_shared_openai_credential(tmp_path: Path, monke
     assert chosen.decision is not None
     assert chosen.decision.option == "code"
     assert calls == [("stored-openai-key", _ENDPOINT)] * 2
+
+
+async def test_named_credentials_service_replaces_the_openai_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A named service supplies the key, and an empty one skips the backend instead of using the model key."""
+    paths = test_runtime_paths(tmp_path)
+    credentials = get_runtime_shared_credentials_manager(paths)
+    credentials.save_credentials("openai", {"api_key": "proxy-key"})
+    settings = OpenAIDecisionsJudgmentConfig(provider="openai_decisions", credentials_service="openai_direct")
+    assert create_judgment_evaluator(settings, Config(), paths, owner="agent", question_id="simple_task") is None
+
+    credentials.save_credentials("openai_direct", {"api_key": "direct-key"})
+    calls: list[str] = []
+    response = json.dumps(_body(_predicate(0.9))).encode()
+
+    async def post(self: JudgmentClient, _request_body: bytes) -> bytes:
+        calls.append(self._api_key)
+        return response
+
+    monkeypatch.setattr(JudgmentClient, "_post", post)
+    evaluate = create_judgment_evaluator(settings, Config(), paths, owner="agent", question_id="simple_task")
+    assert evaluate is not None
+    assert (await evaluate(_request())).decision is True
+    assert calls == ["direct-key"]

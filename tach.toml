@@ -2170,6 +2170,7 @@ depends_on = [
     "mindroom.matrix.room_history_reads",
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -7845,7 +7846,7 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.config.judgment"
-depends_on = ["mindroom.config.schema_hints"]
+depends_on = ["mindroom.config.schema_hints", "mindroom.credentials"]
 
 [[modules]]
 path = "mindroom.judgment.execution"

@@ -116,6 +116,7 @@ After a judgment backend approves, the agent replies normally with its own model
 | `provider` | all | Required | `llm` for a configured model alias, `typesafe` for System One, or `openai_decisions` for the OpenAI Decisions API |
 | `model` | `llm` | Required | Existing alias under `models`, which can be cheaper than the reply model |
 | `threshold` | `typesafe`, `openai_decisions` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
+| `credentials_service` | `openai_decisions` | `null` | Credential service holding the OpenAI API key, instead of the OpenAI model credential |
 | `timeout_seconds` | all | `5` for `llm`, otherwise `1.5` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
 
 Unknown fields are rejected.
@@ -143,6 +144,9 @@ To use System One instead, set `TYPESAFE_API_KEY` in the process environment or 
 
 To use the OpenAI Decisions API with `gpt-6-luna`, set `provider: openai_decisions` instead.
 It uses the same OpenAI API key as OpenAI models, from `OPENAI_API_KEY` or the dashboard, and always calls `api.openai.com`, regardless of any model `base_url`.
+When OpenAI models go through a proxy, that credential holds the proxy's key, which `api.openai.com` rejects; set `credentials_service` to a service holding a real OpenAI key instead.
+A named service that has no key skips the backend; it never falls back to the OpenAI model credential.
+No environment variable fills a custom service name, so add its `api_key` in the dashboard or through [credential seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds).
 
 The LLM backend uses the alias's normal provider credentials and receives no tools, agent system prompt, or agent memory.
 A model alias whose provider adds native tools that cannot be disabled is refused.

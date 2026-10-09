@@ -2696,6 +2696,7 @@ After a judgment backend approves, the agent replies normally with its own model
 | `provider` | all | Required | `llm` for a configured model alias, `typesafe` for System One, or `openai_decisions` for the OpenAI Decisions API |
 | `model` | `llm` | Required | Existing alias under `models`, which can be cheaper than the reply model |
 | `threshold` | `typesafe`, `openai_decisions` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
+| `credentials_service` | `openai_decisions` | `null` | Credential service holding the OpenAI API key, instead of the OpenAI model credential |
 | `timeout_seconds` | all | `5` for `llm`, otherwise `1.5` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
 
 Unknown fields are rejected.
@@ -2723,6 +2724,9 @@ To use System One instead, set `TYPESAFE_API_KEY` in the process environment or 
 
 To use the OpenAI Decisions API with `gpt-6-luna`, set `provider: openai_decisions` instead.
 It uses the same OpenAI API key as OpenAI models, from `OPENAI_API_KEY` or the dashboard, and always calls `api.openai.com`, regardless of any model `base_url`.
+When OpenAI models go through a proxy, that credential holds the proxy's key, which `api.openai.com` rejects; set `credentials_service` to a service holding a real OpenAI key instead.
+A named service that has no key skips the backend; it never falls back to the OpenAI model credential.
+No environment variable fills a custom service name, so add its `api_key` in the dashboard or through [credential seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds).
 
 The LLM backend uses the alias's normal provider credentials and receives no tools, agent system prompt, or agent memory.
 A model alias whose provider adds native tools that cannot be disabled is refused.
@@ -10434,7 +10438,7 @@ Attachment IDs (`att_*`) are limited to the current conversation and IDs registe
 
 ## [`matrix_room`]
 
-`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None)` reads room data and never writes.
+`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False)` reads room data and never writes.
 Use `matrix_message` or `matrix_api` for writes.
 
 | Action | Returns |
@@ -10442,7 +10446,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
-| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token` |
+| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread |
 | `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to address that agent.
@@ -10555,6 +10559,9 @@ Editing a summary in MindRoom Chat also pins it when the editor can address an a
 A pinned thread receives no automatic summaries or automatic topic tags; add tags with [`thread_tags`] instead.
 
 The tool returns an error without posting when it cannot read the thread's complete history, which always happens for threads longer than 2,000 messages or 16 MiB of content.
+
+To retitle many threads, start from `matrix_room(action="threads", include_summaries=True)`: each row has the thread's current `summary` and `summary_pinned`, which is `true` when the title is pinned, so threads can be chosen without reading them before calling `set_thread_summary(summary, thread_id=...)` for each one.
+Both fields are omitted for a thread whose complete history cannot be read, the same threads `set_thread_summary` refuses.
 
 ```python
 set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
