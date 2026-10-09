@@ -42,7 +42,7 @@ class LegacyPausedAnswer:
 # LEGACY_COMPAT: Paused answers stored in approval continuation context.
 # Legacy format: approval_continuations.context_json carrying response_text, response_tool_trace, and
 # response_presentation_state, which earlier releases wrote at every pause before replies held what a pause shows.
-# Last legacy release: v2026.10.214; replacement: the unreleased durable reply messages keep the paused answer as
+# Last legacy release: v2026.10.215; replacement: the unreleased durable reply messages keep the paused answer as
 # the reply's answer segment and no longer write these keys.
 # Handling: adoption reads them once, from the stored context of a continuation it adopts, to build the paused
 # reply's presentation; nothing else reads them, and an advance rewrites the context without them.
@@ -83,7 +83,7 @@ def _classified(transaction: Transaction, principal_id: str) -> bool:
 # LEGACY_COMPAT: Approval-paused agent and team replies without reply records.
 # Legacy format: approval continuations an earlier release left before reply_messages existed, for a principal with no
 # reply_legacy_classifications row.
-# Last legacy release: v2026.10.214; replacement: the unreleased durable reply messages record every reply in
+# Last legacy release: v2026.10.215; replacement: the unreleased durable reply messages record every reply in
 # reply_messages and reply_spans.
 # Handling: once per principal at bot start, before owner_lost, the newest continuation of each reply pauses it, and
 # its approval runtime resumes or settles it as any paused reply. Older continuations of the same reply are
