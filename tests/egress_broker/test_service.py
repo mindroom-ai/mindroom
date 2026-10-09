@@ -18,7 +18,9 @@ from cryptography.hazmat.primitives import serialization
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
-from mindroom.egress_broker import AuditLog, DialPolicy, TokenSigner, service
+from mindroom.egress_broker import service
+from mindroom.egress_broker.audit import AuditLog
+from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
 from mindroom.egress_broker.secrets import save_secret
 from mindroom.egress_broker.service import (
@@ -28,6 +30,7 @@ from mindroom.egress_broker.service import (
     manage_url,
     serve_egress_broker,
 )
+from mindroom.egress_broker.tokens import TokenSigner
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
 from .conftest import audit_records

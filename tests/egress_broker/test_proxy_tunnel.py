@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
-from mindroom.egress_broker import TokenSigner
+from mindroom.egress_broker.tokens import TokenSigner
 from tests.egress_broker.conftest import (
     DEFAULT_CLAIMS,
     audit_records,
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     import httpx
 
-    from mindroom.egress_broker import AuditLog
+    from mindroom.egress_broker.audit import AuditLog
     from mindroom.egress_broker.proxy import EgressBroker
     from tests.egress_broker.conftest import BrokerFactory, RawResponse, Upstream, UpstreamCA
 

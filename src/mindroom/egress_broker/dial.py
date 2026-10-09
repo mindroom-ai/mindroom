@@ -15,6 +15,13 @@ if TYPE_CHECKING:
 
     _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
+__all__ = [
+    "DestinationBlockedError",
+    "DestinationUnresolvableError",
+    "DialPolicy",
+    "open_upstream",
+]
+
 
 @dataclass(frozen=True)
 class DialPolicy:

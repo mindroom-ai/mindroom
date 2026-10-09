@@ -22,7 +22,8 @@ from cryptography.hazmat.primitives import serialization
 from structlog.testing import capture_logs
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
-from mindroom.egress_broker import DialPolicy, materialize_ca_bundle
+from mindroom.egress_broker.ca import materialize_ca_bundle
+from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.mitm import _verifying_context
 from tests.egress_broker.conftest import audit_records, connect_request, proxy_authorization, read_raw_response
 
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 
     import httpx
 
-    from mindroom.egress_broker import AuditLog
+    from mindroom.egress_broker.audit import AuditLog
     from tests.egress_broker.conftest import BrokerFactory, Upstream, UpstreamCA
 
     ProxyClient = Callable[..., httpx.AsyncClient]
