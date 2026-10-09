@@ -6,7 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.config.judgment import LLMJudgmentConfig, OpenAIDecisionsJudgmentConfig
-from mindroom.credentials_sync import get_api_key_for_provider
+from mindroom.credentials_sync import get_api_key_for_provider, get_api_key_for_service
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
@@ -71,7 +71,12 @@ def _probability_client(
     question_id: str,
 ) -> JudgmentClient | None:
     if isinstance(settings, OpenAIDecisionsJudgmentConfig):
-        wire, key = OPENAI_DECISIONS, get_api_key_for_provider("openai", runtime_paths)
+        wire = OPENAI_DECISIONS
+        key = (
+            get_api_key_for_provider("openai", runtime_paths)
+            if settings.credentials_service is None
+            else get_api_key_for_service(settings.credentials_service, runtime_paths)
+        )
     else:
         wire, key = SYSTEM_ONE, runtime_paths.env_value("TYPESAFE_API_KEY")
     key = (key or "").strip()
