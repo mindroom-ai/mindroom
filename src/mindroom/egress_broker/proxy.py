@@ -18,6 +18,7 @@ from mindroom.egress_broker._relay import (
     close_stream,
     normalize_host,
     send_json,
+    send_proxy_challenge,
     serve_peer,
     upstream_request_headers,
 )
@@ -37,8 +38,6 @@ __all__ = ["EgressBroker", "ManageUrl", "SecretResolver"]
 
 type SecretResolver = Callable[[WorkerClaims, str], str | None]
 type ManageUrl = Callable[[WorkerClaims], str | None]
-
-_PROXY_AUTHENTICATE = (b"proxy-authenticate", b'Basic realm="mindroom-egress-broker"')
 
 
 def _parse_port(text: str) -> int:
@@ -133,6 +132,7 @@ class EgressBroker:
         )
         self._interceptor = TlsInterceptor(
             self._relay,
+            signer=signer,
             ca=ca,
             upstream_ssl_context=upstream_ssl_context,
             resolve_secret=resolve_secret,
@@ -194,20 +194,15 @@ class EgressBroker:
             return False
         token = _token_from(list(request.headers))
         claims = self._signer.verify(token) if token is not None else None
-        if claims is None:
-            await send_json(
-                client,
-                407,
-                {"error": "proxy_authentication_required"},
-                headers=(_PROXY_AUTHENTICATE,),
-            )
+        if token is None or claims is None:
+            await send_proxy_challenge(client)
             return False
         if request.method == b"CONNECT":
-            await self._connect(client, request, claims)
+            await self._connect(client, request, token, claims)
             return False
         return await self._forward_plain(client, request, claims)
 
-    async def _connect(self, client: Peer, request: h11.Request, claims: WorkerClaims) -> None:
+    async def _connect(self, client: Peer, request: h11.Request, token: str, claims: WorkerClaims) -> None:
         try:
             host, port = _parse_connect_target(request.target)
         except ValueError:
@@ -221,7 +216,7 @@ class EgressBroker:
         if config is None:
             return
         if host_has_rules(config, host, port):
-            await self._interceptor.intercept(client, claims, host, port)
+            await self._interceptor.intercept(client, token, claims, host, port)
             return
         if config.unmatched_hosts == "deny":
             await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
@@ -265,7 +260,7 @@ class EgressBroker:
             entry.service = match.service
             await self._relay.deny(client, entry, {"error": "tls_required", "service": match.service})
             return False
-        headers = upstream_request_headers(list(request.headers), host=authority, keep_upgrade=False)
+        headers = upstream_request_headers(list(request.headers), host=authority)
         upstream_request = h11.Request(method=request.method, target=target, headers=headers)
         return await self._forward(client, entry, port, upstream_request, strip_cookies=has_rules)
 

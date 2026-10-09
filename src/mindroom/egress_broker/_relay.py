@@ -35,12 +35,14 @@ __all__ = [
     "close_stream",
     "normalize_host",
     "send_json",
+    "send_proxy_challenge",
     "serve_peer",
     "upstream_request_headers",
 ]
 
 _CHUNK = 64 * 1024
 _CLOSE_TIMEOUT = 5.0
+_PROXY_AUTHENTICATE = (b"proxy-authenticate", b'Basic realm="mindroom-egress-broker"')
 _HOSTNAME = re.compile(r"[a-z0-9_][a-z0-9_.-]*")
 
 logger = get_logger(__name__)
@@ -132,6 +134,11 @@ async def send_json(
     await client.send(*events, h11.EndOfMessage())
 
 
+async def send_proxy_challenge(client: Peer) -> None:
+    """Answer 407 with a Basic challenge: the proxy token is missing, invalid, or expired."""
+    await send_json(client, 407, {"error": "proxy_authentication_required"}, headers=(_PROXY_AUTHENTICATE,))
+
+
 async def serve_peer(peer: Peer, serve_one: Callable[[Peer], Awaitable[bool]]) -> None:
     """Serve requests on `peer` until `serve_one` returns False, containing every failure to this connection."""
     try:
@@ -198,25 +205,17 @@ def normalize_host(host: str) -> str:
     return host
 
 
-def upstream_request_headers(
-    received: list[tuple[bytes, bytes]],
-    *,
-    host: bytes,
-    keep_upgrade: bool,
-) -> list[tuple[bytes, bytes]]:
+def upstream_request_headers(received: list[tuple[bytes, bytes]], *, host: bytes) -> list[tuple[bytes, bytes]]:
     """Return the headers to send upstream: Host set to `host`, hop-by-hop removed, framing rebuilt.
 
     The broker answers ``Expect: 100-continue`` itself. A chunked body is re-chunked, so a client
     Content-Length beside it is dropped rather than forwarded next to the new Transfer-Encoding.
-    `keep_upgrade` keeps Connection and Upgrade for a protocol switch such as a websocket handshake.
     """
     chunked = any(name == b"transfer-encoding" for name, _ in received)
     dropped = {b"host", b"expect", b"content-length"} if chunked else {b"host", b"expect"}
     headers = [(b"host", host)]
     headers += [
-        (name, value)
-        for name, value in strip_request_headers(received, keep_upgrade=keep_upgrade)
-        if name not in dropped
+        (name, value) for name, value in strip_request_headers(received, keep_upgrade=False) if name not in dropped
     ]
     if chunked:
         headers.append((b"transfer-encoding", b"chunked"))

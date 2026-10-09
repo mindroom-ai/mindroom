@@ -9,14 +9,21 @@ import os
 import shutil
 import socket
 import ssl
+import threading
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import aiohttp
+import certifi
 import pytest
+from cryptography.hazmat.primitives import serialization
+from structlog.testing import capture_logs
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
 from mindroom.egress_broker import DialPolicy, materialize_ca_bundle
+from mindroom.egress_broker.mitm import _verifying_context
 from tests.egress_broker.conftest import audit_records, connect_request, proxy_authorization, read_raw_response
 
 if TYPE_CHECKING:
@@ -60,6 +67,14 @@ async def _open_tunnel(
         server_hostname="localhost",
     )
     return reader, writer
+
+
+def _websocket_handshake(port: int, *, connection: str = "Upgrade", upgrade: str = "websocket") -> bytes:
+    return (
+        f"GET /ws HTTP/1.1\r\nHost: localhost:{port}\r\n"
+        f"Upgrade: {upgrade}\r\nConnection: {connection}\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    ).encode()
 
 
 def _closed_port() -> int:
@@ -503,13 +518,7 @@ async def test_websocket_splice_ends_when_client_closes(
     """Once the client goes away the upstream is closed too, even though the upstream would keep waiting."""
     await broker(_config(), secrets={"svc": SECRET})
     reader, writer = await _open_tunnel(broker, f"localhost:{tls_upstream.port}")
-    writer.write(
-        (
-            f"GET /ws HTTP/1.1\r\nHost: localhost:{tls_upstream.port}\r\n"
-            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-        ).encode(),
-    )
+    writer.write(_websocket_handshake(tls_upstream.port))
     switched = await read_raw_response(reader)
 
     writer.close()
@@ -716,3 +725,249 @@ async def test_git_ls_remote_basic_auth(broker: BrokerFactory, tls_upstream: Ups
 
     assert returncode == 0, stderr
     assert f"{'1' * 40}\trefs/heads/main" in stdout
+
+
+@pytest.mark.asyncio
+async def test_bytes_sent_before_connect_answer_get_400(broker: BrokerFactory) -> None:
+    """Bytes sent with the CONNECT, before the broker answered it, cannot start TLS and are refused."""
+    started = await broker(_config(), secrets={"svc": SECRET})
+    reader, writer = await asyncio.open_connection("127.0.0.1", started.port)
+    try:
+        writer.write(
+            connect_request("localhost:443", authorization=proxy_authorization(broker.token()))
+            + b"\x16\x03\x01\x00\x05early",
+        )
+        response = await read_raw_response(reader)
+    finally:
+        writer.transport.abort()
+
+    assert response.status == 400
+    assert response.json() == {"error": "bad_request"}
+    assert broker.resolved == []
+
+
+@pytest.mark.asyncio
+async def test_client_hello_sent_before_connect_answer_still_reaches_tls(
+    broker: BrokerFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ClientHello that arrives while the broker is still preparing its 200 is handed to the TLS handshake."""
+    started = await broker(_config(), secrets={"svc": SECRET})
+    preparing, release = threading.Event(), threading.Event()
+    server_context = broker.ca.server_context
+
+    def slow_server_context(host: str) -> ssl.SSLContext:
+        preparing.set()
+        release.wait(5)
+        return server_context(host)
+
+    monkeypatch.setattr(broker.ca, "server_context", slow_server_context)
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = ssl.create_default_context(cadata=broker.ca.cert_pem).wrap_bio(
+        incoming,
+        outgoing,
+        server_hostname="localhost",
+    )
+    reader, writer = await asyncio.open_connection("127.0.0.1", started.port)
+    try:
+        writer.write(connect_request("localhost:443", authorization=proxy_authorization(broker.token())))
+        assert await asyncio.to_thread(preparing.wait, 5)
+        with contextlib.suppress(ssl.SSLWantReadError):
+            tls.do_handshake()
+        writer.write(outgoing.read())
+        # Give the broker's event loop the chance to read the early ClientHello before the leaf is ready.
+        await asyncio.sleep(0.05)
+        release.set()
+        async with asyncio.timeout(5):
+            assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+            while True:
+                try:
+                    tls.do_handshake()
+                    break
+                except ssl.SSLWantReadError:
+                    writer.write(outgoing.read())
+                    data = await reader.read(65536)
+                    assert data
+                    incoming.write(data)
+        writer.write(outgoing.read())
+    finally:
+        release.set()
+        writer.transport.abort()
+
+    assert ("DNS", "localhost") in tls.getpeercert()["subjectAltName"]
+
+
+@pytest.mark.asyncio
+async def test_secret_with_line_break_gets_502_without_leaking(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+) -> None:
+    """A stored secret that is not a valid header value fails the request without reaching logs or the upstream."""
+    await broker(_config(), resolve_secret=lambda _claims, _service: f"{SECRET}\r\nX-Injected: y")
+    client = proxy_client(broker.token())
+
+    with capture_logs() as logs:
+        response = await client.get(tls_upstream.url("/echo"))
+
+    assert (response.status_code, response.json()) == (502, {"error": "broker_error"})
+    assert tls_upstream.hits == []
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.service) == ("request", 502, "svc")
+    assert {"event": "egress_broker_secret_unusable", "log_level": "warning", "service": "svc"} in logs
+    assert SECRET not in repr(logs)
+
+
+@pytest.mark.parametrize("trust_env", [None, "SSL_CERT_FILE", "SSL_CERT_DIR"])
+def test_default_upstream_context_adds_certifi_unless_trust_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_ca: UpstreamCA,
+    tmp_path: Path,
+    trust_env: str | None,
+) -> None:
+    """Without a configured trust store certifi's roots are added; SSL_CERT_FILE or SSL_CERT_DIR is left to OpenSSL."""
+    operator_file = certifi.where()
+    stand_in = tmp_path / "certifi.pem"
+    stand_in.write_text(upstream_ca.pem)
+    monkeypatch.setattr(certifi, "where", lambda: str(stand_in))
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    if trust_env == "SSL_CERT_FILE":
+        monkeypatch.setenv("SSL_CERT_FILE", operator_file)
+    elif trust_env == "SSL_CERT_DIR":
+        (tmp_path / "certs").mkdir()
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "certs"))
+
+    loaded = _verifying_context().get_ca_certs(binary_form=True)
+
+    assert (upstream_ca.cert.public_bytes(serialization.Encoding.DER) in loaded) is (trust_env is None)
+
+
+@pytest.mark.asyncio
+async def test_non_websocket_upgrade_is_not_spliced(broker: BrokerFactory, tls_upstream: Upstream) -> None:
+    """Only websocket upgrades are spliced; any other Upgrade is dropped and served as a normal request."""
+    await broker(_config(), secrets={"svc": SECRET})
+    reader, writer = await _open_tunnel(broker, f"localhost:{tls_upstream.port}")
+    try:
+        writer.write(
+            (
+                f"GET /echo HTTP/1.1\r\nHost: localhost:{tls_upstream.port}\r\n"
+                "Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\n"
+            ).encode(),
+        )
+        upgraded = await read_raw_response(reader)
+        writer.write(f"GET /echo HTTP/1.1\r\nHost: localhost:{tls_upstream.port}\r\n\r\n".encode())
+        following = await read_raw_response(reader)
+    finally:
+        writer.transport.abort()
+
+    assert (upgraded.status, following.status) == (200, 200)
+    seen = upgraded.json()["headers"]
+    assert not {"upgrade", "connection", "http2-settings"} & set(seen)
+    assert seen["authorization"] == [f"Bearer {SECRET}"]
+
+
+@pytest.mark.asyncio
+async def test_websocket_handshake_forwards_only_connection_upgrade(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+) -> None:
+    """A websocket handshake reaches the upstream with ``Connection: Upgrade`` instead of the client's value."""
+    await broker(_config(), secrets={"svc": SECRET})
+    reader, writer = await _open_tunnel(broker, f"localhost:{tls_upstream.port}")
+    try:
+        writer.write(_websocket_handshake(tls_upstream.port, connection="keep-alive, Upgrade", upgrade="WebSocket"))
+        switched = await read_raw_response(reader)
+    finally:
+        writer.transport.abort()
+
+    assert switched.status == 101
+    [seen] = tls_upstream.requests
+    assert seen.headers["connection"] == ["Upgrade"]
+    assert seen.headers["upgrade"] == ["websocket"]
+
+
+@pytest.mark.asyncio
+async def test_expired_token_stops_open_tunnel(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """The token is checked on every intercepted request, so a busy tunnel stops working when the token expires."""
+    clock = [time.time()]
+    await broker(_config(), secrets={"svc": SECRET})
+
+    with patch("mindroom.egress_broker.tokens.time", SimpleNamespace(time=lambda: clock[0])):
+        client = proxy_client(broker.token())
+        first = await client.get(tls_upstream.url("/echo"))
+        clock[0] += 604800 + 1
+        second = await client.get(tls_upstream.url("/echo"))
+
+    assert first.status_code == 200
+    assert second.status_code == 407
+    assert second.headers["connection"] == "close"
+    assert second.headers["proxy-authenticate"] == 'Basic realm="mindroom-egress-broker"'
+    assert tls_upstream.hits == ["/echo"]
+    assert broker.resolved == ["svc"]
+
+
+@pytest.mark.asyncio
+async def test_chunked_body_over_limit_in_tunnel_gets_413_and_closes_upstream(
+    broker: BrokerFactory,
+    upstream_ca: UpstreamCA,
+    audit: AuditLog,
+    tmp_path: Path,
+) -> None:
+    """A streamed body crossing the limit gets 413, and the half-sent upstream request's connection is closed."""
+    upstream_closed = asyncio.Event()
+
+    async def receive(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while await reader.read(65536):
+                pass
+        except OSError:
+            pass
+        finally:
+            upstream_closed.set()
+            writer.transport.abort()
+
+    upstream = await asyncio.start_server(receive, "127.0.0.1", 0, ssl=upstream_ca.server_context(tmp_path))
+    port = upstream.sockets[0].getsockname()[1]
+    await broker(_config(), secrets={"svc": SECRET}, max_body_bytes=1024)
+    reader, writer = await _open_tunnel(broker, f"localhost:{port}")
+    try:
+        writer.write(
+            f"POST /upload HTTP/1.1\r\nHost: localhost:{port}\r\nTransfer-Encoding: chunked\r\n\r\n".encode()
+            + b"".join(b"200\r\n" + b"x" * 512 + b"\r\n" for _ in range(4))
+            + b"0\r\n\r\n",
+        )
+        response = await read_raw_response(reader)
+        async with asyncio.timeout(5):
+            await upstream_closed.wait()
+    finally:
+        writer.transport.abort()
+        upstream.close()
+        await upstream.wait_closed()
+
+    assert response.status == 413
+    assert response.json() == {"error": "request_body_too_large"}
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.service) == ("request", 413, "svc")
+
+
+@pytest.mark.asyncio
+async def test_http10_request_without_host_gets_tunnel_authority(broker: BrokerFactory, tls_upstream: Upstream) -> None:
+    """An HTTP/1.0 request without Host is forwarded with the CONNECT authority as its Host."""
+    await broker(_config(), secrets={"svc": SECRET})
+    reader, writer = await _open_tunnel(broker, f"localhost:{tls_upstream.port}")
+    try:
+        writer.write(b"GET /echo HTTP/1.0\r\n\r\n")
+        response = await read_raw_response(reader)
+    finally:
+        writer.transport.abort()
+
+    assert response.status == 200
+    seen = response.json()["headers"]
+    assert seen["host"] == [f"localhost:{tls_upstream.port}"]
+    assert seen["authorization"] == [f"Bearer {SECRET}"]
