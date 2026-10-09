@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
+from functools import cache
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -15,6 +16,15 @@ _ApprovalAction = Literal["auto_approve", "require_approval"]
 _MAX_TIMEOUT_DAYS = 36500.0
 _TimeoutDays = Annotated[float, Field(gt=0, le=_MAX_TIMEOUT_DAYS, allow_inf_nan=False)]
 _FILE_EDIT_FUNCTIONS = ("edit_file", "write_file")
+
+
+@cache
+def _warn_apply_patch_gap(_default: str, _rules: tuple[tuple[str, str | None, str | None], ...]) -> None:
+    """Warn once per distinct approval policy, however often the config is validated."""
+    logger.warning(
+        "tool_approval gates edit_file or write_file but not apply_patch, which OpenAI models edit files with; "
+        "add a rule matching apply_patch to gate their edits too",
+    )
 
 
 class ApprovalRuleConfig(BaseModel):
@@ -115,10 +125,7 @@ class ToolApprovalConfig(BaseModel):
         if any(self.may_require_approval(name) for name in _FILE_EDIT_FUNCTIONS) and not self.may_require_approval(
             "apply_patch",
         ):
-            logger.warning(
-                "tool_approval gates edit_file or write_file but not apply_patch, which OpenAI models edit files "
-                "with; add a rule matching apply_patch to gate their edits too",
-            )
+            _warn_apply_patch_gap(self.default, tuple((rule.match, rule.action, rule.script) for rule in self.rules))
         return self
 
     @field_validator("timeout_days", mode="before")

@@ -20,7 +20,6 @@ from mindroom.shell_execution import (
     _format_background_handle_message,
     _format_finished_status,
     _format_running_status,
-    _shell_call_reference,
     check_command,
     kill_all_records,
     kill_command,
@@ -293,7 +292,6 @@ def test_background_handle_message_round_trips() -> None:
     assert parse_background_handle_message(text) == _BackgroundHandle(timeout=10, pid=4242, handle="shell:0123abcd")
     assert parse_background_handle_message(text + "\nextra") is None
     assert parse_background_handle_message("Command timed out") is None
-    assert _shell_call_reference("check_shell_command", "shell:0123abcd") == "check_shell_command('shell:0123abcd')"
 
 
 def test_parse_check_status_matches_both_templates() -> None:

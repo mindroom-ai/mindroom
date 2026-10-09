@@ -26,7 +26,7 @@ from mindroom.approval_manager import (
 )
 from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ToolApprovalConfig
+from mindroom.config.approval import ToolApprovalConfig, _warn_apply_patch_gap
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
@@ -2318,7 +2318,20 @@ def test_warns_when_file_edit_rules_leave_apply_patch_ungated(
     warns: bool,
 ) -> None:
     """OpenAI models edit with apply_patch, so rules gating only edit_file or write_file draw a warning."""
+    _warn_apply_patch_gap.cache_clear()
     with capture_logs() as logs:
         ToolApprovalConfig.model_validate({"default": default, "rules": rules})
 
     assert any("apply_patch" in entry["event"] for entry in logs) is warns
+
+
+def test_apply_patch_gap_warns_once_per_policy() -> None:
+    """Validating the same approval policy again does not repeat the warning."""
+    _warn_apply_patch_gap.cache_clear()
+    policy = {"rules": [{"match": "write_file", "action": "require_approval"}]}
+
+    with capture_logs() as logs:
+        ToolApprovalConfig.model_validate(policy)
+        ToolApprovalConfig.model_validate(policy)
+
+    assert sum("apply_patch" in entry["event"] for entry in logs) == 1

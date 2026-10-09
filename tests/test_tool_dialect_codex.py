@@ -209,3 +209,11 @@ def test_kill_shell_command_call_dispatches_with_the_handle() -> None:
 
     assert errors == []
     assert json.loads(translated["function"]["arguments"]) == {"handle": "shell:0123abcd", "force": False}
+
+
+def test_stale_kill_names_the_session_id() -> None:
+    """Stopping a session MindRoom no longer knows names the session ID the model used."""
+    assert (
+        _render("kill_shell_command", "Error: Unknown handle 'shell:0123abcd'")
+        == f"Error: Unknown session ID {0x0123ABCD}"
+    )

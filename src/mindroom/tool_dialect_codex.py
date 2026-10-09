@@ -90,8 +90,8 @@ def _render_exec(text: str) -> str:
 
 
 def _render_poll(text: str) -> str:
-    if (handle := parse_unknown_handle_error(text)) is not None:
-        return f"Error: Unknown session ID {_session_id(handle)}"
+    if (unknown := _render_unknown_handle(text)) is not None:
+        return unknown
     status = parse_check_status(text)
     if status is None:
         return text
@@ -100,7 +100,14 @@ def _render_poll(text: str) -> str:
     return f"Wall time: {status.elapsed:g} seconds\n{state}\nOutput:\n{status.output}{stderr}"
 
 
+def _render_unknown_handle(text: str) -> str | None:
+    handle = parse_unknown_handle_error(text)
+    return f"Error: Unknown session ID {_session_id(handle)}" if handle is not None else None
+
+
 def _render_kill(text: str) -> str:
+    if (unknown := _render_unknown_handle(text)) is not None:
+        return unknown
     kill = parse_kill_message(text)
     if kill is None:
         return text

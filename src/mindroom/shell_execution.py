@@ -42,16 +42,10 @@ MAX_CHECK_WAIT_SECONDS = 60
 _HANDLE_FIELD = r"shell:[0-9a-f]+"
 
 
-def _shell_call_reference(function_name: str, handle: str) -> str:
-    """Return how shell results tell the model to call a handle function."""
-    return f"{function_name}('{handle}')"
-
-
 _BACKGROUND_HANDLE_TEMPLATE = (
     "Command timed out after {timeout}s. Still running (PID {pid}).\n"
     "Handle: {handle}\n"
-    f"Use {_shell_call_reference('check_shell_command', '{handle}')} to poll or "
-    f"{_shell_call_reference('kill_shell_command', '{handle}')} to stop."
+    "Use check_shell_command('{handle}') to poll or kill_shell_command('{handle}') to stop."
 )
 _BACKGROUND_HANDLE = template_pattern(
     _BACKGROUND_HANDLE_TEMPLATE,
@@ -59,10 +53,7 @@ _BACKGROUND_HANDLE = template_pattern(
     pid=INT_FIELD,
     handle=_HANDLE_FIELD,
 )
-_KILL_TEMPLATE = (
-    "{action} process {pid} ({signal} sent). "
-    f"Use {_shell_call_reference('check_shell_command', '{handle}')} to confirm exit."
-)
+_KILL_TEMPLATE = "{action} process {pid} ({signal} sent). Use check_shell_command('{handle}') to confirm exit."
 _KILL = template_pattern(
     _KILL_TEMPLATE,
     action="Terminated|Force-killed",

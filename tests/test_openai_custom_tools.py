@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 from agno.agent import Agent
+from agno.models.message import Message
 from openai import AsyncOpenAI
 
 from mindroom.agents import _set_toolkit_approval_origin
@@ -126,7 +127,7 @@ async def _run(
             await agent.arun("Create hello.txt.")
 
 
-@pytest.mark.parametrize(("stream", "codex"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(("stream", "codex"), [(False, False), (True, False), (False, True), (True, True)])
 @pytest.mark.asyncio
 async def test_end_to_end_apply_patch_edits_workspace_file(
     tmp_path: Path,
@@ -219,3 +220,45 @@ def test_deferred_custom_tool_is_deferred() -> None:
         {**custom, "defer_loading": True},
         {**function, "defer_loading": True},
     ]
+
+
+@pytest.mark.asyncio
+async def test_codex_non_stream_invocation_projects_history_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Codex model streams under a non-stream call; history renders once, so same-named calls keep their IDs."""
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, text=_stream([_ANSWER]), headers={"content-type": "text/event-stream"})
+
+    kill_call = {
+        "id": "fc_kill",
+        "call_id": "call_kill",
+        "type": "function",
+        "function": {
+            "name": "kill_shell_command",
+            "arguments": json.dumps({"handle": "shell:0123abcd", "force": False}),
+        },
+    }
+    messages = [
+        Message(role="user", content="Stop it."),
+        Message(role="assistant", tool_calls=[kill_call]),
+        Message(
+            role="tool",
+            tool_call_id="call_kill",
+            tool_name="kill_shell_command",
+            content="Process 7 already exited",
+        ),
+    ]
+    kill_tool = {"type": "function", "function": {"name": "kill_shell_command", "parameters": {"type": "object"}}}
+    async with AsyncOpenAI(
+        api_key="test",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as client:
+        monkeypatch.setattr(CodexResponses, "get_async_client", lambda _self: client)
+        model = CodexResponses(id="gpt-6.1-sol")
+        install_tool_dialect(model, CODEX_DIALECT)
+        await model.ainvoke(messages=messages, assistant_message=Message(role="assistant"), tools=[kill_tool])
+
+    [call] = [item for item in requests[0]["input"] if item.get("type") == "function_call"]
+    assert json.loads(call["arguments"]) == {"session_id": 0x0123ABCD, "force": False}

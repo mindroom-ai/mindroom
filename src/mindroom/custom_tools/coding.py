@@ -786,8 +786,10 @@ class CodingTools(Toolkit):
                 overlay[target] = new_contents
                 writes.append((target, new_contents.encode("utf-8")))
                 if target != resolved:
-                    overlay[resolved] = None
-                    writes.append((resolved, None))
+                    # A moved link goes away itself, like a deleted one, and its target stays.
+                    source = self._patch_link(hunk.path, overlay, deleting=True)
+                    overlay[source] = None
+                    writes.append((source, None))
                 modified.append(f"M {hunk.move_to or hunk.path}")
         return writes, [*added, *modified, *deleted]
 

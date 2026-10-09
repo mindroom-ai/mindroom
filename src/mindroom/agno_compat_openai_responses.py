@@ -440,8 +440,6 @@ class OpenAIResponsesProviderCompat:
             call = custom_tool_call(stream_event.item)
             model_response.tool_calls = [call]
             assistant_message.tool_calls = [*(assistant_message.tool_calls or []), call]
-            model_response.extra = model_response.extra or {}
-            model_response.extra.setdefault("tool_call_ids", []).append(call["call_id"])
         if isinstance(stream_event, ResponseOutputItemDoneEvent):
             self._record_provider_only_responses_items(model_response, [stream_event.item])
             if self._should_buffer_responses_output():

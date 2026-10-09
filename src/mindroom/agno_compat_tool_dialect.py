@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from types import MethodType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from mindroom.tool_dialect_types import ToolDialect
 
 _TOOL_DIALECT_MARKER = "_mindroom_tool_dialect"
+# Set while a non-streamed invocation runs on wire-form messages, so a nested stream call does not render again.
+_PROJECTED: ContextVar[bool] = ContextVar("mindroom_tool_dialect_projected", default=False)
 _TOOL_DIALECT_INVOKE_MARKER = "_mindroom_tool_dialect_invoke"
 
 
@@ -82,31 +85,42 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
         )
         return function_calls
 
-    def wrap_invoke(
-        invoke: Callable[..., Coroutine[object, object, ModelResponse]],
-    ) -> Callable[..., Coroutine[object, object, ModelResponse]]:
-        async def invoke_in_dialect(*args: object, **kwargs: object) -> ModelResponse:
-            return await invoke(*args, **_wire_kwargs(dialect, kwargs))
-
-        return invoke_in_dialect
-
-    def wrap_stream(
-        stream: Callable[..., AsyncIterator[ModelResponse]],
-    ) -> Callable[..., AsyncIterator[ModelResponse]]:
-        async def stream_in_dialect(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-            async for chunk in stream(*args, **_wire_kwargs(dialect, kwargs)):
-                yield chunk
-
-        return stream_in_dialect
-
     model_dict["_format_tools"] = MethodType(format_wire_tools, model)
     model_dict["get_function_calls_to_run"] = MethodType(get_canonical_function_calls_to_run, model)
     install_async_invocation_hooks(
         model,
         marker=_TOOL_DIALECT_INVOKE_MARKER,
-        wrap_invoke=wrap_invoke,
-        wrap_stream=wrap_stream,
+        wrap_invoke=lambda invoke: _invoke_in_dialect(dialect, invoke),
+        wrap_stream=lambda stream: _stream_in_dialect(dialect, stream),
     )
+
+
+def _invoke_in_dialect(
+    dialect: ToolDialect,
+    invoke: Callable[..., Coroutine[object, object, ModelResponse]],
+) -> Callable[..., Coroutine[object, object, ModelResponse]]:
+    async def invoke_in_dialect(*args: object, **kwargs: object) -> ModelResponse:
+        if _PROJECTED.get():
+            return await invoke(*args, **kwargs)
+        # Some models answer a non-streamed call by streaming; their messages are already in wire form.
+        token = _PROJECTED.set(True)
+        try:
+            return await invoke(*args, **_wire_kwargs(dialect, kwargs))
+        finally:
+            _PROJECTED.reset(token)
+
+    return invoke_in_dialect
+
+
+def _stream_in_dialect(
+    dialect: ToolDialect,
+    stream: Callable[..., AsyncIterator[ModelResponse]],
+) -> Callable[..., AsyncIterator[ModelResponse]]:
+    async def stream_in_dialect(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+        async for chunk in stream(*args, **(kwargs if _PROJECTED.get() else _wire_kwargs(dialect, kwargs))):
+            yield chunk
+
+    return stream_in_dialect
 
 
 def _wire_kwargs(dialect: ToolDialect, kwargs: dict[str, object]) -> dict[str, object]:

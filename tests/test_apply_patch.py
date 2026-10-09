@@ -284,3 +284,18 @@ def test_replacing_a_symlink_keeps_its_old_target(tmp_path: Path) -> None:
     assert not (tmp_path / "current.txt").is_symlink()
     assert (tmp_path / "current.txt").read_text() == "new\n"
     assert (tmp_path / "original.txt").read_text() == "keep\n"
+
+
+def test_moving_a_symlink_removes_the_link_and_keeps_its_target(tmp_path: Path) -> None:
+    """A move reads through a link, writes the new file, and removes the link itself, as Codex does."""
+    (tmp_path / "a.txt").write_text("x\n")
+    (tmp_path / "link.txt").symlink_to("a.txt")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Update File: link.txt\n*** Move to: b.txt\n@@\n-x\n+y\n*** End Patch",
+    )
+
+    assert result == "Success. Updated the following files:\nM b.txt"
+    assert (tmp_path / "b.txt").read_text() == "y\n"
+    assert (tmp_path / "a.txt").read_text() == "x\n"
+    assert not (tmp_path / "link.txt").is_symlink()

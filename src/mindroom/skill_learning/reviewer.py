@@ -95,16 +95,22 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
     return min(_MAX_INPUT_TOKENS, int(context_window * _INPUT_CONTEXT_FRACTION))
 
 
+def _canonical_definitions(tools: list[Function | dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"type": "function", "function": tool.to_dict()} if isinstance(tool, Function) else tool for tool in tools]
+
+
 def _review_tools(
     schemas: Sequence[Function | dict[str, Any]],
     tools: SkillTools,
+    format_definitions: Callable[[list[Function | dict[str, Any]]], list[dict[str, Any]]] = _canonical_definitions,
 ) -> tuple[list[Function | dict[str, Any]], list[str]]:
     """Keep every tool definition of the agent's request, but run only the skill tools, as the review's.
 
     Each copy keeps its definition's fields, so the request's tools stay byte-identical. Like Hermes' denial message,
     every other tool answers with the skill tools the review can use. A tool that needs approval or external execution
-    stays a plain definition, which Agno answers with "The requested tool does not exist or is not available." instead of
-    pausing the review. Returns the tools and the skill tools that run.
+    stays a plain definition, formatted by *format_definitions* as the request formatted it, which Agno answers with
+    "The requested tool does not exist or is not available." instead of pausing the review. Returns the tools and the
+    skill tools that run.
     """
     # The copies skip Agno's entrypoint processing to keep their schemas, so the skill tools validate their own
     # arguments as Agno would, such as an action outside the enum or a string "false" for replace_all.
@@ -133,11 +139,14 @@ def _review_tools(
     for tool in schemas:
         if not isinstance(tool, Function):
             review_tools.append(tool)
-        elif tool.requires_confirmation or tool.external_execution:
-            review_tools.append({"type": "function", "function": tool.to_dict()})
-        else:
-            entrypoint = entrypoints.get(tool.name, deny)
-            review_tools.append(Function(**tool.to_dict(), entrypoint=entrypoint, skip_entrypoint_processing=True))
+            continue
+        if tool.requires_confirmation or tool.external_execution:
+            review_tools.extend(format_definitions([tool]))
+            continue
+        copy = Function(**tool.to_dict(), entrypoint=entrypoints.get(tool.name, deny), skip_entrypoint_processing=True)
+        # The owning toolkit is not a serialized field; a tool dialect needs it to present the copy as it did the request.
+        copy.owning_toolkit = tool.owning_toolkit
+        review_tools.append(copy)
     return review_tools, runnable
 
 
@@ -182,7 +191,8 @@ def _fork(
     sent = _context_tokens(config, captured.model, captured.model_name, final.metrics) if final.metrics else 0
     if sent * _CONVERSATION_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
         return None
-    review_tools, runnable = _review_tools(captured.tools, tools)
+    # The captured model formats plain definitions as it formatted the request, including any tool dialect.
+    review_tools, runnable = _review_tools(captured.tools, tools, captured.model._format_tools)
     if "skill_manage" not in runnable:
         return None
     return _ReviewRequest(
