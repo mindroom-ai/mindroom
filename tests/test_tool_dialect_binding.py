@@ -12,6 +12,7 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 from agno.tools.toolkit import Toolkit
 from openai import AsyncOpenAI
@@ -23,7 +24,7 @@ from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError,
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from agno.run.agent import RunOutput
@@ -398,6 +399,32 @@ async def test_deepcopied_model_invokes_on_itself() -> None:
         )
 
     assert (len(provider.requests), len(original_provider.requests)) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_closing_the_stream_closes_the_provider_stream() -> None:
+    """A consumer that stops a dialect stream early closes the provider stream before the close returns."""
+    closed: list[bool] = []
+
+    async def provider_stream(*_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        try:
+            yield ModelResponse(content="a")
+            yield ModelResponse(content="b")
+        finally:
+            closed.append(True)
+
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test")
+    vars(model)["ainvoke_stream"] = provider_stream
+    install_tool_dialect(model, _CLAUDE_TOY)
+    stream = model.ainvoke_stream(
+        messages=[Message(role="user", content="Hi.")],
+        assistant_message=Message(role="assistant"),
+    )
+
+    await anext(stream)
+    await stream.aclose()
+
+    assert closed == [True]
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,14 @@ from typing import Any
 
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, parse_edit_multiple_matches_error, split_read_output
 from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS, parse_background_handle_message, parse_kill_message
-from mindroom.tool_dialect_types import ToolDialect, WireFunction, milliseconds_to_seconds, object_schema, wire_argument
+from mindroom.tool_dialect_types import (
+    ToolDialect,
+    WireFunction,
+    milliseconds_to_seconds,
+    object_schema,
+    shell_command_text,
+    wire_argument,
+)
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
 
@@ -52,8 +59,7 @@ def _bash_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _bash_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
-    args = canonical.get("args")
-    command = shlex.join(args) if isinstance(args, list) else str(args or "")
+    command = shell_command_text(canonical.get("args"))
     if isinstance(workdir := canonical.get("workdir"), str):
         command = f"cd {shlex.quote(workdir)} && {command}"
     wire: dict[str, Any] = {"command": command}

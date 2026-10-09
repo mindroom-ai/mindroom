@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -15,6 +16,11 @@ type DialectName = Literal["mindroom", "claude", "codex"]
 
 # Tool-call dict key recording the exact wire form of a lossy translated call: dialect, name, arguments.
 MINDROOM_WIRE_KEY = "mindroom_wire"
+
+
+def without_wire_record(call: dict[str, Any]) -> dict[str, Any]:
+    """Return a stored tool call without its wire record, which only provider replay reads."""
+    return {key: value for key, value in call.items() if key != MINDROOM_WIRE_KEY}
 
 
 class DialectArgumentError(ValueError):
@@ -86,6 +92,13 @@ def milliseconds_to_seconds(milliseconds: float, tool: str, name: str) -> int:
         msg = f"{tool} {name} must be a positive number of milliseconds"
         raise DialectArgumentError(msg)
     return math.ceil(milliseconds / 1000)
+
+
+def shell_command_text(args: object) -> str:
+    """Return canonical shell ``args`` as one command line; recorded history may hold any JSON value there."""
+    if isinstance(args, list):
+        return " ".join(shlex.quote(str(arg)) for arg in args)
+    return str(args or "")
 
 
 def object_schema(properties: dict[str, dict[str, Any]], *required: str) -> dict[str, Any]:

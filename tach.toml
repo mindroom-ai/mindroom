@@ -7026,6 +7026,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.native_compaction",
     "mindroom.token_budget",
+    "mindroom.tool_dialect_types",
 ]
 visibility = [
     "mindroom.ai",
@@ -7071,6 +7072,7 @@ depends_on = [
     "mindroom.history.replay",
     "mindroom.timing",
     "mindroom.token_budget",
+    "mindroom.tool_dialect_types",
 ]
 visibility = ["mindroom.history.compaction"]
 

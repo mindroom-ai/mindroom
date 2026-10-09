@@ -42,6 +42,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -55,6 +56,7 @@ from tests.history_helpers import (  # noqa: F401
     _completed_run,
     _make_config,
     _session,
+    _shell_call_run,
 )
 
 
@@ -489,6 +491,20 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
     assert included_runs == [run]
     assert "Run truncated to fit compaction budget." in summary_input
     assert "<run_metadata>" not in summary_input
+
+
+def test_build_summary_input_omits_tool_call_wire_records() -> None:
+    """A call's provider wire record is replay bookkeeping, so compaction summarizes only the canonical call."""
+    summary_input, included_runs = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[_shell_call_run("run-wire", wire_record=True)],
+        max_input_tokens=100_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert len(included_runs) == 1
+    assert "run_shell_command" in summary_input
+    assert MINDROOM_WIRE_KEY not in summary_input
 
 
 def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:

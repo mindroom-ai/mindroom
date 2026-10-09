@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from agno.models.message import Message
+    from agno.models.response import ModelResponse
     from openai.types.responses import ResponseCustomToolCall
 
 # AGNO_COMPAT: Responses custom tool calls are dropped.
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 CUSTOM_TOOL_CALL = "custom_tool_call"
 
 
-def custom_tool_call(item: ResponseCustomToolCall) -> dict[str, Any]:
+def _custom_tool_call(item: ResponseCustomToolCall) -> dict[str, Any]:
     """Return an Agno tool call for one custom tool call item, with its raw text as the ``input`` argument."""
     return {
         "id": item.id,
@@ -45,10 +46,19 @@ def tool_calls_with_custom(tool_calls: list[dict[str, Any]], output_items: Itera
     ordered: list[dict[str, Any]] = []
     for item in items:
         if item.type == CUSTOM_TOOL_CALL:
-            ordered.append(custom_tool_call(item))
+            ordered.append(_custom_tool_call(item))
         elif item.type == "function_call" and item.call_id in remaining:
             ordered.append(remaining.pop(item.call_id))
     return [*ordered, *remaining.values()]
+
+
+def record_streamed_custom_tool_call(model_response: ModelResponse, assistant_message: Message, item: Any) -> None:  # noqa: ANN401
+    """Record a completed streamed custom tool call the way Agno records a completed function call."""
+    if item.type != CUSTOM_TOOL_CALL:
+        return
+    call = _custom_tool_call(item)
+    model_response.tool_calls = [call]
+    assistant_message.tool_calls = [*(assistant_message.tool_calls or []), call]
 
 
 def _custom_item(item: dict[str, Any]) -> dict[str, Any]:

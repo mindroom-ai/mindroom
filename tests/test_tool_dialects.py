@@ -268,6 +268,18 @@ def test_wire_messages_other_dialect_translates_by_name() -> None:
     ]
 
 
+def test_translated_arguments_keep_non_ascii_text_as_written() -> None:
+    """Canonical and rendered arguments keep non-ASCII text unescaped, the way models write it."""
+    functions = {"run_shell_command": _function("run_shell_command", "shell")}
+
+    [translated], _errors = canonical_tool_calls(_TOY, [_call("a", "Run", {"cmd": "echo café"})], functions)
+    [rendered] = wire_messages(_TOY, [_assistant(_call("b", "run_shell_command", {"args": "echo café"}))], _PRESENTED)
+
+    assert translated["function"]["arguments"] == '{"args": "echo café"}'
+    assert rendered.tool_calls is not None
+    assert rendered.tool_calls[0]["function"]["arguments"] == '{"cmd": "echo café"}'
+
+
 def test_wire_messages_render_only_tools_presented_in_wire_form() -> None:
     """Calls and results of a same-named tool the request presents canonically stay canonical."""
     call = _call("a", "run_shell_command", {"args": "x"})

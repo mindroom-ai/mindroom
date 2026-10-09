@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from contextvars import ContextVar
 from functools import partial
 from types import MethodType
@@ -14,7 +15,7 @@ from mindroom.model_instance_checks import OPENAI_RESPONSES_CLASS, isinstance_of
 from mindroom.tool_dialects import canonical_tool_calls, wire_messages, wire_tools
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 
     from agno.models.base import Model
     from agno.models.response import ModelResponse
@@ -115,12 +116,13 @@ async def _invoke_in_dialect(
 
 async def _stream_in_dialect(
     dialect: ToolDialect,
-    stream: Callable[..., AsyncIterator[ModelResponse]],
+    stream: Callable[..., AsyncGenerator[ModelResponse]],
     *args: object,
     **kwargs: object,
 ) -> AsyncIterator[ModelResponse]:
-    async for chunk in stream(*args, **(kwargs if _PROJECTED.get() else _wire_kwargs(dialect, kwargs))):
-        yield chunk
+    async with aclosing(stream(*args, **(kwargs if _PROJECTED.get() else _wire_kwargs(dialect, kwargs)))) as chunks:
+        async for chunk in chunks:
+            yield chunk
 
 
 def _wire_kwargs(dialect: ToolDialect, kwargs: dict[str, object]) -> dict[str, object]:

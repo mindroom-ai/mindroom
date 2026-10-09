@@ -121,6 +121,11 @@ def test_argv_history_renders_as_command_string() -> None:
     assert _wire("Bash").to_wire({"args": ["echo", "a b"]}) == {"command": "echo 'a b'"}
 
 
+def test_history_argv_with_non_strings_still_renders() -> None:
+    """A recorded call whose argv holds non-strings, which the shell tool rejected, still renders as a command."""
+    assert _wire("Bash").to_wire({"args": ["head", "-n", 5, "f"]}) == {"command": "head -n 5 f"}
+
+
 def test_background_handle_renders_claude_wording() -> None:
     """A command moved to the background tells the model to use BashOutput and KillShell."""
     message = "[cwd: /w]\n" + _format_background_handle_message(120, 77, "shell:0123abcd")

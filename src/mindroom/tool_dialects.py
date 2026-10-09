@@ -20,7 +20,14 @@ from mindroom.logging_config import get_logger
 from mindroom.model_loading import canonical_provider
 from mindroom.tool_dialect_claude import CLAUDE_DIALECT
 from mindroom.tool_dialect_codex import CODEX_DIALECT
-from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError, DialectName, ToolDialect, WireFunction
+from mindroom.tool_dialect_types import (
+    MINDROOM_WIRE_KEY,
+    DialectArgumentError,
+    DialectName,
+    ToolDialect,
+    WireFunction,
+    without_wire_record,
+)
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -216,7 +223,7 @@ def _translate_call(
         "function": {
             **call["function"],
             "name": wire_function.key.function,
-            "arguments": json.dumps(canonical_arguments),
+            "arguments": json.dumps(canonical_arguments, ensure_ascii=False),
         },
     }
     if _with_output_path(canonical_arguments, wire_function.to_wire(canonical_arguments)) != arguments:
@@ -260,7 +267,7 @@ def canonical_tool_calls(
 
 def _wire_call(dialect: ToolDialect, mapped: Mapping[str, WireFunction], call: dict[str, Any]) -> dict[str, Any]:
     """Return *call* as this request presents it, never carrying the wire record to the provider."""
-    stripped = {key: value for key, value in call.items() if key != MINDROOM_WIRE_KEY}
+    stripped = without_wire_record(call)
     function = call.get("function")
     if not isinstance(function, dict):
         return stripped
@@ -276,7 +283,7 @@ def _wire_call(dialect: ToolDialect, mapped: Mapping[str, WireFunction], call: d
         return stripped
     if not isinstance(arguments, dict):
         return stripped
-    wire_arguments = json.dumps(_with_output_path(arguments, wire_function.to_wire(arguments)))
+    wire_arguments = json.dumps(_with_output_path(arguments, wire_function.to_wire(arguments)), ensure_ascii=False)
     return {**stripped, "function": {**function, "name": wire_function.wire_name, "arguments": wire_arguments}}
 
 

@@ -46,6 +46,11 @@ def test_exec_command_maps_cmd_workdir_yield() -> None:
         to_canonical({"command": "ls"})
 
 
+def test_history_argv_with_non_strings_still_renders() -> None:
+    """A recorded call whose argv holds non-strings, which the shell tool rejected, still renders as a command."""
+    assert _wire("exec_command").to_wire({"args": ["head", "-n", 5, "f"]}) == {"cmd": "head -n 5 f"}
+
+
 def test_session_id_round_trips_handles() -> None:
     """Session IDs are the numeric value of the handle's hex digits, in both directions."""
     write_stdin = _wire("write_stdin")

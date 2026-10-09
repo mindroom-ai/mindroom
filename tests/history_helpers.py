@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY
 from mindroom.usage_storage import quote_identifier
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -205,6 +207,26 @@ def _completed_run(
         or [
             Message(role="user", content=f"{run_id} question"),
             Message(role="assistant", content=f"{run_id} answer"),
+        ],
+    )
+
+
+def _shell_call_run(run_id: str, *, wire_record: bool) -> RunOutput:
+    """Return a run with one shell call, optionally carrying a long provider wire record."""
+    call: dict[str, object] = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "run_shell_command", "arguments": json.dumps({"args": "ls"})},
+    }
+    if wire_record:
+        wire_arguments = json.dumps({"command": "ls", "description": "x" * 4_000})
+        call[MINDROOM_WIRE_KEY] = {"dialect": "claude", "name": "Bash", "arguments": wire_arguments}
+    return _completed_run(
+        run_id,
+        messages=[
+            Message(role="user", content="List the files."),
+            Message(role="assistant", tool_calls=[call]),
+            Message(role="tool", tool_call_id="call-1", tool_name="run_shell_command", content="a.txt"),
         ],
     )
 

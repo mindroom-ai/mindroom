@@ -11,7 +11,6 @@ Copyright 2025 OpenAI, licensed under the Apache License, Version 2.0.
 from __future__ import annotations
 
 import math
-import shlex
 from typing import Any
 
 from mindroom.shell_execution import (
@@ -27,6 +26,7 @@ from mindroom.tool_dialect_types import (
     WireFunction,
     milliseconds_to_seconds,
     object_schema,
+    shell_command_text,
     wire_argument,
 )
 from mindroom.tool_system.tool_access import ToolKey
@@ -125,8 +125,7 @@ def _exec_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _exec_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
-    args = canonical.get("args")
-    wire: dict[str, Any] = {"cmd": shlex.join(args) if isinstance(args, list) else str(args or "")}
+    wire: dict[str, Any] = {"cmd": shell_command_text(canonical.get("args"))}
     if canonical.get("workdir") is not None:
         wire["workdir"] = canonical["workdir"]
     _minimum, default, _maximum = _YIELD_MS
