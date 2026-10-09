@@ -23,6 +23,7 @@ from mindroom.matrix.client_visible_messages import (
     trusted_visible_sender_ids,
 )
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
+from mindroom.thread_summary import current_thread_summary
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -116,6 +117,7 @@ class MatrixRoomTools(Toolkit):
         self,
         context: ToolRuntimeContext,
         *,
+        room_id: str,
         event: nio.Event,
         trusted_sender_ids: frozenset[str],
     ) -> dict[str, object] | None:
@@ -132,7 +134,7 @@ class MatrixRoomTools(Toolkit):
         ):
             logger.warning(
                 "Skipping malformed room thread root",
-                room_id=context.room_id,
+                room_id=room_id,
                 event_type=type(event).__name__,
             )
             return None
@@ -154,6 +156,20 @@ class MatrixRoomTools(Toolkit):
         latest_activity_ts = self._thread_latest_activity_ts(event)
         if latest_activity_ts is not None:
             payload["latest_activity_ts"] = latest_activity_ts
+        current_summary = await current_thread_summary(
+            context.client,
+            room_id,
+            event_id,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            conversation_reader=context.conversation_reader,
+            entity_name=context.agent_name,
+            membership_index=context.require_agent_reply_memberships(),
+            trusted_sender_ids=trusted_sender_ids,
+        )
+        if current_summary is not None:
+            payload["summary"] = current_summary.summary
+            payload["summary_pinned"] = current_summary.pinned
         return payload
 
     @classmethod
@@ -421,6 +437,7 @@ class MatrixRoomTools(Toolkit):
         for event in thread_roots:
             thread_info = await self._serialize_thread_root(
                 context,
+                room_id=room_id,
                 event=event,
                 trusted_sender_ids=trusted_sender_ids,
             )
@@ -544,6 +561,8 @@ class MatrixRoomTools(Toolkit):
           To start a conversation, use matrix_message(recipient=name, message="...").
           This lists conversation targets; run_subagent separately lists your allowed subagents.
         - threads: List thread roots with preview, sender, timestamp, reply count, and latest activity when available.
+          Each row also has summary (the current thread title, or null) and summary_pinned (true when set manually,
+          so automatic summaries keep it); both are omitted when the thread's full history is unavailable.
           Use page_token from a previous response's next_token to paginate.
         - state: Read room state. If event_type is given, return that specific state event.
           If omitted, return a summary of all state events (m.room.member events are elided).

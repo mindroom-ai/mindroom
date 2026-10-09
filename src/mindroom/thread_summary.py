@@ -107,6 +107,14 @@ class _ThreadSummaryWriteResult:
     summary: str
 
 
+@dataclass(frozen=True)
+class _CurrentThreadSummary:
+    """The summary a thread shows now, and whether automatic summaries leave it alone."""
+
+    summary: str | None
+    pinned: bool
+
+
 class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
@@ -1094,6 +1102,69 @@ async def set_manual_thread_summary(
             message_count=message_count,
             summary=normalized_summary,
         )
+
+
+async def current_thread_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+    trusted_sender_ids: Collection[str],
+) -> _CurrentThreadSummary | None:
+    """Return a thread's newest summary and pin state under the trust and pin rules summary writers use.
+
+    Returns ``None`` rather than guessing when the complete history cannot be
+    read, which always happens for threads longer than one projected page, or
+    when room membership needed to authorize a human pin is still pending.
+    The read is the projected one manual writes use: the first read of a
+    conversation walks it on the homeserver once, and later reads stay local.
+    """
+    try:
+        thread_history = await complete_thread_history(conversation_reader, room_id, thread_id)
+    except Exception as exc:
+        logger.warning(
+            "Thread history unavailable for current summary",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        return None
+    if not thread_history.is_full_history:
+        return None
+    human_sender_allowed = _human_summary_authorizer(
+        client,
+        room_id,
+        config,
+        runtime_paths,
+        entity_name,
+        membership_index,
+    )
+    summary: str | None = None
+    try:
+        for message in thread_history:
+            metadata = _summary_pin_metadata(
+                message,
+                trusted_sender_ids=trusted_sender_ids,
+                human_sender_allowed=human_sender_allowed,
+                thread_id=thread_id,
+            )
+            if metadata is not None:
+                text = metadata.get("summary")
+                summary = text if isinstance(text, str) and text else message.body
+        pinned = _recover_pin_state(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        )
+    except ReplyMembershipPendingError:
+        return None
+    return _CurrentThreadSummary(summary=summary, pinned=pinned)
 
 
 async def _countable_thread_history(
