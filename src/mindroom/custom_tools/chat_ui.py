@@ -504,8 +504,10 @@ class ChatUITools(Toolkit):
 
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. Success means the request was sent, not that the user opened or
-        answered it.
+        canvas ID. Without it, show_canvas creates a separate canvas: use one for a
+        distinct artifact and an update for a new version of the same one. The user can
+        switch between this conversation's canvases from the room header. Success means
+        the request was sent, not that the user opened or answered it.
 
         Args:
             title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
