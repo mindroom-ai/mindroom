@@ -50,9 +50,10 @@ _SidePanel = Literal["members", "computer"]
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
 _SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
-# Conversations, keyed by agent Matrix user, room, and thread (None for the room timeline), that got
-# the show_computer notice in this process, so the agent's first browser use announces it only once.
-_SHOWN_COMPUTERS: set[tuple[str, str, str | None]] = set()
+# Conversations, keyed by agent Matrix user, requester, room, and thread (None for the room timeline),
+# that got the show_computer notice in this process, so the agent's first browser use announces it only
+# once. Each requester has their own computer and Chat shows only notices addressed to its own user.
+_SHOWN_COMPUTERS: set[tuple[str, str, str, str | None]] = set()
 # Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
 _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
@@ -129,8 +130,8 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
     }
 
 
-def _computer_conversation(context: ToolRuntimeContext) -> tuple[str, str, str | None]:
-    return (context.client.user_id, context.room_id, context.resolved_thread_id)
+def _computer_conversation(context: ToolRuntimeContext, requester_id: str) -> tuple[str, str, str, str | None]:
+    return (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
 
 
 def _canvas_title_is_valid(title: str) -> bool:
@@ -378,7 +379,7 @@ class ChatUITools(Toolkit):
         context, requester_id = validated
         result = await self._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
         if json.loads(result)["status"] == "ok":
-            _SHOWN_COMPUTERS.add(_computer_conversation(context))
+            _SHOWN_COMPUTERS.add(_computer_conversation(context, requester_id))
         return result
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
@@ -857,7 +858,7 @@ class ChatUITools(Toolkit):
 
 
 async def show_computer_once() -> None:
-    """Send the show_computer notice unless this agent already showed its computer in this conversation.
+    """Send the show_computer notice unless this agent already showed the requester its computer here.
 
     Contexts where Chat UI actions are unsupported, such as teams, the router, or a missing
     runtime context, send nothing.
@@ -866,7 +867,7 @@ async def show_computer_once() -> None:
     if isinstance(validated, str):
         return
     context, requester_id = validated
-    conversation = _computer_conversation(context)
+    conversation = _computer_conversation(context, requester_id)
     if conversation in _SHOWN_COMPUTERS:
         return
     # Claim the conversation before awaiting the send, so concurrent first calls send one notice.

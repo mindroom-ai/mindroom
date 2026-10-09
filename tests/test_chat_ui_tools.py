@@ -580,6 +580,30 @@ async def test_show_computer_once_announces_each_thread_and_the_room_timeline(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("alice_shows", ["explicitly", "by browsing"])
+async def test_each_requester_in_a_thread_gets_one_announcement(tmp_path: Path, alice_shows: str) -> None:
+    """Each requester has their own computer, so one requester's notice does not cover another's."""
+    bob_id = "@bob:example.org"
+    alice = _context(tmp_path)
+    bob = _context(tmp_path, requester_id=bob_id)
+    assert alice.client.user_id == bob.client.user_id
+
+    with tool_runtime_context(alice):
+        if alice_shows == "explicitly":
+            await ChatUITools().show_computer()
+        await show_computer_once()
+        await show_computer_once()
+    with tool_runtime_context(bob):
+        await show_computer_once()
+        await show_computer_once()
+
+    for context, requester_id in ((alice, REQUESTER_ID), (bob, bob_id)):
+        context.client.room_send.assert_awaited_once()
+        assert _sent_content(context)["io.mindroom.ui_action"]["requester_id"] == requester_id
+        assert _sent_content(context)["io.mindroom.ui_action"]["thread_id"] == THREAD_ID
+
+
+@pytest.mark.asyncio
 async def test_explicit_show_computer_suppresses_the_announcement(
     tmp_path: Path,
     computer_request: Callable[[], Awaitable[str]],
