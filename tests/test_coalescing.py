@@ -955,6 +955,65 @@ async def test_thread_reply_does_not_promote_a_completed_room_media_turn(complet
 
 
 @pytest.mark.asyncio
+async def test_thread_caption_promotes_its_pending_room_voice_root() -> None:
+    """A caption threaded under a pending room voice note must join the voice note's turn."""
+    gate, batches = _recording_gate(1.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$voice:localhost", owner)
+
+    await _admit_ready(gate, room_key, _voice_pending("$voice:localhost", "voice transcript", 1_000_000))
+    await _admit_ready(gate, thread_key, _pending(_text_event("$caption:localhost", "typed caption", 1_000_200)))
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert len(batches) == 1
+    assert batches[0].ingress.coalescing_key.thread_id == "$voice:localhost"
+    assert list(batches[0].handled_turn.source_event_ids) == ["$voice:localhost", "$caption:localhost"]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_caption_held_behind_a_transcribing_room_voice_root_joins_its_turn() -> None:
+    """A caption the sender lane holds behind voice transcription must still join the voice note's turn."""
+    gate, batches = _recording_gate(1.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    lane_key = ReceiptLaneKey(room_id=room_key.room_id, sender_id=owner.requester_user_id)
+    voice_ready = asyncio.Event()
+
+    voice_slot = gate.enter_lane(lane_key)
+    gate.submit_lane_slot(
+        voice_slot,
+        key=room_key,
+        source_event_id="$voice:localhost",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(
+            _ready_after(voice_ready, _voice_pending("$voice:localhost", "voice transcript", 1_000_000)),
+        ),
+    )
+    caption_slot = gate.enter_lane(lane_key)
+    gate.submit_lane_slot(
+        caption_slot,
+        key=CoalescingKey("!room:localhost", "$voice:localhost", owner),
+        source_event_id="$caption:localhost",
+        source_kind=MESSAGE_SOURCE_KIND,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$caption:localhost", "typed caption", 1_000_200)),
+        ),
+    )
+    await asyncio.sleep(0.01)
+    assert batches == []
+
+    voice_ready.set()
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert len(batches) == 1
+    assert batches[0].ingress.coalescing_key.thread_id == "$voice:localhost"
+    assert list(batches[0].handled_turn.source_event_ids) == ["$voice:localhost", "$caption:localhost"]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
 async def test_media_promotion_promptly_releases_the_empty_room_gate() -> None:
     """Promotion must wake an already-waiting room drain so its empty gate exits."""
     gate = CoalescingGate(

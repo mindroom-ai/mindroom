@@ -21,6 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    THREAD_SUMMARY_CONTENT_KEY,
     UI_ACTION_CONTENT_KEY,
 )
 from mindroom.execution_preparation import (
@@ -466,6 +467,16 @@ class TestUnseenMessagesPartialReplies:
                     sender="@mindroom_other:localhost",
                     body="Interactive panel: Seats. Open it in MindRoom Chat to respond.",
                     content={UI_ACTION_CONTENT_KEY: {"version": 1, "action": "show_canvas"}},
+                ),
+                # A thread summary is the thread's title, not something the agent said.
+                _make_visible_message(
+                    event_id="e1e",
+                    sender=agent_id,
+                    body="Release checklist review",
+                    content={
+                        "msgtype": "m.notice",
+                        THREAD_SUMMARY_CONTENT_KEY: {"version": 1, "summary": "Release checklist review"},
+                    },
                 ),
                 _make_visible_message(
                     event_id="e2",

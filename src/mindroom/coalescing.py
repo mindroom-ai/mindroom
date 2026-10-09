@@ -37,7 +37,7 @@ from .coalescing_policy import (
     source_or_event_allows_room_scope_batching,
 )
 from .dispatch_recovery_context import turn_dispatch_recovery_scope
-from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .logging_config import get_logger
 from .response_admission import ResponseAdmissionRefusedError
@@ -417,6 +417,10 @@ class CoalescingGate:
         )
 
     @staticmethod
+    def _queued_event_is_voice(queued: _QueuedEvent) -> bool:
+        return VOICE_SOURCE_KIND in {queued.source_kind, queued.pending_event.event.source_kind}
+
+    @staticmethod
     def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
         return (
             queued.source_event_id == thread_id
@@ -434,9 +438,13 @@ class CoalescingGate:
             return None
         candidate_count = self._front_normal_run_length(room_gate, run_limit=self._front_run_limit(room_key, room_gate))
         candidates = list(room_gate.queue)[:candidate_count]
+        # A voice note ends a room burst, except the one this thread's caption replies to.
         if (
             not candidates
-            or pending_event_is_text(candidates[-1].pending_event)
+            or (
+                self._queued_event_is_voice(candidates[-1])
+                and not self._queued_event_is_thread_root_media(candidates[-1], key.thread_id)
+            )
             or not self._queued_event_allows_room_scope_batching(candidates[-1])
             or not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates)
         ):

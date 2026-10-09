@@ -172,7 +172,7 @@ _POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
 # breaks against a glibc server. The journal's server is therefore glibc.
 _POSTGRES_JOURNAL_RUN_ID_STASH_KEY = pytest.StashKey[str]()
 _POSTGRES_JOURNAL_CONTAINER_PREFIX = "mindroom-postgres-journal-test-"
-_POSTGRES_JOURNAL_IMAGE = "postgres:16"
+_POSTGRES_JOURNAL_IMAGE = "mirror.gcr.io/library/postgres:16"
 _POSTGRES_JOURNAL_LOCALE = "en_US.utf8"
 
 # `postgres:16` declares `VOLUME /var/lib/postgresql/data`, so every container
