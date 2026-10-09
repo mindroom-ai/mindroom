@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import SubagentPersona
 
 logger = get_logger(__name__)
 
@@ -99,6 +100,7 @@ class DelegationMetadata:
     parent_delegation_id: str | None = None
     subagent_id: str | None = None
     previous_delegation_id: str | None = None
+    persona: SubagentPersona | None = None
 
 
 @dataclass(frozen=True)
@@ -295,6 +297,7 @@ class DelegationRecordOwner:
                 "schema_version": _SCHEMA_VERSION,
                 "delegation_id": resolved_id,
                 **asdict(metadata),
+                "persona": _persona_record(metadata.persona),
                 "status": "running",
                 "started_at": timestamp,
                 "updated_at": timestamp,
@@ -754,6 +757,19 @@ def _write_receipt(
     )
 
 
+def _persona_record(persona: SubagentPersona | None) -> dict[str, object] | None:
+    """Describe an authored child's persona; the digest identifies the exact prompt the child received."""
+    if persona is None:
+        return None
+    return {
+        "source_kind": persona.source_kind,
+        "source_name": persona.source_name,
+        "tools": None if persona.tools is None else list(persona.tools),
+        "system_prompt_sha256": persona.prompt_sha256,
+        "system_prompt": persona.system_prompt,
+    }
+
+
 def _write_transcript(
     handle: DelegationRecordHandle,
     record_fd: int,
@@ -775,6 +791,7 @@ def _write_transcript(
         "",
         run["task"],
         "",
+        *(["## System prompt", "", run["persona"]["system_prompt"], ""] if run.get("persona") else []),
         "## Events",
         "",
         "",

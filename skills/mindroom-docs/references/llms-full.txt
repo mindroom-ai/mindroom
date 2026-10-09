@@ -12268,6 +12268,7 @@ Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mind
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
+For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, and the SHA-256 of its system prompt, and `transcript.md` shows that prompt.
 These files are audit exports that MindRoom never reads, so editing or deleting them does not affect the delegation.
 
 ## [`dynamic_workflow`]
