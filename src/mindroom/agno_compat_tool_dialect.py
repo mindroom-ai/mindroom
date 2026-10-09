@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from functools import partial
 from types import MethodType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -90,37 +91,36 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
     install_async_invocation_hooks(
         model,
         marker=_TOOL_DIALECT_INVOKE_MARKER,
-        wrap_invoke=lambda invoke: _invoke_in_dialect(dialect, invoke),
-        wrap_stream=lambda stream: _stream_in_dialect(dialect, stream),
+        # Partials, unlike closures, rebind to a deepcopied model, so a copy invokes its own provider chain.
+        wrap_invoke=lambda invoke: partial(_invoke_in_dialect, dialect, invoke),
+        wrap_stream=lambda stream: partial(_stream_in_dialect, dialect, stream),
     )
 
 
-def _invoke_in_dialect(
+async def _invoke_in_dialect(
     dialect: ToolDialect,
     invoke: Callable[..., Coroutine[object, object, ModelResponse]],
-) -> Callable[..., Coroutine[object, object, ModelResponse]]:
-    async def invoke_in_dialect(*args: object, **kwargs: object) -> ModelResponse:
-        if _PROJECTED.get():
-            return await invoke(*args, **kwargs)
-        # Some models answer a non-streamed call by streaming; their messages are already in wire form.
-        token = _PROJECTED.set(True)
-        try:
-            return await invoke(*args, **_wire_kwargs(dialect, kwargs))
-        finally:
-            _PROJECTED.reset(token)
+    *args: object,
+    **kwargs: object,
+) -> ModelResponse:
+    if _PROJECTED.get():
+        return await invoke(*args, **kwargs)
+    # Some models answer a non-streamed call by streaming; their messages are already in wire form.
+    token = _PROJECTED.set(True)
+    try:
+        return await invoke(*args, **_wire_kwargs(dialect, kwargs))
+    finally:
+        _PROJECTED.reset(token)
 
-    return invoke_in_dialect
 
-
-def _stream_in_dialect(
+async def _stream_in_dialect(
     dialect: ToolDialect,
     stream: Callable[..., AsyncIterator[ModelResponse]],
-) -> Callable[..., AsyncIterator[ModelResponse]]:
-    async def stream_in_dialect(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        async for chunk in stream(*args, **(kwargs if _PROJECTED.get() else _wire_kwargs(dialect, kwargs))):
-            yield chunk
-
-    return stream_in_dialect
+    *args: object,
+    **kwargs: object,
+) -> AsyncIterator[ModelResponse]:
+    async for chunk in stream(*args, **(kwargs if _PROJECTED.get() else _wire_kwargs(dialect, kwargs))):
+        yield chunk
 
 
 def _wire_kwargs(dialect: ToolDialect, kwargs: dict[str, object]) -> dict[str, object]:

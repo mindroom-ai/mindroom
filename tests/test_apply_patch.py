@@ -315,3 +315,24 @@ def test_writing_below_a_link_deleted_earlier_is_refused(tmp_path: Path) -> None
     assert result.startswith("apply_patch verification failed: ")
     assert _tree(tmp_path) == before
     assert (tmp_path / "link").is_symlink()
+
+
+@pytest.mark.parametrize("header", ["@@ ", "@@\t"])
+def test_hunk_header_trailing_whitespace_is_ignored(tmp_path: Path, header: str) -> None:
+    """A bare @@ header followed by whitespace still opens a hunk, as in Codex."""
+    (tmp_path / "a.txt").write_text("a\nb\nc\n")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        f"*** Begin Patch\n*** Update File: a.txt\n{header}\n a\n-b\n+B\n*** End Patch",
+    )
+
+    assert result.startswith("Success.")
+    assert (tmp_path / "a.txt").read_text() == "a\nB\nc\n"
+
+
+def test_blank_line_after_end_of_file_is_ignored() -> None:
+    """A blank line between an end-of-file hunk and the end of the patch is skipped, as in Codex."""
+    [hunk] = parse_patch("*** Begin Patch\n*** Update File: a.txt\n@@\n-c\n+C\n*** End of File\n\n*** End Patch")
+
+    assert isinstance(hunk, _UpdateFile)
+    assert [chunk.is_end_of_file for chunk in hunk.chunks] == [True]

@@ -11,6 +11,7 @@ import pytest
 from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
+from agno.models.message import Message
 from agno.run.base import RunStatus
 from agno.tools.toolkit import Toolkit
 from openai import AsyncOpenAI
@@ -370,6 +371,33 @@ def test_overrides_bind_to_deepcopied_model() -> None:
 
     assert copied._format_tools.__self__ is copied
     assert copied.get_function_calls_to_run.__self__ is copied
+
+
+@pytest.mark.asyncio
+async def test_deepcopied_model_invokes_on_itself() -> None:
+    """A deepcopy's provider call runs on the copy, with its own client, not on the original."""
+    provider, original_provider = _Provider([_ANSWER]), _Provider([_ANSWER])
+    async with (
+        AsyncOpenAI(
+            api_key="test",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(original_provider.respond)),
+        ) as original_client,
+        AsyncOpenAI(
+            api_key="test",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(provider.respond)),
+        ) as client,
+    ):
+        model = MindRoomOpenAIResponses(id="gpt-6-astra", async_client=original_client, store=False)
+        install_tool_dialect(model, _CLAUDE_TOY)
+        copied = deepcopy(model)
+        copied.async_client = client
+
+        await copied.ainvoke(
+            messages=[Message(role="user", content="Hi.")],
+            assistant_message=Message(role="assistant"),
+        )
+
+    assert (len(provider.requests), len(original_provider.requests)) == (1, 0)
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from mindroom.tool_dialect_types import (
     ToolDialect,
     WireFunction,
     milliseconds_to_seconds,
+    object_schema,
     wire_argument,
 )
 from mindroom.tool_system.tool_access import ToolKey
@@ -58,10 +59,6 @@ eof_line: "*** End of File" LF
 """
 
 
-def _object_schema(properties: dict[str, dict[str, Any]], *required: str) -> dict[str, Any]:
-    return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
-
-
 def _session_id(handle: str) -> int | None:
     digits = handle.removeprefix(_HANDLE_PREFIX)
     if not handle.startswith(_HANDLE_PREFIX) or not digits:
@@ -77,13 +74,13 @@ def _handle(session_id: int) -> str:
 
 
 def _render_exec(text: str) -> str:
-    _cwd, rest = split_cwd_prefix(text)
+    prefix, rest = split_cwd_prefix(text)
     background = parse_background_handle_message(rest)
     if background is None:
         return text
     session_id = _session_id(background.handle)
     return (
-        f"{text[: len(text) - len(rest)]}Wall time: {background.timeout:g} seconds\n"
+        f"{prefix}Wall time: {background.timeout:g} seconds\n"
         f"Process running with session ID {session_id} (PID {background.pid}); "
         f"poll it with write_stdin or stop it with kill_shell_command(session_id={session_id})\nOutput:\n"
     )
@@ -150,7 +147,8 @@ def _write_stdin_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _write_stdin_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
     handle = str(canonical.get("handle", ""))
-    wire: dict[str, Any] = {"session_id": _session_id(handle) if _session_id(handle) is not None else handle}
+    session_id = _session_id(handle)
+    wire: dict[str, Any] = {"session_id": session_id if session_id is not None else handle}
     if isinstance(wait := canonical.get("wait"), int | float):
         wire["yield_time_ms"] = int(wait * 1000)
     return wire
@@ -165,7 +163,7 @@ _EXEC_COMMAND = WireFunction(
         "- Every call starts a fresh non-login bash in `workdir`, which defaults to the working directory.\n"
         "- Poll a running session with write_stdin and empty `chars`."
     ),
-    parameters=_object_schema(
+    parameters=object_schema(
         {
             "cmd": {"type": "string", "description": "Shell command to execute."},
             "max_output_tokens": {
@@ -195,7 +193,7 @@ _WRITE_STDIN = WireFunction(
         "Polls a running exec_command session and returns its output once it finishes or `yield_time_ms` "
         "elapses. Writing input is not supported, so `chars` must be empty."
     ),
-    parameters=_object_schema(
+    parameters=object_schema(
         {
             "chars": {"type": "string", "description": "Must be empty; writing input is not supported."},
             "session_id": {"type": "number", "description": "Identifier of the running exec_command session."},
@@ -227,7 +225,7 @@ _APPLY_PATCH = WireFunction(
         "already make the location unique, and end a hunk at the end of a file with *** End of File. "
         "Paths are relative to the working directory."
     ),
-    parameters=_object_schema(
+    parameters=object_schema(
         {"input": {"type": "string", "description": "The entire contents of the apply_patch command"}},
         "input",
     ),
@@ -240,7 +238,7 @@ _KILL_SHELL_COMMAND = WireFunction(
     key=ToolKey("shell", "kill_shell_command"),
     wire_name="kill_shell_command",
     description="Stops a running exec_command session.",
-    parameters=_object_schema(
+    parameters=object_schema(
         {
             "force": {"type": "boolean", "description": "Send SIGKILL at once instead of SIGTERM."},
             "session_id": {"type": "number", "description": "Identifier of the running exec_command session."},

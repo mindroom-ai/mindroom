@@ -1253,5 +1253,5 @@ async def test_check_shell_command_wait_returns_when_finished(tmp_path: Path) ->
 
 def test_split_cwd_prefix_inverts_prefix() -> None:
     """The cwd prefix splits off exactly once."""
-    assert split_cwd_prefix("[cwd: /w]\nout\n[cwd: /x]") == ("/w", "out\n[cwd: /x]")
-    assert split_cwd_prefix("out") == (None, "out")
+    assert split_cwd_prefix("[cwd: /w]\nout\n[cwd: /x]") == ("[cwd: /w]\n", "out\n[cwd: /x]")
+    assert split_cwd_prefix("out") == ("", "out")

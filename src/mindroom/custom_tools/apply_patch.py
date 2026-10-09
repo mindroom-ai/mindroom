@@ -100,11 +100,12 @@ def _patch_body(lines: list[str]) -> list[str]:
 
 
 def _chunk_header(line: str, line_number: int, *, allow_missing_context: bool) -> tuple[str | None, int]:
-    """Return a chunk's @@ context and how many header lines it has."""
-    if line == _EMPTY_CHANGE_CONTEXT:
+    """Return a chunk's @@ context and how many header lines it has; trailing whitespace is ignored, as in Codex."""
+    header = line.rstrip()
+    if header == _EMPTY_CHANGE_CONTEXT:
         return None, 1
-    if line.startswith(_CHANGE_CONTEXT):
-        return line.removeprefix(_CHANGE_CONTEXT), 1
+    if header.startswith(_CHANGE_CONTEXT):
+        return header.removeprefix(_CHANGE_CONTEXT), 1
     if allow_missing_context:
         return None, 0
     raise _hunk_error(line_number, f"Expected update hunk to start with a @@ context marker, got: '{line}'")
@@ -168,7 +169,12 @@ def _parse_update(lines: list[str], line_number: int, path: str) -> tuple[_Updat
         parsed += 1
     chunks: list[_UpdateChunk] = []
     while remaining:
-        # Like Codex, a blank line here is an empty context line, which the chunk parser reads.
+        # Like Codex, a blank line here is an empty context line, which the chunk parser reads, except after an
+        # end-of-file hunk, where it is skipped.
+        if chunks and chunks[-1].is_end_of_file and not remaining[0].strip():
+            remaining = remaining[1:]
+            parsed += 1
+            continue
         if remaining[0].startswith("*"):
             break
         chunk, chunk_lines = _parse_chunk(remaining, line_number + parsed, allow_missing_context=not chunks)

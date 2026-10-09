@@ -111,12 +111,12 @@ _CWD_PREFIX = "[cwd: {cwd}]\n"
 _CWD_PREFIX_PATTERN = template_pattern(_CWD_PREFIX, cwd="[^\n]*")
 
 
-def split_cwd_prefix(text: str) -> tuple[str | None, str]:
-    """Return the working directory echoed by ``run_shell_command`` and the remaining result."""
+def split_cwd_prefix(text: str) -> tuple[str, str]:
+    """Return the working-directory line ``run_shell_command`` puts first (or "") and the rest of the result."""
     match = _CWD_PREFIX_PATTERN.match(text)
     if match is None:
-        return None, text
-    return match["cwd"], text[match.end() :]
+        return "", text
+    return text[: match.end()], text[match.end() :]
 
 
 # Module-level process registry shared across all MindRoomShellTools instances.

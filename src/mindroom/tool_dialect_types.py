@@ -86,3 +86,8 @@ def milliseconds_to_seconds(milliseconds: float, tool: str, name: str) -> int:
         msg = f"{tool} {name} must be a positive number of milliseconds"
         raise DialectArgumentError(msg)
     return math.ceil(milliseconds / 1000)
+
+
+def object_schema(properties: dict[str, dict[str, Any]], *required: str) -> dict[str, Any]:
+    """Return a closed JSON object schema with *properties*, of which *required* are required."""
+    return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}

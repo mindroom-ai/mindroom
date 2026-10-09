@@ -13,6 +13,7 @@ from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
     ResponseErrorEvent,
     ResponseFailedEvent,
     ResponseIncompleteEvent,
@@ -21,7 +22,7 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent,
 )
 
-from mindroom.agno_compat_openai_custom_tools import CUSTOM_TOOL_CALL, custom_tool_call
+from mindroom.agno_compat_openai_custom_tools import custom_tool_call
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.usage_storage import has_token_usage
 
@@ -435,7 +436,10 @@ class OpenAIResponsesProviderCompat:
                 items = [response_items[index] for index in sorted(response_items)]
             self._record_completed_responses_output(model_response, items)
             response_items = {}
-        if isinstance(stream_event, ResponseOutputItemDoneEvent) and stream_event.item.type == CUSTOM_TOOL_CALL:
+        if isinstance(stream_event, ResponseOutputItemDoneEvent) and isinstance(
+            stream_event.item,
+            ResponseCustomToolCall,
+        ):
             # Mirror Agno's function_call completion for the freeform call it does not parse.
             call = custom_tool_call(stream_event.item)
             model_response.tool_calls = [call]

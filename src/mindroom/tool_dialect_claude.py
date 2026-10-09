@@ -11,13 +11,9 @@ from typing import Any
 
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, parse_edit_multiple_matches_error, split_read_output
 from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS, parse_background_handle_message, parse_kill_message
-from mindroom.tool_dialect_types import ToolDialect, WireFunction, milliseconds_to_seconds, wire_argument
+from mindroom.tool_dialect_types import ToolDialect, WireFunction, milliseconds_to_seconds, object_schema, wire_argument
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
-
-
-def _object_schema(properties: dict[str, dict[str, Any]], *required: str) -> dict[str, Any]:
-    return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
 
 
 def _render_kill(text: str) -> str:
@@ -29,7 +25,7 @@ def _render_kill(text: str) -> str:
 
 
 def _render_bash(text: str) -> str:
-    _cwd, rest = split_cwd_prefix(text)
+    prefix, rest = split_cwd_prefix(text)
     background = parse_background_handle_message(rest)
     if background is None:
         return text
@@ -42,7 +38,7 @@ def _render_bash(text: str) -> str:
         )
     else:
         status = f"Command running in the background (PID {background.pid}) with ID: {handle}."
-    return f"{text[: len(text) - len(rest)]}{status} {poll}"
+    return f"{prefix}{status} {poll}"
 
 
 def _bash_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +140,7 @@ _BASH = WireFunction(
         "background and returns an ID for BashOutput and KillShell.\n"
         "- `run_in_background: true` starts the command in the background at once."
     ),
-    parameters=_object_schema(
+    parameters=object_schema(
         {
             "command": {"type": "string", "description": "The command to execute"},
             "timeout": {
@@ -165,7 +161,7 @@ _BASH_OUTPUT = WireFunction(
     key=ToolKey("shell", "check_shell_command"),
     wire_name="BashOutput",
     description="Return the status and output of a background command started by Bash.",
-    parameters=_object_schema(
+    parameters=object_schema(
         {"bash_id": {"type": "string", "description": "The background command's ID"}},
         "bash_id",
     ),
@@ -176,7 +172,7 @@ _KILL_SHELL = WireFunction(
     key=ToolKey("shell", "kill_shell_command"),
     wire_name="KillShell",
     description="Stop a background command started by Bash.",
-    parameters=_object_schema(
+    parameters=object_schema(
         {"shell_id": {"type": "string", "description": "The background command's ID"}},
         "shell_id",
     ),
@@ -192,7 +188,7 @@ _READ = WireFunction(
         "- Reads up to 2000 lines by default; pass `offset` (the line to start from) and `limit` for larger files.\n"
         "- `file_path` may be absolute or relative to the working directory."
     ),
-    parameters=_object_schema(
+    parameters=object_schema(
         {
             "file_path": {"type": "string", "description": "The path of the file to read"},
             "offset": {"type": "integer", "description": "The line number to start reading from"},
@@ -213,7 +209,7 @@ _EDIT = WireFunction(
         "unique unless `replace_all` is true.\n"
         "- Small whitespace and Unicode differences are tolerated."
     ),
-    parameters=_object_schema(
+    parameters=object_schema(
         {
             "file_path": {"type": "string", "description": "The path of the file to modify"},
             "old_string": {"type": "string", "description": "The text to replace"},
@@ -232,7 +228,7 @@ _WRITE = WireFunction(
     key=ToolKey("coding", "write_file"),
     wire_name="Write",
     description="Write a file, replacing it if it exists and creating missing parent directories. Prefer Edit for partial changes.",
-    parameters=_object_schema(
+    parameters=object_schema(
         {
             "file_path": {"type": "string", "description": "The path of the file to write"},
             "content": {"type": "string", "description": "The full content to write"},

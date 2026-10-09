@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from agno.models.message import Message
+    from openai.types.responses import ResponseCustomToolCall
 
 # AGNO_COMPAT: Responses custom tool calls are dropped.
 # Reason: Agno 3.0.9 sends custom tool definitions unchanged but parses only `function_call` output
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 CUSTOM_TOOL_CALL = "custom_tool_call"
 
 
-def custom_tool_call(item: Any) -> dict[str, Any]:  # noqa: ANN401 - an SDK custom tool call output item
+def custom_tool_call(item: ResponseCustomToolCall) -> dict[str, Any]:
     """Return an Agno tool call for one custom tool call item, with its raw text as the ``input`` argument."""
     return {
         "id": item.id,
