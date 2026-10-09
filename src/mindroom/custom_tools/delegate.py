@@ -6,8 +6,6 @@ Each turn runs independently and returns its response as the tool result.
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -16,15 +14,8 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.lifecycle import (
-    authorize_delegation,
-    child_run_context,
-    finish_child_turn,
-    prepare_child_turn,
-    reserve_child_turn,
-    start_child_turn,
-)
+from mindroom.delegation.direct import run_direct_child_turn
+from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     list_profiles,
@@ -33,13 +24,8 @@ from mindroom.delegation.personas import (
     resolve_persona_request,
 )
 from mindroom.delegation.recovery import resolve_subagent
-from mindroom.delegation.sessions import (
-    SubagentSessionError,
-    subagent_liveness,
-)
-from mindroom.logging_config import get_logger
+from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.minimal_mode_preflight import minimal_subagent_candidates
-from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
@@ -58,8 +44,6 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -372,61 +356,18 @@ class DelegateTools(Toolkit):
             parent_tool_call_id=(parent.tool_call_id or "") if parent is not None else "",
             persona=persona,
         )
-        liveness = AsyncExitStack()
         try:
-            await liveness.enter_async_context(subagent_liveness(child, self._runtime_paths))
-            try:
-                await reserve_child_turn(child, owner=owner, runtime_paths=self._runtime_paths)
-            except SubagentSessionError as error:
-                return str(error)
-            await start_child_turn(
+            result = await run_direct_child_turn(
                 child,
+                owner=owner,
                 parent_run_id=parent.run_id if parent is not None else None,
                 config=config,
                 runtime_paths=self._runtime_paths,
-                caller_execution_identity=owner,
+                refresh_scheduler=self._refresh_scheduler,
             )
-            async with child_run_context(child, config=config, runtime_paths=self._runtime_paths):
-                response = await run_delegated_child_response(
-                    child,
-                    prompt=task,
-                    config=config,
-                    runtime_paths=self._runtime_paths,
-                    refresh_scheduler=self._refresh_scheduler,
-                    supports_native_tool_approval=False,
-                )
-        except asyncio.CancelledError:
-            await finish_child_turn(
-                child,
-                config=config,
-                runtime_paths=self._runtime_paths,
-                status="cancelled",
-                reason="Delegation cancelled.",
-            )
-            raise
-        except ResponsePausedForApproval:
-            raise
-        except Exception as error:
-            logger.exception("Delegation failed", from_agent=self._agent_name, to_agent=agent_name, error=str(error))
-            receipt = await finish_child_turn(
-                child,
-                config=config,
-                runtime_paths=self._runtime_paths,
-                status="failed",
-                reason=str(error),
-            )
-            return _result_with_receipt(f"Delegation to '{agent_name}' failed: {error}", receipt)
-        else:
-            receipt = await finish_child_turn(
-                child,
-                config=config,
-                runtime_paths=self._runtime_paths,
-                status="failed",
-                reason="Delegated run ended without a retained terminal outcome.",
-            )
-            return _result_with_receipt(response or "Agent completed the task but returned no content.", receipt)
-        finally:
-            await liveness.aclose()
+        except SubagentSessionError as error:
+            return str(error)
+        return _result_with_receipt(result.text, result.receipt)
 
 
 def _result_with_receipt(result: str, receipt: str) -> str:

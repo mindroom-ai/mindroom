@@ -15,7 +15,8 @@ _T = TypeVar("_T")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _SUPPORTED_SCHEMA_VERSION = 1
 _STEP_TYPES = frozenset({"agent_step", "report_step", "transform_step"})
-_PARTICIPANT_KINDS = frozenset({"ephemeral_agent", "room_agent"})
+_PARTICIPANT_KINDS = frozenset({"subagent", "room_agent"})
+_PARTICIPANT_MODES = frozenset({"standard", "minimal"})
 _AGENT_STEP_TEMPLATE_FIELDS = ("prompt", "response_template", "output_template", "template")
 _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
 _MAX_WORKFLOW_PARTICIPANTS = 8
@@ -48,7 +49,8 @@ _SPEC_KEYS = frozenset(
     },
 )
 _ROOM_AGENT_PARTICIPANT_KEYS = frozenset({"id", "kind", "agent", "model", "tools"})
-_EPHEMERAL_PARTICIPANT_KEYS = frozenset({"id", "kind", "name", "role", "description", "model", "tools", "instructions"})
+_SUBAGENT_INLINE_KEYS = frozenset({"system_prompt", "tools", "model", "mode"})
+_SUBAGENT_PARTICIPANT_KEYS = frozenset({"id", "kind", "description", "profile", *_SUBAGENT_INLINE_KEYS})
 _AGENT_STEP_KEYS = frozenset({"id", "type", "participant", *_AGENT_STEP_TEMPLATE_FIELDS})
 _TRANSFORM_STEP_KEYS = frozenset({"id", "type", "template", "text"})
 _REPORT_STEP_KEYS = frozenset({"id", "type", "body_template", "from_step", "title"})
@@ -341,9 +343,7 @@ def _validate_participant(participant: dict[str, object], index: int, participan
         raise DynamicWorkflowError(msg)
     participant["id"] = participant_id
     participant_ids.add(participant_id)
-    participant_kind = (
-        _required_text(participant, "kind", context=context) if "kind" in participant else "ephemeral_agent"
-    )
+    participant_kind = _required_text(participant, "kind", context=context) if "kind" in participant else "subagent"
     if participant_kind not in _PARTICIPANT_KINDS:
         msg = f"{context} has unsupported kind '{participant_kind}'."
         raise DynamicWorkflowError(msg)
@@ -351,7 +351,7 @@ def _validate_participant(participant: dict[str, object], index: int, participan
     if participant_kind == "room_agent":
         _validate_room_agent_participant(participant, context)
     else:
-        _validate_ephemeral_agent_participant(participant, context)
+        _validate_subagent_participant(participant, context)
 
 
 def _validate_room_agent_participant(participant: dict[str, object], context: str) -> None:
@@ -362,30 +362,34 @@ def _validate_room_agent_participant(participant: dict[str, object], context: st
         msg = f"{context} room_agent participants cannot override model."
         raise DynamicWorkflowError(msg)
     if participant.get("tools") not in (None, []):
-        msg = f"{context} room_agent participants cannot declare tools; tool grants are only available to ephemeral participants."
+        msg = f"{context} room_agent participants cannot declare tools; tool grants are only available to subagent participants."
         raise DynamicWorkflowError(msg)
 
 
-def _validate_ephemeral_agent_participant(participant: dict[str, object], context: str) -> None:
-    _reject_unsupported_fields(participant, _EPHEMERAL_PARTICIPANT_KEYS, context)
-    participant["tools"] = _normalized_tool_names(
-        participant.get("tools"),
-        f"{context} field 'tools'",
-    )
-    if "model" in participant and participant.get("model") is not None:
-        model = _required_text(participant, "model", context=context)
-        participant["model"] = model
-    if "instructions" in participant:
-        _validate_participant_instructions(participant["instructions"], context)
-
-
-def _validate_participant_instructions(value: object, context: str) -> None:
-    if value is None or isinstance(value, str):
+def _validate_subagent_participant(participant: dict[str, object], context: str) -> None:
+    """Validate an authored subagent: a saved profile, or an inline prompt with optional tools, model, and mode."""
+    _reject_unsupported_fields(participant, _SUBAGENT_PARTICIPANT_KEYS, context)
+    if "description" in participant and not isinstance(participant["description"], str):
+        msg = f"{context} field 'description' must be a string."
+        raise DynamicWorkflowError(msg)
+    if "profile" in participant:
+        participant["profile"] = _required_text(participant, "profile", context=context)
+        inline = sorted(_SUBAGENT_INLINE_KEYS & set(participant))
+        if inline:
+            msg = f"{context} uses profile, so it cannot also set '{inline[0]}'."
+            raise DynamicWorkflowError(msg)
         return
-    if isinstance(value, list) and all(isinstance(instruction, str) for instruction in value):
-        return
-    msg = f"{context} field 'instructions' must be a string or list of strings."
-    raise DynamicWorkflowError(msg)
+    system_prompt = participant.get("system_prompt")
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        msg = f"{context} needs a non-empty 'system_prompt' or a 'profile'."
+        raise DynamicWorkflowError(msg)
+    if participant.get("tools") is not None:
+        participant["tools"] = _normalized_tool_names(participant["tools"], f"{context} field 'tools'")
+    if participant.get("model") is not None:
+        participant["model"] = _required_text(participant, "model", context=context)
+    if participant.get("mode") is not None and participant["mode"] not in _PARTICIPANT_MODES:
+        msg = f"{context} field 'mode' must be 'standard' or 'minimal'."
+        raise DynamicWorkflowError(msg)
 
 
 def _validate_workflow_step(
@@ -531,11 +535,13 @@ def _normalized_tool_names(raw_tools: object, context: str) -> list[str]:
 
 
 def _validate_participant_tool_grants(spec: dict[str, object], participants: list[dict[str, object]]) -> None:
-    granted_tools = _permissions_mapping(spec).get("tools", [])
-    granted = set(cast("list[str]", granted_tools))
+    """Keep participant tools inside permissions.tools when the spec narrows them that way."""
+    granted = set(cast("list[str]", _permissions_mapping(spec).get("tools", [])))
+    if not granted:
+        return
     for participant in participants:
         for tool_name in cast("list[str]", participant.get("tools") or []):
-            if tool_name not in granted:
+            if tool_name.partition(".")[0] not in granted:
                 participant_id = participant["id"]
                 msg = f"Participant '{participant_id}' tool '{tool_name}' is not granted by permissions.tools."
                 raise DynamicWorkflowError(msg)

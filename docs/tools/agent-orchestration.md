@@ -205,11 +205,12 @@ Workflow specs are JSON or YAML objects with `schema_version: 1` and `kind: work
 The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`, and `id`, `name`, `participants`, and `workflow` are required.
 
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
-- **`participants`**: Up to 8 entries with `kind` set to `ephemeral_agent` (the default) or `room_agent`.
-  - An `ephemeral_agent` declares `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
-    Its `model`, given as an alias or model ID, defaults to the caller's current model and must be that model; when `permissions.models` is set, it must also list it.
-    Its `tools` may include any registered tool except `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, and `invite_router`, and each tool must also appear in `permissions.tools`.
-    Granted tools run with the caller's credentials, worker routing, and plugin hooks.
+- **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
+  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `model`, and `mode`.
+    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, or `invite_router`; omitting `tools` gives it every other caller tool that can run without approval.
+    Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
+    It runs with the caller's credentials, worker routing, and plugin hooks, and a participant used by several steps continues one session.
+    Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
   - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
     It runs with its configured model and without tools, skills, knowledge, durable state, or context files.
 - **`workflow`**: Up to 64 steps, each with a unique `id` and a `type`, run one at a time in order.
@@ -222,7 +223,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
   - `max_runtime_seconds` is 1 to 3600 and defaults to 3600; a run that exceeds it fails.
   - `max_total_agents` is 1 to 16, defaults to 16, and caps the number of `agent_step` entries.
   - `max_concurrent_agents` is 1 to 8 and is only validated, because steps never run in parallel.
-  - `models` lists the models participants may use, and `tools` lists the tools participants may be granted.
+  - `models` lists the models participants may use, and a non-empty `tools` lists every toolkit a participant may name.
   - `data` must keep `matrix_history: none`, `attachments: none`, and `knowledge_bases: []`, because direct workflow data grants are not supported yet; participants can still reach such data through granted tools such as `matrix_message`.
 
 ```python
@@ -241,8 +242,8 @@ create_workflow(
         "participants": [
             {
                 "id": "writer",
-                "kind": "ephemeral_agent",
-                "name": "Report Writer",
+                "kind": "subagent",
+                "system_prompt": "You write concise, well-cited research reports.",
                 "model": "claude-sonnet-5-5",
                 "tools": ["duckduckgo", "website"],
             },
@@ -274,7 +275,7 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Workflow participants cannot pause for human approval, so a workflow is rejected when any function of a granted tool would require approval.
+Workflow participants cannot pause for human approval, so a run fails when a tool a participant names has a function that would require approval, and a participant without `tools` never sees such functions.
 Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
 Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
 

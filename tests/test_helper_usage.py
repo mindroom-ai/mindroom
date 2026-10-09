@@ -439,14 +439,12 @@ async def test_memory_usage_survives_rejected_output_and_retry(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("caller", ["agent", "private_agent", "configured_team", "ad_hoc_team"])
-@pytest.mark.parametrize("participant_kind", ["ephemeral_agent", "room_agent"])
 async def test_workflow_first_turn_uses_actual_caller_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caller: str,
-    participant_kind: str,
 ) -> None:
-    """Synthetic participant IDs must not replace private, configured or ad hoc caller ownership."""
+    """Synthetic room-agent participant IDs must not replace private, configured or ad hoc caller ownership."""
     config, paths = _make_config(tmp_path)
     config.memory.backend = "none"
     if caller == "private_agent":
@@ -500,11 +498,13 @@ async def test_workflow_first_turn_uses_actual_caller_store(
         assert isinstance(storage, SqliteDb)
         result = await _aexecute_participant(
             context,
-            {"id": "writer", "kind": participant_kind, "agent": "test_agent"},
+            {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
             "Sample task.",
+            workflow_id="sample-workflow",
             run_scope="sample-workflow",
+            children={},
         )
-        assert result == "Sample output."
+        assert result.content == "Sample output."
         loaded = (get_team_session if caller.endswith("team") else get_agent_session)(storage, context.session_id)
         assert loaded is not None, "First-turn helper usage needs its actual caller session row"
         assert not loaded.runs

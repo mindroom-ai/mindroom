@@ -16,6 +16,14 @@ class DynamicWorkflowExecutionError(ValueError):
     """Raised when a Dynamic Workflow step cannot execute."""
 
 
+@dataclass(frozen=True)
+class ParticipantOutput:
+    """One participant answer and the delegation record of the turn that produced it, if any."""
+
+    content: object
+    delegation_id: str | None = None
+
+
 class ParticipantExecutor(Protocol):
     """Callable that executes one resolved Dynamic Workflow participant."""
 
@@ -26,7 +34,7 @@ class ParticipantExecutor(Protocol):
         prompt: str,
         input_data: dict[str, object],
         step_outputs: dict[str, object],
-    ) -> object:
+    ) -> ParticipantOutput:
         """Run one participant with rendered prompt and prior step outputs."""
 
 
@@ -40,7 +48,7 @@ class AsyncParticipantExecutor(Protocol):
         prompt: str,
         input_data: dict[str, object],
         step_outputs: dict[str, object],
-    ) -> Awaitable[object]:
+    ) -> Awaitable[ParticipantOutput]:
         """Run one participant with rendered prompt and prior step outputs."""
 
 
@@ -55,6 +63,7 @@ class _DynamicWorkflowStepResult:
     started_at: str
     completed_at: str
     error: str | None = None
+    delegation_id: str | None = None
 
     def to_json(self) -> dict[str, object]:
         """Return a JSON-serializable representation."""
@@ -66,6 +75,7 @@ class _DynamicWorkflowStepResult:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error": self.error,
+            "delegation_id": self.delegation_id,
         }
 
 
@@ -180,7 +190,7 @@ def _execute_workflow_step(
     step_id = _required_text(step, "id")
     step_type = str(step.get("type", "agent_step"))
     started_at = _utc_now()
-    content = _execute_step_content(
+    output = _execute_step_content(
         step,
         step_type=step_type,
         input_data=input_data,
@@ -192,9 +202,10 @@ def _execute_workflow_step(
         step_id=step_id,
         step_type=step_type,
         status="completed",
-        content=content,
+        content=output.content,
         started_at=started_at,
         completed_at=_utc_now(),
+        delegation_id=output.delegation_id,
     )
 
 
@@ -210,7 +221,7 @@ async def _async_execute_workflow_step(
     step_id = _required_text(step, "id")
     step_type = str(step.get("type", "agent_step"))
     started_at = _utc_now()
-    content = await _aexecute_step_content(
+    output = await _aexecute_step_content(
         step,
         step_type=step_type,
         input_data=input_data,
@@ -222,9 +233,10 @@ async def _async_execute_workflow_step(
         step_id=step_id,
         step_type=step_type,
         status="completed",
-        content=content,
+        content=output.content,
         started_at=started_at,
         completed_at=_utc_now(),
+        delegation_id=output.delegation_id,
     )
 
 
@@ -236,10 +248,10 @@ def _execute_step_content(
     step_outputs: Mapping[str, object],
     participant_executor: ParticipantExecutor | None,
     participants_by_id: Mapping[str, dict[str, object]] | None,
-) -> object:
+) -> ParticipantOutput:
     if step_type == "transform_step":
         template = _step_template(step, ("template", "text"))
-        return _render_template(template, input_data=input_data, step_outputs=step_outputs)
+        return ParticipantOutput(_render_template(template, input_data=input_data, step_outputs=step_outputs))
 
     if step_type == "agent_step":
         step_id = _required_text(step, "id")
@@ -275,8 +287,8 @@ def _execute_step_content(
         title = step.get("title")
         if isinstance(title, str) and title.strip():
             rendered_title = _render_template(title, input_data=input_data, step_outputs=step_outputs)
-            return f"# {rendered_title}\n\n{body}"
-        return body
+            return ParticipantOutput(f"# {rendered_title}\n\n{body}")
+        return ParticipantOutput(body)
 
     msg = f"Unsupported workflow step type '{step_type}'."
     raise DynamicWorkflowExecutionError(msg)
@@ -290,7 +302,7 @@ async def _aexecute_step_content(
     step_outputs: Mapping[str, object],
     participant_executor: AsyncParticipantExecutor | None,
     participants_by_id: Mapping[str, dict[str, object]] | None,
-) -> object:
+) -> ParticipantOutput:
     if step_type != "agent_step":
         return _execute_step_content(
             step,

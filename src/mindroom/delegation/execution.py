@@ -716,7 +716,12 @@ def _resolve_fresh_target(
         # A resumed call never rereads a profile the worker could have changed.
         return _DelegationTarget(child_name, task, None, retained.agent_mode, retained.persona, model)
     workspace = (
-        resolve_agent_runtime(caller_identity.agent_name, config, runtime_paths, caller_identity).workspace
+        resolve_agent_runtime(
+            caller_identity.agent_name,
+            config,
+            runtime_paths,
+            execution_identity=caller_identity,
+        ).workspace
         if args.get("profile") is not None
         else None
     )
