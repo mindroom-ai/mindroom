@@ -18,6 +18,7 @@ from mindroom.shell_execution import (
     MAX_CHECK_WAIT_SECONDS,
     parse_background_handle_message,
     parse_check_status,
+    parse_kill_message,
     parse_unknown_handle_error,
 )
 from mindroom.tool_dialect_types import (
@@ -31,12 +32,10 @@ from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
 
 _HANDLE_PREFIX = "shell:"
-_SHORT_HANDLE_DIGITS = 8
-_LONG_HANDLE_DIGITS = 32
-# Codex waits at least 5 seconds on an empty poll and yields a command after at least 250 ms;
-# MindRoom caps a poll's wait at MAX_CHECK_WAIT_SECONDS.
+# Codex yields a command after 10 seconds by default, between 250 ms and 30 seconds, and waits at least
+# 5 seconds on an empty poll; MindRoom caps a poll's wait at MAX_CHECK_WAIT_SECONDS.
 _EMPTY_POLL_WAIT_SECONDS = (5, MAX_CHECK_WAIT_SECONDS)
-_MIN_YIELD_MS = 250
+_YIELD_MS = (250, 10_000, 30_000)
 _APPLY_PATCH_GRAMMAR = """start: begin_patch hunk+ end_patch
 begin_patch: "*** Begin Patch" LF
 end_patch: "*** End Patch" LF?
@@ -74,8 +73,7 @@ def _session_id(handle: str) -> int | None:
 
 
 def _handle(session_id: int) -> str:
-    digits = _SHORT_HANDLE_DIGITS if session_id < 16**_SHORT_HANDLE_DIGITS else _LONG_HANDLE_DIGITS
-    return f"{_HANDLE_PREFIX}{session_id:0{digits}x}"
+    return f"{_HANDLE_PREFIX}{session_id:08x}"
 
 
 def _render_exec(text: str) -> str:
@@ -83,9 +81,11 @@ def _render_exec(text: str) -> str:
     background = parse_background_handle_message(rest)
     if background is None:
         return text
+    session_id = _session_id(background.handle)
     return (
         f"{text[: len(text) - len(rest)]}Wall time: {background.timeout:g} seconds\n"
-        f"Process running with session ID {_session_id(background.handle)} (PID {background.pid})\nOutput:\n"
+        f"Process running with session ID {session_id} (PID {background.pid}); "
+        f"poll it with write_stdin or stop it with kill_shell_command(session_id={session_id})\nOutput:\n"
     )
 
 
@@ -100,12 +100,22 @@ def _render_poll(text: str) -> str:
     return f"Wall time: {status.elapsed:g} seconds\n{state}\nOutput:\n{status.output}{stderr}"
 
 
+def _render_kill(text: str) -> str:
+    kill = parse_kill_message(text)
+    if kill is None:
+        return text
+    action, pid, signal, handle = kill
+    return f"{action} process {pid} ({signal} sent). Use write_stdin(session_id={_session_id(handle)}) to confirm exit."
+
+
 def _exec_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
     canonical: dict[str, Any] = {"args": wire_argument(arguments, "exec_command", "cmd")}
     if (workdir := wire_argument(arguments, "exec_command", "workdir", required=False)) is not None:
         canonical["workdir"] = workdir
-    if (yield_ms := wire_argument(arguments, "exec_command", "yield_time_ms", kind=float, required=False)) is not None:
-        canonical["timeout"] = milliseconds_to_seconds(max(yield_ms, _MIN_YIELD_MS), "exec_command", "yield_time_ms")
+    minimum, default, maximum = _YIELD_MS
+    yield_ms = wire_argument(arguments, "exec_command", "yield_time_ms", kind=float, required=False)
+    clamped = default if yield_ms is None else min(max(yield_ms, minimum), maximum)
+    canonical["timeout"] = milliseconds_to_seconds(clamped, "exec_command", "yield_time_ms")
     # Output length follows the canonical tool's tail and byte limits, so max_output_tokens is not forwarded.
     return canonical
 
@@ -123,7 +133,7 @@ def _exec_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
 def _write_stdin_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
     session_id = wire_argument(arguments, "write_stdin", "session_id", kind=int)
     if wire_argument(arguments, "write_stdin", "chars", required=False):
-        msg = "write_stdin cannot send input; pass empty chars to poll"
+        msg = "write_stdin cannot send input; pass empty chars to poll, or stop a session with kill_shell_command"
         raise DialectArgumentError(msg)
     yield_ms = wire_argument(arguments, "write_stdin", "yield_time_ms", kind=float, required=False)
     minimum, maximum = _EMPTY_POLL_WAIT_SECONDS
@@ -161,7 +171,7 @@ _EXEC_COMMAND = WireFunction(
             },
             "yield_time_ms": {
                 "type": "number",
-                "description": "Wait before returning a session ID for a command still running. Defaults to 120000 ms.",
+                "description": "Wait before returning a session ID for a command still running. Defaults to 10000 ms, at most 30000 ms.",
             },
         },
         "cmd",
@@ -219,8 +229,30 @@ _APPLY_PATCH = WireFunction(
     custom_format={"type": "grammar", "syntax": "lark", "definition": _APPLY_PATCH_GRAMMAR},
 )
 
+_KILL_SHELL_COMMAND = WireFunction(
+    key=ToolKey("shell", "kill_shell_command"),
+    wire_name="kill_shell_command",
+    description="Stops a running exec_command session.",
+    parameters=_object_schema(
+        {
+            "force": {"type": "boolean", "description": "Send SIGKILL at once instead of SIGTERM."},
+            "session_id": {"type": "number", "description": "Identifier of the running exec_command session."},
+        },
+        "session_id",
+    ),
+    to_canonical=lambda arguments: {
+        "handle": _handle(wire_argument(arguments, "kill_shell_command", "session_id", kind=int)),
+        "force": bool(wire_argument(arguments, "kill_shell_command", "force", kind=bool, required=False)),
+    },
+    to_wire=lambda canonical: {
+        "session_id": _session_id(str(canonical.get("handle", ""))),
+        "force": bool(canonical.get("force")),
+    },
+    render_result=_render_kill,
+)
+
 CODEX_DIALECT = ToolDialect(
     name="codex",
-    functions=(_EXEC_COMMAND, _WRITE_STDIN, _APPLY_PATCH),
+    functions=(_EXEC_COMMAND, _WRITE_STDIN, _KILL_SHELL_COMMAND, _APPLY_PATCH),
     hidden=frozenset({ToolKey("coding", "edit_file"), ToolKey("coding", "write_file")}),
 )

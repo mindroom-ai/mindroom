@@ -137,6 +137,11 @@ def _wire_tool_dict(function: Function, wire_function: WireFunction, *, custom_t
     return {"type": "function", "function": definition}
 
 
+def presents(dialect: ToolDialect, function: Function) -> bool:
+    """Return whether *dialect* shows *function* to the model at all."""
+    return not any(_is_canonical(function, key) for key in dialect.hidden)
+
+
 def wire_tools(
     dialect: ToolDialect,
     tools: Sequence[Function | dict[str, Any]],
@@ -153,7 +158,7 @@ def wire_tools(
         if not isinstance(tool, Function):
             presented.append(tool)
             continue
-        if any(_is_canonical(tool, key) for key in dialect.hidden):
+        if not presents(dialect, tool):
             continue
         wire_function = _wire_function_for(dialect, tool)
         if wire_function is not None and wire_function.wire_name != tool.name and wire_function.wire_name in taken:
@@ -256,12 +261,12 @@ def _wire_call(dialect: ToolDialect, mapped: Mapping[str, WireFunction], call: d
     function = call.get("function")
     if not isinstance(function, dict):
         return stripped
-    wire = call.get(MINDROOM_WIRE_KEY)
-    if isinstance(wire, dict) and wire.get("dialect") == dialect.name:
-        return {**stripped, "function": {**function, "name": wire["name"], "arguments": wire["arguments"]}}
     wire_function = mapped.get(function.get("name", ""))
     if wire_function is None:
         return stripped
+    wire = call.get(MINDROOM_WIRE_KEY)
+    if isinstance(wire, dict) and wire.get("dialect") == dialect.name and wire.get("name") == wire_function.wire_name:
+        return {**stripped, "function": {**function, "name": wire["name"], "arguments": wire["arguments"]}}
     try:
         arguments = json.loads(function.get("arguments") or "{}")
     except json.JSONDecodeError:
@@ -289,14 +294,17 @@ def _wire_result(message: Message, wire_function: WireFunction) -> Message:
 def wire_messages(dialect: ToolDialect, messages: list[Message], presented: Collection[str]) -> list[Message]:
     """Return *messages* rendered for one provider request whose tools have the *presented* names.
 
-    Only functions the request presents in wire form render; a call recorded in the active dialect replays
-    its exact wire form, and other calls translate by canonical name.
+    Only functions the request presents in wire form render; a call recorded in the active dialect under
+    the same wire name replays its exact wire form, and other calls translate by canonical name.
     Messages that change are copied, so stored history stays canonical.
     """
+    # A presented wire name stands for the dialect's function unless its canonical name is also presented,
+    # which means a collision kept the canonical function and the wire name belongs to another tool.
     mapped = {
         wire_function.key.function: wire_function
         for wire_function in dialect.functions
-        if wire_function.wire_name in presented and wire_function.key.function not in presented
+        if wire_function.wire_name in presented
+        and (wire_function.wire_name == wire_function.key.function or wire_function.key.function not in presented)
     }
     rendered: list[Message] = []
     for message in messages:

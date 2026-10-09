@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 type DialectName = Literal["mindroom", "claude", "codex"]
 
-# Tool-call dict key recording the exact wire form of a translated call: dialect, toolkit, name, arguments, custom.
+# Tool-call dict key recording the exact wire form of a lossy translated call: dialect, name, arguments.
 MINDROOM_WIRE_KEY = "mindroom_wire"
 
 

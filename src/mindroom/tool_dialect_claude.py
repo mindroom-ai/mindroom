@@ -10,7 +10,7 @@ import shlex
 from typing import Any
 
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, parse_edit_multiple_matches_error, split_read_output
-from mindroom.shell_execution import parse_background_handle_message, parse_kill_message
+from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS, parse_background_handle_message, parse_kill_message
 from mindroom.tool_dialect_types import ToolDialect, WireFunction, milliseconds_to_seconds, wire_argument
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
@@ -50,7 +50,8 @@ def _bash_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
     if wire_argument(arguments, "Bash", "run_in_background", kind=bool, required=False):
         canonical["timeout"] = 0
     elif (timeout := wire_argument(arguments, "Bash", "timeout", kind=float, required=False)) is not None:
-        canonical["timeout"] = milliseconds_to_seconds(timeout, "Bash", "timeout")
+        # Longer foreground waits outlast the worker proxy request; the command backgrounds instead.
+        canonical["timeout"] = min(milliseconds_to_seconds(timeout, "Bash", "timeout"), DEFAULT_RUN_TIMEOUT_SECONDS)
     return canonical
 
 
@@ -139,7 +140,7 @@ _BASH = WireFunction(
         "Run a bash command and return its output.\n"
         "- Every call starts a fresh non-login bash, so `cd` and exported variables do not carry over to the "
         "next call; chain dependent steps with `&&`.\n"
-        "- `timeout` is in milliseconds (default 120000); a command still running then keeps running in the "
+        "- `timeout` is in milliseconds (default and maximum 120000); a command still running then keeps running in the "
         "background and returns an ID for BashOutput and KillShell.\n"
         "- `run_in_background: true` starts the command in the background at once."
     ),

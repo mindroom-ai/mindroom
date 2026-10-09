@@ -59,6 +59,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.pre_model_preparation import prewarm_agent_model_client
 from mindroom.session_ids import create_session_id
 from mindroom.tool_approval import tool_may_require_approval
+from mindroom.tool_dialects import presents, resolve_tool_dialect
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -588,6 +589,9 @@ async def build_call_tools(
             raise TypeError(msg)
         if _function_requires_text_chat(tool, config):
             logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
+            continue
+        # Realtime voice models see MindRoom's own tool names, so they get the default dialect's tool set.
+        if not presents(resolve_tool_dialect(None), tool):
             continue
         visible_functions.append(tool)
         tools.append(

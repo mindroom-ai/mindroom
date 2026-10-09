@@ -243,3 +243,8 @@ async def test_thinking_replay_keeps_wire_call_verbatim() -> None:
 def test_workdir_history_renders_as_cd_prefix() -> None:
     """A canonical call with a workdir, such as one Codex made, renders as a Bash command that changes into it."""
     assert _wire("Bash").to_wire({"args": "make", "workdir": "sub dir"}) == {"command": "cd 'sub dir' && make"}
+
+
+def test_bash_timeout_stays_inside_the_worker_budget() -> None:
+    """A Bash timeout above 120 seconds waits 120 and then moves the command to the background."""
+    assert _wire("Bash").to_canonical({"command": "make", "timeout": 600000}) == {"args": "make", "timeout": 120}

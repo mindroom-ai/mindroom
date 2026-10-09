@@ -30,7 +30,8 @@ _TOOL_DIALECT_INVOKE_MARKER = "_mindroom_tool_dialect_invoke"
 # worker routing, and stored history keep the canonical name; the binding overrides `_format_tools`,
 # `get_function_calls_to_run`, and the async invocation entry points of one model instance.
 # Upstream issue: Tracking gap; no public hook separates provider-visible tool names and arguments from
-# the dispatched Function.
+# the dispatched Function, and searching agno-agi/agno issues and PRs for tool aliases, tool presentation,
+# and provider-specific tool names on October 9, 2026 found nothing.
 # Upstream PR: None identified.
 # Remove when: Agno exposes a per-model tool presentation hook that renames and reshapes definitions,
 # history calls, and incoming calls while dispatching the original Function.
@@ -61,7 +62,7 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
         messages: list[Message],
         functions: dict[str, Function] | None = None,
     ) -> list[FunctionCall]:
-        if not assistant_message.tool_calls or functions is None:
+        if not dialect.functions or not assistant_message.tool_calls or functions is None:
             return get_function_calls_to_run(bound_model, assistant_message, messages, functions)
         translated, errors = canonical_tool_calls(dialect, assistant_message.tool_calls, functions)
         failed_calls = {id(error.call) for error in errors}

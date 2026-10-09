@@ -742,7 +742,7 @@ class CodingTools(Toolkit):
         try:
             hunks = parse_patch(input)
         except PatchError as e:
-            return str(e)
+            return f"apply_patch verification failed: {e}"
         if not hunks:
             return "No files were modified."
         try:
@@ -767,7 +767,7 @@ class CodingTools(Toolkit):
         modified: list[str] = []
         deleted: list[str] = []
         for hunk in hunks:
-            resolved = self._patch_path(hunk.path)
+            resolved = self._patch_link(hunk.path) if isinstance(hunk, DeleteFile) else self._patch_path(hunk.path)
             if isinstance(hunk, AddFile):
                 self._check_patch_target(resolved, hunk.path, overlay)
                 overlay[resolved] = hunk.contents
@@ -800,6 +800,12 @@ class CodingTools(Toolkit):
             raise PatchError(blocked_git_metadata_message("applying patch", path))
         return resolved
 
+    def _patch_link(self, path: str) -> Path:
+        """Return the path a delete removes: a link itself, not its target, like Codex."""
+        parent = self._patch_path(str(Path(path).parent))
+        link = parent / Path(path).name
+        return link if link.is_symlink() and not is_git_metadata_path(link) else self._patch_path(path)
+
     def _check_patch_target(self, resolved: Path, path: str, overlay: dict[Path, str | None]) -> None:
         """Refuse a write that must fail, onto a directory or below a file, as earlier hunks leave the tree."""
         planned_directory = any(
@@ -821,7 +827,7 @@ class CodingTools(Toolkit):
                 msg = f"Failed to read file to {action} {path}: No such file or directory"
                 raise PatchError(msg)
             return
-        if not resolved.is_file():
+        if not resolved.is_file() and not (action == "delete" and resolved.is_symlink()):
             reason = "Is a directory" if resolved.is_dir() else "No such file or directory"
             msg = f"Failed to read file to {action} {path}: {reason}"
             raise PatchError(msg)

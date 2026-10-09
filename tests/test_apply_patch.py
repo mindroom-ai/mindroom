@@ -68,16 +68,16 @@ def test_parse_patch_builds_every_hunk_kind() -> None:
 @pytest.mark.parametrize(
     ("patch", "message"),
     [
-        ("*** Update File: a\n*** End Patch", "Invalid patch: The first line of the patch must be '*** Begin Patch'"),
-        ("*** Begin Patch\n*** Delete File: a", "Invalid patch: The last line of the patch must be '*** End Patch'"),
+        ("*** Update File: a\n*** End Patch", "invalid patch: The first line of the patch must be '*** Begin Patch'"),
+        ("*** Begin Patch\n*** Delete File: a", "invalid patch: The last line of the patch must be '*** End Patch'"),
         (
             "*** Begin Patch\n*** Frobnicate: a\n*** End Patch",
-            "Invalid patch hunk on line 2: '*** Frobnicate: a' is not a valid hunk header. Valid hunk headers: "
+            "invalid hunk at line 2, '*** Frobnicate: a' is not a valid hunk header. Valid hunk headers: "
             "'*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'",
         ),
         (
             "*** Begin Patch\n*** Update File: a\n*** End Patch",
-            "Invalid patch hunk on line 2: Update file hunk for path 'a' is empty",
+            "invalid hunk at line 2, Update file hunk for path 'a' is empty",
         ),
     ],
 )
@@ -87,6 +87,32 @@ def test_parse_errors_use_codex_wording(patch: str, message: str) -> None:
         parse_patch(patch)
 
     assert str(error.value) == message
+
+
+def test_parse_error_reaches_the_model_as_verification_failure(tmp_path: Path) -> None:
+    """Like Codex's tool, a patch that does not parse reports a verification failure."""
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch("*** Begin Patch\n*** Frobnicate: a\n*** End Patch")
+
+    assert result.startswith("apply_patch verification failed: invalid hunk at line 2, ")
+
+
+def test_header_and_marker_trailing_whitespace_is_ignored() -> None:
+    """Trailing spaces after Move to and End of File markers do not change their meaning."""
+    [hunk] = parse_patch(
+        "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt  \n@@\n-x\n+y\n*** End of File \n*** End Patch",
+    )
+
+    assert isinstance(hunk, _UpdateFile)
+    assert hunk.move_to == "b.txt"
+    assert hunk.chunks[0].is_end_of_file
+
+
+def test_blank_line_after_update_header_is_context() -> None:
+    """A blank line that opens an update is an empty context line, as in Codex."""
+    [hunk] = parse_patch("*** Begin Patch\n*** Update File: a.txt\n\n-x\n+y\n*** End Patch")
+
+    assert isinstance(hunk, _UpdateFile)
+    assert hunk.chunks[0].old_lines == ("", "x")
 
 
 def test_heredoc_wrapped_patch_is_accepted() -> None:
@@ -228,3 +254,18 @@ def test_delete_binary_file(tmp_path: Path) -> None:
 
     assert result == "Success. Updated the following files:\nD logo.png"
     assert not (tmp_path / "logo.png").exists()
+
+
+def test_delete_through_symlink_removes_the_link(tmp_path: Path) -> None:
+    """Deleting a link inside the workspace removes the link and keeps its target, as Codex does."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "real.log").write_text("keep\n")
+    (tmp_path / "current.log").symlink_to("logs/real.log")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Delete File: current.log\n*** End Patch",
+    )
+
+    assert result == "Success. Updated the following files:\nD current.log"
+    assert not (tmp_path / "current.log").is_symlink()
+    assert (tmp_path / "logs" / "real.log").read_text() == "keep\n"

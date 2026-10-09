@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom import approval_manager, approval_transport, redaction
 from mindroom.approval_events import PendingApproval, parse_approval_datetime
@@ -25,6 +26,7 @@ from mindroom.approval_manager import (
 )
 from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
@@ -2290,3 +2292,33 @@ async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_pa
         assert recovery._startup_cleanup_retry is None
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("rules", "default", "warns"),
+    [
+        ([{"match": "edit_file", "action": "require_approval"}], "auto_approve", True),
+        ([{"match": "*_file", "action": "require_approval"}], "auto_approve", True),
+        (
+            [
+                {"match": "edit_file", "action": "require_approval"},
+                {"match": "apply_patch", "action": "require_approval"},
+            ],
+            "auto_approve",
+            False,
+        ),
+        ([{"match": "run_shell_command", "action": "require_approval"}], "auto_approve", False),
+        ([], "require_approval", False),
+    ],
+)
+def test_warns_when_file_edit_rules_leave_apply_patch_ungated(
+    rules: list[dict[str, str]],
+    default: str,
+    *,
+    warns: bool,
+) -> None:
+    """OpenAI models edit with apply_patch, so rules gating only edit_file or write_file draw a warning."""
+    with capture_logs() as logs:
+        ToolApprovalConfig.model_validate({"default": default, "rules": rules})
+
+    assert any("apply_patch" in entry["event"] for entry in logs) is warns

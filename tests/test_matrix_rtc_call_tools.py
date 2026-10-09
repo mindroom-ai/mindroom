@@ -2078,3 +2078,45 @@ def test_matrix_message_available_during_call_needs_the_tool_without_approval() 
         rules=[ApprovalRuleConfig(match="matrix_message", action="require_approval")],
     )
     assert not matrix_message_available_during_call(config, AGENT)
+
+
+@pytest.mark.asyncio
+async def test_build_call_tools_hides_apply_patch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voice models see MindRoom's own file tools, so the Codex-only apply_patch stays hidden."""
+    patch = _function(lambda input: input, name="apply_patch")  # noqa: A006
+    patch.owning_toolkit = "coding"
+    read = _function(lambda path: path, name="read_file")
+    read.owning_toolkit = "coding"
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        lambda *_args, **_kwargs: FakeAgnoAgent([patch, read]),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
+        lambda function, **_kwargs: function.name,
+    )
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    tool_support = SimpleNamespace(
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
+        build_execution_identity=lambda **_k: SimpleNamespace(),
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+    )
+
+    assert tooling.tools == ("read_file",)

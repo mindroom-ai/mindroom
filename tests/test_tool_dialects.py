@@ -370,3 +370,24 @@ def test_output_path_argument_survives_translation() -> None:
         "cmd": "ls -R",
         OUTPUT_PATH_ARGUMENT: "out.txt",
     }
+
+
+def test_wire_record_is_ignored_when_the_tool_is_not_presented_in_wire_form() -> None:
+    """A recorded wire call replays as a canonical call when this request presents the tool canonically."""
+    wire = {"dialect": "claude", "name": "Run", "arguments": '{"cmd": "ls", "note": 1}'}
+    call = _call("a", "run_shell_command", {"args": "ls"}, **{MINDROOM_WIRE_KEY: wire})
+
+    [rendered] = wire_messages(_TOY, [_assistant(call)], frozenset({"run_shell_command"}))
+
+    assert rendered.tool_calls == [_call("a", "run_shell_command", {"args": "ls"})]
+
+
+def test_identity_named_functions_render_results_when_presented() -> None:
+    """A dialect function that keeps its canonical name still renders its results."""
+    same_name = replace(_TOY.functions[0], wire_name="run_shell_command")
+    dialect = ToolDialect(name="codex", functions=(same_name,))
+    result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="check_shell_command")
+
+    [rendered] = wire_messages(dialect, [result], frozenset({"run_shell_command"}))
+
+    assert rendered.content == "Poll"

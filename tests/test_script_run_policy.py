@@ -19,7 +19,7 @@ from mindroom.script_runs.policy import (
     resolve_current_script_tool,
     resolve_script_launch_grants,
 )
-from mindroom.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
+from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -239,8 +239,8 @@ def test_background_approval_overlay_never_preapproves_system_mutation() -> None
         never_preapprove_toolkits=frozenset({"claude_agent", "config_manager", "scheduler"}),
     )
 
-    read_rule = _matching_tool_approval_rule(resolved, "read_url")
-    update_rule = _matching_tool_approval_rule(resolved, "update_config")
+    read_rule = resolved.tool_approval.matching_rule("read_url")
+    update_rule = resolved.tool_approval.matching_rule("update_config")
     assert read_rule is not None
     assert update_rule is not None
     assert read_rule.action == "auto_approve"

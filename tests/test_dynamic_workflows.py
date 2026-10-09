@@ -35,7 +35,6 @@ from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
-from mindroom.tool_approval import _matching_tool_approval_rule
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -2318,7 +2317,7 @@ def test_participant_run_config_preserves_operator_rule_precedence(tmp_path: Pat
     ordered = [(rule.match, rule.action) for rule in run_config.tool_approval.rules]
     assert ordered[0] == ("run_shell_command", "require_approval")
     assert ordered[1] == ("run_shell_command", "auto_approve")
-    matched = _matching_tool_approval_rule(run_config, "run_shell_command")
+    matched = run_config.tool_approval.matching_rule("run_shell_command")
     assert matched is not None
     assert matched.action == "require_approval"
 

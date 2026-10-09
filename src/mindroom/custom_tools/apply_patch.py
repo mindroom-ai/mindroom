@@ -82,7 +82,7 @@ type PatchHunk = AddFile | DeleteFile | _UpdateFile
 
 
 def _hunk_error(line_number: int, message: str) -> PatchError:
-    return PatchError(f"Invalid patch hunk on line {line_number}: {message}")
+    return PatchError(f"invalid hunk at line {line_number}, {message}")
 
 
 def _patch_body(lines: list[str]) -> list[str]:
@@ -93,9 +93,9 @@ def _patch_body(lines: list[str]) -> list[str]:
     if lines and lines[0] in _HEREDOC_STARTS and lines[-1].endswith("EOF") and len(lines) >= 4:
         return _patch_body(lines[1:-1])
     if first != _BEGIN_PATCH:
-        msg = "Invalid patch: The first line of the patch must be '*** Begin Patch'"
+        msg = "invalid patch: The first line of the patch must be '*** Begin Patch'"
         raise PatchError(msg)
-    msg = "Invalid patch: The last line of the patch must be '*** End Patch'"
+    msg = "invalid patch: The last line of the patch must be '*** End Patch'"
     raise PatchError(msg)
 
 
@@ -125,7 +125,7 @@ def _parse_chunk(
     is_end_of_file = False
     parsed = 0
     for line in lines[start:]:
-        if line == _END_OF_FILE:
+        if line.rstrip() == _END_OF_FILE:
             if parsed == 0:
                 raise _hunk_error(line_number + 1, "Update hunk does not contain any lines")
             is_end_of_file = True
@@ -162,16 +162,13 @@ def _parse_chunk(
 def _parse_update(lines: list[str], line_number: int, path: str) -> tuple[_UpdateFile, int]:
     remaining = lines[1:]
     parsed = 1
-    move_to = remaining[0].removeprefix(_MOVE_TO) if remaining and remaining[0].startswith(_MOVE_TO) else None
+    move_to = remaining[0].rstrip().removeprefix(_MOVE_TO) if remaining and remaining[0].startswith(_MOVE_TO) else None
     if move_to is not None:
         remaining = remaining[1:]
         parsed += 1
     chunks: list[_UpdateChunk] = []
     while remaining:
-        if not remaining[0].strip():
-            remaining = remaining[1:]
-            parsed += 1
-            continue
+        # Like Codex, a blank line here is an empty context line, which the chunk parser reads.
         if remaining[0].startswith("*"):
             break
         chunk, chunk_lines = _parse_chunk(remaining, line_number + parsed, allow_missing_context=not chunks)

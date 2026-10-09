@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 _ApprovalAction = Literal["auto_approve", "require_approval"]
 _MAX_TIMEOUT_DAYS = 36500.0
 _TimeoutDays = Annotated[float, Field(gt=0, le=_MAX_TIMEOUT_DAYS, allow_inf_nan=False)]
+_FILE_EDIT_FUNCTIONS = ("edit_file", "write_file")
 
 
 class ApprovalRuleConfig(BaseModel):
@@ -91,6 +97,29 @@ class ToolApprovalConfig(BaseModel):
             "not only the exact arguments it was scheduled with"
         ),
     )
+
+    def matching_rule(self, tool_name: str) -> ApprovalRuleConfig | None:
+        """Return the first rule that matches *tool_name*."""
+        return next((rule for rule in self.rules if fnmatchcase(tool_name, rule.match)), None)
+
+    def may_require_approval(self, tool_name: str) -> bool:
+        """Return whether calls to *tool_name* can need approval."""
+        rule = self.matching_rule(tool_name)
+        if rule is None:
+            return self.default == "require_approval"
+        return rule.action != "auto_approve"
+
+    @model_validator(mode="after")
+    def warn_when_apply_patch_escapes_file_edit_rules(self) -> ToolApprovalConfig:
+        """Warn when rules gate file edits but not the apply_patch tool OpenAI models edit files with."""
+        if any(self.may_require_approval(name) for name in _FILE_EDIT_FUNCTIONS) and not self.may_require_approval(
+            "apply_patch",
+        ):
+            logger.warning(
+                "tool_approval gates edit_file or write_file but not apply_patch, which OpenAI models edit files "
+                "with; add a rule matching apply_patch to gate their edits too",
+            )
+        return self
 
     @field_validator("timeout_days", mode="before")
     @classmethod

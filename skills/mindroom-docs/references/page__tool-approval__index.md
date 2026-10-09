@@ -33,7 +33,7 @@ tool_approval:
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
-OpenAI models edit files with `apply_patch` instead of `edit_file` and `write_file`, so a rule that gates file edits should also match `apply_patch`.
+OpenAI models edit files with `apply_patch` instead of `edit_file` and `write_file`, so a rule that gates file edits should also match `apply_patch`; MindRoom logs a warning when the config gates `edit_file` or `write_file` but not `apply_patch`.
 
 ## Approving and Denying
 

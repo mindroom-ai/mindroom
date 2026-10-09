@@ -40,7 +40,6 @@ def test_exec_command_maps_cmd_workdir_yield() -> None:
         "timeout": 2,
     }
     assert to_canonical({"cmd": "ls", "yield_time_ms": 10}) == {"args": "ls", "timeout": 1}
-    assert to_canonical({"cmd": "ls"}) == {"args": "ls"}
     with pytest.raises(DialectArgumentError, match="exec_command requires cmd"):
         to_canonical({"command": "ls"})
 
@@ -93,7 +92,8 @@ def test_status_renderings() -> None:
     running = _format_running_status(pid=77, elapsed=3.0, buffered_lines=1, partial="partial")
 
     assert _render("exec_command", background) == (
-        f"[cwd: /w]\nWall time: 10 seconds\nProcess running with session ID {0x0123ABCD} (PID 77)\nOutput:\n"
+        f"[cwd: /w]\nWall time: 10 seconds\nProcess running with session ID {0x0123ABCD} (PID 77); poll it with "
+        f"write_stdin or stop it with kill_shell_command(session_id={0x0123ABCD})\nOutput:\n"
     )
     assert (
         _render("write_stdin", finished)
@@ -164,3 +164,31 @@ def test_apply_patch_custom_format_only_with_custom_tools() -> None:
 def test_resolve_tool_dialect_returns_codex_for_openai_and_codex(provider: str, model_id: str) -> None:
     """OpenAI GPT and Codex models get the Codex dialect."""
     assert resolve_tool_dialect(ModelConfig(provider=provider, id=model_id)) is CODEX_DIALECT
+
+
+def test_kill_shell_command_takes_the_session_id() -> None:
+    """Codex models stop a session by the ID they were shown."""
+    kill = _wire("kill_shell_command")
+
+    assert kill.to_canonical({"session_id": 0x0123ABCD}) == {"handle": "shell:0123abcd", "force": False}
+    assert kill.to_canonical({"session_id": 1, "force": True}) == {"handle": "shell:00000001", "force": True}
+    assert kill.to_wire({"handle": "shell:0123abcd", "force": False}) == {"session_id": 0x0123ABCD, "force": False}
+    assert _render(
+        "kill_shell_command",
+        "Terminated process 77 (SIGTERM sent). Use check_shell_command('shell:0123abcd') to confirm exit.",
+    ) == (f"Terminated process 77 (SIGTERM sent). Use write_stdin(session_id={0x0123ABCD}) to confirm exit.")
+
+
+def test_background_session_names_how_to_stop_it() -> None:
+    """A session that keeps running says how to stop it with the tools Codex models see."""
+    rendered = _render("exec_command", _format_background_handle_message(10, 77, "shell:0123abcd"))
+
+    assert f"kill_shell_command(session_id={0x0123ABCD})" in rendered
+
+
+def test_exec_command_yields_like_codex() -> None:
+    """exec_command waits 10 seconds by default and at most 30, as Codex does."""
+    to_canonical = _wire("exec_command").to_canonical
+
+    assert to_canonical({"cmd": "ls"}) == {"args": "ls", "timeout": 10}
+    assert to_canonical({"cmd": "ls", "yield_time_ms": 600000}) == {"args": "ls", "timeout": 30}
