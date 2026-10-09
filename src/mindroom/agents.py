@@ -91,7 +91,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
     from mindroom.credentials import CredentialsManager
-    from mindroom.delegation.personas import SubagentPersona
+    from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope

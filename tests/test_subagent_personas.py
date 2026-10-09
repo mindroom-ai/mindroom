@@ -12,7 +12,6 @@ from mindroom.delegation.personas import (
     InvalidPersonaProfile,
     PersonaError,
     PersonaProfile,
-    SubagentPersona,
     inline_persona,
     list_profiles,
     load_profile,
@@ -22,6 +21,7 @@ from mindroom.delegation.personas import (
     render_profile_listing,
     validate_persona_tools,
 )
+from mindroom.delegation.state import SubagentPersona
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -47,6 +47,7 @@ from mindroom.delegation.execution import drive_delegation_stream, drive_delegat
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
+    delegation_grant,
     note_child_run_id,
     observe_child_event,
 )
@@ -1400,6 +1401,7 @@ async def run_delegated_child_response(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool,
+    approval_config: Config | None = None,
 ) -> str:
     """Execute the normal response envelope for a prepared child owned by either adapter.
 
@@ -1415,6 +1417,8 @@ async def run_delegated_child_response(
         runtime_paths=runtime_paths,
         execution_identity=replace(identity, agent_name=child.caller_agent_name),
         depth=child.depth - 1,
+        grant=delegation_grant(child),
+        approval_config=approval_config,
     )
     if isinstance(active_config, str):
         return active_config
@@ -1438,6 +1442,7 @@ async def run_delegated_child_response(
     )
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
+        persona=child.persona,
         entity_label=child.child_agent_name,
         session_id=child.session_id,
         run_id=child.run_id,

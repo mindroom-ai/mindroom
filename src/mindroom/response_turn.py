@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutput
 
     from mindroom.agent_modes import AgentMode
-    from mindroom.delegation.personas import SubagentPersona
+    from mindroom.delegation.state import SubagentPersona
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder

@@ -26,6 +26,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.error_handling import run_error_event_text
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
@@ -35,9 +36,12 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import SubagentPersona
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 MAX_DELEGATION_DEPTH = 3
+
+type DelegationGrant = Literal["delegate", "dynamic_workflow"]
 
 type _ChildTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied"})
@@ -245,6 +249,45 @@ async def observe_child_event(event: object) -> None:
     await record_child_event(event)
 
 
+def delegation_grant(child: DelegationChild) -> DelegationGrant:
+    """Name the caller permission that authorizes this child: its delegate allowlist or its workflow tool."""
+    return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
+
+
+def _caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: DelegationGrant) -> bool:
+    caller = config.agents.get(caller_name)
+    if caller is None:
+        return False
+    if grant == "delegate":
+        return agent_name in caller.delegate_to
+    names = {entry.name for entry in visible_tool_surface(agent_name=caller_name, config=config).runtime_tool_configs}
+    return agent_name == caller_name and "dynamic_workflow" in names
+
+
+def _target_refusal(
+    caller_name: str,
+    agent_name: str,
+    task: str,
+    *,
+    config: Config,
+    allowed_targets: Sequence[str] | None,
+    grant: DelegationGrant,
+) -> str | None:
+    """Return why this caller cannot start this target at all, before any requester check."""
+    if not task or not task.strip():
+        return "Cannot delegate an empty task. Please provide a task description."
+    if grant == "dynamic_workflow":
+        if agent_name == caller_name:
+            return None
+        return f"Cannot author a subagent for '{agent_name}': system_prompt, tools, and profile apply only to yourself."
+    if allowed_targets is None:
+        caller = config.agents.get(caller_name)
+        allowed_targets = caller.delegate_to if caller is not None else []
+    if agent_name in allowed_targets:
+        return None
+    return f"Cannot delegate to '{agent_name}'. Allowed subagents: {', '.join(allowed_targets)}."
+
+
 def authorize_delegation(  # noqa: PLR0911
     caller_name: str,
     agent_name: str,
@@ -256,17 +299,24 @@ def authorize_delegation(  # noqa: PLR0911
     depth: int,
     allowed_targets: Sequence[str] | None = None,
     model: str | None = None,
+    grant: DelegationGrant = "delegate",
+    approval_config: Config | None = None,
 ) -> Config | str:
-    """Recheck the current caller allowlist and requester authority."""
-    if allowed_targets is None:
-        caller = config.agents.get(caller_name)
-        allowed_targets = caller.delegate_to if caller is not None else []
-    if not task or not task.strip():
-        return "Cannot delegate an empty task. Please provide a task description."
+    """Recheck the caller's current grant and requester authority.
 
-    if agent_name not in allowed_targets:
-        available = ", ".join(allowed_targets)
-        return f"Cannot delegate to '{agent_name}'. Allowed subagents: {available}."
+    ``approval_config``, when given, is returned in place of the active config
+    so a caller can run the child under its own pre-approval overlay.
+    """
+    refusal = _target_refusal(
+        caller_name,
+        agent_name,
+        task,
+        config=config,
+        allowed_targets=allowed_targets,
+        grant=grant,
+    )
+    if refusal is not None:
+        return refusal
 
     runtime_context = get_tool_runtime_context()
     detached_context = get_detached_requester_context()
@@ -290,8 +340,7 @@ def authorize_delegation(  # noqa: PLR0911
         return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-    caller_config = active_config.agents.get(caller_name)
-    caller_allows_target = caller_config is not None and agent_name in caller_config.delegate_to
+    caller_allows_target = _caller_grants_child(caller_name, agent_name, active_config, grant)
     if not caller_allows_target or not is_sender_allowed_for_responder(
         requester_id,
         agent_name,
@@ -312,7 +361,7 @@ def authorize_delegation(  # noqa: PLR0911
     if model is not None and (not isinstance(model, str) or model not in active_config.models):
         available_models = ", ".join(sorted(active_config.models))
         return f"Cannot delegate: Unknown model '{model}'. Available models: {available_models}."
-    return active_config
+    return approval_config if approval_config is not None else active_config
 
 
 def prepare_child_turn(
@@ -329,10 +378,11 @@ def prepare_child_turn(
     previous: DelegationChild | None = None,
     parent_tool_call_id: str = "",
     parent_requirement_id: str = "",
+    persona: SubagentPersona | None = None,
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the model of the child it continues; callers pass its mode.
+    A follow-up keeps the model and persona of the child it continues; callers pass its mode.
     """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
@@ -372,4 +422,5 @@ def prepare_child_turn(
         parent_requirement_id=parent_requirement_id,
         storage_bindings=freeze_delegation_storage(config, (caller_name, agent_name)),
         agent_mode=agent_mode,
+        persona=previous.persona if previous is not None else persona,
     )

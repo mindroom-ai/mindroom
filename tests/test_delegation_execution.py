@@ -35,7 +35,7 @@ from mindroom.delegation.execution import (
     drive_delegation_stream,
     drive_delegations,
 )
-from mindroom.delegation.lifecycle import note_child_run_id
+from mindroom.delegation.lifecycle import authorize_delegation, note_child_run_id
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import _cancel_delegations, cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
@@ -966,3 +966,70 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
         assert executed == []
     finally:
         storage.close()
+
+
+def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
+    """A workflow persona child needs the caller's dynamic_workflow tool, not a self entry in delegate_to."""
+    paths = _runtime_paths(tmp_path)
+    with_workflow = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"])},
+        defaults=DefaultsConfig(tools=[]),
+    )
+    without_workflow = Config(
+        agents={"leader": AgentConfig(display_name="Leader")},
+        defaults=DefaultsConfig(tools=[]),
+    )
+    override = Config(agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"])})
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="leader",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="parent-session",
+    )
+    options = {"runtime_paths": paths, "execution_identity": identity, "depth": 0}
+
+    with tool_runtime_context(_delegate_runtime_context(with_workflow, paths, execution_identity=identity)):
+        granted = authorize_delegation(
+            "leader",
+            "leader",
+            "task",
+            config=with_workflow,
+            grant="dynamic_workflow",
+            **options,
+        )
+        overridden = authorize_delegation(
+            "leader",
+            "leader",
+            "task",
+            config=with_workflow,
+            grant="dynamic_workflow",
+            approval_config=override,
+            **options,
+        )
+        other_agent = authorize_delegation(
+            "leader",
+            "child",
+            "task",
+            config=with_workflow,
+            grant="dynamic_workflow",
+            **options,
+        )
+        delegate_rule = authorize_delegation("leader", "leader", "task", config=with_workflow, **options)
+    with tool_runtime_context(_delegate_runtime_context(without_workflow, paths, execution_identity=identity)):
+        revoked = authorize_delegation(
+            "leader",
+            "leader",
+            "task",
+            config=without_workflow,
+            grant="dynamic_workflow",
+            **options,
+        )
+
+    assert isinstance(granted, Config)
+    assert overridden is override
+    assert isinstance(other_agent, str)
+    assert isinstance(delegate_rule, str)
+    assert isinstance(revoked, str)

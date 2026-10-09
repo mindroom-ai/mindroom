@@ -129,6 +129,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 | S24 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained subagent without `agent_mode` as standard, so delegations saved before minimal subagents continue unchanged. |
 | S25 | Tiny retained default | [`scheduling.py`][scheduling] reads a scheduled workflow without `pre_approved_call` as an ordinary task, since no task saved before scheduled tool calls carried a call approval. |
+| S26 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained subagent without `persona` as a configured-agent child, so delegations saved before authored subagents continue with their configured prompt. |
 
 ## Configuration and credentials
 

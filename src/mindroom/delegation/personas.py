@@ -7,24 +7,23 @@ than the caller can.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
+from mindroom.delegation.state import SubagentPersona
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.skills import SkillMarkdownError, parse_skill_markdown, workspace_entry_names
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from agno.tools.function import Function
 
     from mindroom.agent_modes import AgentMode
-
-type PersonaSourceKind = Literal["inline", "profile", "workflow"]
+    from mindroom.delegation.state import PersonaSourceKind
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
 _PROFILE_DIRNAME = "subagents"
@@ -36,60 +35,11 @@ _MAX_LISTING_CHARS = 2000
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _PROFILE_KEYS = frozenset({"description", "tools", "model", "mode"})
 _MODES: tuple[AgentMode, ...] = ("standard", "minimal")
-_SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
 _NAME_RULE = "profile names use lowercase letters, digits, '-', and '_', at most 64 characters"
 
 
 class PersonaError(ValueError):
     """A persona or profile that cannot be used; the message is user-facing."""
-
-
-@dataclass(frozen=True)
-class SubagentPersona:
-    """The authored presentation of one child: its whole system prompt and optional tool subset."""
-
-    source_kind: PersonaSourceKind
-    source_name: str
-    system_prompt: str
-    tools: tuple[str, ...] | None = None
-
-    @property
-    def prompt_sha256(self) -> str:
-        """Digest of the exact prompt bytes, for audit records."""
-        return hashlib.sha256(self.system_prompt.encode()).hexdigest()
-
-    def to_dict(self) -> dict[str, object]:
-        """Return a JSON-compatible snapshot."""
-        return {
-            "source_kind": self.source_kind,
-            "source_name": self.source_name,
-            "system_prompt": self.system_prompt,
-            "tools": None if self.tools is None else list(self.tools),
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, object]) -> SubagentPersona:
-        """Read a snapshot written by ``to_dict``."""
-        source_kind, source_name, system_prompt, tools = (
-            data["source_kind"],
-            data["source_name"],
-            data["system_prompt"],
-            data["tools"],
-        )
-        if (
-            source_kind not in _SOURCE_KINDS
-            or not isinstance(source_name, str)
-            or not isinstance(system_prompt, str)
-            or not (tools is None or (isinstance(tools, list) and all(isinstance(tool, str) for tool in tools)))
-        ):
-            msg = "Invalid subagent persona snapshot"
-            raise TypeError(msg)
-        return cls(
-            source_kind=cast("PersonaSourceKind", source_kind),
-            source_name=source_name,
-            system_prompt=system_prompt,
-            tools=None if tools is None else tuple(cast("list[str]", tools)),
-        )
 
 
 @dataclass(frozen=True)

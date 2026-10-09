@@ -2,16 +2,72 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
+
+type PersonaSourceKind = Literal["inline", "profile", "workflow"]
+_SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
+
+
+@dataclass(frozen=True)
+class SubagentPersona:
+    """The authored presentation of one child: its whole system prompt and optional tool subset."""
+
+    source_kind: PersonaSourceKind
+    source_name: str
+    system_prompt: str
+    tools: tuple[str, ...] | None = None
+
+    @property
+    def prompt_sha256(self) -> str:
+        """Digest of the exact prompt bytes, for audit records."""
+        return hashlib.sha256(self.system_prompt.encode()).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-compatible snapshot."""
+        return {
+            "source_kind": self.source_kind,
+            "source_name": self.source_name,
+            "system_prompt": self.system_prompt,
+            "tools": None if self.tools is None else list(self.tools),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> SubagentPersona:
+        """Read a snapshot written by ``to_dict``."""
+        source_kind, source_name, system_prompt, tools = (
+            data["source_kind"],
+            data["source_name"],
+            data["system_prompt"],
+            data["tools"],
+        )
+        if (
+            source_kind not in _SOURCE_KINDS
+            or not isinstance(source_name, str)
+            or not isinstance(system_prompt, str)
+            or not (
+                tools is None or (isinstance(tools, (list, tuple)) and all(isinstance(tool, str) for tool in tools))
+            )
+        ):
+            msg = "Invalid subagent persona snapshot"
+            raise TypeError(msg)
+        return cls(
+            source_kind=cast("PersonaSourceKind", source_kind),
+            source_name=source_name,
+            system_prompt=system_prompt,
+            tools=None if tools is None else tuple(cast("list[str] | tuple[str, ...]", tools)),
+        )
 
 
 @dataclass
@@ -41,6 +97,19 @@ class DelegationChild:
     # Handling: The dataclass default reads an absent mode as standard, so retained children and follow-ups keep their behavior.
     # Coverage: tests/test_delegation_minimal_mode.py::test_child_snapshot_without_mode_continues_in_standard_mode.
     agent_mode: AgentMode = "standard"
+    # LEGACY_COMPAT: Delegated children persisted without a persona.
+    # Legacy format: Parent delegation state and subagent session records omitted persona; every child ran its configured prompt.
+    # Last legacy release: v2026.10.216; replacement: the next release persists each child's authored persona or null.
+    # Handling: The dataclass default and from_dict read an absent persona as a configured-agent child, so retained children keep their behavior.
+    # Coverage: tests/test_delegation_sessions.py::test_child_snapshot_without_persona_reads_as_configured_child.
+    persona: SubagentPersona | None = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:
+        """Read a snapshot written by ``dataclasses.asdict``."""
+        fields: dict[str, Any] = dict(data)
+        persona = fields.pop("persona", None)
+        return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
 
 
 @dataclass
@@ -93,13 +162,13 @@ class DelegationState:
             raise TypeError(msg)
         snapshot = cast("dict[str, Any]", stored)
         return cls(
-            children=[DelegationChild(**child) for child in snapshot.get("children", [])],
+            children=[DelegationChild.from_dict(child) for child in snapshot.get("children", [])],
             gates=dict(snapshot.get("gates", {})),
             hooks={key: DelegationHookState(**value) for key, value in snapshot.get("hooks", {}).items()},
             pending_tools=list(snapshot.get("pending_tools", [])),
             pending_tool_sources={
                 call_id: DelegationPendingTool(
-                    child=DelegationChild(**source["child"]),
+                    child=DelegationChild.from_dict(source["child"]),
                     tool_call_id=source["tool_call_id"],
                     toolkit_name=source.get("toolkit_name"),
                 )

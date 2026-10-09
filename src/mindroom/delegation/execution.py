@@ -294,6 +294,7 @@ async def _execute_child(
             include_interactive_questions=False,
             tool_function_filter=context.tool_function_filter,
             required_tool_names=required_tool_names,
+            persona=child.persona,
         )
     except BaseException:
         storage.close()

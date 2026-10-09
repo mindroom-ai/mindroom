@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -20,7 +21,7 @@ from mindroom.delegation.sessions import (
     subagent_liveness,
     update_subagent_turn,
 )
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.test_delegate_tools import _runtime_paths
@@ -28,6 +29,8 @@ from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @pytest.mark.asyncio
@@ -167,3 +170,70 @@ async def test_liveness_distinguishes_active_from_abandoned_turn(tmp_path: Path)
     del config.agents["leader"]
     with pytest.raises(SubagentSessionError, match="no longer configured"):
         await load_subagent(subagent_id, **options)
+
+
+def _persona_child(config: Config, owner: ToolExecutionIdentity, persona: SubagentPersona | None) -> DelegationChild:
+    subagent_id = uuid4().hex
+    session_id = f"delegate:leader:leader:{subagent_id}"
+    return DelegationChild(
+        delegation_id=subagent_id,
+        subagent_id=subagent_id,
+        parent_tool_call_id="call",
+        caller_agent_name="leader",
+        child_agent_name="leader",
+        task="Review the plan",
+        session_id=session_id,
+        run_id=uuid4().hex,
+        model_name="default",
+        depth=1,
+        execution_identity=serialize_tool_execution_identity(replace(owner, session_id=session_id)),
+        storage_bindings=freeze_delegation_storage(config, ("leader",)),
+        persona=persona,
+    )
+
+
+@pytest.mark.asyncio
+async def test_persona_round_trips_through_session_record(tmp_path: Path) -> None:
+    """A retained handle rebuilds the exact authored persona after a reload."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    persona = SubagentPersona(
+        source_kind="profile",
+        source_name="critic",
+        system_prompt="You are a critic {x}.",
+        tools=("file",),
+    )
+    child = _persona_child(config, owner, persona)
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    child.status = "completed"
+    await update_subagent_turn(child, paths)
+
+    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+
+    assert restored.persona == persona
+    assert restored == child
+    assert DelegationState.from_metadata(
+        {DELEGATION_STATE_KEY: DelegationState(children=[child]).to_dict()},
+    ).children == [
+        child,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_child_snapshot_without_persona_reads_as_configured_child(tmp_path: Path) -> None:
+    """A handle written before personas existed continues as a configured-agent child."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    child = _persona_child(config, owner, None)
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
+    payload = json.loads(record.read_text())
+    del payload["child"]["persona"]
+    record.write_text(json.dumps(payload))
+
+    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+
+    assert restored.persona is None
+    assert restored.child_agent_name == "leader"
