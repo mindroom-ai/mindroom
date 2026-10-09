@@ -70,12 +70,14 @@ def _probability_client(
     *,
     question_id: str,
 ) -> JudgmentClient | None:
+    credentials_service = None
     if isinstance(settings, OpenAIDecisionsJudgmentConfig):
+        credentials_service = settings.credentials_service
         wire = OPENAI_DECISIONS
         key = (
             get_api_key_for_provider("openai", runtime_paths)
-            if settings.credentials_service is None
-            else get_api_key_for_service(settings.credentials_service, runtime_paths)
+            if credentials_service is None
+            else get_api_key_for_service(credentials_service, runtime_paths)
         )
     else:
         wire, key = SYSTEM_ONE, runtime_paths.env_value("TYPESAFE_API_KEY")
@@ -86,7 +88,7 @@ def _probability_client(
             question=question_id,
             backend=settings.provider,
             failure="missing_credential",
-            credentials_service=getattr(settings, "credentials_service", None),
+            credentials_service=credentials_service,
         )
         return None
     return JudgmentClient(
