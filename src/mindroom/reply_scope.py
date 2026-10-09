@@ -434,14 +434,12 @@ class ReplyRuntime:
     ) -> SpanHandle | ClaimRefused:
         """Claim the reply one span answers, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
-        request = replace(
-            await self._new_request(
-                delivery_id=delivery_id,
-                sources=sources,
-                room_id=room_id,
-                thread_id=thread_id,
-                empty=empty,
-            ),
+        request = await self._new_request(
+            delivery_id=delivery_id,
+            sources=sources,
+            room_id=room_id,
+            thread_id=thread_id,
+            empty=empty,
             driving_edit_id=driving_edit_id,
             interactive_span_id=interactive_span_id,
         )
@@ -488,6 +486,8 @@ class ReplyRuntime:
         room_id: str,
         thread_id: str | None,
         empty: Presentation,
+        driving_edit_id: str | None = None,
+        interactive_span_id: str | None = None,
     ) -> rl.ClaimRequest:
         return rl.ClaimRequest(
             span_id=_new_id(),
@@ -501,6 +501,8 @@ class ReplyRuntime:
             thread_id=thread_id,
             membership_epoch=await self.store.membership_epoch(room_id),
             empty_presentation=encode_presentation(empty),
+            driving_edit_id=driving_edit_id,
+            interactive_span_id=interactive_span_id,
         )
 
     async def claim_approval_resume(
