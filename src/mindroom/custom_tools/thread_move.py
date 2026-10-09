@@ -60,6 +60,9 @@ _COPIED_CONTENT_KEYS = (
     "file",
     "info",
     "filename",
+    "geo_uri",
+    "org.matrix.msc3245.voice",
+    "org.matrix.msc1767.audio",
     TOOL_TRACE_CONTENT_KEY,
 )
 _IN_PROGRESS_STREAM_STATUSES = frozenset(
@@ -87,7 +90,8 @@ def _plan_thread_copy(
 
     An entity that can post in the target room re-posts its own messages, so
     each agent still sees its earlier replies as its own turns. Everyone else
-    is relayed by the router with visible attribution.
+    is relayed by the router, and every copy that speaks for someone other
+    than its poster names them visibly.
     """
     plan: list[_PlannedCopy] = []
     for message in messages:
@@ -97,22 +101,21 @@ def _plan_thread_copy(
         # Copies are history, never requests: no mention in them may wake an agent.
         content[SKIP_MENTIONS_KEY] = True
         content["m.mentions"] = {}
-        poster = entity_name_for_sender(message.sender)
+        entity = entity_name_for_sender(message.sender)
         author = message.sender
         relayed_author = message.content.get(ORIGINAL_SENDER_KEY)
-        if poster is not None and isinstance(relayed_author, str) and relayed_author:
-            # A managed sender's own relay, such as the router's voice transcript, names who spoke.
+        if entity is not None and isinstance(relayed_author, str) and relayed_author:
+            # A managed sender's own relay, such as the router's voice transcript, speaks for who said it.
             author = relayed_author
-            content[ORIGINAL_SENDER_KEY] = author
-        if poster is None or poster not in target_posters:
-            poster = ROUTER_AGENT_NAME
+        poster = entity if entity is not None and entity in target_posters else ROUTER_AGENT_NAME
+        if poster != entity or author != message.sender:
             _attribute_relay(content, author, display_names.get(author, author))
         plan.append(_PlannedCopy(poster=poster, content=content))
     return plan
 
 
 def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
-    """Name the original author on a router-posted copy."""
+    """Name the original author on a copy posted by someone else."""
     # No source kind: the relay is attributed in prompts but never becomes a human turn.
     content[ORIGINAL_SENDER_KEY] = sender
     body = str(content.get("body", ""))

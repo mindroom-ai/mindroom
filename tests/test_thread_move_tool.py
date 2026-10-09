@@ -97,7 +97,7 @@ def test_plan_keeps_trusted_relay_attribution_of_managed_senders() -> None:
 
     assert own.poster == ROUTER_AGENT_NAME
     assert own.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert own.content["body"] == "🎤 fix the parser"
+    assert own.content["body"] == "Dominic: 🎤 fix the parser"
     assert relayed.poster == ROUTER_AGENT_NAME
     assert relayed.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
     assert relayed.content["body"] == "Dominic: relayed"
@@ -169,6 +169,26 @@ def test_plan_copies_only_allowlisted_keys() -> None:
         assert copy.content["m.mentions"] == {}
     assert set(own.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions"}
     assert set(relayed.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions", ORIGINAL_SENDER_KEY}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"msgtype": "m.location", "body": "Office", "geo_uri": "geo:52.37,4.89"},
+        {
+            "msgtype": "m.audio",
+            "body": "voice.ogg",
+            "url": "mxc://example.org/voice",
+            "org.matrix.msc3245.voice": {},
+            "org.matrix.msc1767.audio": {"duration": 2000, "waveform": [0, 512, 1024]},
+        },
+    ],
+)
+def test_plan_keeps_fields_clients_need_to_render_locations_and_voice_notes(content: dict[str, Any]) -> None:
+    """A moved location still shows its map and a moved voice note still plays as a voice note."""
+    [copy] = _plan(_message(CODE_ID, content))
+
+    assert {key: copy.content[key] for key in content} == content
 
 
 def test_plan_prefixes_relayed_text() -> None:
