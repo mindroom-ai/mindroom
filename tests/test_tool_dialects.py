@@ -289,3 +289,23 @@ def test_wire_definition_carries_notes_present_on_the_canonical_function() -> No
 
     assert isinstance(presented, dict)
     assert presented["function"]["description"] == "Run a command.\n\nNote A."
+
+
+def test_wire_name_equal_to_canonical_name_is_not_a_collision() -> None:
+    """A dialect may keep a function's own name, as Codex does for apply_patch, and still present it in wire form."""
+    patch = replace(
+        _TOY.functions[0],
+        key=ToolKey("coding", "apply_patch"),
+        wire_name="apply_patch",
+        custom_format={"type": "grammar"},
+    )
+    dialect = ToolDialect(name="codex", functions=(patch,))
+
+    [presented] = wire_tools(dialect, [_function("apply_patch", "coding")], custom_tools=True)
+
+    assert presented == {
+        "type": "custom",
+        "name": "apply_patch",
+        "description": "Run a command.",
+        "format": {"type": "grammar"},
+    }

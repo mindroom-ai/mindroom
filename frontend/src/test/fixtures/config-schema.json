@@ -720,7 +720,7 @@
       "description": "One ordered tool-approval rule.",
       "properties": {
         "match": {
-          "description": "Case-sensitive glob over exposed tool function names; the first matching rule wins",
+          "description": "Case-sensitive glob over MindRoom tool function names; the first matching rule wins",
           "title": "Match",
           "type": "string"
         },

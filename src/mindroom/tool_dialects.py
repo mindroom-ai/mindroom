@@ -18,6 +18,7 @@ from agno.tools.function import Function
 from mindroom.logging_config import get_logger
 from mindroom.model_loading import canonical_provider
 from mindroom.tool_dialect_claude import CLAUDE_DIALECT
+from mindroom.tool_dialect_codex import CODEX_DIALECT
 from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError, DialectName, ToolDialect, WireFunction
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -36,7 +37,13 @@ _CODEX_PROVIDERS = frozenset({"codex", "openai_codex"})
 _OPENAI_MODEL_PROVIDERS = frozenset({"openai", "azure"})
 _OPENAI_MODEL_ID = re.compile(r"gpt-|o\d|codex")
 
-_DIALECTS: dict[DialectName, ToolDialect] = {"mindroom": ToolDialect(name="mindroom"), "claude": CLAUDE_DIALECT}
+# apply_patch exists for Codex models; every other dialect edits with edit_file and write_file.
+_MINDROOM_DIALECT = ToolDialect(name="mindroom", hidden=frozenset({ToolKey("coding", "apply_patch")}))
+_DIALECTS: dict[DialectName, ToolDialect] = {
+    "mindroom": _MINDROOM_DIALECT,
+    "claude": CLAUDE_DIALECT,
+    "codex": CODEX_DIALECT,
+}
 
 
 @dataclass(frozen=True)
@@ -66,8 +73,7 @@ def _resolve_tool_dialect_name(model_config: ModelConfig) -> DialectName:
 
 def resolve_tool_dialect(model_config: ModelConfig | None) -> ToolDialect:
     """Return the dialect object for *model_config*; an unknown model keeps MindRoom's own tools."""
-    name = _resolve_tool_dialect_name(model_config) if model_config is not None else "mindroom"
-    return _DIALECTS.get(name, _DIALECTS["mindroom"])
+    return _DIALECTS[_resolve_tool_dialect_name(model_config) if model_config is not None else "mindroom"]
 
 
 def _tool_dict_name(tool: dict[str, Any]) -> str:
@@ -132,7 +138,7 @@ def wire_tools(
         if ToolKey(tool.owning_toolkit or "", tool.name) in dialect.hidden:
             continue
         wire_function = _wire_function_for(dialect, tool)
-        if wire_function is not None and wire_function.wire_name in taken:
+        if wire_function is not None and wire_function.wire_name != tool.name and wire_function.wire_name in taken:
             logger.warning(
                 "Tool dialect name collides with another tool; keeping the canonical name",
                 dialect=dialect.name,

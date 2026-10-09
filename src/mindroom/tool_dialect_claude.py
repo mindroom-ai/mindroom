@@ -247,4 +247,8 @@ _WRITE = WireFunction(
     to_wire=lambda canonical: {"file_path": canonical.get("path"), "content": canonical.get("content")},
 )
 
-CLAUDE_DIALECT = ToolDialect(name="claude", functions=(_BASH, _BASH_OUTPUT, _KILL_SHELL, _READ, _EDIT, _WRITE))
+CLAUDE_DIALECT = ToolDialect(
+    name="claude",
+    functions=(_BASH, _BASH_OUTPUT, _KILL_SHELL, _READ, _EDIT, _WRITE),
+    hidden=frozenset({ToolKey("coding", "apply_patch")}),
+)

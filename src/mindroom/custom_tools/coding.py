@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.custom_tools.apply_patch import AddFile, DeleteFile, PatchError, PatchHunk, parse_patch, updated_contents
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
 from mindroom.text_templates import INT_FIELD, template_pattern
@@ -34,6 +35,7 @@ from mindroom.tools.path_safety import (
     format_path_for_output,
     is_within_base_dir,
     read_resolved_file,
+    remove_resolved_path,
     resolve_base_dir_path,
     resolve_tool_base_dir,
     split_search_pattern,
@@ -621,6 +623,7 @@ class CodingTools(Toolkit):
                 self.read_file,
                 self.edit_file,
                 self.write_file,
+                self.apply_patch,
                 self.grep,
                 self.find_files,
                 self.ls,
@@ -722,6 +725,96 @@ class CodingTools(Toolkit):
         byte_count = len(content.encode("utf-8"))
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return f"Wrote {byte_count} bytes ({lines} lines) to {path}"
+
+    def apply_patch(self, input: str) -> str:  # noqa: A002 - Codex names the patch argument input
+        """Apply a patch in the apply_patch format, adding, updating, moving, and deleting files.
+
+        Every hunk is checked against the files before anything is written, so a patch that does not
+        apply changes nothing.
+
+        Args:
+            input: The whole patch, from ``*** Begin Patch`` to ``*** End Patch``.
+
+        Returns:
+            The added, modified, and deleted files, or an error message.
+
+        """
+        try:
+            hunks = parse_patch(input)
+        except PatchError as e:
+            return str(e)
+        if not hunks:
+            return "No files were modified."
+        try:
+            writes, summary = self._plan_patch(hunks)
+        except PatchError as e:
+            return f"apply_patch verification failed: {e}"
+        for resolved, payload in writes:
+            try:
+                if payload is None:
+                    remove_resolved_path(self.base_dir, resolved)
+                else:
+                    write_resolved_file(self.base_dir, resolved, payload)
+            except OSError as e:
+                return f"Error applying patch to {format_path_for_output(resolved, self.base_dir)}: {e}"
+        return "\n".join(["Success. Updated the following files:", *summary])
+
+    def _plan_patch(self, hunks: list[PatchHunk]) -> tuple[list[tuple[Path, bytes | None]], list[str]]:
+        """Return the ordered writes (None deletes) and summary lines for *hunks*, checking every hunk first."""
+        overlay: dict[Path, str | None] = {}
+        writes: list[tuple[Path, bytes | None]] = []
+        added: list[str] = []
+        modified: list[str] = []
+        deleted: list[str] = []
+        for hunk in hunks:
+            resolved = self._patch_path(hunk.path)
+            if isinstance(hunk, AddFile):
+                overlay[resolved] = hunk.contents
+                writes.append((resolved, hunk.contents.encode("utf-8")))
+                added.append(f"A {hunk.path}")
+            elif isinstance(hunk, DeleteFile):
+                self._patch_source(resolved, hunk.path, overlay, action="delete")
+                overlay[resolved] = None
+                writes.append((resolved, None))
+                deleted.append(f"D {hunk.path}")
+            else:
+                original = self._patch_source(resolved, hunk.path, overlay, action="update")
+                new_contents = updated_contents(original, hunk.path, hunk.chunks)
+                target = resolved if hunk.move_to is None else self._patch_path(hunk.move_to)
+                overlay[target] = new_contents
+                writes.append((target, new_contents.encode("utf-8")))
+                if target != resolved:
+                    overlay[resolved] = None
+                    writes.append((resolved, None))
+                modified.append(f"M {hunk.move_to or hunk.path}")
+        return writes, [*added, *modified, *deleted]
+
+    def _patch_path(self, path: str) -> Path:
+        try:
+            resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
+        except ValueError as e:
+            raise PatchError(str(e)) from e
+        if is_git_metadata_path(resolved):
+            raise PatchError(blocked_git_metadata_message("applying patch", path))
+        return resolved
+
+    def _patch_source(self, resolved: Path, path: str, overlay: dict[Path, str | None], *, action: str) -> str:
+        """Return the current text of a file a hunk changes, as earlier hunks of the same patch left it."""
+        if resolved in overlay:
+            contents = overlay[resolved]
+            if contents is None:
+                msg = f"Failed to read file to {action} {path}: No such file or directory"
+                raise PatchError(msg)
+            return contents
+        if not resolved.is_file():
+            reason = "Is a directory" if resolved.is_dir() else "No such file or directory"
+            msg = f"Failed to read file to {action} {path}: {reason}"
+            raise PatchError(msg)
+        try:
+            return read_resolved_file(self.base_dir, resolved).decode("utf-8")
+        except (OSError, ValueError) as e:
+            msg = f"Failed to read file to {action} {path}: {e}"
+            raise PatchError(msg) from e
 
     def grep(
         self,

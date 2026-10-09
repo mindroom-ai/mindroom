@@ -44,7 +44,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=[],
-    function_names=("edit_file", "find_files", "grep", "ls", "read_file", "write_file"),
+    function_names=("apply_patch", "edit_file", "find_files", "grep", "ls", "read_file", "write_file"),
 )
 def coding_tools() -> type[CodingTools]:
     """Return ergonomic coding tools for LLM agents."""

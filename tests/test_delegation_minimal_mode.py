@@ -437,4 +437,5 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
         assert "Answer 1" in await toolkit.continue_subagent(payload["child"]["subagent_id"], "More")
 
     assert "bash" not in models[1].seen_tools[0]
-    assert "run_shell_command" in models[1].seen_tools[0]
+    # The child keeps the native shell, presented in the Codex dialect of its GPT model.
+    assert "exec_command" in models[1].seen_tools[0]

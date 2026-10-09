@@ -25,7 +25,7 @@ from mindroom.shell_output_capture import (
     ShellOutputDestination,
     format_shell_completion,
 )
-from mindroom.text_templates import FLOAT_FIELD, INT_FIELD, template_pattern
+from mindroom.text_templates import FLOAT_FIELD, INT_FIELD, TEXT_FIELD, template_pattern
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
@@ -65,6 +65,23 @@ _FINISHED_TEMPLATE = _FINISHED_HEADER_TEMPLATE + "Output:\n{output}"
 _RUNNING_TEMPLATE = (
     "Status: RUNNING (PID {pid}, elapsed {elapsed}s)\nPartial output ({buffered} lines buffered):\n{output}"
 )
+_FINISHED_WITH_STDERR = template_pattern(
+    _FINISHED_WITH_STDERR_TEMPLATE,
+    code=INT_FIELD,
+    elapsed=FLOAT_FIELD,
+    stderr=r"[\s\S]*?",
+    output=TEXT_FIELD,
+)
+_FINISHED = template_pattern(_FINISHED_TEMPLATE, code=INT_FIELD, elapsed=FLOAT_FIELD, output=TEXT_FIELD)
+_RUNNING = template_pattern(
+    _RUNNING_TEMPLATE,
+    pid=INT_FIELD,
+    elapsed=FLOAT_FIELD,
+    buffered=INT_FIELD,
+    output=TEXT_FIELD,
+)
+_UNKNOWN_HANDLE_TEMPLATE = "Error: Unknown handle '{handle}'"
+_UNKNOWN_HANDLE = template_pattern(_UNKNOWN_HANDLE_TEMPLATE, handle=_HANDLE_FIELD)
 
 
 @dataclass(frozen=True)
@@ -74,6 +91,18 @@ class _BackgroundHandle:
     timeout: float
     pid: int
     handle: str
+
+
+@dataclass(frozen=True)
+class _CheckStatus:
+    """Fields of one ``check_command`` status report."""
+
+    running: bool
+    exit_code: int | None
+    elapsed: float
+    pid: int | None
+    stderr: str | None
+    output: str
 
 
 def _format_background_handle_message(timeout: float, pid: int, handle: str) -> str:
@@ -483,7 +512,7 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     """Poll the status of a backgrounded shell command in *registry*."""
     record = registry.get(handle)
     if record is None or record.namespace != namespace:
-        return f"Error: Unknown handle '{handle}'"
+        return _UNKNOWN_HANDLE_TEMPLATE.format(handle=handle)
 
     elapsed = time.monotonic() - record.started_at
 
@@ -506,6 +535,37 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     )
 
 
+def parse_check_status(text: str) -> _CheckStatus | None:
+    """Return the fields of a ``check_command`` status report, or None for any other text."""
+    if (match := _RUNNING.fullmatch(text)) is not None:
+        return _CheckStatus(
+            running=True,
+            exit_code=None,
+            elapsed=float(match["elapsed"]),
+            pid=int(match["pid"]),
+            stderr=None,
+            output=match["output"],
+        )
+    match = _FINISHED_WITH_STDERR.fullmatch(text) or _FINISHED.fullmatch(text)
+    if match is None:
+        return None
+    groups = match.groupdict()
+    return _CheckStatus(
+        running=False,
+        exit_code=int(groups["code"]),
+        elapsed=float(groups["elapsed"]),
+        pid=None,
+        stderr=groups.get("stderr"),
+        output=groups["output"],
+    )
+
+
+def parse_unknown_handle_error(text: str) -> str | None:
+    """Return the handle of an unknown-handle error, or None for any other text."""
+    match = _UNKNOWN_HANDLE.fullmatch(text)
+    return match["handle"] if match is not None else None
+
+
 async def wait_for_command(
     registry: dict[str, ProcessRecord],
     *,
@@ -525,7 +585,7 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
     """Kill a backgrounded shell command tracked in *registry*."""
     record = registry.get(handle)
     if record is None or record.namespace != namespace:
-        return f"Error: Unknown handle '{handle}'"
+        return _UNKNOWN_HANDLE_TEMPLATE.format(handle=handle)
 
     if record.finished:
         return f"Process already finished (exit code {record.return_code})"

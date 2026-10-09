@@ -17,11 +17,17 @@ from mindroom.shell_execution import (
     SHELL_CALL_REFERENCE_PATTERN,
     ProcessRecord,
     _BackgroundHandle,
+    _CheckStatus,
     _format_background_handle_message,
+    _format_finished_status,
+    _format_running_status,
     _shell_call_reference,
+    check_command,
     kill_all_records,
     kill_command,
     parse_background_handle_message,
+    parse_check_status,
+    parse_unknown_handle_error,
     run_command,
     signal_record,
 )
@@ -292,3 +298,47 @@ def test_background_handle_message_round_trips() -> None:
         ("kill_shell_command", "shell:0123abcd"),
     ]
     assert _shell_call_reference("check_shell_command", "shell:0123abcd") == "check_shell_command('shell:0123abcd')"
+
+
+def test_parse_check_status_matches_both_templates() -> None:
+    """Both check_command templates parse into one status shape."""
+    failed = _format_finished_status(return_code=2, elapsed=1.5, stderr="boom", output="out\nmore")
+    succeeded = _format_finished_status(return_code=0, elapsed=0.5, stderr="ignored", output="ok")
+    running = _format_running_status(pid=77, elapsed=3.0, buffered_lines=4, partial="a\nb")
+
+    assert parse_check_status(failed) == _CheckStatus(
+        running=False,
+        exit_code=2,
+        elapsed=1.5,
+        pid=None,
+        stderr="boom",
+        output="out\nmore",
+    )
+    assert parse_check_status(succeeded) == _CheckStatus(
+        running=False,
+        exit_code=0,
+        elapsed=0.5,
+        pid=None,
+        stderr=None,
+        output="ok",
+    )
+    assert parse_check_status(running) == _CheckStatus(
+        running=True,
+        exit_code=None,
+        elapsed=3.0,
+        pid=77,
+        stderr=None,
+        output="a\nb",
+    )
+
+
+def test_parse_check_status_rejects_plain_output() -> None:
+    """Output that is not a check status is never parsed."""
+    assert parse_check_status("hello") is None
+    assert parse_check_status("Status: FINISHED (exit code x, ran for 1s)\nOutput:\n") is None
+
+
+def test_unknown_handle_error_round_trips() -> None:
+    """The unknown-handle error parses back to its handle."""
+    assert parse_unknown_handle_error(check_command({}, namespace="ns", handle="shell:0123abcd")) == "shell:0123abcd"
+    assert parse_unknown_handle_error("Error: something else") is None

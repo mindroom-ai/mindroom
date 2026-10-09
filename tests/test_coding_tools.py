@@ -1635,11 +1635,11 @@ class TestRegistration:
         cls = coding_tools()
         assert cls is CodingTools
 
-    def test_toolkit_has_six_methods(self) -> None:
-        """Toolkit exposes exactly the 6 expected methods."""
+    def test_toolkit_has_seven_methods(self) -> None:
+        """Toolkit exposes exactly the 7 expected methods."""
         tools = CodingTools()
         func_names = {f.name for f in tools.functions.values()}
-        expected = {"read_file", "edit_file", "write_file", "grep", "find_files", "ls"}
+        expected = {"read_file", "edit_file", "write_file", "apply_patch", "grep", "find_files", "ls"}
         assert expected == func_names
 
 

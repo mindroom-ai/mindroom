@@ -121,6 +121,7 @@ Matrix sync callback
 | `tool_dialects.py` | Per-model-family tool dialects: dialect resolution, wire tool definitions, incoming-call translation, and per-request history rendering |
 | `tool_dialect_types.py` | Tool dialect and wire-function types and argument helpers shared by the dialect tables |
 | `tool_dialect_claude.py` | Claude Code tool names and argument shapes for the canonical shell and coding functions |
+| `tool_dialect_codex.py` | Codex CLI tool names, argument shapes, and the apply_patch grammar for the canonical shell and coding functions |
 | `agno_compat_tool_dialect.py` | Binds one tool dialect to an Agno model's tool formatting, call dispatch, and request messages |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
@@ -217,6 +218,7 @@ Matrix sync callback
 | `api/request_body_limit.py` | Pure ASGI middleware answering 413 for dashboard API request bodies over 16 MiB, except knowledge uploads |
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
+| `custom_tools/apply_patch.py` | Codex apply_patch parsing and file-update computation behind the coding toolkit's `apply_patch` |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `custom_tools/todo_template_render.py` | Full-Jinja rendering of workspace todo templates in a short-lived, memory- and CPU-limited child process |

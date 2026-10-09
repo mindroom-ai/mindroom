@@ -6,9 +6,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        # Patch scenarios pin exact bytes, including padded markers.
+        exclude: ^tests/fixtures/apply_patch_scenarios/
       - id: end-of-file-fixer
         # Next.js uses a metadata image's .alt.txt file verbatim as its alt text, so it must not end in a newline.
-        exclude: ^skills/mindroom-docs/references/|\.alt\.txt$
+        exclude: ^skills/mindroom-docs/references/|\.alt\.txt$|^tests/fixtures/apply_patch_scenarios/
       - id: check-docstring-first
       - id: check-yaml
         exclude: (cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$|cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$)

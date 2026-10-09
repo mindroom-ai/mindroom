@@ -27,11 +27,13 @@ tool_approval:
 | `default` | `auto_approve` or `require_approval` | `auto_approve` | Decision for calls that no rule matches |
 | `timeout_days` | number, greater than 0 and at most 36500 | `7` | How long an approval card stays open before it expires |
 | `rules` | list | `[]` | Ordered rules; the first matching rule wins |
-| `rules[].match` | string | Required | Case-sensitive glob over exposed function names, not toolkit identifiers, so the same function name in another toolkit also matches |
+| `rules[].match` | string | Required | Case-sensitive glob over MindRoom function names, such as `run_shell_command`, even when the model sees the tool under another [name](https://docs.mindroom.chat/tools/execution-and-coding/#tool-names-per-model-family); not toolkit identifiers, so the same function name in another toolkit also matches |
 | `rules[].action` | `auto_approve` or `require_approval` | — | Fixed decision; set exactly one of `action` or `script` |
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
+
+OpenAI models edit files with `apply_patch` instead of `edit_file` and `write_file`, so a rule that gates file edits should also match `apply_patch`.
 
 ## Approving and Denying
 
