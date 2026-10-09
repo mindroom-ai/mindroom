@@ -767,6 +767,7 @@ visibility = [
     "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.cli_approval_waits",
+    "mindroom.custom_tools.dynamic_workflow",
 ]
 
 [[modules]]
@@ -828,6 +829,7 @@ depends_on = [
     "mindroom.credentials",
     "mindroom.custom_tools.computer_announcement",
     "mindroom.custom_tools.delegate",
+    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.custom_tools.memory",
     "mindroom.entity_resolution",
     "mindroom.history.agno_compat_message_builder",
@@ -1294,6 +1296,7 @@ visibility = [
     "mindroom.scheduling",
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
+    "mindroom.custom_tools.dynamic_workflow",
 ]
 
 [[modules]]
@@ -1435,6 +1438,30 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.dynamic_workflow"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.authorization",
+    "mindroom.credentials",
+    "mindroom.custom_tools.dynamic_workflow_context",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.custom_tools.toolkit_functions",
+    "mindroom.delegation.direct",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.personas",
+    "mindroom.delegation.sessions",
+    "mindroom.dynamic_workflows",
+    "mindroom.entity_resolution",
+    "mindroom.helper_usage",
+    "mindroom.response_turn",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_approval",
+    "mindroom.tool_system",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -7157,6 +7184,7 @@ visibility = [
     "mindroom.ai",
     "mindroom.agents",
     "mindroom.custom_tools.delegate",
+    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
