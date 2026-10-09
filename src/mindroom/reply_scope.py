@@ -785,8 +785,8 @@ def terminal_write(
 ) -> ReplyWrite:
     """Return the span's terminal row for one reply state, as finish, stopped, or a delivery failure decides it.
 
-    ``ACTIVE`` is the note a resumed reply shows when its continuation failed
-    before delivering: an edit that keeps the reply's sources pending.
+    ``ACTIVE`` is the note an interruption shows before delivery started: an
+    edit that keeps the reply's sources pending.
     """
     write = rl.TerminalWrite(
         shown=encode_presentation(shown),
@@ -802,8 +802,7 @@ def terminal_write(
             return rl.finish(reply, span, write, now_ns=now_ns)
         if write.state is rl.ReplyState.CANCELLED:
             return rl.stopped(reply, span, write, now_ns=now_ns)
-        phase = "pre_delivery" if write.state is rl.ReplyState.ACTIVE else "delivery"
-        return rl.fail(reply, span, write, phase=phase, now_ns=now_ns)
+        return rl.fail(reply, span, write, now_ns=now_ns)
 
     return ReplyWrite(
         span=handle.span,

@@ -18,6 +18,7 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome, SpanSources
+from mindroom.reply_presentation import decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -29,7 +30,12 @@ from tests.ai_user_id_helpers import (
     _team_orchestrator,
 )
 from tests.bot_helpers import unique_room_send_responses
-from tests.conftest import bind_runtime_paths, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import (
+    _make_room_get_event_response,
+    bind_runtime_paths,
+    patch_response_runner_module,
+    unwrap_extracted_collaborator,
+)
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -361,8 +367,8 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
 
 
 @pytest.mark.asyncio
-async def test_team_pre_delivery_failure_keeps_its_placeholder_for_the_retry_and_reraises(tmp_path: Path) -> None:
-    """A team failure before delivery leaves its placeholder to the retry that answers into it, and re-raises."""
+async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_path: Path) -> None:
+    """A team failure before delivery shows its error on the placeholder, settles the turn, and re-raises."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
@@ -407,6 +413,13 @@ async def test_team_pre_delivery_failure_keeps_its_placeholder_for_the_retry_and
             "finalize_streamed_response",
             AsyncMock(side_effect=fake_finalize),
         )
+        # The error note is a real edit of the placeholder.
+        object.__delattr__(coordinator.deps.delivery_gateway, "edit_text")
+        bot.client.user_id = "@mindroom_ultimate:localhost"
+        bot.client.device_id = "DEVICE"
+        bot.client.room_get_event = AsyncMock(
+            side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id, sender=bot.client.user_id),
+        )
         with (
             patch.object(
                 ResponseRunner,
@@ -421,15 +434,16 @@ async def test_team_pre_delivery_failure_keeps_its_placeholder_for_the_retry_and
                 team_mode="coordinate",
             )
 
-    # The failure came before any delivery: the span releases, the reply keeps
-    # its placeholder for the retry to stream into, and nothing is finalized.
+    # The failure came before any delivery: the placeholder shows the error,
+    # the turn is settled without a retry, and nothing is finalized.
     assert finalize_requests == []
     reply = await coordinator.deps.replies.store.replies.for_sources(("$user_msg",))
     assert reply is not None
-    assert reply.state is ReplyState.ACTIVE
+    assert reply.state is ReplyState.FAILED
     assert reply.event_id == "$thinking"
+    assert "team prep exploded" in render_body(decode_presentation(reply.presentation))[0]
     spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
-    assert spans[-1].outcome is SpanOutcome.RELEASED
+    assert spans[-1].outcome is SpanOutcome.FAILED
 
 
 async def _run_response_function_directly(**kwargs: object) -> str:

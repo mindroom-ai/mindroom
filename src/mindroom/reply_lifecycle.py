@@ -1057,21 +1057,19 @@ def stopped(  # noqa: PLR0911
     return _terminal_row(reply, span, write, SpanOutcome.CANCELLED, now_ns, stop_applied=True)
 
 
-_FailurePhase = Literal["pre_delivery", "delivery"]
-
-
 def fail(  # noqa: C901, PLR0911
     reply: Reply,
     span: Span,
     write: TerminalWrite | None,
     *,
-    phase: _FailurePhase,
     now_ns: int,
 ) -> Transition:
-    """End a span that failed.
+    """End a span that failed or was interrupted, with the note ``write`` renders.
 
-    ``write`` is the error or interruption note for delivery failures, and for
-    a resumed reply's pre-delivery note; it is ``None`` otherwise.
+    A ``FAILED`` write ends the reply with its note. An ``ACTIVE`` write is an
+    interruption before delivery started: the reply shows its note while the
+    sources return for a retry. ``write`` is ``None`` only for a resume span,
+    whose approval's settlement ends the reply.
     """
     if span.ended:
         # A terminal row already decided this span; a later error report is the same outcome.
@@ -1080,36 +1078,36 @@ def fail(  # noqa: C901, PLR0911
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
-    if reply.unapplied_stop and span.kind is not SpanKind.APPROVAL_RESUME:
-        if write is not None and write.state is not ReplyState.CANCELLED:
+    if span.kind is SpanKind.APPROVAL_RESUME:
+        return _end_span_only(reply, span, SpanOutcome.FAILED, now_ns)
+    if write is None:
+        return _unmodeled(reply, span, reason="failure_without_note", now_ns=now_ns)
+    if reply.unapplied_stop:
+        if write.state is not ReplyState.CANCELLED:
             # As in ``finish``: the span learned the Stop's revision from one
             # of its own writes before the Stop reached it, so the payload
             # renders again, cancelled.
             return _unchanged(Outcome.RECOMPUTE, reply)
         return stopped(reply, span, write, now_ns=now_ns)
-    if span.kind is SpanKind.APPROVAL_RESUME:
-        return _end_span_only(reply, span, SpanOutcome.FAILED, now_ns)
-    if phase == "delivery" and (kept := _kept_answer(reply, span)) is not None:
-        return _restored(reply, span, kept, now_ns, *_settle_sources(reply, span))
-    if phase == "pre_delivery":
+    kept = _kept_answer(reply, span)
+    if write.state is ReplyState.ACTIVE:
         # The sources return for a retry, which streams into the kept
         # placeholder; a regeneration's retry runs it again with its rollback,
         # and whatever drops the retry instead puts the earlier answer back.
         updated = _touch(_clear_current(reply, span.span_id), now_ns)
         ended = _end(span, SpanOutcome.RELEASED)
-        if write is None or _kept_answer(reply, span) is not None:
+        if kept is not None:
             # A regeneration that wrote nothing leaves the answer it was replacing as the room shows it.
             return Transition(outcome=Outcome.APPLIED, reply=updated, spans=(ended,))
         recompute = _check_revision(reply, write.prepared_revision)
         if recompute is not None:
             return recompute
-        # A resumed reply shows its interruption below the recovered content
-        # without settling its sources.
+        # The interruption shows below what the reply showed without settling its sources.
         updated = _bump(updated, now_ns, presentation=write.shown)
         updated, row = _row(updated, span, WriteStage.EDIT, shown=write.shown)
         return Transition(outcome=Outcome.APPLIED, reply=updated, spans=(ended,), row=row)
-    if write is None:
-        return _unmodeled(reply, span, reason="delivery_failure_without_note", now_ns=now_ns)
+    if kept is not None:
+        return _restored(reply, span, kept, now_ns, *_settle_sources(reply, span))
     recompute = _check_revision(reply, write.prepared_revision)
     if recompute is not None:
         return recompute

@@ -491,7 +491,6 @@ async def test_edit_row_waits_for_the_create_and_targets_its_event(journal_store
                 reply,
                 span,
                 rl.TerminalWrite(shown="note", prepared_revision=reply.revision, state=ReplyState.ACTIVE),
-                phase="pre_delivery",
                 now_ns=70,
             ),
             room_id=ROOM,

@@ -610,20 +610,17 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self._span_exit(span, transition)
 
     @precondition(lambda self: self._live() is not None)
-    @rule(phase=st.sampled_from(["pre_delivery", "delivery"]), note=st.booleans())
-    def fail(self, phase: rl._FailurePhase, note: bool) -> None:
-        """Fail."""
+    @rule(interrupted=st.booleans())
+    def fail(self, interrupted: bool) -> None:
+        """Fail, or be interrupted before delivery started, which shows its note while the sources retry."""
         span = self._live()
         reply = self.model.reply
         assert span is not None
         assert reply is not None
         if reply.state is ReplyState.PAUSED:
             return
-        write: TerminalWrite | None = None
-        if phase == "delivery" or note or reply.unapplied_stop:
-            requested = ReplyState.FAILED if phase == "delivery" else ReplyState.ACTIVE
-            write = self._terminal_write(requested)
-        self._span_exit(span, rl.fail(reply, span, write, phase=phase, now_ns=self._now()))
+        write = self._terminal_write(ReplyState.ACTIVE if interrupted else ReplyState.FAILED)
+        self._span_exit(span, rl.fail(reply, span, write, now_ns=self._now()))
 
     @precondition(lambda self: self._live() is not None)
     @rule(reason=st.sampled_from(["suppressed", "hook_failed"]))

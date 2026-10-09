@@ -1362,7 +1362,7 @@ class DeliveryGateway:
                 state, note = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)
             shown = _with_note(_shown_before(reply, handle), note)
             write = terminal_write(handle, shown, state=state)
-            # A resumed reply's note keeps its sources pending, yet shows as a failure.
+            # An interruption's note keeps its sources pending, yet shows as a failure.
             rendered = render(shown, state=ReplyState.FAILED if state is ReplyState.ACTIVE else state)
             try:
                 delivered = await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
@@ -2562,7 +2562,7 @@ class DeliveryGateway:
         """End a resumed reply's continuation that stopped before streaming anything below it."""
         stream_outcome = request.stream_transport_outcome
         failure_reason = stream_outcome.failure_reason or "interrupted"
-        # The note shows below the recovered content, and the sources stay for a retry unless a Stop ended the reply.
+        # An interruption's note shows below the recovered content while the sources retry; a failure or a Stop ends the reply.
         outcome = await self.end_interrupted_span(
             handle,
             request.target,

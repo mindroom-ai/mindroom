@@ -31,8 +31,6 @@ from mindroom.reply_presentation import NoteKind, note_segment
 from mindroom.reply_scope import interrupted_end
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.cancellation import CancelSource
 
 GEN = "gen-2"
@@ -501,8 +499,8 @@ def test_failure_rendered_at_a_stops_revision_recomputes() -> None:
     stopped = rl.stop(reply, span, StopFacts(receipt_order=9, span_live=True), now_ns=NOW)
     assert stopped.reply is not None
     failed = _write(stopped.reply, ReplyState.FAILED)
-    assert rl.fail(stopped.reply, span, failed, phase="delivery", now_ns=NOW).outcome is Outcome.RECOMPUTE
-    cancelled = rl.fail(stopped.reply, span, _write(stopped.reply, ReplyState.CANCELLED), phase="delivery", now_ns=NOW)
+    assert rl.fail(stopped.reply, span, failed, now_ns=NOW).outcome is Outcome.RECOMPUTE
+    cancelled = rl.fail(stopped.reply, span, _write(stopped.reply, ReplyState.CANCELLED), now_ns=NOW)
     assert cancelled.reply is not None
     assert cancelled.reply.state is ReplyState.CANCELLED
     assert not cancelled.reply.unapplied_stop
@@ -740,7 +738,7 @@ def test_an_interrupted_regeneration_that_wrote_nothing_leaves_the_answer_withou
     reply, span = _regenerating()
     note = replace(_write(reply, ReplyState.ACTIVE, shown="interrupted"), prepared_revision=reply.revision)
 
-    transition = rl.fail(reply, span, note, phase="pre_delivery", now_ns=NOW)
+    transition = rl.fail(reply, span, note, now_ns=NOW)
 
     assert transition.row is None
     assert transition.reply is not None
@@ -750,20 +748,10 @@ def test_an_interrupted_regeneration_that_wrote_nothing_leaves_the_answer_withou
     assert transition.effects == ()
 
 
-def test_pre_delivery_failure_releases_the_span_and_keeps_the_placeholder() -> None:
-    """Main retries the sources, and the retry streams into the kept placeholder."""
-    reply, span = _turn()
-    transition = rl.fail(reply, span, None, phase="pre_delivery", now_ns=NOW)
-    assert transition.reply is not None
-    assert transition.reply.state is ReplyState.ACTIVE
-    assert _span_after(transition, span.span_id).outcome is SpanOutcome.RELEASED
-    assert transition.effects == ()
-
-
-def test_pre_delivery_failure_of_a_resumed_reply_writes_its_note_without_settling() -> None:
+def test_an_interruption_before_delivery_writes_its_note_without_settling() -> None:
     """The interruption note is an edit row; the sources stay pending."""
     reply, span = _turn()
-    transition = rl.fail(reply, span, _write(reply, ReplyState.ACTIVE), phase="pre_delivery", now_ns=NOW)
+    transition = rl.fail(reply, span, _write(reply, ReplyState.ACTIVE), now_ns=NOW)
     assert transition.row is not None
     assert transition.row.stage is WriteStage.EDIT
     assert transition.effects == ()
@@ -772,7 +760,7 @@ def test_pre_delivery_failure_of_a_resumed_reply_writes_its_note_without_settlin
 def test_delivery_failure_writes_a_failed_terminal_row() -> None:
     """An error during delivery ends the reply failed with its note as the FINAL."""
     reply, span = _turn()
-    transition = rl.fail(reply, span, _write(reply, ReplyState.FAILED), phase="delivery", now_ns=NOW)
+    transition = rl.fail(reply, span, _write(reply, ReplyState.FAILED), now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
     assert transition.row is not None
@@ -785,7 +773,7 @@ def test_failure_after_the_terminal_row_is_a_duplicate() -> None:
     finished = rl.finish(reply, span, _write(reply, ReplyState.COMPLETED), now_ns=NOW)
     assert finished.reply is not None
     ended = _span_after(finished, span.span_id)
-    again = rl.fail(finished.reply, ended, _write(finished.reply, ReplyState.FAILED), phase="delivery", now_ns=NOW)
+    again = rl.fail(finished.reply, ended, _write(finished.reply, ReplyState.FAILED), now_ns=NOW)
     assert again.outcome is Outcome.DUPLICATE
 
 
@@ -794,28 +782,18 @@ def test_failure_with_an_unapplied_stop_cancels() -> None:
     reply, span = _turn()
     stop = rl.stop(reply, span, StopFacts(receipt_order=2, span_live=True), now_ns=NOW)
     assert stop.reply is not None
-    cancelled = rl.fail(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), phase="delivery", now_ns=NOW)
+    cancelled = rl.fail(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
     assert cancelled.reply is not None
     assert cancelled.reply.state is ReplyState.CANCELLED
     assert cancelled.row is not None
 
 
-@pytest.mark.parametrize(
-    "exit_without_write",
-    [
-        lambda reply, span: rl.fail(reply, span, None, phase="pre_delivery", now_ns=NOW),
-        lambda reply, span: rl.release(reply, span, now_ns=NOW),
-    ],
-    ids=["error_before_delivery", "release"],
-)
-def test_an_exit_that_rendered_nothing_still_honors_a_recorded_stop(
-    exit_without_write: Callable[[Reply, Span], rl.Transition],
-) -> None:
+def test_a_release_still_honors_a_recorded_stop() -> None:
     """A Stop outranks a retry: the reply ends cancelled, its sources settle, and it owes the cancel note."""
     reply, span = _turn()
     stop = rl.stop(reply, span, StopFacts(receipt_order=2, span_live=True), now_ns=NOW)
     assert stop.reply is not None
-    transition = exit_without_write(stop.reply, span)
+    transition = rl.release(stop.reply, span, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.CANCELLED
     assert not transition.reply.unapplied_stop
@@ -1524,11 +1502,11 @@ def test_a_regeneration_a_restart_lost_after_it_wrote_keeps_what_it_showed() -> 
     assert rerun.claimed is not None
     assert rerun.claimed.kind is SpanKind.REGENERATION
     assert rerun.claimed.rollback is None
-    # A provider error before the re-run's first chunk leaves its sources for a retry.
-    failed = rl.fail(rerun.reply, rerun.claimed, None, phase="pre_delivery", now_ns=NOW)
-    assert failed.reply is not None
-    assert failed.reply.state is ReplyState.ACTIVE
-    assert failed.effects == ()
+    # An interruption before the re-run's first chunk shows its note and leaves its sources for a retry.
+    interrupted = rl.fail(rerun.reply, rerun.claimed, _write(rerun.reply, ReplyState.ACTIVE), now_ns=NOW)
+    assert interrupted.reply is not None
+    assert interrupted.reply.state is ReplyState.ACTIVE
+    assert interrupted.effects == ()
     # A Stop ends it cancelled, below what the room shows.
     stop = rl.stop(rerun.reply, rerun.claimed, StopFacts(9, span_live=True), now_ns=NOW)
     assert stop.reply is not None
@@ -2107,15 +2085,15 @@ def test_superseded_span_whose_sources_settle_ends_the_reply() -> None:
     assert orphan.reply.state is ReplyState.FAILED
 
 
-def test_a_regeneration_whose_model_fails_before_it_shows_anything_is_retried() -> None:
-    """An error before delivery returns the edit for a retry, which regenerates with the same rollback."""
+def test_a_regeneration_interrupted_before_it_shows_anything_is_retried() -> None:
+    """An interruption before delivery returns the edit for a retry, which regenerates with the same rollback."""
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
     reply = replace(reply, state=ReplyState.COMPLETED, presentation="answer", event_id="$reply")
     regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
     assert regen.reply is not None
     assert regen.claimed is not None
-    failed = rl.fail(regen.reply, regen.claimed, None, phase="pre_delivery", now_ns=NOW)
+    failed = rl.fail(regen.reply, regen.claimed, _write(regen.reply, ReplyState.ACTIVE), now_ns=NOW)
     assert failed.reply is not None
     assert failed.effects == ()
     released = _span_after(failed, "span-2")

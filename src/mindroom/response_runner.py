@@ -3383,7 +3383,7 @@ class ResponseRunner:
         # The rules leave a resume span's end to its approval, whether a Stop or a failure ended it.
         await self.deps.delivery_gateway.end_reply_span(
             handle,
-            lambda reply, span: rl.fail(reply, span, None, phase="delivery", now_ns=now_ns),
+            lambda reply, span: rl.fail(reply, span, None, now_ns=now_ns),
         )
 
     async def _claim_owned_approval(
