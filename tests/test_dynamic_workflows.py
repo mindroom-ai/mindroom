@@ -2129,8 +2129,9 @@ def test_participant_tools_must_be_pre_approved_or_auto_approved(tmp_path: Path)
         reject(context, ("mixed",), allowed=frozenset())
     with pytest.raises(DynamicWorkflowExecutionError, match="dangerous require approval and cannot suspend"):
         reject(context, ("mixed.dangerous",), allowed=frozenset({"mixed"}))
-    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'scheduler' is not pre-approved"):
+    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'scheduler' always requires approval") as never:
         reject(context, ("scheduler",), allowed=frozenset({"*"}))
+    assert "allowed_tools" not in str(never.value)
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:

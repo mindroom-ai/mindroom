@@ -445,6 +445,7 @@ visibility = [
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
     "mindroom.api.agent_cli",
+    "mindroom.delegation.personas",
     "mindroom.minimal_agent",
     "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
@@ -6978,6 +6979,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.personas"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.delegation.state",

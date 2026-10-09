@@ -641,7 +641,7 @@ def test_minimal_persona_with_tools_must_keep_shell(tmp_path: Path) -> None:
     kept = resolve_persona_request(system_prompt="P", tools=["file", "shell"], **options)
     everything = resolve_persona_request(system_prompt="P", tools=None, **options)
 
-    assert refused == "Cannot delegate: a minimal subagent that lists its tools must include shell."
+    assert refused == "Cannot delegate: a minimal subagent needs shell among its tools."
     assert isinstance(kept, PersonaRequest)
     assert isinstance(everything, PersonaRequest)
 

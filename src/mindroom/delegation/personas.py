@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
+from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.delegation.state import SubagentPersona
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -38,7 +39,6 @@ _MAX_LISTING_CHARS = 2000
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _PROFILE_KEYS = frozenset({"description", "tools", "model", "mode"})
 _MODES: tuple[AgentMode, ...] = ("standard", "minimal")
-_MINIMAL_SHELL_FUNCTIONS = ("run_shell_command", "check_shell_command", "kill_shell_command")
 _NAME_RULE = "profile names use lowercase letters, digits, '-', and '_', at most 64 characters"
 
 
@@ -379,9 +379,9 @@ def require_minimal_shell(persona: SubagentPersona | None, mode: AgentMode) -> N
     tools = persona.tools if persona is not None else None
     if mode != "minimal" or tools is None:
         return
-    if "shell" in tools or all(f"shell.{name}" in tools for name in _MINIMAL_SHELL_FUNCTIONS):
+    if "shell" in tools or all(f"shell.{name}" in tools for name in SHELL_OPERATION_NAMES):
         return
-    msg = "Cannot delegate: a minimal subagent that lists its tools must include shell."
+    msg = "Cannot delegate: a minimal subagent needs shell among its tools."
     raise PersonaError(msg)
 
 
