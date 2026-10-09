@@ -1,29 +1,38 @@
-"""Integration tests for MindRoom's vendored Agno Team message patch."""
+"""Integration tests for MindRoom's vendored Agno Agent and Team message patches."""
 # ruff: noqa: D101, D102, D103
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.agent import Agent
 from agno.agent import _messages as agent_messages
+from agno.db.in_memory import InMemoryDb
 from agno.media import Audio, File, Image, Video
+from agno.media.storage.local import LocalMediaStorage
 from agno.models.message import Message
 from agno.models.openai.chat import OpenAIChat
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
-from agno.run.base import RunContext
+from agno.run.base import RunContext, RunStatus
 from agno.run.messages import RunMessages
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from agno.team import Team, _messages
 from agno.team import _run as team_run
+from agno.tools.function import Function
 from pydantic import BaseModel
 
 from mindroom.history import agno_compat_message_builder, message_content
+from mindroom.synthetic_model import SyntheticModel
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -248,17 +257,6 @@ async def test_team_list_message_patch_preserves_additional_input_separately(use
     assert run_messages.extra_messages == [historical_input, additional_input]
 
 
-def test_team_list_message_patch_is_idempotent() -> None:
-    patched_sync = _messages._get_run_messages
-    patched_async = _messages._aget_run_messages
-
-    agno_compat_message_builder.apply_patch()
-    agno_compat_message_builder.apply_patch()
-
-    assert _messages._get_run_messages is patched_sync
-    assert _messages._aget_run_messages is patched_async
-
-
 @pytest.mark.asyncio
 async def test_persisted_history_media_is_not_replayed() -> None:
     history_message = Message(
@@ -311,10 +309,8 @@ def _assert_continuation_replays_history_without_media(
     assert current_message.images
 
 
-@pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.asyncio
-async def test_agent_continuation_does_not_replay_persisted_history_media(use_async: bool) -> None:
-    """Approval continuations rebuild history without the media a fresh run would strip."""
+def test_agent_continuation_does_not_replay_persisted_history_media() -> None:
+    """Synchronous Agent continuations rebuild history without persisted inline media."""
     agent = Agent(model=RecordingOpenAIChat(id="gpt-test", api_key="sk-test"), telemetry=False)
     history_message = _voice_note_history_message()
     session = AgentSession(
@@ -323,28 +319,18 @@ async def test_agent_continuation_does_not_replay_persisted_history_media(use_as
     )
     current_message, paused_input = _paused_run_input()
 
-    if use_async:
-        run_messages = await agent_messages.aget_continue_run_messages(
-            agent,
-            input=paused_input,
-            session=session,
-            add_history_to_context=True,
-        )
-    else:
-        run_messages = agent_messages.get_continue_run_messages(
-            agent,
-            input=paused_input,
-            session=session,
-            add_history_to_context=True,
-        )
+    run_messages = agent_messages.get_continue_run_messages(
+        agent,
+        input=paused_input,
+        session=session,
+        add_history_to_context=True,
+    )
 
     _assert_continuation_replays_history_without_media(run_messages, history_message, current_message)
 
 
-@pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.asyncio
-async def test_team_continuation_does_not_replay_persisted_history_media(use_async: bool) -> None:
-    """Team approval continuations rebuild history without persisted inline media."""
+def test_team_continuation_does_not_replay_persisted_history_media() -> None:
+    """Synchronous Team continuations rebuild history without persisted inline media."""
     team = _team(RecordingOpenAIChat(id="gpt-test", api_key="sk-test"))
     history_message = _voice_note_history_message()
     session = TeamSession(
@@ -353,22 +339,142 @@ async def test_team_continuation_does_not_replay_persisted_history_media(use_asy
     )
     current_message, paused_input = _paused_run_input()
 
-    if use_async:
-        run_messages = await team_run._aget_continue_run_messages(
-            team,
-            input=paused_input,
-            session=session,
-            add_history_to_context=True,
-        )
-    else:
-        run_messages = team_run._get_continue_run_messages(
-            team,
-            input=paused_input,
-            session=session,
-            add_history_to_context=True,
-        )
+    run_messages = team_run._get_continue_run_messages(
+        team,
+        input=paused_input,
+        session=session,
+        add_history_to_context=True,
+    )
 
     _assert_continuation_replays_history_without_media(run_messages, history_message, current_message)
+
+
+@dataclass
+class _ApprovalScriptedModel(SyntheticModel):
+    """Answer the first turn, request one confirmed tool on the second, then answer."""
+
+    requests: list[list[Message]] = field(default_factory=list)
+
+    async def ainvoke(self, messages: list[Message], **_kwargs: object) -> ModelResponse:
+        self.requests.append(deepcopy(messages))
+        if len(self.requests) == 2:
+            return ModelResponse(
+                tool_calls=[
+                    {"id": "call_1", "type": "function", "function": {"name": "approve_me", "arguments": "{}"}},
+                ],
+            )
+        return ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, messages: list[Message], **kwargs: object) -> AsyncIterator[ModelResponse]:
+        yield await self.ainvoke(messages, **kwargs)
+
+
+def _replayed_history(request: list[Message]) -> list[tuple[object, ...]]:
+    return [
+        (
+            message.role,
+            message.content,
+            message.audio,
+            message.files,
+            [(image.id, image.content) for image in message.images or []],
+        )
+        for message in request
+        if message.from_history
+    ]
+
+
+async def _paused_and_resumed_requests(
+    entity_kind: str,
+    *,
+    stream: bool,
+    media_storage: LocalMediaStorage | None = None,
+) -> tuple[list[Message], list[Message]]:
+    """Run a media turn, pause the next turn for approval, resume it, and return both requests."""
+    model = _ApprovalScriptedModel(id="scripted")
+    entity_kwargs: dict[str, Any] = {
+        "model": model,
+        "db": InMemoryDb(),
+        "media_storage": media_storage,
+        "tools": [Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)],
+        "add_history_to_context": True,
+        "store_history_messages": False,
+        "telemetry": False,
+    }
+    entity = Agent(**entity_kwargs) if entity_kind == "agent" else Team(members=[], **entity_kwargs)
+    await entity.arun(
+        "voice note",
+        audio=[Audio(content=b"history-audio", mime_type="audio/mp4")],
+        files=[File(content=b"history-file", mime_type="text/plain")],
+        images=[Image(id="mindroom_viewed_1", content=b"viewed-image", mime_type="image/png")],
+        session_id="session",
+    )
+    paused = await entity.arun("canvas response", session_id="session")
+    assert paused.status == RunStatus.paused
+    requirements = list(paused.requirements or [])
+    for requirement in requirements:
+        requirement.confirm()
+    if entity_kind == "agent":
+        resume_target: dict[str, Any] = {"run_id": paused.run_id}
+    else:
+        # Like MindRoom, resume the stored run, whose history messages were not persisted.
+        persisted = entity.get_session(session_id="session").get_run(paused.run_id)
+        persisted.requirements = requirements
+        resume_target = {"run_response": persisted}
+    resumed = entity.acontinue_run(
+        **resume_target,
+        requirements=requirements,
+        session_id="session",
+        stream=stream,
+        stream_events=stream,
+        yield_run_output=True,
+    )
+    if stream:
+        async for _event in resumed:
+            pass
+    else:
+        await resumed
+    assert len(model.requests) == 3
+    return model.requests[1], model.requests[2]
+
+
+def _assert_resumed_request_replays_paused_history(
+    paused_request: list[Message],
+    resumed_request: list[Message],
+) -> None:
+    assert _replayed_history(resumed_request) == _replayed_history(paused_request)
+    replayed_voice_note = next(
+        message for message in resumed_request if message.from_history and message.role == "user"
+    )
+    assert replayed_voice_note.audio is None
+    assert replayed_voice_note.files is None
+    assert [(image.id, image.content) for image in replayed_voice_note.images or []] == [
+        ("mindroom_viewed_1", b"viewed-image"),
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("entity_kind", ["agent", "team"])
+@pytest.mark.asyncio
+async def test_resumed_approval_run_replays_the_history_the_paused_request_saw(
+    entity_kind: str,
+    stream: bool,
+) -> None:
+    """Resuming after approval strips history media exactly as the request that paused did."""
+    paused_request, resumed_request = await _paused_and_resumed_requests(entity_kind, stream=stream)
+
+    _assert_resumed_request_replays_paused_history(paused_request, resumed_request)
+
+
+@pytest.mark.asyncio
+async def test_resumed_approval_run_filters_offloaded_history_after_reading_it_back(tmp_path: Path) -> None:
+    """Offloaded viewed images are read back before filtering, so a resumed run still replays them."""
+    paused_request, resumed_request = await _paused_and_resumed_requests(
+        "agent",
+        stream=False,
+        media_storage=LocalMediaStorage(str(tmp_path)),
+    )
+
+    _assert_resumed_request_replays_paused_history(paused_request, resumed_request)
 
 
 @pytest.mark.asyncio
@@ -485,8 +591,10 @@ def test_apply_patch_is_idempotent() -> None:
     patched_team_async = _messages._aget_run_messages
     patched_agent_sync = agent_messages.get_run_messages
     patched_agent_async = agent_messages.aget_run_messages
-    patched_team_continue = team_run._build_continue_run_messages
-    patched_agent_continue = agent_messages._build_continue_run_messages
+    patched_team_continue = team_run._get_continue_run_messages
+    patched_team_acontinue = team_run._aget_continue_run_messages
+    patched_agent_continue = agent_messages.get_continue_run_messages
+    patched_agent_acontinue = agent_messages.aget_continue_run_messages
 
     agno_compat_message_builder.apply_patch()
     agno_compat_message_builder.apply_patch()
@@ -495,8 +603,10 @@ def test_apply_patch_is_idempotent() -> None:
     assert _messages._aget_run_messages is patched_team_async
     assert agent_messages.get_run_messages is patched_agent_sync
     assert agent_messages.aget_run_messages is patched_agent_async
-    assert team_run._build_continue_run_messages is patched_team_continue
-    assert agent_messages._build_continue_run_messages is patched_agent_continue
+    assert team_run._get_continue_run_messages is patched_team_continue
+    assert team_run._aget_continue_run_messages is patched_team_acontinue
+    assert agent_messages.get_continue_run_messages is patched_agent_continue
+    assert agent_messages.aget_continue_run_messages is patched_agent_acontinue
 
 
 @pytest.mark.parametrize(
