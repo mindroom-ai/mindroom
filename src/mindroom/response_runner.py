@@ -1314,8 +1314,8 @@ class ResponseRunner:
             return None
 
         def notify() -> None:
-            orchestrator.automations.response_finished(source_event_ids)
             orchestrator.budgets.response_finished()
+            orchestrator.automations.response_finished(source_event_ids)
 
         return notify
 

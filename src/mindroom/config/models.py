@@ -655,16 +655,22 @@ class ModelPricing(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    input: float = Field(ge=0, description="USD per million uncached input tokens")
-    output: float = Field(ge=0, description="USD per million output tokens, including reasoning tokens")
+    input: float = Field(ge=0, allow_inf_nan=False, description="USD per million uncached input tokens")
+    output: float = Field(
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million output tokens, including reasoning tokens",
+    )
     cache_read: float | None = Field(
         default=None,
         ge=0,
+        allow_inf_nan=False,
         description="USD per million cache-read input tokens; unset uses the input price",
     )
     cache_write: float | None = Field(
         default=None,
         ge=0,
+        allow_inf_nan=False,
         description="USD per million cache-write input tokens; unset uses the input price",
     )
 

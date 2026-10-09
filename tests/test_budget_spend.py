@@ -9,7 +9,11 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.metrics import ModelMetrics, RunMetrics
+from agno.run.agent import RunOutput
+from agno.session.agent import AgentSession
 
+from mindroom.agent_storage import create_state_storage
 from mindroom.budgets.pricing import price_table
 from mindroom.budgets.spend import _UnpricedModelUsage, collect_monthly_spend, month_bounds
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -18,6 +22,7 @@ from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
 from mindroom.usage_stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
+from tests.conftest import seed_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -254,3 +259,57 @@ def test_spend_charges_team_members_and_helpers_to_the_requester(
     snapshot = _spend(config, tmp_path)
 
     assert snapshot.spend_usd == {ALICE: pytest.approx(3.0 + 3.0 + 0.2)}
+
+
+def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> None:
+    """Usage written by real session storage must match the price table's model identities."""
+    config = _config()
+    paths = _paths(tmp_path)
+    model = get_model_instance(config, paths, "astra")
+    storage = create_state_storage(
+        "code",
+        paths.storage_root / "agents" / "code",
+        subdir="sessions",
+        session_table="code_sessions",
+    )
+    metrics = RunMetrics(
+        input_tokens=1_000_000,
+        output_tokens=100_000,
+        total_tokens=1_100_000,
+        details={
+            "model": [
+                ModelMetrics(
+                    id=model.id,
+                    provider=model.get_provider(),
+                    input_tokens=1_000_000,
+                    output_tokens=100_000,
+                    total_tokens=1_100_000,
+                ),
+            ],
+        },
+    )
+    try:
+        seed_session(
+            storage,
+            AgentSession(
+                session_id="session-1",
+                agent_id="code",
+                user_id=ALICE,
+                runs=[
+                    RunOutput(
+                        run_id="run-1",
+                        model_provider=model.provider,
+                        model=model.id,
+                        created_at=int(datetime(2026, 10, 3, tzinfo=UTC).timestamp()),
+                        metrics=metrics,
+                    ),
+                ],
+            ),
+        )
+    finally:
+        storage.close()
+
+    snapshot = collect_monthly_spend(config, paths, NOW, price_table(config, paths))
+
+    assert snapshot.spend_usd == {ALICE: pytest.approx(5.0 + 3.0)}
+    assert snapshot.unpriced_models == ()

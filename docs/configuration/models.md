@@ -43,7 +43,7 @@ The [macOS app's local model setup](../installation/macos-app.md#local-ai-models
 | `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; equivalent to `extra_kwargs.api_key` |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters (see [Extra Kwargs](#extra-kwargs)) |
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](history.md#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
-| `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](../budgets.md): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price |
+| `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](../budgets.md): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.

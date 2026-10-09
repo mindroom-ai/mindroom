@@ -35,6 +35,11 @@ def test_pricing_rejects_negative_prices() -> None:
         ModelPricing(input=-1.0, output=1.0)
 
 
+def test_pricing_rejects_infinite_prices() -> None:
+    with pytest.raises(ValidationError):
+        ModelPricing(input=float("inf"), output=1.0)
+
+
 def test_budgets_parse_default_overrides_and_fallback() -> None:
     config = Config(
         models=_models(),

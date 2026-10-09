@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -337,3 +338,61 @@ def test_decision_cost_does_not_grow_with_configured_users(tmp_path: Path) -> No
         assert budget_model(config, paths, None, "@user7:example.test", "astra") == "astra"
 
     assert resolve.call_count == 2
+
+
+def test_bridge_bot_requesters_are_never_budgeted(tmp_path: Path) -> None:
+    config = _config(monthly_limit_usd=0).model_copy(update={"bot_accounts": ["@bridgebot:example.test"]})
+
+    assert budget_model(config, _paths(tmp_path), None, "@bridgebot:example.test", "astra") == "astra"
+
+
+@pytest.mark.asyncio
+async def test_rescans_wait_for_the_minimum_interval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scans = _Scans(monkeypatch, {})
+    started: list[float] = []
+    collect = monitor_module.collect_monthly_spend
+
+    def timed(*args: object) -> SpendSnapshot:
+        started.append(time.monotonic())
+        return collect(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(monitor_module, "collect_monthly_spend", timed)
+    current = [_config()]
+    monitor = BudgetMonitor(
+        runtime_paths=_paths(tmp_path),
+        config_provider=lambda: current[0],
+        clock=_Clock(),
+        min_scan_interval_seconds=0.3,
+    )
+    monitor.sync()
+    await _until(lambda: scans.calls == 1)
+    monitor.response_finished()
+    await _until(lambda: scans.calls == 2)
+
+    assert started[1] - started[0] >= 0.3
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_tick_rescans_when_the_month_rolls_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scans = _Scans(monkeypatch, {ALICE: 12.0})
+    clock = _Clock()
+    monitor = BudgetMonitor(
+        runtime_paths=_paths(tmp_path),
+        config_provider=_config,
+        clock=clock,
+        min_scan_interval_seconds=0,
+        tick_seconds=0.05,
+    )
+    monitor.sync()
+    await _until(lambda: scans.calls == 1)
+    await _quiet()
+    assert scans.calls == 1
+
+    clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
+    await _until(lambda: scans.calls == 2)
+
+    snapshot = monitor.status().snapshot
+    assert snapshot is not None
+    assert snapshot.period_start == date(2026, 11, 1)
+    await monitor.stop()
