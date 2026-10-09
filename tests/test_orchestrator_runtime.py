@@ -1084,8 +1084,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
+            budget_monitor: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
+            assert budget_monitor is mock_orchestrator.budgets
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1175,8 +1177,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
+            budget_monitor: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
+            assert budget_monitor is mock_orchestrator.budgets
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1256,8 +1260,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
+            budget_monitor: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
+            assert budget_monitor is mock_orchestrator.budgets
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate

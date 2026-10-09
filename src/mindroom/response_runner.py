@@ -1290,16 +1290,21 @@ class ResponseRunner:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
-            notify_response_finished=self._automation_notifier(request.sources.logical_source_event_ids),
+            notify_response_finished=self._response_finished_notifier(request.sources.logical_source_event_ids),
             persist_response_event_id=persist_response_event_id,
         )
 
-    def _automation_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
-        """Return the callback that lets an automation verify the run its prompt started."""
+    def _response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
+        """Return the callback that lets automations verify their runs and budgets count the new spend."""
         orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
             return None
-        return lambda: orchestrator.automations.response_finished(source_event_ids)
+
+        def notify() -> None:
+            orchestrator.automations.response_finished(source_event_ids)
+            orchestrator.budgets.response_finished()
+
+        return notify
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -2133,7 +2138,7 @@ class ResponseRunner:
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
             # A continuation keeps its turn's source events, so a run paused for approval is verified when it ends.
-            notify_response_finished=self._automation_notifier(continuation.sources.logical_source_event_ids),
+            notify_response_finished=self._response_finished_notifier(continuation.sources.logical_source_event_ids),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )
 

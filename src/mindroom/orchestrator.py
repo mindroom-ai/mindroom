@@ -26,6 +26,7 @@ from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
@@ -412,6 +413,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _skill_reviews: SkillReviewRunner = field(init=False, repr=False)
     _automations: AutomationRunner = field(init=False, repr=False)
+    _budgets: BudgetMonitor = field(init=False, repr=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
@@ -477,6 +479,7 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             definition_provider=lambda name: self.hook_registry.automations.get(name),
         )
+        self._budgets = BudgetMonitor(runtime_paths=self.runtime_paths, config_provider=lambda: self.config)
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -579,6 +582,11 @@ class _MultiAgentOrchestrator:
     def automations(self) -> AutomationRunner:
         """Return the orchestrator-owned runner of automations."""
         return self._automations
+
+    @property
+    def budgets(self) -> BudgetMonitor:
+        """Return the orchestrator-owned monitor of per-user spending budgets."""
+        return self._budgets
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""
@@ -1051,6 +1059,7 @@ class _MultiAgentOrchestrator:
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
         self._automations.start()
+        self._budgets.sync()
         self._thread_export_runner.start()
         if self.running:
             # Startup queues its own pass once the bots are up; a reload
@@ -2469,6 +2478,7 @@ class _MultiAgentOrchestrator:
         await _run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
         await _run_shutdown_step("skill_reviews", self._skill_reviews.stop())
         await _run_shutdown_step("automations", self._automations.stop())
+        await _run_shutdown_step("budgets", self._budgets.stop())
         await _run_shutdown_step("knowledge_source_watchers", self._knowledge_source_watcher.shutdown())
         await _run_shutdown_step("knowledge_refresh", self._knowledge_refresh_scheduler.shutdown())
         await _run_shutdown_step("bot_start_tasks", self._cancel_bot_start_tasks())
@@ -2668,6 +2678,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_cli_registry: TurnToolRegistry | None = None,
+    budget_monitor: BudgetMonitor | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
@@ -2684,6 +2695,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     api_state.active_calls = active_calls
     api_state.active_script_runs = script_runtime.active_runs if script_runtime is not None else None
     api_state.config_reload_status = config_reload_status
+    api_state.budget_monitor = budget_monitor
     if agent_reply_memberships is not None:
         api_state.agent_reply_memberships = agent_reply_memberships
     if script_runtime is not None:
@@ -3115,6 +3127,7 @@ async def main(  # noqa: PLR0915
                     config_reload_status=lambda: orchestrator.config_reload.status,
                     agent_reply_memberships=orchestrator.agent_reply_memberships,
                     agent_cli_registry=orchestrator.agent_cli_registry,
+                    budget_monitor=orchestrator.budgets,
                 ),
                 name="api_server",
             )
