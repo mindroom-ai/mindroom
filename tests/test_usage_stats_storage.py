@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -276,6 +277,30 @@ def test_reader_keeps_usage_when_run_timestamp_is_unusable(tmp_path: Path, creat
     assert isinstance(row, UsageSessionRow)
     assert row.runs[0].created_at is None
     assert row.runs[0].metrics["total_tokens"] == 20
+
+
+def test_reader_since_skips_older_and_undated_usage_rows(tmp_path: Path) -> None:
+    """A start timestamp limits the read to runs created at or after it."""
+    database = tmp_path / "code.db"
+    september = datetime(2026, 9, 29, tzinfo=UTC).timestamp()
+    october = datetime(2026, 10, 2, tzinfo=UTC).timestamp()
+    _create_database(
+        database,
+        runs=[
+            {**_run(), "run_id": "sept", "created_at": september},
+            {**_run(), "run_id": "oct", "created_at": october},
+            {**_run(), "run_id": "undated", "created_at": None},
+        ],
+    )
+    source = _source(database)
+
+    since = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    rows = [row for row in iter_usage_storage_rows(source, since=since) if isinstance(row, UsageSessionRow)]
+
+    assert [run.run_id for row in rows for run in row.runs] == ["oct"]
+    assert all(row.session_metrics_available is False for row in rows)
+    unfiltered = [row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]
+    assert sorted(run.run_id or "" for row in unfiltered for run in row.runs) == ["oct", "sept", "undated"]
 
 
 def test_reader_uses_run_table_timestamp_when_dict_payload_omits_it(tmp_path: Path) -> None:

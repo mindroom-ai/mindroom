@@ -57,7 +57,8 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[st
             continue
         try:
             model = get_model_instance(config, runtime_paths, model_name)
-        except Exception as error:  # noqa: BLE001 - provider SDKs raise arbitrary construction errors
+        except Exception as error:
+            # Provider SDKs raise arbitrary construction errors; an unusable model stays unpriced.
             logger.warning("budget_pricing_model_unavailable", model=model_name, error=str(error))
             continue
         key = (model.get_provider(), model.id)

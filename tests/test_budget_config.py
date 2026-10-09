@@ -1,4 +1,5 @@
 """Model pricing and per-user budget configuration."""
+# ruff: noqa: D103
 
 from __future__ import annotations
 

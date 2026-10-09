@@ -1,4 +1,5 @@
 """Pricing retained token usage for budgets."""
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -18,7 +19,11 @@ if TYPE_CHECKING:
 
 
 def _paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage", process_env={})
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
 
 
 def test_openai_cache_reads_are_charged_out_of_input() -> None:
@@ -52,9 +57,19 @@ def test_inconsistent_cache_counters_never_make_input_negative() -> None:
 def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: Path) -> None:
     config = Config(
         models={
-            "sol": ModelConfig(provider="openai", id="gpt-6.1-sol", api_key="key", pricing=ModelPricing(input=1, output=4)),
+            "sol": ModelConfig(
+                provider="openai",
+                id="gpt-6.1-sol",
+                api_key="key",
+                pricing=ModelPricing(input=1, output=4),
+            ),
             "codex": ModelConfig(provider="codex", id="gpt-6.1-sol"),
-            "opus": ModelConfig(provider="anthropic", id="claude-opus-5-5", api_key="key", pricing=ModelPricing(input=5, output=25)),
+            "opus": ModelConfig(
+                provider="anthropic",
+                id="claude-opus-5-5",
+                api_key="key",
+                pricing=ModelPricing(input=5, output=25),
+            ),
         },
     )
     paths = _paths(tmp_path)
@@ -95,8 +110,18 @@ def test_anthropic_family_providers_report_cache_outside_input(tmp_path: Path, p
 def test_conflicting_prices_for_one_model_keep_the_higher_price(tmp_path: Path) -> None:
     config = Config(
         models={
-            "cheap": ModelConfig(provider="openai", id="gpt-6-luna", api_key="key", pricing=ModelPricing(input=0.1, output=1)),
-            "dear": ModelConfig(provider="openai", id="gpt-6-luna", api_key="key", pricing=ModelPricing(input=0.2, output=2)),
+            "cheap": ModelConfig(
+                provider="openai",
+                id="gpt-6-luna",
+                api_key="key",
+                pricing=ModelPricing(input=0.1, output=1),
+            ),
+            "dear": ModelConfig(
+                provider="openai",
+                id="gpt-6-luna",
+                api_key="key",
+                pricing=ModelPricing(input=0.2, output=2),
+            ),
         },
     )
 
