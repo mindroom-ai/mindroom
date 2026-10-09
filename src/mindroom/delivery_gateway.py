@@ -1548,7 +1548,7 @@ class DeliveryGateway:
                 return final is not None and (final.acknowledged_event_id is not None or final.permanently_failed)
             # A Stop recorded meanwhile decides the note, as the finish decides the state.
             shown_note = NoteKind.CANCELLED if reply.unapplied_stop else note
-            shown = with_trailing_note(
+            shown = _with_note(
                 _shown_before(reply, None),
                 note_segment(shown_note, text if shown_note is NoteKind.ERROR else None),
             )
