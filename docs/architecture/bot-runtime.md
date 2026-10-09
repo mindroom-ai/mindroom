@@ -36,7 +36,7 @@ Once a reply span claims the request, the span's records own its sources and the
 The turn record holds an edit's text once its regeneration claims the reply, and the outbox alone owns frozen payloads, acknowledgement, and retirement.
 `response_sources.py` owns the immutable runtime values, and `event_journal/legacy_response_attempts.py` cancels the approvals an earlier release left pending.
 
-`EditRegenerator` owns edits of answered messages: it regenerates the reply to the latest message of a conversation while no approval holds that reply, stopping the reply first while it streams (see [Reply messages](reply-messages.md#claims)).
+`EditRegenerator` owns edits of answered messages: it regenerates the reply to the latest message of a conversation, stopping the reply first while it streams or an approval holds it, which cancels that approval (see [Reply messages](reply-messages.md#claims)).
 It runs the regeneration on a runner-owned task and does not wait for its claim, so another reply holding the conversation never holds up the room's event lane.
 An edit of a message still waiting in its coalescing queue changes that message's text in the queue instead.
 

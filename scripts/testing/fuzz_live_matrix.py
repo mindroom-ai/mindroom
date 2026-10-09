@@ -5890,9 +5890,8 @@ class FinalStateAuditor:
         snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
         decisions = _supersession_decisions(self.oracle.log_path)
         self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
-        # MindRoom regenerates a reply only for an edit of the latest message of its conversation, while no
-        # approval holds that reply; it settles any other edit, such as one of a message it never answered,
-        # without a visible effect.
+        # MindRoom regenerates a reply only for an edit of the latest message of its conversation; it settles
+        # any other edit, such as one of a message it never answered, without a visible effect.
         self.oracle.declined_edit_sources = frozenset(
             source
             for source, edits in self.pending_edit_markers.items()

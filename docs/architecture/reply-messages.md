@@ -177,11 +177,11 @@ Edits:
 - A regeneration whose history was redacted meanwhile is suppressed instead of rebuilt.
 - An edit a `message:received` hook suppresses still counts as its message's newest revision, so an older edit of that message arriving later regenerates nothing, nor does an earlier edit of another message of the same coalesced turn whose regeneration has not claimed the reply yet; a later edit of another message regenerates with the suppressed message's earlier text.
 - A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply's exit applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
-- When the stopped reply's terminal row is still unresolved, or the approval its Stop cancelled has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps its cancelled note.
+- When the stopped reply's terminal row is still unresolved, or the approval that holds it has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps its cancelled note.
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
-- While a deferred claim stays blocked by an unresolved row, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves.
+- While a deferred claim stays blocked by an unresolved row or by the approval it waits for, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves or the approval ends.
 - After a restart, a regeneration may be told about tool calls the attempt before the edit made, which errs toward not repeating a side effect.
-- A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming reply, so the reply keeps its partial answer with the cancelled note.
+- A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming or held reply, so the reply keeps its partial answer with the cancelled note.
 
 Tool calls and the restart account:
 
