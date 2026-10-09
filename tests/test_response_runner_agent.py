@@ -3225,7 +3225,7 @@ class TestAgentBot(AgentBotTestBase):
 
         lifecycle = cast("Any", SimpleNamespace(identity=identity, finalize=finalize))
         # The response runs in the reply span the locked generation claims for it.
-        async with runner._reply_span_scope():
+        async with runner.deps.replies.span_scope():
             claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
             assert claimed is not None
             result = await runner._run_and_settle_locked_response(
