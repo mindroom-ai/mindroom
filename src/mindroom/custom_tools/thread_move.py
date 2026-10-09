@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+import nio
 from agno.tools import Toolkit
 
 from mindroom.constants import (
@@ -42,8 +43,6 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
-
-    import nio
 
     from mindroom.entity_resolution import EntityIdentityRegistry
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -215,7 +214,7 @@ async def _prepare_move(  # noqa: PLR0911
     if thread_error is not None:
         return thread_error
     assert root_id is not None
-    target_room_id, room_error = resolve_requested_room_id(context, room_id)
+    target_room_id, room_error = await _target_room_id(context, room_id)
     if room_error is not None:
         return room_error
     assert target_room_id is not None
@@ -269,6 +268,22 @@ async def _source_thread_root(context: ToolRuntimeContext, thread_id: str | None
         fail_closed_on_normalization_error=True,
     )
     return target.canonical_thread_id, target.error
+
+
+async def _target_room_id(context: ToolRuntimeContext, room_id: str) -> tuple[str | None, str | None]:
+    """Resolve the target room from a room ID, a configured room name, or any Matrix alias."""
+    target_room_id, error = resolve_requested_room_id(context, room_id)
+    if error is not None:
+        return None, error
+    assert target_room_id is not None
+    # Only aliases of configured rooms resolve locally; the user's own rooms resolve through Matrix.
+    if target_room_id.startswith("#"):
+        response = await context.client.room_resolve_alias(target_room_id)
+        if isinstance(response, nio.RoomResolveAliasResponse):
+            target_room_id = response.room_id
+    if not target_room_id.startswith("!"):
+        return None, f"Unknown room {room_id!r}; pass a room ID, alias, or configured room name."
+    return target_room_id, None
 
 
 async def _target_poster_clients(

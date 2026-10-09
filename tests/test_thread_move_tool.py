@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
@@ -361,6 +362,36 @@ async def test_move_thread_rejects_current_room(tmp_path: Path) -> None:
         "status": "error",
         "tool": "thread_move",
     }
+    mocks.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_move_thread_resolves_an_alias_of_an_unconfigured_room(tmp_path: Path) -> None:
+    """A room MindRoom did not create is found through its Matrix alias."""
+    move = _move(tmp_path)
+    move.context.client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasResponse("#ideas:localhost", TARGET_ROOM_ID, ["localhost"]),
+    )
+    with _matrix(move, _thread(move)) as mocks:
+        payload = await _run("#ideas:localhost")
+
+    move.context.client.room_resolve_alias.assert_awaited_once_with("#ideas:localhost")
+    assert payload["status"] == "ok"
+    assert {call.args[1] for call in mocks.send.await_args_list[:3]} == {TARGET_ROOM_ID}
+
+
+@pytest.mark.parametrize("room_id", ["#missing:localhost", "ideas"])
+@pytest.mark.asyncio
+async def test_move_thread_rejects_an_unknown_room(tmp_path: Path, room_id: str) -> None:
+    """A room name that resolves to no room is reported as unknown, not as an access problem."""
+    move = _move(tmp_path)
+    move.context.client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasError("Room alias not found", "M_NOT_FOUND"),
+    )
+    with _matrix(move, _thread(move)) as mocks:
+        payload = await _run(room_id)
+
+    assert payload["message"] == f"Unknown room {room_id!r}; pass a room ID, alias, or configured room name."
     mocks.send.assert_not_awaited()
 
 
