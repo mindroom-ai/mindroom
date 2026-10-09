@@ -171,7 +171,6 @@ from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
     DeliveryGateway,
-    DeliveryStage,
     EditTextRequest,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
@@ -2248,14 +2247,10 @@ class ResponseRunner:
         the replayed turn adopts it like any reply a restart left streaming; a
         Stop the run left unapplied ends it cancelled instead. A
         hand-back that cannot finish yet, such as cards that did not expire, is
-        retried by the next recovery pass. A deleted reply, a resume that
-        already failed before its failure was fenced, or a FINAL already owed
-        settles the continuation as a failure instead.
+        retried by the next recovery pass. A resume that already failed before
+        its failure was fenced, or a FINAL already owed, settles the
+        continuation as a failure instead.
         """
-        initial = await self.deps.approval_store.load_matrix_delivery(
-            delivery_id=continuation.source_event_ids[0],
-            stage=DeliveryStage.INITIAL,
-        )
         claim_span = (
             None
             if continuation.claim_span_id is None
@@ -2263,11 +2258,7 @@ class ResponseRunner:
         )
         # A resume that already ended without its answer has nothing for a replay to continue.
         resume_ended = claim_span is not None and claim_span.outcome in _UNANSWERED_RESUME_OUTCOMES
-        if (
-            (initial is not None and initial.retired)
-            or resume_ended
-            or await self._approval_responses.final_delivery(continuation) is not None
-        ):
+        if resume_ended or await self._approval_responses.final_delivery(continuation) is not None:
             settled = await self._approval_responses.settle_failure(continuation, reason)
             return continuation.response_event_id if settled else None
         await self._approval_responses.release_to_replay(continuation, reason)

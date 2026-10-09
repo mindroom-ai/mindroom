@@ -834,7 +834,7 @@ def fence(
 
 
 def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str) -> ApprovalContinuation | None:
-    """Lock a paused run that may end: after terminal FINAL delivery or proven failed-response deletion.
+    """Lock a paused run that may end: its FINAL was acknowledged or refused for good.
 
     The caller applies the finish to the reply it paused while the run still
     holds that reply, then deletes the run with ``delete``.
@@ -881,9 +881,6 @@ def may_release(
         return None
     delivery_id = continuation.source_event_ids[0]
     if outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL) is not None:
-        return None
-    initial = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-    if initial is not None and initial.retired:
         return None
     return continuation
 

@@ -187,7 +187,6 @@ class PostgresBackend:
                 "WHERE table_schema = current_schema() AND table_name = 'approval_continuation_calls'",
             )
             call_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
-            # The toolkit fence reads whole continuations, so every call column exists first.
             upgrade_approval_argument_digests(_PostgresTransaction(cursor), call_columns)
             upgrade_approval_toolkit_origins(_PostgresTransaction(cursor), call_columns)
         self._writer.commit()

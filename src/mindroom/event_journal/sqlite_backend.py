@@ -213,7 +213,6 @@ class SqliteBackend:
             call_columns = frozenset(
                 str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")
             )
-            # The toolkit fence reads whole continuations, so every call column exists first.
             upgrade_approval_argument_digests(_SqliteTransaction(connection), call_columns)
             upgrade_approval_toolkit_origins(_SqliteTransaction(connection), call_columns)
             connection.execute("COMMIT")
