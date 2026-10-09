@@ -6,7 +6,7 @@ import copy
 from typing import cast
 
 
-def render_legacy_participant_prompt(name: object, role: object, instructions: object) -> str:
+def _render_legacy_participant_prompt(name: object, role: object, instructions: object) -> str:
     """Render one retired participant's name, role, and instructions as a system prompt."""
     if isinstance(instructions, str):
         lines = [instructions]
@@ -51,7 +51,7 @@ def _upgrade_participant(participant: dict[str, object]) -> dict[str, object]:
     upgraded: dict[str, object] = {
         "id": participant.get("id"),
         "kind": "subagent",
-        "system_prompt": render_legacy_participant_prompt(
+        "system_prompt": _render_legacy_participant_prompt(
             participant.get("name"),
             participant.get("role"),
             participant.get("instructions"),

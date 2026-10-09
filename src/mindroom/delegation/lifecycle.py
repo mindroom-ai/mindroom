@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 MAX_DELEGATION_DEPTH = 3
 
-type DelegationGrant = Literal["delegate", "dynamic_workflow"]
+type _DelegationGrant = Literal["delegate", "dynamic_workflow"]
 
 type _ChildTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied"})
@@ -249,12 +249,12 @@ async def observe_child_event(event: object) -> None:
     await record_child_event(event)
 
 
-def delegation_grant(child: DelegationChild) -> DelegationGrant:
+def delegation_grant(child: DelegationChild) -> _DelegationGrant:
     """Name the caller permission that authorizes this child: its delegate allowlist or its workflow tool."""
     return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
 
 
-def _caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: DelegationGrant) -> bool:
+def _caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: _DelegationGrant) -> bool:
     caller = config.agents.get(caller_name)
     if caller is None:
         return False
@@ -274,7 +274,7 @@ def _target_refusal(
     *,
     config: Config,
     allowed_targets: Sequence[str] | None,
-    grant: DelegationGrant,
+    grant: _DelegationGrant,
 ) -> str | None:
     """Return why this caller cannot start this target at all, before any requester check."""
     if not task or not task.strip():
@@ -302,7 +302,7 @@ def authorize_delegation(  # noqa: PLR0911
     depth: int,
     allowed_targets: Sequence[str] | None = None,
     model: str | None = None,
-    grant: DelegationGrant = "delegate",
+    grant: _DelegationGrant = "delegate",
     approval_config: Config | None = None,
 ) -> Config | str:
     """Recheck the caller's current grant and requester authority.

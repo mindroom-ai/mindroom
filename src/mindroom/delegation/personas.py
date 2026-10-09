@@ -45,7 +45,7 @@ class PersonaError(ValueError):
 
 
 @dataclass(frozen=True)
-class PersonaProfile:
+class _PersonaProfile:
     """One valid ``subagents/<name>.md`` file."""
 
     name: str
@@ -56,7 +56,7 @@ class PersonaProfile:
 
 
 @dataclass(frozen=True)
-class InvalidPersonaProfile:
+class _InvalidPersonaProfile:
     """One profile file the agent must fix before it can run."""
 
     name: str
@@ -98,7 +98,7 @@ def inline_persona(
     )
 
 
-def parse_profile(name: str, content: str) -> PersonaProfile:
+def _parse_profile(name: str, content: str) -> _PersonaProfile:
     """Parse one profile file; ``PersonaError`` carries the reason it is invalid."""
     try:
         frontmatter, body = parse_skill_markdown(content)
@@ -132,7 +132,7 @@ def parse_profile(name: str, content: str) -> PersonaProfile:
     except PersonaError as exc:
         msg = str(exc).removeprefix("Cannot delegate: ").removesuffix(".")
         raise PersonaError(msg) from exc
-    return PersonaProfile(
+    return _PersonaProfile(
         name=name,
         description=description.strip(),
         persona=persona,
@@ -164,19 +164,19 @@ def _profile_text(directory_fd: int, name: str) -> str:
         raise PersonaError(msg) from exc
 
 
-def _read_profile(directory_fd: int, name: str) -> PersonaProfile | InvalidPersonaProfile | None:
+def _read_profile(directory_fd: int, name: str) -> _PersonaProfile | _InvalidPersonaProfile | None:
     """Read one profile below its pinned directory; None when the file is absent."""
     if not _PROFILE_NAME.fullmatch(name):
-        return InvalidPersonaProfile(name=name, reason=_NAME_RULE)
+        return _InvalidPersonaProfile(name=name, reason=_NAME_RULE)
     try:
-        return parse_profile(name, _profile_text(directory_fd, name))
+        return _parse_profile(name, _profile_text(directory_fd, name))
     except FileNotFoundError:
         return None
     except PersonaError as exc:
-        return InvalidPersonaProfile(name=name, reason=str(exc))
+        return _InvalidPersonaProfile(name=name, reason=str(exc))
 
 
-def list_profiles(workspace_root: Path) -> list[PersonaProfile | InvalidPersonaProfile]:
+def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPersonaProfile]:
     """Read up to 256 profiles from ``subagents/``, sorted by name, never following links."""
     try:
         with open_directory_within_root(workspace_root, _PROFILE_DIRNAME) as directory_fd:
@@ -191,7 +191,7 @@ def list_profiles(workspace_root: Path) -> list[PersonaProfile | InvalidPersonaP
         return []
 
 
-def load_profile(workspace_root: Path, name: str) -> PersonaProfile:
+def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
     """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
@@ -204,17 +204,17 @@ def load_profile(workspace_root: Path, name: str) -> PersonaProfile:
         entry = None
     if entry is None:
         raise PersonaError(not_found)
-    if isinstance(entry, InvalidPersonaProfile):
+    if isinstance(entry, _InvalidPersonaProfile):
         msg = f"Cannot delegate: subagent profile '{name}' is invalid: {entry.reason}."
         raise PersonaError(msg)
     return entry
 
 
-def render_profile_listing(entries: Sequence[PersonaProfile | InvalidPersonaProfile]) -> str:
+def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaProfile]) -> str:
     """Render profiles for the delegate instructions, bounded to 2,000 characters."""
     lines = [
         f"- {entry.name}: {entry.description}"
-        if isinstance(entry, PersonaProfile)
+        if isinstance(entry, _PersonaProfile)
         else f"- {entry.name} (invalid: {entry.reason})"
         for entry in entries
     ]

@@ -9,13 +9,13 @@ from agno.tools.function import Function
 
 import mindroom.tools  # noqa: F401 - registers built-in tool metadata, including function names
 from mindroom.delegation.personas import (
-    InvalidPersonaProfile,
     PersonaError,
-    PersonaProfile,
+    _InvalidPersonaProfile,
+    _parse_profile,
+    _PersonaProfile,
     inline_persona,
     list_profiles,
     load_profile,
-    parse_profile,
     persona_disabled_toolkits,
     persona_function_filter,
     render_profile_listing,
@@ -98,8 +98,8 @@ def test_empty_tool_list_means_no_tools() -> None:
 
 def test_parse_profile_reads_frontmatter_and_body() -> None:
     """Frontmatter supplies tools, model, and mode, and the stripped body is the prompt."""
-    profile = parse_profile("critic", _CRITIC)
-    assert profile == PersonaProfile(
+    profile = _parse_profile("critic", _CRITIC)
+    assert profile == _PersonaProfile(
         name="critic",
         description="Finds the three biggest risks.",
         persona=SubagentPersona(
@@ -115,7 +115,7 @@ def test_parse_profile_reads_frontmatter_and_body() -> None:
 
 def test_parse_profile_defaults_optional_fields() -> None:
     """A profile with only a description keeps every caller tool and normal model and mode selection."""
-    profile = parse_profile("plain", "---\ndescription: Plain.\n---\nBe brief.\n")
+    profile = _parse_profile("plain", "---\ndescription: Plain.\n---\nBe brief.\n")
     assert profile.persona.tools is None
     assert profile.model is None
     assert profile.mode is None
@@ -136,7 +136,7 @@ def test_parse_profile_defaults_optional_fields() -> None:
 def test_parse_profile_rejects_bad_frontmatter(content: str) -> None:
     """Missing descriptions, unknown keys, bad modes, and empty bodies are invalid."""
     with pytest.raises(PersonaError):
-        parse_profile("critic", content)
+        _parse_profile("critic", content)
 
 
 def test_list_profiles_skips_unsafe_entries(tmp_path: Path) -> None:
@@ -153,7 +153,7 @@ def test_list_profiles_skips_unsafe_entries(tmp_path: Path) -> None:
     entries = list_profiles(tmp_path)
 
     assert [entry.name for entry in entries] == ["Critic", "broken", "critic"]
-    assert [type(entry) for entry in entries] == [InvalidPersonaProfile, InvalidPersonaProfile, PersonaProfile]
+    assert [type(entry) for entry in entries] == [_InvalidPersonaProfile, _InvalidPersonaProfile, _PersonaProfile]
     assert "lowercase" in entries[0].reason
 
 
@@ -184,7 +184,7 @@ def test_list_profiles_caps_count_and_size(tmp_path: Path) -> None:
     big_root.mkdir()
     _profile_file(big_root, "big.md", "---\ndescription: D\n---\n" + "x" * (64 * 1024))
     [entry] = list_profiles(big_root)
-    assert isinstance(entry, InvalidPersonaProfile)
+    assert isinstance(entry, _InvalidPersonaProfile)
     assert entry.name == "big"
 
 
@@ -220,8 +220,8 @@ def test_render_profile_listing_shows_entries_and_errors() -> None:
     """Valid profiles show their description and invalid ones their reason."""
     listing = render_profile_listing(
         [
-            InvalidPersonaProfile(name="broken", reason="empty body"),
-            parse_profile("critic", _CRITIC),
+            _InvalidPersonaProfile(name="broken", reason="empty body"),
+            _parse_profile("critic", _CRITIC),
         ],
     )
     assert "broken (invalid: empty body)" in listing
@@ -231,7 +231,7 @@ def test_render_profile_listing_shows_entries_and_errors() -> None:
 def test_render_profile_listing_bounds_length() -> None:
     """A listing that would exceed 2,000 characters becomes a count pointing at subagents/."""
     entries = [
-        parse_profile(f"p{index:03d}", "---\ndescription: " + "d" * 40 + "\n---\nBody\n") for index in range(256)
+        _parse_profile(f"p{index:03d}", "---\ndescription: " + "d" * 40 + "\n---\nBody\n") for index in range(256)
     ]
     listing = render_profile_listing(entries)
     assert len(listing) <= 2000

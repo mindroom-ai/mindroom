@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
-class DirectChildResult:
+class _DirectChildResult:
     """What one settled child turn returns to the tool call that ran it."""
 
     text: str
@@ -40,7 +40,7 @@ async def run_direct_child_turn(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     approval_config: Config | None = None,
-) -> DirectChildResult:
+) -> _DirectChildResult:
     """Reserve, run, and settle one child turn.
 
     A refused reservation raises ``SubagentSessionError`` and an approval pause
@@ -91,7 +91,7 @@ async def run_direct_child_turn(
                 status="failed",
                 reason=str(error),
             )
-            return DirectChildResult(f"Delegation to '{child.child_agent_name}' failed: {error}", receipt, False)
+            return _DirectChildResult(f"Delegation to '{child.child_agent_name}' failed: {error}", receipt, False)
         receipt = await finish_child_turn(
             child,
             config=config,
@@ -100,4 +100,4 @@ async def run_direct_child_turn(
             reason="Delegated run ended without a retained terminal outcome.",
         )
         text = response or "Agent completed the task but returned no content."
-        return DirectChildResult(text, receipt, child.status == "completed")
+        return _DirectChildResult(text, receipt, child.status == "completed")

@@ -36,7 +36,8 @@ A persona is a typed value with these fields:
 | `mode` | `standard` or `minimal` | `standard` | Same rule as today's `run_subagent(minimal=...)` |
 | `description` | string up to 1,024 characters | required for profiles, optional elsewhere | One line shown to the parent when listing profiles |
 
-Every entry in `tools` must name a toolkit or function the caller has in this execution, after its own `tools`, `defaults.tools`, `include_default_tools`, and approval-driven hiding are applied.
+Every entry in `tools` must name a toolkit or function the caller has in this execution, including deferred toolkits it could load on demand, after its own `tools`, `defaults.tools`, and `include_default_tools` are applied.
+A persona's named toolkits load eagerly in the child, so a named deferred toolkit is present from the first request.
 An unknown entry fails with an error that lists the caller's available toolkit names.
 Tool approval rules apply to the child exactly as they apply to the caller, because the child is the caller.
 
@@ -113,7 +114,7 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 
 ## Child construction
 
-`create_agent` accepts an optional persona and applies it in one focused helper owned by the persona module:
+`create_agent` accepts an optional persona and applies it in one private helper beside it:
 
 - The agent's `system_message` is the persona's `system_prompt`, and `resolve_in_context` is off so braces in the prompt are never treated as session-state variables.
 - No MindRoom identity, role, instructions, date context, skills listing, knowledge description, toolkit instructions, context files, or memory text is added to the system message.
@@ -153,7 +154,9 @@ Authorization stays with each entry point, while capability comes only from the 
 
 - A standard persona started through `delegate` in Matrix pauses for approval exactly as today's standard children do.
 - A minimal persona hides approval-gated tools, as minimal children do today.
-- A workflow participant cannot pause, so its gated functions must be pre-approved through the caller's `dynamic_workflow` `allowed_tools`, and a participant whose `tools` entry names a function, or a toolkit with any function, that may require approval and is not pre-approved is rejected when the workflow is validated or run.
+- A workflow participant cannot pause, so its gated functions must be pre-approved through the caller's `dynamic_workflow` `allowed_tools`, and a participant whose `tools` entry names a function, or a toolkit with any function, that may require approval and is not pre-approved fails the run at its first step.
+- The approval overlay is built from the participant's toolkits, which are constructed once per step to learn their function names, because approval rules match function names.
+- A pause that still reaches a participant, for example through `mindroom-agent` from a pre-approved shell, settles the child as failed and fails the step.
 - When a workflow participant's `tools` is null, gated functions that are not pre-approved are hidden instead of rejected.
 - Workflow participants also keep the existing exclusion of agent-infrastructure tools such as `delegate`, `dynamic_workflow`, `memory`, and `self_config`, because they cannot pause or own a nested response.
 
@@ -175,7 +178,7 @@ A `subagent` participant carries either `profile` or the inline persona fields `
 
 ### Execution
 
-Each `subagent` participant becomes one subagent handle per workflow run, and each `agent_step` for it becomes one child turn through the shared delegation lifecycle: `prepare_child_turn`, `reserve_child_turn`, `start_child_turn`, `run_delegated_child_response`, and `finish_child_turn`.
+Each `subagent` participant becomes one subagent handle per workflow run, and each `agent_step` for it becomes one child turn through `run_direct_child_turn` in `delegation/direct.py`, the reserve, start, run, and settle sequence that `run_subagent` uses too.
 A participant used by several steps continues the same child session, matching today's per-run participant session.
 Each step therefore writes the standard delegation record and receipt, and the workflow run record lists the delegation ID of each step.
 This removes the workflow's own agent construction, toolkit resolution, and run loop for ephemeral participants, which today duplicate `create_agent` and the response envelope.
@@ -183,13 +186,15 @@ This removes the workflow's own agent construction, toolkit resolution, and run 
 ### Rule changes
 
 - Participant tools must be a subset of the caller's tools; today they may name any registered tool the caller lacks, which this refactor closes.
+- A participant without `tools` gets every caller toolkit except the infrastructure toolkits, frozen into its persona at its first step, and functions that are not pre-approved stay hidden.
 - Participant models follow the delegate rule, any configured model alias, instead of the caller's active model only.
-- `permissions.tools` and `permissions.models` remain optional narrower caps within the spec.
+- A non-empty `permissions.tools` must list every toolkit a participant names, and `permissions.models` still caps participant models.
 
 ### Stored revision conversion
 
 Saved revisions are immutable per-file YAML documents, so the store converts legacy participants when it reads a revision instead of rewriting files: each `ephemeral_agent` participant becomes a `subagent` participant whose `system_prompt` is rendered deterministically from its old `name`, `role`, and `instructions`, keeping `id`, `description`, `model`, and `tools`.
 `update_workflow` merges its patch onto the converted spec, so every new revision is written in the current format.
+A legacy participant without tools reads as `tools: []`, so it stays toolless instead of gaining the caller's tools.
 The rendered prompt differs from the prompt Agno built for the old participant, which is acceptable under the no-backward-compatibility policy.
 The reader lives in `src/mindroom/dynamic_workflows/legacy_participants.py` beside the store, carries a `LEGACY_COMPAT` marker, and is listed in `docs/architecture/migrations.md`.
 A migrated revision whose tools exceed the caller's tools fails at run time with the subset error, which names the missing tools.
@@ -209,10 +214,12 @@ The primary reads profiles only through no-follow confinement with the count and
 
 ## Module layout
 
-- `src/mindroom/delegation/personas.py`: the persona dataclass, inline validation, profile parsing and listing, the caller tool-subset check, and the helper that applies a persona to an agent.
+- `src/mindroom/delegation/state.py`: the serializable `SubagentPersona` dataclass beside `DelegationChild`, which keeps that leaf module free of Agno and config imports.
+- `src/mindroom/delegation/personas.py`: inline validation, profile parsing and listing, the caller tool surface and subset check, and `run_subagent` argument resolution.
+- `src/mindroom/delegation/direct.py`: the shared reserve, start, run, and settle sequence for one child turn inside a caller's tool call.
 - `src/mindroom/custom_tools/delegate.py` and `src/mindroom/delegation/execution.py`: persona parameters and resolution on both delegation paths.
 - `src/mindroom/delegation/state.py`, `sessions.py`, `lifecycle.py`, and `audit.py`: persona snapshot, grant-aware authorization, and record fields.
-- `src/mindroom/agents.py` and `src/mindroom/minimal_agent.py`: accept and apply a persona through the persona module.
+- `src/mindroom/agents.py` and `src/mindroom/minimal_agent.py`: accept a persona and apply it in a private helper beside `create_agent`.
 - `src/mindroom/custom_tools/dynamic_workflow.py`, `src/mindroom/dynamic_workflows/validation.py`, and `src/mindroom/dynamic_workflows/store.py`: new participant schema, lifecycle-based execution, and migration call.
 - `src/mindroom/dynamic_workflows/legacy_participants.py`: the read-time conversion of legacy participants.
 - `tach.toml`: any new dependency from `dynamic_workflows` or `custom_tools.dynamic_workflow` onto `delegation`.
