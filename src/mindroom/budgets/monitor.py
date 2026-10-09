@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from mindroom.budgets.pricing import price_table
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
 from mindroom.logging_config import get_logger
+from mindroom.model_loading import canonical_provider
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
@@ -28,16 +29,27 @@ _MIN_SCAN_INTERVAL_SECONDS = 30.0
 _TICK_SECONDS = 300.0
 
 
-def _budget_limit_usd(config: Config, user_id: str, runtime_paths: RuntimePaths) -> float | None:
-    """Return the requester's monthly cap in USD, or None when budgets are off or the user is uncapped."""
+def _budget_limit_usd(config: Config, canonical_user_id: str) -> float | None:
+    """Return a canonical requester's monthly cap in USD, or None when budgets are off or the user is uncapped."""
     budgets = config.budgets
     if budgets is None:
         return None
-    canonical_user_id = resolve_human_requester_alias(user_id, config, runtime_paths)
     for configured_user_id, limit in budgets.users.items():
-        if resolve_human_requester_alias(configured_user_id, config, runtime_paths) == canonical_user_id:
+        if config.authorization.resolve_alias(configured_user_id) == canonical_user_id:
             return limit
     return budgets.monthly_limit_usd
+
+
+def _is_priced(config: Config, model_name: str) -> bool:
+    """Return whether usage of this model adds spend, including through another alias of the same model."""
+    model_config = config.models.get(model_name)
+    if model_config is None:
+        return False
+    identity = (canonical_provider(model_config.provider), model_config.id)
+    return any(
+        other.pricing is not None and (canonical_provider(other.provider), other.id) == identity
+        for other in config.models.values()
+    )
 
 
 def budget_model(
@@ -55,16 +67,15 @@ def budget_model(
     budgets = config.budgets
     if budgets is None or requester_id is None:
         return model_name
-    model_config = config.models.get(model_name)
     # Unpriced models add no tracked spend, so swapping them could only raise cost.
-    if model_name == budgets.fallback_model or model_config is None or model_config.pricing is None:
+    if model_name == budgets.fallback_model or not _is_priced(config, model_name):
         return model_name
     if not is_human_requester_id(requester_id, config, runtime_paths):
         return model_name
-    limit = _budget_limit_usd(config, requester_id, runtime_paths)
+    canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    limit = _budget_limit_usd(config, canonical_requester_id)
     if limit is None:
         return model_name
-    canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
     if spend < limit:
         return model_name
@@ -184,12 +195,10 @@ class BudgetMonitor:
         period_start, period_end = month_bounds(self.clock())
         snapshot = self._current_snapshot()
         spend = dict(snapshot.spend_usd) if snapshot is not None else {}
-        user_ids = set(spend) | {
-            resolve_human_requester_alias(user_id, config, self.runtime_paths) for user_id in config.budgets.users
-        }
+        user_ids = set(spend) | {config.authorization.resolve_alias(user_id) for user_id in config.budgets.users}
         users = []
         for user_id in user_ids:
-            limit = _budget_limit_usd(config, user_id, self.runtime_paths)
+            limit = _budget_limit_usd(config, user_id)
             user_spend = spend.get(user_id, 0.0)
             users.append(
                 _BudgetUserStatus(

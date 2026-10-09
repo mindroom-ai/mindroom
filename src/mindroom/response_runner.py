@@ -4315,11 +4315,14 @@ class ResponseRunner:
             )
         )
         if turn_models is not None:
+            budgeted = {
+                model_name: self._budgeted_model(request, model_name)
+                for model_name in {turn_models.team_model_name, *turn_models.member_model_names.values()}
+            }
             turn_models = TeamTurnModelSelection(
-                team_model_name=self._budgeted_model(request, turn_models.team_model_name),
+                team_model_name=budgeted[turn_models.team_model_name],
                 member_model_names={
-                    member: self._budgeted_model(request, model_name)
-                    for member, model_name in turn_models.member_model_names.items()
+                    member: budgeted[model_name] for member, model_name in turn_models.member_model_names.items()
                 },
             )
         request = await self._prepare_admitted_locked_turn(

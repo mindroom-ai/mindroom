@@ -7,6 +7,7 @@ import asyncio
 import threading
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -175,14 +176,20 @@ async def test_per_user_override_beats_the_default_cap(tmp_path: Path, monkeypat
     await monitor.stop()
 
 
-def test_budget_limit_resolves_aliases_and_defaults(tmp_path: Path) -> None:
-    paths = _paths(tmp_path)
+def test_budget_limit_resolves_aliases_and_defaults() -> None:
     config = _config(users={ALICE_BRIDGE: 100.0})
 
-    assert _budget_limit_usd(config, ALICE, paths) == 100.0
-    assert _budget_limit_usd(config, BOB, paths) == 10.0
-    assert _budget_limit_usd(_config(monthly_limit_usd=None), BOB, paths) is None
-    assert _budget_limit_usd(Config(), BOB, paths) is None
+    assert _budget_limit_usd(config, ALICE) == 100.0
+    assert _budget_limit_usd(config, BOB) == 10.0
+    assert _budget_limit_usd(_config(monthly_limit_usd=None), BOB) is None
+    assert _budget_limit_usd(Config(), BOB) is None
+
+
+def test_an_unpriced_alias_of_a_priced_model_is_swapped_too(tmp_path: Path) -> None:
+    config = _config(monthly_limit_usd=0)
+    config.models["astra_fast"] = ModelConfig(provider="openai", id="gpt-6-astra")
+
+    assert budget_model(config, _paths(tmp_path), None, ALICE, "astra_fast") == "luna"
 
 
 def test_no_snapshot_yet_means_zero_spend(tmp_path: Path) -> None:
@@ -314,3 +321,19 @@ def test_status_before_first_scan_reports_current_month_without_spend(tmp_path: 
     assert payload["generated_at"] is None
     assert payload["period_start"] == "2026-10-01"
     assert payload["users"] == []
+
+
+def test_decision_cost_does_not_grow_with_configured_users(tmp_path: Path) -> None:
+    users = {f"@user{index}:example.test": 50.0 for index in range(200)}
+    config = _config(users=users, monthly_limit_usd=0)
+    paths = _paths(tmp_path)
+
+    with patch.object(
+        monitor_module,
+        "resolve_human_requester_alias",
+        wraps=monitor_module.resolve_human_requester_alias,
+    ) as resolve:
+        assert budget_model(config, paths, None, ALICE_BRIDGE, "astra") == "luna"
+        assert budget_model(config, paths, None, "@user7:example.test", "astra") == "astra"
+
+    assert resolve.call_count == 2
