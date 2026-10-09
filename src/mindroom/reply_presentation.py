@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import (
@@ -25,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
 )
+from mindroom.reply_lifecycle import NoteKind
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
     INTERRUPTED_RESPONSE_NOTE,
@@ -49,18 +49,6 @@ AGENT_PLACEHOLDER = PROGRESS_PLACEHOLDER
 TEAM_PLACEHOLDER = TEAM_PROGRESS_PLACEHOLDER
 _DELIVERY_FAILED_NOTE = "Response delivery failed. Please retry."
 _APPROVAL_START_FAILED_NOTE = "Tool approval could not be started. Please try again."
-
-
-class NoteKind(StrEnum):
-    """Why a note sits in a reply; its text is fixed by the kind or carried by the segment."""
-
-    RESTART = "restart"
-    CANCELLED = "cancelled"
-    INTERRUPTED = "interrupted"
-    ERROR = "error"
-    DELIVERY_FAILED = "delivery_failed"
-    APPROVAL_WAIT = "approval_wait"
-    APPROVAL_FAILED = "approval_failed"
 
 
 def format_error_note(error: object) -> str:
@@ -205,7 +193,7 @@ def _folded(presentation: Presentation) -> Presentation:
     return replace(presentation, segments=(Segment(kind="answer", text=body, tool_trace=trace),), trailing_note=None)
 
 
-def shown_work(possibly_shown: Presentation) -> Segment | None:
+def _shown_work(possibly_shown: Presentation) -> Segment | None:
     """Return the work a stopped reply may have shown, without its notes.
 
     Trailing cancel, interruption, restart, and error notes are dropped, so a
@@ -225,7 +213,7 @@ def after_restart(possibly_shown: Presentation) -> Presentation:
     A reply that showed only its placeholder is replaced rather than
     annotated, as a continued stream is.
     """
-    work = shown_work(possibly_shown)
+    work = _shown_work(possibly_shown)
     if work is None:
         return replace(possibly_shown, segments=(), trailing_note=None)
     return replace(possibly_shown, segments=(work, note_segment(NoteKind.RESTART)), trailing_note=None)

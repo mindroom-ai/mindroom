@@ -522,7 +522,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.reply_presentation"
-depends_on = ["mindroom.constants", "mindroom.streaming", "mindroom.tool_system.events"]
+depends_on = ["mindroom.constants", "mindroom.reply_lifecycle", "mindroom.streaming", "mindroom.tool_system.events"]
 
 [[modules]]
 path = "mindroom.reply_scope"

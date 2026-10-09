@@ -615,7 +615,7 @@ def test_a_stop_after_an_unacknowledged_progress_edit_does_not_restore() -> None
     transition = rl.stopped(_progress(stop.reply, span), span, None, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.CANCELLED
-    assert transition.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_CANCELLED)
+    assert transition.reply.owed_write == rl.OwedWrite("span-2", rl.NoteKind.CANCELLED)
     assert _span_after(transition, "span-2").outcome is SpanOutcome.CANCELLED
 
 
@@ -707,7 +707,7 @@ def test_a_refused_final_of_a_regeneration_ends_the_reply_failed_with_its_note()
 
     assert refused.reply is not None
     assert refused.reply.state is ReplyState.FAILED
-    assert refused.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_DELIVERY_FAILED)
+    assert refused.reply.owed_write == rl.OwedWrite("span-2", rl.NoteKind.DELIVERY_FAILED)
 
 
 def test_stopped_without_a_recorded_stop_ends_the_reply_unmodeled() -> None:
@@ -803,7 +803,7 @@ def test_an_exit_that_rendered_nothing_still_honors_a_recorded_stop(
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.CANCELLED
     assert not transition.reply.unapplied_stop
-    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_CANCELLED)
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.CANCELLED)
     assert transition.effects == (SettleSources(span.span_id),)
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.CANCELLED
 
@@ -813,7 +813,7 @@ def test_an_exit_that_rendered_nothing_still_honors_a_recorded_stop(
     [
         (None, False, ReplyState.GONE, (), None),
         ("$reply", True, ReplyState.GONE, ("$reply",), None),
-        ("$reply", False, ReplyState.CANCELLED, (), rl.OwedWrite("span-1", rl._NOTE_INTERRUPTED)),
+        ("$reply", False, ReplyState.CANCELLED, (), rl.OwedWrite("span-1", rl.NoteKind.INTERRUPTED)),
     ],
 )
 def test_suppression_follows_mains_branches(
@@ -840,18 +840,18 @@ def test_suppressing_after_visible_progress_ends_what_it_showed() -> None:
     suppressed = rl.suppress(shown, span, reason="suppressed", now_ns=NOW)
     assert suppressed.reply is not None
     assert suppressed.reply.state is ReplyState.CANCELLED
-    assert suppressed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
+    assert suppressed.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.INTERRUPTED)
     stop = rl.stop(shown, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     stopped = rl.suppress(stop.reply, span, reason="suppressed", now_ns=NOW)
     assert stopped.reply is not None
     assert stopped.reply.state is ReplyState.CANCELLED
-    assert stopped.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_CANCELLED)
+    assert stopped.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.CANCELLED)
     assert not stopped.reply.unapplied_stop
     regenerating, regeneration = _regenerating()
     partial = rl.suppress(_progress(regenerating, regeneration), regeneration, reason="suppressed", now_ns=NOW)
     assert partial.reply is not None
-    assert partial.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_INTERRUPTED)
+    assert partial.reply.owed_write == rl.OwedWrite("span-2", rl.NoteKind.INTERRUPTED)
 
 
 def test_hook_failure_of_substantive_content_fails_the_reply() -> None:
@@ -861,7 +861,7 @@ def test_hook_failure_of_substantive_content_fails_the_reply() -> None:
     transition = rl.suppress(reply, span, reason="hook_failed", now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
-    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.INTERRUPTED)
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.FAILED
 
 
@@ -945,7 +945,7 @@ def test_sources_settled_with_a_stop_recorded_end_the_reply_cancelled() -> None:
     assert ended.reply is not None
     assert ended.reply.state is ReplyState.CANCELLED
     assert not ended.reply.unapplied_stop
-    assert ended.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_CANCELLED)
+    assert ended.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.CANCELLED)
 
 
 def test_pause_ends_the_span_and_writes_an_edit_row() -> None:
@@ -1284,7 +1284,7 @@ def test_permanently_failed_pause_row_fences_the_approval() -> None:
     assert failed.reply is not None
     assert failed.reply.state is ReplyState.FAILED
     assert failed.reply.owed_write is not None
-    assert failed.reply.owed_write.note == rl._NOTE_APPROVAL_FAILED
+    assert failed.reply.owed_write.note == rl.NoteKind.APPROVAL_FAILED
     assert failed.effects == (FenceApproval("approval-1", "failed"), WakeApproval("approval-1"))
 
 
@@ -1351,7 +1351,7 @@ def test_stop_without_a_live_span_cancels_directly_and_owes_a_note() -> None:
     stop = rl.stop(reply, None, StopFacts(receipt_order=6, span_live=False), now_ns=NOW)
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.CANCELLED
-    assert stop.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_CANCELLED)
+    assert stop.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.CANCELLED)
     assert stop.effects == (SettleSources(span.span_id),)
     flushed = rl.flush_owed_write(
         stop.reply,
@@ -1493,7 +1493,7 @@ def test_a_regeneration_a_restart_lost_after_it_wrote_keeps_what_it_showed() -> 
     )
     assert settled.reply is not None
     assert settled.reply.state is ReplyState.FAILED
-    assert settled.reply.owed_write == rl.OwedWrite("span-2", rl._NOTE_RESTART)
+    assert settled.reply.owed_write == rl.OwedWrite("span-2", rl.NoteKind.RESTART)
 
     lost = rl.owner_lost(
         reply,
@@ -1519,7 +1519,7 @@ def test_a_regeneration_a_restart_lost_after_it_wrote_keeps_what_it_showed() -> 
     cancelled = rl.stopped(stop.reply, rerun.claimed, None, now_ns=NOW)
     assert cancelled.reply is not None
     assert cancelled.reply.state is ReplyState.CANCELLED
-    assert cancelled.reply.owed_write == rl.OwedWrite("span-3", rl._NOTE_CANCELLED)
+    assert cancelled.reply.owed_write == rl.OwedWrite("span-3", rl.NoteKind.CANCELLED)
 
 
 def test_deleting_sources_keeps_paused_and_completed_replies() -> None:
@@ -1560,7 +1560,7 @@ def test_sources_settled_without_reply() -> None:
     assert failed.reply is not None
     assert failed.reply.state is ReplyState.FAILED
     # The in-progress status it shows ends with the interrupted note.
-    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
+    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.INTERRUPTED)
 
 
 def test_sources_settled_without_reply_leave_a_held_reply_to_its_approval() -> None:
@@ -1605,7 +1605,7 @@ def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
     for owing in (
         rl.replay_superseded(reply, span, durable_write_debt=True, now_ns=NOW),
         rl.replay_superseded(
-            replace(reply, owed_write=rl.OwedWrite(span.span_id, rl._NOTE_RESTART)),
+            replace(reply, owed_write=rl.OwedWrite(span.span_id, rl.NoteKind.RESTART)),
             span,
             durable_write_debt=False,
             now_ns=NOW,
@@ -1625,12 +1625,12 @@ def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
 def test_a_dropped_replay_ends_the_reply_its_earlier_span_left() -> None:
     """Ingress settled the replay's sources without a turn, so the reply ends interrupted; it owes no row first."""
     reply, span = _interrupted()
-    owing = replace(reply, owed_write=rl.OwedWrite(span.span_id, rl._NOTE_RESTART))
+    owing = replace(reply, owed_write=rl.OwedWrite(span.span_id, rl.NoteKind.RESTART))
     dropped = rl.replay_dropped(owing, span, sources_pending=False, now_ns=NOW)
     assert dropped.outcome is Outcome.APPLIED
     assert dropped.reply is not None
     assert dropped.reply.state is ReplyState.FAILED
-    assert dropped.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_INTERRUPTED)
+    assert dropped.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.INTERRUPTED)
     # Settling again is idempotent, and it is what records the turn answered.
     assert dropped.effects == (SettleSources(span.span_id, answered=False),)
     # A placeholder is removed, unless an edit Matrix has not confirmed may show more.
@@ -1669,7 +1669,7 @@ def test_owner_lost_fails_settled_orphans_with_a_restart_note() -> None:
     transition = rl.owner_lost(replace(reply, event_id="$reply"), stale, facts, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
-    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_RESTART)
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.RESTART)
     silent = rl.owner_lost(reply, stale, facts, now_ns=NOW)
     assert silent.reply is not None
     assert silent.reply.state is ReplyState.GONE
@@ -1713,7 +1713,7 @@ def test_a_refused_terminal_row_owes_the_delivery_failed_note() -> None:
         failed = rl._terminal_write_failed(refused, span, now_ns=NOW)
         assert failed.reply is not None
         assert failed.reply.state is ReplyState.FAILED
-        assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
+        assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.DELIVERY_FAILED)
         assert failed.reply.redaction_pending == ()
 
 
@@ -1723,7 +1723,7 @@ def test_dispatch_failure_fails_the_reply_and_owes_its_error() -> None:
     transition = rl.dispatch_failed(reply, span, error_text="boom", now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
-    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_ERROR, "boom")
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.ERROR, "boom")
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.FAILED
 
 
@@ -1861,7 +1861,7 @@ def test_releasing_an_approval_a_stop_covers_ends_the_reply_instead_of_replaying
     released = rl.approval_released(stop.reply, resume.claimed, now_ns=NOW)
     assert released.reply is not None
     assert released.reply.state is ReplyState.CANCELLED
-    assert released.reply.owed_write == rl.OwedWrite("resume", rl._NOTE_CANCELLED)
+    assert released.reply.owed_write == rl.OwedWrite("resume", rl.NoteKind.CANCELLED)
     assert released.effects == (SettleSources("resume"),)
     assert _span_after(released, "resume").outcome is SpanOutcome.CANCELLED
 
@@ -1939,7 +1939,7 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
     failed = rl._terminal_write_failed(final.reply, ended, now_ns=NOW)
     assert failed.reply is not None
     # The progress stays its event's content, never redacted as a placeholder; the note ends it.
-    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_DELIVERY_FAILED)
+    assert failed.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.DELIVERY_FAILED)
     assert failed.reply.state is ReplyState.FAILED
     assert failed.reply.redaction_pending == ()
 
@@ -2199,7 +2199,7 @@ def test_an_unmodeled_event_ends_the_reply_failed_and_settles_its_sources() -> N
     assert transition.unmodeled == "test"
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.FAILED
-    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl._NOTE_ERROR, rl._UNMODELED_ERROR_TEXT)
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.ERROR, rl._UNMODELED_ERROR_TEXT)
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.FAILED
     assert transition.effects == (CancelSpan(span.span_id), SettleSources(span.span_id))
 

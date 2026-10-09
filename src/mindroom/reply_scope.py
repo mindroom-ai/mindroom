@@ -36,7 +36,6 @@ from mindroom.reply_presentation import (
     format_error_note,
     note_segment,
     render_body,
-    shown_work,
     with_answer,
 )
 from mindroom.stop import SpanRegistry
@@ -164,14 +163,6 @@ def current_span() -> SpanHandle | None:
 def current_slot() -> SpanSlot | None:
     """Return the slot of the span scope the current task runs in, if any."""
     return _current_slot.get()
-
-
-def _unfinished_from(shown: Presentation) -> UnfinishedStreamedReply | None:
-    """Describe what a reply showed in the shape the streamer continues below."""
-    work = shown_work(shown)
-    if work is None:
-        return None
-    return UnfinishedStreamedReply(visible_text=work.text, tool_trace=work.tool_trace)
 
 
 logger = get_logger(__name__)
@@ -634,9 +625,11 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=replace(empty, segments=()))
     if span.kind is rl.SpanKind.APPROVAL_RESUME:
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=continued_by(canonical, span.span_id))
-    # A replay continues below what the stopped attempt may have shown.
-    resumed = _unfinished_from(shown)
-    base = after_restart(shown) if resumed is not None else replace(empty, segments=())
+    # A replay continues below what the stopped attempt may have shown: its work, then the restart note.
+    restarted = after_restart(shown)
+    work = restarted.segments[0] if restarted.segments else None
+    base = restarted if work is not None else replace(empty, segments=())
+    resumed = None if work is None else UnfinishedStreamedReply(visible_text=work.text, tool_trace=work.tool_trace)
     return SpanHandle(
         runtime=runtime,
         span=span,

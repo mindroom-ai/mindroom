@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.reply_lifecycle import (
+    NoteKind,
     OwedWrite,
     Reply,
     ReplyState,
@@ -80,7 +81,7 @@ def _owed(stored: object) -> OwedWrite | None:
     text = data.get("text")
     return OwedWrite(
         span_id=str(data["span_id"]),
-        note=str(data["note"]),
+        note=NoteKind(str(data["note"])),
         text=text if isinstance(text, str) else None,
     )
 

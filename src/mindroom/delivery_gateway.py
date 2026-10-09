@@ -1681,7 +1681,7 @@ class DeliveryGateway:
             owed = reply.owed_write
             span = await self.deps.outbox.replies.span(owed.span_id)
             assert span is not None, "an owed write names a span of its reply"
-            shown = _with_note(_shown_before(reply, None), note_segment(NoteKind(owed.note), owed.text))
+            shown = _with_note(_shown_before(reply, None), note_segment(owed.note, owed.text))
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
             rendered = render(shown, state=reply.state.value)
@@ -2317,29 +2317,16 @@ class DeliveryGateway:
             event_id: str | None,
             retry_sync_recovery: bool,
         ) -> DeliveredMatrixEvent | None:
-            if event_id is None:
-                outcome = await self._send_content(
-                    SendTextRequest(
-                        target=target,
-                        response_text="",
-                        retry_sync_recovery=retry_sync_recovery,
-                        reply_write=write,
-                    ),
-                    target.room_id,
-                    content,
-                )
-            else:
-                outcome = await self._edit_content(
-                    EditTextRequest(
-                        target=target,
-                        event_id=event_id,
-                        new_text=display_text,
-                        retry_sync_recovery=retry_sync_recovery,
-                        reply_write=write,
-                    ),
-                    target.room_id,
-                    content,
-                )
+            self._ready_client()
+            outcome = await self._deliver_reply_write(
+                write,
+                target=target,
+                content=content,
+                # A create's text is its content's body; an edit names its new text.
+                new_text=None if event_id is None else display_text,
+                result=None,
+                retry_sync_recovery=retry_sync_recovery,
+            )
             return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
         async def initial_send(

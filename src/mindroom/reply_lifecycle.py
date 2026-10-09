@@ -89,13 +89,18 @@ class WriteStage(StrEnum):
     EDIT = "edit"
 
 
-# Note kinds are owned by ``reply_presentation``; the lifecycle names them by value.
-_NOTE_CANCELLED = "cancelled"
-_NOTE_RESTART = "restart"
-_NOTE_INTERRUPTED = "interrupted"
-_NOTE_DELIVERY_FAILED = "delivery_failed"
-_NOTE_APPROVAL_FAILED = "approval_failed"
-_NOTE_ERROR = "error"
+class NoteKind(StrEnum):
+    """Why a note sits in a reply; its text is fixed by the kind or carried by the note itself."""
+
+    RESTART = "restart"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+    ERROR = "error"
+    DELIVERY_FAILED = "delivery_failed"
+    APPROVAL_WAIT = "approval_wait"
+    APPROVAL_FAILED = "approval_failed"
+
+
 # What a reply ended by a state the rules do not model shows; the error note has no text of its own.
 _UNMODELED_ERROR_TEXT = "⚠️ Error: this reply could not continue. Please try again."
 
@@ -166,7 +171,7 @@ class OwedWrite:
     """
 
     span_id: str
-    note: str
+    note: NoteKind
     # Text for notes whose wording is not fixed by their kind (errors).
     text: str | None = None
 
@@ -436,7 +441,7 @@ def _cancelled(reply: Reply, span_id: str, now_ns: int) -> Reply:
         _stop_applied(reply),
         ReplyState.CANCELLED,
         now_ns,
-        owed_write=OwedWrite(span_id, _NOTE_CANCELLED),
+        owed_write=OwedWrite(span_id, NoteKind.CANCELLED),
     )
 
 
@@ -496,7 +501,7 @@ def _unmodeled(reply: Reply, span: Span | None, *, reason: str, now_ns: int) -> 
         effects += [FenceApproval(reply.approval_id, "failed"), WakeApproval(reply.approval_id)]
     else:
         effects.append(SettleSources(reply.last_span_id))
-    owed = OwedWrite(reply.last_span_id, _NOTE_ERROR, _UNMODELED_ERROR_TEXT)
+    owed = OwedWrite(reply.last_span_id, NoteKind.ERROR, _UNMODELED_ERROR_TEXT)
     updated = _set_state(_stop_applied(updated), ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=spans, effects=tuple(effects), unmodeled=reason)
 
@@ -894,11 +899,11 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
         updated = _clear_current(updated, span.span_id)
         effects.append(CancelSpan(span.span_id))
     if reply.unapplied_stop:
-        owed = OwedWrite(span.span_id, _NOTE_CANCELLED)
+        owed = OwedWrite(span.span_id, NoteKind.CANCELLED)
         updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns)
         disposition: FailureDisposition = "cancelled_by_user"
     else:
-        owed = OwedWrite(span.span_id, _NOTE_APPROVAL_FAILED)
+        owed = OwedWrite(span.span_id, NoteKind.APPROVAL_FAILED)
         updated = _set_state(updated, ReplyState.FAILED, now_ns)
         disposition = "failed"
     effects.insert(0, FenceApproval(reply.approval_id, disposition))
@@ -917,7 +922,7 @@ def _terminal_write_failed(reply: Reply, span: Span, *, now_ns: int) -> Transiti
     if span.span_id != reply.last_span_id:
         # A later span claims the reply only after this row resolved, so this is not its row.
         return replace(_unchanged(Outcome.STALE, reply), unmodeled="refused_row_of_an_older_span")
-    owed = OwedWrite(span.span_id, _NOTE_DELIVERY_FAILED)
+    owed = OwedWrite(span.span_id, NoteKind.DELIVERY_FAILED)
     return Transition(
         outcome=Outcome.APPLIED,
         reply=replace(_set_state(reply, ReplyState.FAILED, now_ns), owed_write=owed),
@@ -1133,7 +1138,7 @@ def suppress(
         ending = _cancelled(updated, span.span_id, now_ns)
     else:
         state = ReplyState.CANCELLED if reason == "suppressed" else ReplyState.FAILED
-        ending = _set_state(updated, state, now_ns, owed_write=OwedWrite(span.span_id, _NOTE_INTERRUPTED))
+        ending = _set_state(updated, state, now_ns, owed_write=OwedWrite(span.span_id, NoteKind.INTERRUPTED))
     return Transition(outcome=Outcome.APPLIED, reply=ending, spans=ended, effects=effects)
 
 
@@ -1472,7 +1477,7 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
         # A Stop recorded before the failure decides what the reply shows.
         updated = _cancelled(updated, reply.last_span_id, now_ns)
     else:
-        owed = OwedWrite(reply.last_span_id, _NOTE_ERROR, error_text)
+        owed = OwedWrite(reply.last_span_id, NoteKind.ERROR, error_text)
         updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=spans, effects=(SettleSources(reply.last_span_id),))
 
@@ -1508,7 +1513,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     # What the reply showed stays, ended by the interrupted note; nothing else
     # would replace the in-progress status it shows. An edit Matrix has not
     # confirmed may show more than the placeholder, so it stays too.
-    owed = OwedWrite(span.span_id, _NOTE_INTERRUPTED)
+    owed = OwedWrite(span.span_id, NoteKind.INTERRUPTED)
     return Transition(
         outcome=Outcome.APPLIED,
         reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed),
@@ -1676,7 +1681,7 @@ def _ended_by_restart(reply: Reply, updated: Reply, last: Span, ended: tuple[Spa
     if reply.event_id is None and reply.possibly_shown_seq is None:
         # It never wrote anything: a restart note would be a message of its own.
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.GONE, now_ns), spans=ended)
-    owed = OwedWrite(last.span_id, _NOTE_RESTART)
+    owed = OwedWrite(last.span_id, NoteKind.RESTART)
     return Transition(
         outcome=Outcome.APPLIED,
         reply=_set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed),

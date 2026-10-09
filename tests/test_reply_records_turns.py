@@ -488,7 +488,7 @@ async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     answered = await _reply(bot)
     await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
-    owed = rl.OwedWrite(answered.last_span_id, rl._NOTE_RESTART)
+    owed = rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART)
     await bot._reply_runtime.store.replies.update(
         answered.reply_id,
         lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
@@ -532,7 +532,7 @@ async def test_a_note_that_could_not_be_prepared_yet_stays_owed(tmp_path: Path) 
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     answered = await _reply(bot)
-    owed = rl.OwedWrite(answered.last_span_id, rl._NOTE_RESTART)
+    owed = rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART)
     await bot._reply_runtime.store.replies.update(
         answered.reply_id,
         lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
