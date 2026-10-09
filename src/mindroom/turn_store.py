@@ -773,17 +773,13 @@ class TurnStore:
         sanitized = self._sanitize_candidate(record, current)
         if any(self._is_revision_redacted(event_id) for event_id in consumed_revision_ids):
             return True
-        driving = next(
-            (
-                revision
-                for revision in (record.source_event_revisions or {}).values()
-                if revision[1] == driving_revision_id
-            ),
-            None,
-        )
+        # The edit's own revision: only what registered above it can stop it.
+        driving = {revision[1]: revision for revision in (record.source_event_revisions or {}).values()}[
+            driving_revision_id
+        ]
         for source in record.replay_source_event_ids:
             latest = current.revision_watermark(source)
-            if latest is None or (driving is not None and latest < driving):
+            if latest is None or latest < driving:
                 continue
             replay = (current.revision_replay or {}).get(latest[1])
             selected = next(
@@ -800,6 +796,7 @@ class TurnStore:
             current_revision > snapshot_revision
             for source in record.replay_source_event_ids
             if (current_revision := current.revision_watermark(source)) is not None
+            and current_revision > driving
             and (snapshot_revision := record.revision_watermark(source)) is not None
         )
 

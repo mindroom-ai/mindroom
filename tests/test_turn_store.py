@@ -2827,6 +2827,34 @@ async def test_edits_of_two_messages_of_one_turn_let_the_newer_edit_regenerate(
 
 
 @pytest.mark.asyncio
+async def test_an_older_sibling_edit_registered_after_the_snapshot_does_not_stop_a_newer_edit(
+    journal_store: EventJournalStore,
+) -> None:
+    """Edits that register out of timestamp order still let the newer one regenerate."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_responded_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_ids=("$first", "$user_msg"),
+            source_event_prompts={"$first": "FIRST", "$user_msg": "SECOND"},
+            source_event_revisions={"$first": (5, "$first-earlier-edit")},
+        ),
+    )
+    newer = await store.register_edit_revision("$user_msg", (20, "$second-edit"))
+    assert newer is not None
+    newer_snapshot = replace(
+        newer,
+        source_event_prompts={"$first": "FIRST", "$user_msg": "SECOND_EDIT"},
+        source_event_revisions={**(newer.source_event_revisions or {}), "$user_msg": (20, "$second-edit")},
+    )
+    # The older sibling edit registers only after the newer snapshot was built.
+    assert await store.register_edit_revision("$first", (10, "$first-edit")) is not None
+
+    assert await store.prepare_edit_snapshot(record=newer_snapshot, driving_revision_id="$second-edit") is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["driver", "sibling", "newer"])
 async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
     journal_store: EventJournalStore,
