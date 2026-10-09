@@ -6,7 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.config.judgment import LLMJudgmentConfig, OpenAIDecisionsJudgmentConfig
-from mindroom.credentials_sync import get_api_key_for_provider
+from mindroom.credentials_sync import get_api_key_for_provider, get_api_key_for_service
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
@@ -70,13 +70,26 @@ def _probability_client(
     *,
     question_id: str,
 ) -> JudgmentClient | None:
+    credentials_service = None
     if isinstance(settings, OpenAIDecisionsJudgmentConfig):
-        wire, key = OPENAI_DECISIONS, get_api_key_for_provider("openai", runtime_paths)
+        credentials_service = settings.credentials_service
+        wire = OPENAI_DECISIONS
+        key = (
+            get_api_key_for_provider("openai", runtime_paths)
+            if credentials_service is None
+            else get_api_key_for_service(credentials_service, runtime_paths)
+        )
     else:
         wire, key = SYSTEM_ONE, runtime_paths.env_value("TYPESAFE_API_KEY")
     key = (key or "").strip()
     if not key:
-        logger.info("Judgment fallback", question=question_id, backend=settings.provider, failure="missing_credential")
+        logger.info(
+            "Judgment fallback",
+            question=question_id,
+            backend=settings.provider,
+            failure="missing_credential",
+            credentials_service=credentials_service,
+        )
         return None
     return JudgmentClient(
         api_key=key,
