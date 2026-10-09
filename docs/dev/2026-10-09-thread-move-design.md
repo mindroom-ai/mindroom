@@ -90,12 +90,13 @@ The tool reaches it through `ToolRuntimeContext.orchestrator`; no tool imports `
 ### Errors
 
 - A send failure stops the move and returns an error naming how many messages were copied and the partial new thread's link; the source thread is left untouched.
-- `ThreadTagsError` from steps 2 and 4 does not fail the move, because the copy is already complete and retrying would duplicate it; the result reports which tag writes failed.
+- A failure in steps 2 to 4 (a `ThreadTagsError` or a failed notice send) does not fail the move, because the copy is already complete and retrying would duplicate it; the result lists each failure in `warnings`.
+- A thread whose messages are all skipped is refused before anything is posted.
 - No durable move journal exists, so a crash mid-copy leaves a partial copy and an untouched source thread.
 
 ### Result Payload
 
-`status`, `room_id` and `thread_id` of the new thread, `link`, `copied` and `skipped` counts, `tags_copied`, and `tag_errors` when any tag write failed.
+`status`, `room_id` and `thread_id` of the new thread, `link`, `copied` and `skipped` counts, `tags_copied`, and `warnings`.
 
 ## What Does Not Move
 
@@ -111,7 +112,7 @@ Messages posted in the source thread after the move starts are not copied.
 ## Testing
 
 - Copy plan unit tests: skip rules, poster selection, content allowlist, attribution prefixes for text and media, trigger guard keys.
-- Tool tests in the style of `tests/test_thread_resolution_tool.py`: registration, no context, no thread, same room, access denied, incomplete history, encrypted-to-plain refusal, router or acting agent missing from the target room, a full success path asserting send order, poster, content, and relations, tag copy, source notice, and `resolved` tag, a mid-copy send failure, and a reported tag error.
+- Tool tests in the style of `tests/test_thread_resolution_tool.py`: registration, no context, no thread, same room, access denied, incomplete history, encrypted-to-plain refusal, router or acting agent missing from the target room, a full success path asserting send order, poster, content, and relations, tag copy, source notice, and `resolved` tag, a mid-copy send failure, and a tag failure reported as a warning.
 - `running_entity_client` test on the orchestrator.
 - Live test with the `live-test` skill: move a thread with a human and two agents between two rooms, confirm no agent replies to the copies, confirm an untagged follow-up in the new thread reaches the original agent with the earlier conversation in context, and confirm the source thread shows the link and the `resolved` tag.
 
