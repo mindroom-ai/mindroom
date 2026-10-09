@@ -65,13 +65,13 @@ def test_session_id_round_trips_handles() -> None:
 
 
 def test_empty_poll_waits_like_codex() -> None:
-    """An empty poll waits at least 5 seconds and at most 300, as Codex clamps it."""
+    """An empty poll waits at least 5 seconds, as Codex clamps it, and at most MindRoom's 60."""
     to_canonical = _wire("write_stdin").to_canonical
 
     assert to_canonical({"session_id": 1}) == {"handle": "shell:00000001", "wait": 5}
     assert to_canonical({"session_id": 1, "chars": "", "yield_time_ms": 900000}) == {
         "handle": "shell:00000001",
-        "wait": 300,
+        "wait": 60,
     }
 
 
@@ -100,8 +100,11 @@ def test_status_renderings() -> None:
         == "Wall time: 1.5 seconds\nProcess exited with code 2\nOutput:\nout\nStderr:\nboom"
     )
     assert _render("write_stdin", running) == "Wall time: 3 seconds\nProcess running (PID 77)\nOutput:\npartial"
-    assert _render("exec_command", "Use check_shell_command('shell:0123abcd') to confirm exit.") == (
-        f"Use write_stdin(session_id={0x0123ABCD}) to confirm exit."
+    printed = "grep hit: check_shell_command('shell:0123abcd')"
+    assert _render("exec_command", printed) == printed
+    status_output = _format_finished_status(return_code=0, elapsed=1.0, stderr="", output=printed)
+    assert (
+        _render("write_stdin", status_output) == f"Wall time: 1 seconds\nProcess exited with code 0\nOutput:\n{printed}"
     )
     assert _render("exec_command", "[cwd: /w]\nplain output") == "[cwd: /w]\nplain output"
 

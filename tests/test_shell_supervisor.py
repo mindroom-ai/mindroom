@@ -1363,3 +1363,21 @@ async def test_check_wait_through_supervisor() -> None:
 
         assert status.startswith("Status: FINISHED (exit code 0")
         assert "waited" in status
+
+
+@pytest.mark.asyncio
+async def test_negative_wait_polls_at_once() -> None:
+    """A negative wait reports the status immediately instead of timing out the supervisor request."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        handle = _extract_handle(await _run(socket_path, ["bash", "-c", "sleep 30"], timeout=0))
+
+        status = await _check(socket_path, handle, wait=-100)
+        await _kill(socket_path, handle, force=True)
+
+    assert status.startswith("Status: RUNNING")
+
+
+def test_check_wait_stays_inside_the_worker_proxy_budget() -> None:
+    """The longest wait plus the supervisor grace fits the default worker proxy timeout."""
+    assert shell_execution_module.MAX_CHECK_WAIT_SECONDS + 30 < 120

@@ -355,7 +355,7 @@ async def poll_command_via_supervisor(socket_path: str, *, namespace: str, handl
     result = await _async_supervisor_request(
         socket_path,
         request,
-        response_timeout=min(wait, MAX_CHECK_WAIT_SECONDS),
+        response_timeout=min(max(wait, 0), MAX_CHECK_WAIT_SECONDS),
     )
     return result.message
 

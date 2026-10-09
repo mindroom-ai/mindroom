@@ -5,12 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY
-
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
-
-    from agno.models.message import Message
 
 # AGNO_COMPAT: Responses custom tool calls are dropped.
 # Reason: Agno 3.0.9 sends custom tool definitions unchanged but parses only `function_call` output
@@ -21,7 +17,8 @@ if TYPE_CHECKING:
 # Upstream PR: None identified.
 # Remove when: Agno parses `custom_tool_call` output items into tool calls and replays them as
 # `custom_tool_call` and `custom_tool_call_output` input items.
-# Coverage: tests/test_openai_custom_tools.py.
+# Coverage: tests/test_openai_custom_tools.py::test_end_to_end_apply_patch_edits_workspace_file;
+# tests/test_openai_custom_tools.py::test_reasoning_order_survives_custom_call.
 
 CUSTOM_TOOL_CALL = "custom_tool_call"
 
@@ -33,7 +30,6 @@ def custom_tool_call(item: Any) -> dict[str, Any]:  # noqa: ANN401 - an SDK cust
         "call_id": item.call_id,
         "type": "function",
         "function": {"name": item.name, "arguments": json.dumps({"input": item.input})},
-        MINDROOM_WIRE_KEY: {"custom": True},
     }
 
 
@@ -50,17 +46,6 @@ def tool_calls_with_custom(tool_calls: list[dict[str, Any]], output_items: Itera
         elif item.type == "function_call" and item.call_id in remaining:
             ordered.append(remaining.pop(item.call_id))
     return [*ordered, *remaining.values()]
-
-
-def _custom_call_ids(messages: Sequence[Message]) -> set[str]:
-    return {
-        call_id
-        for message in messages
-        for call in message.tool_calls or []
-        if isinstance(wire := call.get(MINDROOM_WIRE_KEY), dict) and wire.get("custom")
-        for call_id in (call.get("call_id"), call.get("id"))
-        if isinstance(call_id, str)
-    }
 
 
 def _custom_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -80,9 +65,14 @@ def _custom_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def replay_custom_tool_items(formatted_input: list[Any], messages: Sequence[Message]) -> list[Any]:
-    """Return Agno's formatted Responses input with custom tool calls and outputs in their own item types."""
-    custom_call_ids = _custom_call_ids(messages)
+def replay_custom_tool_items(formatted_input: list[Any], tools: Sequence[Any] | None) -> list[Any]:
+    """Return Agno's formatted Responses input with calls to this request's custom tools in their own item types."""
+    custom_names = {tool.get("name") for tool in tools or [] if isinstance(tool, dict) and tool.get("type") == "custom"}
+    custom_call_ids = {
+        item.get("call_id")
+        for item in formatted_input
+        if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in custom_names
+    }
     if not custom_call_ids:
         return formatted_input
     return [

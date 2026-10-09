@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.shell_execution import (
-    SHELL_CALL_REFERENCE_PATTERN,
     ProcessRecord,
     _BackgroundHandle,
     _CheckStatus,
@@ -27,6 +26,7 @@ from mindroom.shell_execution import (
     kill_command,
     parse_background_handle_message,
     parse_check_status,
+    parse_kill_message,
     parse_unknown_handle_error,
     run_command,
     signal_record,
@@ -293,10 +293,6 @@ def test_background_handle_message_round_trips() -> None:
     assert parse_background_handle_message(text) == _BackgroundHandle(timeout=10, pid=4242, handle="shell:0123abcd")
     assert parse_background_handle_message(text + "\nextra") is None
     assert parse_background_handle_message("Command timed out") is None
-    assert SHELL_CALL_REFERENCE_PATTERN.findall(text) == [
-        ("check_shell_command", "shell:0123abcd"),
-        ("kill_shell_command", "shell:0123abcd"),
-    ]
     assert _shell_call_reference("check_shell_command", "shell:0123abcd") == "check_shell_command('shell:0123abcd')"
 
 
@@ -342,3 +338,11 @@ def test_unknown_handle_error_round_trips() -> None:
     """The unknown-handle error parses back to its handle."""
     assert parse_unknown_handle_error(check_command({}, namespace="ns", handle="shell:0123abcd")) == "shell:0123abcd"
     assert parse_unknown_handle_error("Error: something else") is None
+
+
+def test_kill_message_round_trips() -> None:
+    """The kill confirmation parses back into its fields."""
+    message = "Force-killed process 77 (SIGKILL sent). Use check_shell_command('shell:0123abcd') to confirm exit."
+
+    assert parse_kill_message(message) == ("Force-killed", 77, "SIGKILL", "shell:0123abcd")
+    assert parse_kill_message("Process 77 already exited") is None

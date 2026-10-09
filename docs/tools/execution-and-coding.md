@@ -140,7 +140,7 @@ With `mindroom_output_path`, the complete output is saved to that file instead.
 
 `workdir` runs the command in a directory relative to the workspace instead of the workspace itself.
 A command that exceeds `timeout` keeps running in the background, and the tool returns a `shell:...` handle.
-Poll it with `check_shell_command(handle)`, passing `wait` to wait up to that many seconds (at most 300) for it to finish, and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
+Poll it with `check_shell_command(handle)`, passing `wait` to wait up to that many seconds (at most 60) for it to finish, and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
 A backgrounded command with `mindroom_output_path` saves its output when it finishes, and `check_shell_command()` then returns the file receipt.
 Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
 Records of finished commands are cleared about 10 minutes after they finish.

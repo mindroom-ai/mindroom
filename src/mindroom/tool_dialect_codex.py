@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import math
 import shlex
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from mindroom.shell_execution import (
-    SHELL_CALL_REFERENCE_PATTERN,
+    MAX_CHECK_WAIT_SECONDS,
     parse_background_handle_message,
     parse_check_status,
     parse_unknown_handle_error,
@@ -30,14 +30,12 @@ from mindroom.tool_dialect_types import (
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
 
-if TYPE_CHECKING:
-    import re
-
 _HANDLE_PREFIX = "shell:"
 _SHORT_HANDLE_DIGITS = 8
 _LONG_HANDLE_DIGITS = 32
-# Codex clamps the yield of an empty poll to 5-300 seconds and of a command to at least 250 ms.
-_EMPTY_POLL_WAIT_SECONDS = (5, 300)
+# Codex waits at least 5 seconds on an empty poll and yields a command after at least 250 ms;
+# MindRoom caps a poll's wait at MAX_CHECK_WAIT_SECONDS.
+_EMPTY_POLL_WAIT_SECONDS = (5, MAX_CHECK_WAIT_SECONDS)
 _MIN_YIELD_MS = 250
 _APPLY_PATCH_GRAMMAR = """start: begin_patch hunk+ end_patch
 begin_patch: "*** Begin Patch" LF
@@ -80,22 +78,11 @@ def _handle(session_id: int) -> str:
     return f"{_HANDLE_PREFIX}{session_id:0{digits}x}"
 
 
-def _codex_shell_reference(match: re.Match[str]) -> str:
-    function_name, handle = match.groups()
-    if function_name == "check_shell_command":
-        return f"write_stdin(session_id={_session_id(handle)})"
-    return match.group(0)
-
-
-def _render_references(text: str) -> str:
-    return SHELL_CALL_REFERENCE_PATTERN.sub(_codex_shell_reference, text)
-
-
 def _render_exec(text: str) -> str:
     _cwd, rest = split_cwd_prefix(text)
     background = parse_background_handle_message(rest)
     if background is None:
-        return _render_references(text)
+        return text
     return (
         f"{text[: len(text) - len(rest)]}Wall time: {background.timeout:g} seconds\n"
         f"Process running with session ID {_session_id(background.handle)} (PID {background.pid})\nOutput:\n"
@@ -107,7 +94,7 @@ def _render_poll(text: str) -> str:
         return f"Error: Unknown session ID {_session_id(handle)}"
     status = parse_check_status(text)
     if status is None:
-        return _render_references(text)
+        return text
     state = f"Process running (PID {status.pid})" if status.running else f"Process exited with code {status.exit_code}"
     stderr = f"\nStderr:\n{status.stderr}" if status.stderr else ""
     return f"Wall time: {status.elapsed:g} seconds\n{state}\nOutput:\n{status.output}{stderr}"
@@ -197,7 +184,7 @@ _WRITE_STDIN = WireFunction(
             "session_id": {"type": "number", "description": "Identifier of the running exec_command session."},
             "yield_time_ms": {
                 "type": "number",
-                "description": "Wait up to this long for the session to finish. Defaults to 5000 ms, at most 300000 ms.",
+                "description": "Wait up to this long for the session to finish. Defaults to 5000 ms, at most 60000 ms.",
             },
         },
         "session_id",

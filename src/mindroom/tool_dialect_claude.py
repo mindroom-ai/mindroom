@@ -7,38 +7,32 @@ and Write tools; the descriptions are MindRoom's own.
 from __future__ import annotations
 
 import shlex
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, parse_edit_multiple_matches_error, split_read_output
-from mindroom.shell_execution import SHELL_CALL_REFERENCE_PATTERN, parse_background_handle_message
+from mindroom.shell_execution import parse_background_handle_message, parse_kill_message
 from mindroom.tool_dialect_types import ToolDialect, WireFunction, milliseconds_to_seconds, wire_argument
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
-
-if TYPE_CHECKING:
-    import re
 
 
 def _object_schema(properties: dict[str, dict[str, Any]], *required: str) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
 
 
-def _claude_shell_reference(match: re.Match[str]) -> str:
-    function_name, handle = match.groups()
-    if function_name == "check_shell_command":
-        return f'BashOutput(bash_id="{handle}")'
-    return f'KillShell(shell_id="{handle}")'
-
-
-def _render_shell_references(text: str) -> str:
-    return SHELL_CALL_REFERENCE_PATTERN.sub(_claude_shell_reference, text)
+def _render_kill(text: str) -> str:
+    kill = parse_kill_message(text)
+    if kill is None:
+        return text
+    action, pid, signal, handle = kill
+    return f'{action} process {pid} ({signal} sent). Use BashOutput(bash_id="{handle}") to confirm exit.'
 
 
 def _render_bash(text: str) -> str:
     _cwd, rest = split_cwd_prefix(text)
     background = parse_background_handle_message(rest)
     if background is None:
-        return _render_shell_references(text)
+        return text
     handle = background.handle
     poll = f'Poll it with BashOutput(bash_id="{handle}") or stop it with KillShell(shell_id="{handle}").'
     if background.timeout > 0:
@@ -62,7 +56,10 @@ def _bash_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _bash_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
     args = canonical.get("args")
-    wire: dict[str, Any] = {"command": shlex.join(args) if isinstance(args, list) else str(args or "")}
+    command = shlex.join(args) if isinstance(args, list) else str(args or "")
+    if isinstance(workdir := canonical.get("workdir"), str):
+        command = f"cd {shlex.quote(workdir)} && {command}"
+    wire: dict[str, Any] = {"command": command}
     timeout = canonical.get("timeout")
     if timeout == 0:
         wire["run_in_background"] = True
@@ -173,7 +170,6 @@ _BASH_OUTPUT = WireFunction(
     ),
     to_canonical=lambda arguments: {"handle": wire_argument(arguments, "BashOutput", "bash_id")},
     to_wire=lambda canonical: {"bash_id": canonical.get("handle")},
-    render_result=_render_shell_references,
 )
 _KILL_SHELL = WireFunction(
     key=ToolKey("shell", "kill_shell_command"),
@@ -185,7 +181,7 @@ _KILL_SHELL = WireFunction(
     ),
     to_canonical=lambda arguments: {"handle": wire_argument(arguments, "KillShell", "shell_id"), "force": False},
     to_wire=lambda canonical: {"shell_id": canonical.get("handle")},
-    render_result=_render_shell_references,
+    render_result=_render_kill,
 )
 _READ = WireFunction(
     key=ToolKey("coding", "read_file"),

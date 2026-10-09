@@ -19,6 +19,7 @@ from mindroom.tool_dialects import (
     wire_messages,
     wire_tools,
 )
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.tool_access import ToolKey
 
 _RUN = ToolKey("shell", "run_shell_command")
@@ -141,6 +142,13 @@ def test_wire_tools_skips_function_with_other_owner() -> None:
     assert _names(presented) == ["run_shell_command"]
 
 
+def test_wire_tools_present_preset_owned_functions() -> None:
+    """A canonical function a preset such as openclaw_compat brought in is presented in the dialect."""
+    presented = wire_tools(_TOY, [_function("run_shell_command", "openclaw_compat")], custom_tools=False)
+
+    assert _names(presented) == ["Run"]
+
+
 def test_wire_name_collision_keeps_canonical() -> None:
     """A wire name already used by another tool leaves the mapped function canonical."""
     tools = [_function("run_shell_command", "shell"), _function("Run", "mcp_server")]
@@ -148,8 +156,8 @@ def test_wire_name_collision_keeps_canonical() -> None:
     assert _names(wire_tools(_TOY, tools, custom_tools=False)) == ["run_shell_command", "Run"]
 
 
-def test_canonical_tool_calls_round_trip_and_attach_wire() -> None:
-    """Wire calls become canonical calls that remember their exact wire form."""
+def test_canonical_tool_calls_translate_lossless_calls_without_a_wire_record() -> None:
+    """A call whose wire form re-renders exactly becomes canonical without storing it twice."""
     functions = {"run_shell_command": _function("run_shell_command", "shell")}
     call = _call("call_1", "Run", {"cmd": "ls -la"}, call_id="call_1")
 
@@ -162,15 +170,30 @@ def test_canonical_tool_calls_round_trip_and_attach_wire() -> None:
             "call_id": "call_1",
             "type": "function",
             "function": {"name": "run_shell_command", "arguments": json.dumps({"args": "ls -la"})},
-            MINDROOM_WIRE_KEY: {
-                "dialect": "claude",
-                "toolkit": "shell",
-                "name": "Run",
-                "arguments": json.dumps({"cmd": "ls -la"}),
-                "custom": False,
-            },
         },
     ]
+
+
+def test_canonical_tool_calls_keep_the_wire_form_of_lossy_calls() -> None:
+    """A call whose translation drops information keeps its exact wire form for same-dialect replay."""
+    functions = {"run_shell_command": _function("run_shell_command", "shell")}
+    raw = '{"cmd": "ls",  "note": "x"}'
+    call = _call("a", "Run", {}) | {"function": {"name": "Run", "arguments": raw}}
+
+    [translated], _errors = canonical_tool_calls(_TOY, [call], functions)
+
+    assert translated["function"] == {"name": "run_shell_command", "arguments": json.dumps({"args": "ls"})}
+    assert translated[MINDROOM_WIRE_KEY] == {"dialect": "claude", "name": "Run", "arguments": raw}
+
+
+def test_canonical_tool_calls_accept_preset_owned_functions() -> None:
+    """A canonical function an authored preset brought in is still the dialect's function."""
+    functions = {"run_shell_command": _function("run_shell_command", "openclaw_compat")}
+
+    [translated], errors = canonical_tool_calls(_TOY, [_call("a", "Run", {"cmd": "ls"})], functions)
+
+    assert errors == []
+    assert translated["function"]["name"] == "run_shell_command"
 
 
 def test_canonical_tool_calls_leave_existing_and_foreign_names() -> None:
@@ -185,7 +208,7 @@ def test_canonical_tool_calls_leave_existing_and_foreign_names() -> None:
 
 
 def test_untranslatable_call_returns_tool_call_error() -> None:
-    """Arguments the dialect cannot translate become a tool error for that call only."""
+    """Arguments the dialect cannot translate become a tool error for that exact call only."""
     functions = {"run_shell_command": _function("run_shell_command", "shell")}
     calls = [
         _call("bad", "Run", {"command": "ls"}),
@@ -195,7 +218,10 @@ def test_untranslatable_call_returns_tool_call_error() -> None:
     translated, errors = canonical_tool_calls(_TOY, calls, functions)
 
     assert translated == calls
-    assert [(error.call_id, error.name) for error in errors] == [("bad", "Run"), ("json", "Run")]
+    assert [(error.call is calls[index], error.name) for index, error in enumerate(errors)] == [
+        (True, "Run"),
+        (True, "Run"),
+    ]
     assert errors[0].message == "Error: Run requires cmd"
     assert errors[1].message.startswith("Error: Invalid JSON arguments for Run")
 
@@ -204,57 +230,68 @@ def _assistant(*calls: dict[str, Any]) -> Message:
     return Message(role="assistant", tool_calls=list(calls))
 
 
-def test_wire_messages_same_dialect_is_verbatim() -> None:
-    """A call made in the active dialect replays exactly as the model sent it."""
-    wire = {
-        "dialect": "claude",
-        "toolkit": "shell",
-        "name": "Run",
-        "arguments": '{"cmd": "ls",  "x": 1}',
-        "custom": False,
-    }
+_PRESENTED = frozenset({"Run", "ls"})
+
+
+def test_wire_messages_same_dialect_is_verbatim_without_the_record() -> None:
+    """A lossy call made in the active dialect replays as sent, and the wire record never reaches the provider."""
+    wire = {"dialect": "claude", "name": "Run", "arguments": '{"cmd": "ls",  "note": 1}'}
     message = _assistant(_call("a", "run_shell_command", {"args": "ls"}, **{MINDROOM_WIRE_KEY: wire}))
 
-    [rendered] = wire_messages(_TOY, [message])
+    [rendered] = wire_messages(_TOY, [message], _PRESENTED)
 
-    assert rendered.tool_calls is not None
-    assert rendered.tool_calls[0]["function"] == {"name": "Run", "arguments": '{"cmd": "ls",  "x": 1}'}
+    assert rendered.tool_calls == [
+        {"id": "a", "type": "function", "function": {"name": "Run", "arguments": '{"cmd": "ls",  "note": 1}'}},
+    ]
 
 
 def test_wire_messages_other_dialect_translates_by_name() -> None:
     """Calls made in another dialect, or with no wire record, render through the active dialect."""
-    other = {"dialect": "codex", "toolkit": "shell", "name": "exec_command", "arguments": "{}", "custom": False}
+    other = {"dialect": "codex", "name": "exec_command", "arguments": "{}"}
     messages = [
         _assistant(_call("a", "run_shell_command", {"args": "pwd"}, **{MINDROOM_WIRE_KEY: other})),
         _assistant(_call("b", "run_shell_command", {"args": "ls"})),
     ]
 
-    rendered = wire_messages(_TOY, messages)
+    rendered = wire_messages(_TOY, messages, _PRESENTED)
 
-    assert [message.tool_calls[0]["function"] for message in rendered if message.tool_calls] == [
-        {"name": "Run", "arguments": json.dumps({"cmd": "pwd"})},
-        {"name": "Run", "arguments": json.dumps({"cmd": "ls"})},
+    assert [message.tool_calls for message in rendered] == [
+        [{"id": "a", "type": "function", "function": {"name": "Run", "arguments": json.dumps({"cmd": "pwd"})}}],
+        [{"id": "b", "type": "function", "function": {"name": "Run", "arguments": json.dumps({"cmd": "ls"})}}],
     ]
+
+
+def test_wire_messages_render_only_tools_presented_in_wire_form() -> None:
+    """Calls and results of a same-named tool the request presents canonically stay canonical."""
+    call = _call("a", "run_shell_command", {"args": "x"})
+    result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="ran check_shell_command")
+
+    rendered = wire_messages(_TOY, [_assistant(call), result], frozenset({"run_shell_command"}))
+
+    assert rendered[0].tool_calls == [call]
+    assert rendered[1] is result
 
 
 def test_wire_messages_leaves_unmapped_calls() -> None:
     """Calls the active dialect does not map keep their canonical form."""
     message = _assistant(_call("a", "apply_patch", {"input": "*** Begin Patch"}))
 
-    [rendered] = wire_messages(_TOY, [message])
+    [rendered] = wire_messages(_TOY, [message], _PRESENTED)
 
     assert rendered is message
 
 
 def test_wire_messages_does_not_mutate_inputs() -> None:
     """Rendering copies the messages it changes and leaves stored history canonical."""
-    message = _assistant(_call("a", "run_shell_command", {"args": "ls"}))
+    wire = {"dialect": "claude", "name": "Run", "arguments": "{}"}
+    message = _assistant(_call("a", "run_shell_command", {"args": "ls"}, **{MINDROOM_WIRE_KEY: wire}))
     result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="use check_shell_command")
 
-    rendered = wire_messages(_TOY, [message, result])
+    rendered = wire_messages(_TOY, [message, result], _PRESENTED)
 
     assert message.tool_calls is not None
     assert message.tool_calls[0]["function"]["name"] == "run_shell_command"
+    assert MINDROOM_WIRE_KEY in message.tool_calls[0]
     assert result.content == "use check_shell_command"
     assert rendered[0] is not message
     assert rendered[1].content == "use Poll"
@@ -272,7 +309,7 @@ def test_render_result_applies_only_to_mapped_tool_results() -> None:
         compressed_content="check_shell_command short",
     )
 
-    rendered = wire_messages(_TOY, [other, media, compressed])
+    rendered = wire_messages(_TOY, [other, media, compressed], _PRESENTED)
 
     assert rendered[0] is other
     assert rendered[1] is media
@@ -308,4 +345,28 @@ def test_wire_name_equal_to_canonical_name_is_not_a_collision() -> None:
         "name": "apply_patch",
         "description": "Run a command.",
         "format": {"type": "grammar"},
+    }
+
+
+def test_output_path_argument_survives_translation() -> None:
+    """The MindRoom-managed output-path argument stays offered, reaches the canonical call, and renders back."""
+    function = _function("run_shell_command", "shell")
+    function.parameters = {
+        "type": "object",
+        "properties": {"args": {"type": "string"}, OUTPUT_PATH_ARGUMENT: {"type": "string", "description": "save"}},
+    }
+    call = _call("a", "Run", {"cmd": "ls -R", OUTPUT_PATH_ARGUMENT: "out.txt"})
+
+    [presented] = wire_tools(_TOY, [function], custom_tools=False)
+    [translated], _errors = canonical_tool_calls(_TOY, [call], {"run_shell_command": function})
+    [rendered] = wire_messages(_TOY, [_assistant(translated)], _PRESENTED)
+
+    assert isinstance(presented, dict)
+    assert presented["function"]["parameters"]["properties"][OUTPUT_PATH_ARGUMENT]["description"] == "save"
+    assert json.loads(translated["function"]["arguments"]) == {"args": "ls -R", OUTPUT_PATH_ARGUMENT: "out.txt"}
+    assert MINDROOM_WIRE_KEY not in translated
+    assert rendered.tool_calls is not None
+    assert json.loads(rendered.tool_calls[0]["function"]["arguments"]) == {
+        "cmd": "ls -R",
+        OUTPUT_PATH_ARGUMENT: "out.txt",
     }

@@ -141,6 +141,15 @@ def test_background_handle_renders_claude_wording() -> None:
     ) == ('Terminated process 77 (SIGTERM sent). Use BashOutput(bash_id="shell:0123abcd") to confirm exit.')
 
 
+def test_program_output_naming_shell_tools_is_not_rewritten() -> None:
+    """Only MindRoom's own messages are reworded; command output that mentions the tools stays as printed."""
+    printed = "[cwd: /w]\ngrep hit: check_shell_command('shell:0123abcd')"
+    status = "Status: FINISHED (exit code 0, ran for 1.0s)\nOutput:\nkill_shell_command('shell:0123abcd')"
+
+    assert _render("Bash", printed) == printed
+    assert _wire("BashOutput").render_result is None or _render("BashOutput", status) == status
+
+
 def test_edit_errors_render_claude_wording() -> None:
     """Edit match errors use Claude Code's wording, including the replace_all hint."""
     multiple = (
@@ -229,3 +238,8 @@ async def test_thinking_replay_keeps_wire_call_verbatim() -> None:
     assert [tool["name"] for tool in requests[0]["tools"]] == ["Bash"]
     assistant = next(message for message in requests[1]["messages"] if message["role"] == "assistant")
     assert assistant["content"] == [thinking, tool_use]
+
+
+def test_workdir_history_renders_as_cd_prefix() -> None:
+    """A canonical call with a workdir, such as one Codex made, renders as a Bash command that changes into it."""
+    assert _wire("Bash").to_wire({"args": "make", "workdir": "sub dir"}) == {"command": "cd 'sub dir' && make"}

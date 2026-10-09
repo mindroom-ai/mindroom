@@ -37,9 +37,9 @@ _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
-MAX_CHECK_WAIT_SECONDS = 300
+# Waits stay inside the default 120-second worker proxy request budget with room for the supervisor relay.
+MAX_CHECK_WAIT_SECONDS = 60
 _HANDLE_FIELD = r"shell:[0-9a-f]+"
-SHELL_CALL_REFERENCE_PATTERN = re.compile(rf"\b(check_shell_command|kill_shell_command)\('({_HANDLE_FIELD})'\)")
 
 
 def _shell_call_reference(function_name: str, handle: str) -> str:
@@ -57,6 +57,17 @@ _BACKGROUND_HANDLE = template_pattern(
     _BACKGROUND_HANDLE_TEMPLATE,
     timeout=FLOAT_FIELD,
     pid=INT_FIELD,
+    handle=_HANDLE_FIELD,
+)
+_KILL_TEMPLATE = (
+    "{action} process {pid} ({signal} sent). "
+    f"Use {_shell_call_reference('check_shell_command', '{handle}')} to confirm exit."
+)
+_KILL = template_pattern(
+    _KILL_TEMPLATE,
+    action="Terminated|Force-killed",
+    pid=INT_FIELD,
+    signal="SIGTERM|SIGKILL",
     handle=_HANDLE_FIELD,
 )
 _FINISHED_HEADER_TEMPLATE = "Status: FINISHED (exit code {code}, ran for {elapsed}s)\n"
@@ -560,6 +571,14 @@ def parse_check_status(text: str) -> _CheckStatus | None:
     )
 
 
+def parse_kill_message(text: str) -> tuple[str, int, str, str] | None:
+    """Return the action, PID, signal, and handle of a kill confirmation, or None for any other text."""
+    match = _KILL.fullmatch(text)
+    if match is None:
+        return None
+    return match["action"], int(match["pid"]), match["signal"], match["handle"]
+
+
 def parse_unknown_handle_error(text: str) -> str | None:
     """Return the handle of an unknown-handle error, or None for any other text."""
     match = _UNKNOWN_HANDLE.fullmatch(text)
@@ -595,10 +614,7 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
         return f"Process {record.pid} already exited"
 
     action = "Force-killed" if force else "Terminated"
-    return (
-        f"{action} process {record.pid} ({sig_name} sent). "
-        f"Use {_shell_call_reference('check_shell_command', handle)} to confirm exit."
-    )
+    return _KILL_TEMPLATE.format(action=action, pid=record.pid, signal=sig_name, handle=handle)
 
 
 def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:

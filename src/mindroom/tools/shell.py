@@ -523,7 +523,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             Args:
                 handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
-                wait: Seconds to wait for the command to finish before reporting, at most 300. 0 reports at once.
+                wait: Seconds to wait for the command to finish before reporting, at most 60. 0 reports at once.
 
             Returns:
                 Output if the command finished, or a status summary if still running.

@@ -17,7 +17,7 @@ from openai import AsyncOpenAI
 
 from mindroom.agents import _set_toolkit_approval_origin
 from mindroom.agno_compat_tool_dialect import install_tool_dialect
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -218,19 +218,20 @@ async def test_wire_call_dispatches_canonical_function() -> None:
 @pytest.mark.asyncio
 async def test_second_request_replays_same_dialect_call_verbatim() -> None:
     """The follow-up request repeats the model's call exactly as it was sent."""
-    provider = _Provider([_function_call("c1", "Run", '{"cmd":   "ls"}')])
+    provider = _Provider([_function_call("c1", "Run", '{"cmd":   "ls", "note": "kept"}')])
 
     await _run(provider, [_shell([])], _CLAUDE_TOY)
 
     [call] = provider.items(1, "function_call")
-    assert (call["name"], call["arguments"]) == ("Run", '{"cmd":   "ls"}')
+    assert (call["name"], call["arguments"]) == ("Run", '{"cmd":   "ls", "note": "kept"}')
+    assert MINDROOM_WIRE_KEY not in json.dumps(provider.requests[1])
 
 
 @pytest.mark.asyncio
 async def test_session_reload_keeps_mindroom_wire(tmp_path: Path) -> None:
     """Stored history keeps the canonical call and its wire record across a database reload."""
     db = SqliteDb(db_file=str(tmp_path / "sessions.db"))
-    provider = _Provider([_function_call("c1", "Run", '{"cmd": "ls"}')])
+    provider = _Provider([_function_call("c1", "Run", '{"cmd": "ls", "note": "kept"}')])
 
     await _run(provider, [_shell([])], _CLAUDE_TOY, db=db)
 
@@ -281,6 +282,11 @@ async def test_mixed_batch_translates_each_call_and_keeps_mcp_call() -> None:
 
     assert sorted(provider.tool_names()) == ["Read", "ls", "run_shell_command"]
     assert sorted(executions) == ["ls", "mcp x", "read a.txt"]
+    assert [(item["call_id"], item["name"]) for item in provider.items(1, "function_call")] == [
+        ("c1", "Read"),
+        ("c2", "ls"),
+        ("c3", "run_shell_command"),
+    ]
     assert [item["call_id"] for item in provider.items(1, "function_call_output")] == ["c1", "c2", "c3"]
 
 
@@ -364,3 +370,48 @@ def test_overrides_bind_to_deepcopied_model() -> None:
 
     assert copied._format_tools.__self__ is copied
     assert copied.get_function_calls_to_run.__self__ is copied
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_payload_carries_no_wire_record() -> None:
+    """Chat Completions sends stored tool calls verbatim, so the wire record must be stripped first."""
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        message: dict[str, Any] = {"role": "assistant", "content": "Done"}
+        if len(requests) == 1:
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "Run", "arguments": '{"cmd": "ls", "note": "kept"}'},
+                    },
+                ],
+            }
+        return httpx.Response(
+            200,
+            json={
+                "id": f"chatcmpl-{len(requests)}",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "claude-sonnet-5.5",
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    async with AsyncOpenAI(
+        api_key="test",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as client:
+        model = MindRoomOpenAIChat(id="anthropic/claude-sonnet-5.5", async_client=client)
+        install_tool_dialect(model, _CLAUDE_TOY)
+        await Agent(model=model, tools=[_shell([])], telemetry=False).arun("Go.")
+
+    [assistant] = [message for message in requests[1]["messages"] if message.get("tool_calls")]
+    assert assistant["tool_calls"][0]["function"] == {"name": "Run", "arguments": '{"cmd": "ls", "note": "kept"}'}
+    assert MINDROOM_WIRE_KEY not in json.dumps(requests[1])

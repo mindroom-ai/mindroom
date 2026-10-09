@@ -9,7 +9,7 @@ from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
 from mindroom.model_instance_checks import OPENAI_RESPONSES_CLASS, isinstance_of_loaded
-from mindroom.tool_dialects import canonical_tool_calls, wire_messages, wire_tools
+from mindroom.tool_dialects import canonical_tool_calls, tool_dict_name, wire_messages, wire_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
@@ -34,7 +34,10 @@ _TOOL_DIALECT_INVOKE_MARKER = "_mindroom_tool_dialect_invoke"
 # Upstream PR: None identified.
 # Remove when: Agno exposes a per-model tool presentation hook that renames and reshapes definitions,
 # history calls, and incoming calls while dispatching the original Function.
-# Coverage: tests/test_tool_dialect_binding.py.
+# Coverage: tests/test_tool_dialect_binding.py::test_wire_call_dispatches_canonical_function;
+# tests/test_tool_dialect_binding.py::test_switching_dialect_rerenders_history;
+# tests/test_tool_dialect_binding.py::test_chat_completions_payload_carries_no_wire_record;
+# tests/test_tool_dialect_binding.py::test_overrides_bind_to_deepcopied_model.
 def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
     """Present this model's canonical tools in *dialect*, as freeform tools where the Responses API allows them."""
     custom_tools = isinstance_of_loaded(model, OPENAI_RESPONSES_CLASS)
@@ -61,8 +64,8 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
         if not assistant_message.tool_calls or functions is None:
             return get_function_calls_to_run(bound_model, assistant_message, messages, functions)
         translated, errors = canonical_tool_calls(dialect, assistant_message.tool_calls, functions)
-        failed_call_ids = {error.call_id for error in errors}
-        assistant_message.tool_calls = [call for call in translated if call.get("id") not in failed_call_ids]
+        failed_calls = {id(error.call) for error in errors}
+        assistant_message.tool_calls = [call for call in translated if id(call) not in failed_calls]
         try:
             function_calls = get_function_calls_to_run(bound_model, assistant_message, messages, functions)
         finally:
@@ -109,4 +112,6 @@ def _wire_kwargs(dialect: ToolDialect, kwargs: dict[str, object]) -> dict[str, o
     messages = kwargs.get("messages")
     if not isinstance(messages, list):
         return kwargs
-    return {**kwargs, "messages": wire_messages(dialect, cast("list[Message]", messages))}
+    tools = cast("list[dict[str, Any]] | None", kwargs.get("tools"))
+    presented = {tool_dict_name(tool) for tool in tools or []}
+    return {**kwargs, "messages": wire_messages(dialect, cast("list[Message]", messages), presented)}

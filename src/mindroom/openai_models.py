@@ -448,7 +448,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
             replay_model.store = False
         formatted_input = replay_custom_tool_items(
             OpenAIResponses._format_messages(replay_model, messages, compress_tool_results, tools=tools),
-            messages,
+            tools,
         )
         if replay_model.store is not False:
             # Match Agno's continuation boundary before locating assistant spans.
