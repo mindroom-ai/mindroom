@@ -74,7 +74,6 @@ class _PlannedCopy:
 
     poster: str
     content: dict[str, Any]
-    source_event_id: str
 
 
 def _plan_thread_copy(
@@ -99,10 +98,16 @@ def _plan_thread_copy(
         content[SKIP_MENTIONS_KEY] = True
         content["m.mentions"] = {}
         poster = entity_name_for_sender(message.sender)
+        author = message.sender
+        relayed_author = message.content.get(ORIGINAL_SENDER_KEY)
+        if poster is not None and isinstance(relayed_author, str) and relayed_author:
+            # A managed sender's own relay, such as the router's voice transcript, names who spoke.
+            author = relayed_author
+            content[ORIGINAL_SENDER_KEY] = author
         if poster is None or poster not in target_posters:
             poster = ROUTER_AGENT_NAME
-            _attribute_relay(content, message.sender, display_names.get(message.sender, message.sender))
-        plan.append(_PlannedCopy(poster=poster, content=content, source_event_id=message.event_id))
+            _attribute_relay(content, author, display_names.get(author, author))
+        plan.append(_PlannedCopy(poster=poster, content=content))
     return plan
 
 
@@ -220,12 +225,14 @@ async def _prepare_move(  # noqa: PLR0911
     assert target_room_id is not None
     if target_room_id == context.room_id:
         return "The thread is already in this room."
-    if not await room_access_allowed(context, target_room_id):
-        return "Not authorized to access the target room."
+    # Membership comes first: an agent missing from the target room cannot
+    # read its members, which the access check would report as a denial.
     registry = entity_identity_registry(context.current_config, context.runtime_paths)
     poster_clients = await _target_poster_clients(context, registry, target_room_id)
     if isinstance(poster_clients, str):
         return poster_clients
+    if not await room_access_allowed(context, target_room_id):
+        return "Not authorized to access the target room."
     history = await complete_thread_history(context.conversation_reader, context.room_id, root_id)
     if not history.is_full_history:
         return "This thread is too long to move."

@@ -1969,7 +1969,7 @@ async def test_moved_thread_copy_that_names_an_agent_starts_no_turn(
     sender_name: str,
     skip_mentions: bool,
 ) -> None:
-    """A copied message that names an agent is history, so only its mention guard keeps it from waking that agent."""
+    """A copied message that names an agent wakes it unless the copy carries the mention guard."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
     event = _text_event(

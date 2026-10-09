@@ -48,17 +48,17 @@ move_thread(room_id: str, thread_id: str | None = None)
 All checks run before anything is written, and each failure returns an error payload:
 
 1. A runtime context exists and a source thread root resolves.
-2. The target room resolves and differs from the current room.
-3. `room_access_allowed(context, target_room_id)` passes.
-4. `complete_thread_history(context.conversation_reader, source_room_id, root_id)` returns `is_full_history=True`; otherwise the thread is too long to move.
-5. The move is refused when the source room is encrypted and the target room is not, so end-to-end encrypted content is never re-posted in plaintext.
-6. The router is running and joined to the target room, and the acting agent is joined to the target room.
-   Membership comes from one `get_room_members` call on the router's client.
+2. The target room resolves to a room ID and differs from the current room; an alias MindRoom does not manage resolves through the homeserver, and anything else is reported as an unknown room.
+3. The router is running and joined to the target room, and the acting agent is joined to the target room.
+   Membership comes from one `get_room_members` call on the router's client, and it is checked before access because an agent missing from the target room cannot read its members, which the access check would report as a denial.
+4. `room_access_allowed(context, target_room_id)` passes.
+5. `complete_thread_history(context.conversation_reader, source_room_id, root_id)` returns `is_full_history=True`; otherwise the thread is too long to move.
+6. The move is refused when the source room is encrypted and the target room is not, so end-to-end encrypted content is never re-posted in plaintext.
 
 ### Copy Plan
 
 A pure function turns the thread history into an ordered list of planned posts.
-Each plan entry holds the posting entity name, the content without its thread relation, and the original event ID.
+Each plan entry holds the posting entity name and the content without its thread relation.
 
 - **Skipped messages:** `m.notice` messages (thread summaries, compaction and other runtime notices, earlier move notices) and messages whose `io.mindroom.stream_status` is `pending`, `streaming`, or `approval_pending` (replies still in progress, including the acting agent's current reply).
 - **Poster selection:** a sender that maps to a managed entity (`entity_identity_registry(...).current_entity_name_for_user_id`) whose bot is running and joined to the target room posts its own copy.
@@ -67,6 +67,7 @@ Each plan entry holds the posting entity name, the content without its thread re
 - **Trigger guard:** every copy gets `com.mindroom.skip_mentions: true` and an empty `m.mentions`.
   Agent-posted copies are additionally ignored as unmentioned managed-sender messages, and a bot ignores its own messages.
 - **Router copies:** they carry `com.mindroom.original_sender` set to the original sender, without any `com.mindroom.source_kind`, so they are attributed in prompts but never treated as a human turn.
+- **Managed relays:** a managed sender's message that already carries `com.mindroom.original_sender`, such as the router's voice transcript, keeps that attribution on its copy, and a router relay of it names that person; a human's message cannot claim another author.
   Because clients do not render `original_sender`, text copies get a visible `Name: ` prefix in `body` and a bold name prefix in `formatted_body`.
   Media copies keep their media fields, set `filename` to the original filename (or the original body when there is none), and use `Name: <caption or filename>` as the body, which Matrix clients show as the caption.
   Names come from `room_member_display_names` for the source room, falling back to the Matrix user ID.

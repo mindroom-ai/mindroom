@@ -83,9 +83,32 @@ def test_plan_posts_entity_messages_as_their_own_account() -> None:
     [copy] = _plan(_message(CODE_ID, {"msgtype": "m.text", "body": "done"}, "$reply:example.org"))
 
     assert copy.poster == "code"
-    assert copy.source_event_id == "$reply:example.org"
     assert copy.content["body"] == "done"
     assert ORIGINAL_SENDER_KEY not in copy.content
+
+
+def test_plan_keeps_trusted_relay_attribution_of_managed_senders() -> None:
+    """A managed sender's relay, such as the router's voice transcript, stays attributed to the person who spoke."""
+    voice_echo = {"msgtype": "m.text", "body": "🎤 fix the parser", ORIGINAL_SENDER_KEY: HUMAN_ID}
+    own, relayed = _plan(
+        _message("@mindroom_router:example.org", voice_echo),
+        _message(ABSENT_ID, {"msgtype": "m.text", "body": "relayed", ORIGINAL_SENDER_KEY: HUMAN_ID}),
+    )
+
+    assert own.poster == ROUTER_AGENT_NAME
+    assert own.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert own.content["body"] == "🎤 fix the parser"
+    assert relayed.poster == ROUTER_AGENT_NAME
+    assert relayed.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert relayed.content["body"] == "Dominic: relayed"
+
+
+def test_plan_ignores_relay_attribution_claimed_by_a_human() -> None:
+    """Only managed senders can attribute a message to someone else."""
+    [copy] = _plan(_message(HUMAN_ID, {"msgtype": "m.text", "body": "hi", ORIGINAL_SENDER_KEY: CODE_ID}))
+
+    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy.content["body"] == "Dominic: hi"
 
 
 def test_plan_relays_human_and_absent_entity_messages_through_router() -> None:
@@ -437,6 +460,21 @@ async def test_move_thread_requires_router_and_agent_in_target(
         else "The router must be in the target room to move a thread."
     )
     assert payload["message"] == expected
+    mocks.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_move_thread_names_a_missing_agent_before_checking_access(tmp_path: Path) -> None:
+    """An agent missing from the target room cannot read its members, so that cause is reported first."""
+    move = _move(tmp_path)
+    members = {REQUESTER_ID, move.ids["code"], move.ids[ROUTER_AGENT_NAME]}
+    with (
+        _matrix(move, _thread(move), members=members) as mocks,
+        patch(f"{MODULE}.room_access_allowed", new=AsyncMock(return_value=False)),
+    ):
+        payload = await _run()
+
+    assert payload["message"] == "Invite general to the target room before moving a thread there."
     mocks.send.assert_not_awaited()
 
 

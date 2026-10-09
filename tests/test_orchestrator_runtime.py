@@ -41,6 +41,7 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -114,10 +115,17 @@ def test_running_entity_client_returns_only_running_bot_clients(tmp_path: Path) 
     config = _runtime_bound_config(Config(), tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     running_client = AsyncMock(spec=nio.AsyncClient)
+
+    def bot(*, running: bool, client: nio.AsyncClient | None) -> AgentBot:
+        managed_bot = MagicMock(spec=AgentBot)
+        managed_bot.running = running
+        managed_bot.client = client
+        return managed_bot
+
     orchestrator.agent_bots = {
-        "running": MagicMock(running=True, client=running_client),
-        "stopped": MagicMock(running=False, client=AsyncMock(spec=nio.AsyncClient)),
-        "clientless": MagicMock(running=True, client=None),
+        "running": bot(running=True, client=running_client),
+        "stopped": bot(running=False, client=AsyncMock(spec=nio.AsyncClient)),
+        "clientless": bot(running=True, client=None),
     }
 
     assert orchestrator.running_entity_client("running") is running_client
