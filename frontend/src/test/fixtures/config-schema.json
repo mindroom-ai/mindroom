@@ -1549,6 +1549,175 @@
         "name"
       ]
     },
+    "EgressAuth": {
+      "additionalProperties": false,
+      "description": "Authentication configuration for an egress rule.",
+      "properties": {
+        "type": {
+          "description": "Authentication type",
+          "enum": [
+            "bearer",
+            "basic",
+            "header",
+            "query"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Username for basic auth; required when type=basic",
+          "title": "Username"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Header or query param name; required for header/query types",
+          "title": "Name"
+        },
+        "template": {
+          "default": "{secret}",
+          "description": "Template for header/query value; must contain {secret} exactly once",
+          "title": "Template",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "EgressAuth",
+      "type": "object"
+    },
+    "EgressBrokerConfig": {
+      "additionalProperties": false,
+      "description": "Top-level egress broker configuration.",
+      "properties": {
+        "unmatched_hosts": {
+          "default": "passthrough",
+          "description": "Action for hosts with no matching rules",
+          "enum": [
+            "passthrough",
+            "deny"
+          ],
+          "title": "Unmatched Hosts",
+          "type": "string"
+        },
+        "services": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EgressService"
+          },
+          "default": {},
+          "description": "Service configurations by name",
+          "title": "Services",
+          "type": "object"
+        }
+      },
+      "title": "EgressBrokerConfig",
+      "type": "object"
+    },
+    "EgressRule": {
+      "additionalProperties": false,
+      "description": "One egress routing rule.",
+      "properties": {
+        "host": {
+          "description": "Host to match (exact, IP, or *.domain.com)",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Port to match; None matches any port",
+          "title": "Port"
+        },
+        "path_prefix": {
+          "default": "/",
+          "description": "Path prefix to match",
+          "title": "Path Prefix",
+          "type": "string"
+        },
+        "auth": {
+          "$ref": "#/$defs/EgressAuth",
+          "description": "Authentication config for this rule"
+        }
+      },
+      "required": [
+        "host",
+        "auth"
+      ],
+      "title": "EgressRule",
+      "type": "object"
+    },
+    "EgressService": {
+      "additionalProperties": false,
+      "description": "One egress service configuration.",
+      "properties": {
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable service name",
+          "title": "Display Name"
+        },
+        "description": {
+          "default": "",
+          "description": "Service description",
+          "title": "Description",
+          "type": "string"
+        },
+        "rules": {
+          "description": "Routing rules for this service",
+          "items": {
+            "$ref": "#/$defs/EgressRule"
+          },
+          "minItems": 1,
+          "title": "Rules",
+          "type": "array"
+        },
+        "placeholder_env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Placeholder environment variables",
+          "title": "Placeholder Env",
+          "type": "object"
+        }
+      },
+      "required": [
+        "rules"
+      ],
+      "title": "EgressService",
+      "type": "object"
+    },
     "EmbedderConfig": {
       "description": "Configuration for memory embedder.",
       "properties": {
@@ -4425,6 +4594,14 @@
   "additionalProperties": false,
   "description": "Complete configuration from YAML.",
   "properties": {
+    "egress_broker": {
+      "$ref": "#/$defs/EgressBrokerConfig",
+      "default": {
+        "unmatched_hosts": "passthrough",
+        "services": {}
+      },
+      "description": "Credential-injecting egress broker for worker shell and python traffic"
+    },
     "administrators": {
       "default": [],
       "description": "Concrete Matrix user IDs with platform-wide administrative authority",

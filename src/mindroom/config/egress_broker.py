@@ -93,6 +93,10 @@ class EgressRule(BaseModel):
         # Lowercase the host
         value = value.lower()
 
+        # Strip one trailing dot (FQDN notation)
+        if value.endswith(".") and not value.endswith(".."):
+            value = value[:-1]
+
         # Check for invalid patterns
         if "://" in value:
             msg = "host must not contain scheme"

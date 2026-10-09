@@ -61,9 +61,18 @@ class _ActiveEmbedderRuntime:
 
 def _validated_service(service: str) -> str:
     try:
-        return validate_service_name(service)
+        validated = validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Reject egress broker services
+    from mindroom.credential_policy import is_egress_broker_service  # noqa: PLC0415
+
+    if is_egress_broker_service(validated):
+        msg = "Egress broker secrets are managed through /api/egress-broker."
+        raise HTTPException(status_code=400, detail=msg)
+
+    return validated
 
 
 def _save_service(access: _DashboardCredentialAccess, service: str) -> str:
