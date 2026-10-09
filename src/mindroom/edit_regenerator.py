@@ -91,13 +91,8 @@ class _EditedSource:
 
 
 def _regenerable(reply: Reply | None) -> bool:
-    """Return whether an edit regenerates this reply: one that showed something and no approval holds."""
-    return (
-        reply is not None
-        and reply.event_id is not None
-        and reply.state is not ReplyState.GONE
-        and reply.approval_id is None
-    )
+    """Return whether an edit regenerates this reply: one that showed something and is not gone."""
+    return reply is not None and reply.event_id is not None and reply.state is not ReplyState.GONE
 
 
 @dataclass
@@ -150,9 +145,9 @@ class EditRegenerator:
     ) -> bool | None:
         """Regenerate the reply an edit's message got; True when its regeneration owns the edit.
 
-        Only the latest message of its conversation regenerates, and only while
-        no approval holds its reply; a reply that still runs is stopped first.
-        Any other edit changes nothing the agent did.
+        Only the latest message of its conversation regenerates; a reply that
+        still runs, or one an approval holds, is stopped first, which cancels
+        that approval. Any other edit changes nothing the agent did.
         """
         if not event_info.original_event_id:
             return None
@@ -239,8 +234,9 @@ class EditRegenerator:
         if prompt is None:
             # A sibling's text is no longer known: nothing regenerates from a partial turn.
             return None
-        if reply.current_span_id is not None:
-            # The answer still runs: the edit stops it, and the regeneration takes its place.
+        if reply.current_span_id is not None or reply.approval_id is not None:
+            # The answer still runs or waits for an approval: the edit stops it, which cancels that approval,
+            # and the regeneration takes its place.
             await self.deps.stop_reply(reply, await self.deps.receipt_order())
         request = self._request(
             room,

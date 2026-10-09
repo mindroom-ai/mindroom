@@ -88,13 +88,19 @@ class _ApprovalCase:
             )
             assert result.consumed
 
-    async def dispatch_newer(self) -> TurnDispatchOutcome:
-        """Dispatch a newer edit of the message whose reply the approval holds."""
+    async def dispatch_newer(self, model: AsyncMock | None = None) -> TurnDispatchOutcome:
+        """Dispatch a newer edit of the message whose reply the approval holds; it stops that reply first.
+
+        Without a model it admits the edit, whose regeneration must not run yet;
+        with one it dispatches the admitted edit again, as its retry does.
+        """
         event = nio.RoomMessageText.from_dict({**self.event.source, "event_id": "$newer-edit", "origin_server_ts": 30})
-        await self.principal.admit(
-            _inbound_event(self.room.room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            _projected_event(self.room.room_id, event, EventKind.MESSAGE, self_sender=self.bot.matrix_id.full_id),
-        )
+        if model is None:
+            model = AsyncMock(side_effect=AssertionError("A held reply regenerates only once its approval ended"))
+            await self.principal.admit(
+                _inbound_event(self.room.room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(self.room.room_id, event, EventKind.MESSAGE, self_sender=self.bot.matrix_id.full_id),
+            )
         with (
             patch.object(
                 self.resolver,
@@ -104,7 +110,12 @@ class _ApprovalCase:
             patch_response_runner_module(
                 typing_indicator=_noop_typing,
                 should_use_streaming=AsyncMock(return_value=False),
-                ai_response=AsyncMock(side_effect=AssertionError("A held reply must not regenerate")),
+                ai_response=model,
+            ),
+            patch.object(
+                self.bot,
+                "_user_stop_reconciler",
+                UserStopReconciler(UserStopReconcilerDeps(self.store, self.gateway)),
             ),
         ):
             outcome = await self.controller.handle_text_event(self.room, event)
@@ -438,28 +449,56 @@ async def approval_case(
 class TestEditApprovalOwnership:
     """Exercise independent pause, resume, and settlement contracts through real controllers."""
 
-    async def test_a_newer_edit_of_the_paused_reply_runs_nothing(self, approval_case: _ApprovalCase) -> None:
-        """The approval holds its reply, so a newer edit leaves the pause as it was."""
+    async def test_a_newer_edit_of_the_paused_reply_cancels_its_approval_and_regenerates(
+        self,
+        approval_case: _ApprovalCase,
+    ) -> None:
+        """The edit stops the held reply, which cancels its approval; the regeneration claims once the approval ended."""
         case = approval_case
-        sends = case.bot.client.room_send.await_count
-        assert await case.dispatch_newer() is TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        assert await case.principal.approval_continuation_for_source("$newer-edit") is None
-        assert await case.principal.approval_continuation(case.approval.approval_id) == case.approval
-        assert await case.principal.is_pending("$edit")
-        assert case.bot.client.room_send.await_count == sends
+        retried: list[tuple[str, ...]] = []
+        case.runner.deps.replies.retry_sources = lambda _room_id, sources: retried.append(sources)
+        await case.dispatch_newer()
+        failing = await case.principal.approval_continuation(case.approval.approval_id)
+        assert failing is not None
+        assert failing.state == "failing"
+        assert failing.failure_reason == "cancelled_by_user"
+        # The regeneration waits for the approval's settlement, which the Stop woke.
+        assert await case.principal.is_pending("$newer-edit")
+        assert retried == []
+        await case.runner.handoff_approval_source("$edit")
+        await case.runner.wait_for_source_owned_inbox_responses()
+        assert await case.principal.approval_continuation(case.approval.approval_id) is None
+        assert retried == [("$newer-edit",)]
+        # The retried edit regenerates the reply in place from the newer text.
+        case.bot.client.room_send.reset_mock()
+        model = AsyncMock(return_value="Newer answer")
+        await case.dispatch_newer(model)
+        model.assert_awaited_once()
+        assert not await case.principal.is_pending("$newer-edit")
+        edits = [
+            call.kwargs["content"]
+            for call in case.bot.client.room_send.await_args_list
+            if call.kwargs["content"].get("m.relates_to", {}).get("event_id") == "$answer"
+        ]
+        assert edits
+        assert edits[-1]["m.new_content"]["body"].startswith("Newer answer")
 
     async def test_a_newer_edit_leaves_a_frozen_success_to_deliver(self, approval_case: _ApprovalCase) -> None:
-        """A newer edit cannot take the reply while the approved run's frozen FINAL is owed, which still delivers."""
+        """A newer edit waits while the approved run's frozen FINAL is owed, which still delivers, then regenerates."""
         case = approval_case
         claimed = await case.freeze_final()
-        assert await case.dispatch_newer() is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        retried: list[tuple[str, ...]] = []
+        case.runner.deps.replies.retry_sources = lambda _room_id, sources: retried.append(sources)
+        await case.dispatch_newer()
         assert await case.principal.approval_continuation_for_source("$newer-edit") is None
         assert not await case.runner._approval_responses.settle_failure(claimed, "Paused run is no longer available")
         final = await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
         assert final is not None
         assert final.permanent_failure_reason is None
         assert not final.retired
+        assert retried == []
         await case.recover_final(claimed)
+        assert retried == [("$newer-edit",)]
 
     @pytest.mark.parametrize("redaction", [None, "revision", "source"])
     async def test_resume_after_restart(self, approval_case: _ApprovalCase, redaction: str | None) -> None:

@@ -556,19 +556,21 @@ async def test_an_edit_of_a_message_someone_answered_after_is_ignored(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_an_edit_of_a_reply_an_approval_holds_is_ignored(tmp_path: Path) -> None:
-    """The approval keeps the reply; the edit changes nothing the agent did."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
-    harness.regenerator.deps.reply_for_sources.return_value = replace(  # type: ignore[attr-defined]
-        _reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.PAUSED),
-        approval_id="approval-1",
-    )
-    event, event_info = _edit_event()
+async def test_an_edit_of_a_reply_an_approval_holds_cancels_the_approval_and_regenerates_in_place(
+    tmp_path: Path,
+) -> None:
+    """The edit stops the held reply, which cancels its approval; the regeneration takes its place."""
+    harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
+    held = replace(_reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.PAUSED), approval_id="approval-1")
+    harness.regenerator.deps.reply_for_sources.return_value = held  # type: ignore[attr-defined]
+    event, event_info = _edit_event(new_body="what is 4+4?")
 
-    assert await _handle_edit(harness, event, event_info) is None
+    assert await _handle_edit(harness, event, event_info) is True
 
-    _assert_no_regeneration(harness)
-    harness.stop_reply.assert_not_awaited()
+    harness.stop_reply.assert_awaited_once_with(held, 9)
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "what is 4+4?"
+    assert request.existing_event_id == RESPONSE_EVENT_ID
 
 
 @pytest.mark.asyncio

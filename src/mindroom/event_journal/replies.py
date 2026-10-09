@@ -47,8 +47,15 @@ class TurnCompleted:
     record: TurnRecord
 
 
+@dataclass(frozen=True, slots=True)
+class WakeClaims:
+    """After commit: the claims that waited for this reply's approval to end retry."""
+
+    reply_id: str
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | TurnCompleted
+type PostCommitEffect = CancelSpan | WakeApproval | WakeClaims | TurnCompleted
 
 
 type Decide = Callable[[Reply, Span], Transition]

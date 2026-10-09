@@ -1912,14 +1912,15 @@ def _end_approval(
     run goes after.
     """
     continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
-    if continuation is not None:
-        replies.lock_paused_reply(transaction, principal_id, continuation)
+    paused = None if continuation is None else replies.lock_paused_reply(transaction, principal_id, continuation)
     ending = may_end()
     if ending is None:
         return None
     applied = end(ending)
     approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
-    return () if applied is None else applied.post_commit
+    effects = () if applied is None else applied.post_commit
+    # A claim that waited for the approval to end, such as an edit's regeneration, retries now.
+    return effects if paused is None else (*effects, replies.WakeClaims(paused.reply_id))
 
 
 class _ReplyRowRefusedError(Exception):

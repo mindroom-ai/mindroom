@@ -193,7 +193,7 @@ def test_a_regeneration_with_no_reply_runs_nothing() -> None:
 
 @pytest.mark.parametrize("held", ["paused", "gone"])
 def test_an_edit_of_a_held_or_gone_reply_runs_nothing(held: str) -> None:
-    """An approval holds its reply, and a reply that is gone shows nothing to regenerate."""
+    """An approval holds its reply until a Stop cancels it, and a reply that is gone shows nothing to regenerate."""
     if held == "paused":
         reply, span, transition = _paused()
         span = _span_after(transition, span.span_id)
@@ -205,6 +205,22 @@ def test_an_edit_of_a_held_or_gone_reply_runs_nothing(held: str) -> None:
     assert edit.outcome is Outcome.DUPLICATE
     assert edit.claimed is None
     assert edit.effects == ()
+
+
+@pytest.mark.parametrize("held", ["stopped", "ended"])
+def test_an_edit_of_a_stopped_or_ended_held_reply_waits_for_its_approval_to_end(held: str) -> None:
+    """The regenerator's Stop cancels the approval; the edit's claim waits until the approval's end releases the reply."""
+    reply, span, transition = _paused()
+    span = _span_after(transition, span.span_id)
+    if held == "stopped":
+        stopped = rl.stop(reply, span, StopFacts(receipt_order=8, span_live=False), now_ns=NOW)
+        assert stopped.reply is not None
+        reply = stopped.reply
+    else:
+        reply = replace(reply, state=ReplyState.FAILED)
+    edit = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
+    assert edit.outcome is Outcome.DEFERRED
+    assert edit.claimed is None
 
 
 def test_an_edit_of_a_reply_waiting_for_its_replay_regenerates_without_a_rollback() -> None:

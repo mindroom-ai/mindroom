@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal.replies import AppliedTransition, Decide, ReplyCreation, TurnCompleted
+from mindroom.event_journal.replies import AppliedTransition, Decide, ReplyCreation, TurnCompleted, WakeClaims
 from mindroom.logging_config import get_logger
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -271,6 +271,8 @@ class ReplyRuntime:
                 await self.complete_turn(effect.record)
             elif isinstance(effect, rl.WakeApproval):
                 await self._wake_fenced_approval(effect.approval_id)
+            elif isinstance(effect, WakeClaims):
+                self.claim_may_proceed(effect.reply_id)
         for effect in effects:
             if isinstance(effect, rl.CancelSpan):
                 self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)

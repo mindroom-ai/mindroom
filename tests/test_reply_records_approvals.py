@@ -556,7 +556,7 @@ async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: 
 
 
 async def test_an_edit_of_a_paused_reply_runs_nothing(tmp_path: Path) -> None:
-    """The approval holds its reply, so an edit's regeneration claims nothing and the pause stays as it was."""
+    """Without the edit regenerator's Stop, the approval holds its reply, so a regeneration claims nothing."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
         paused = await bot.journal_principal().approval_continuation_for_source("$event")

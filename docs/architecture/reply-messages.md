@@ -56,7 +56,7 @@ Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`
 
 A rule returns one outcome: `applied`, `stale` (the span is no longer current), `duplicate` (already true), `deferred` (earlier writes are unresolved), `recompute` (a Stop, deletion, or departure committed after the caller rendered), or `stopped`.
 A rule that meets a state it does not model never raises: on a reply that has not ended it ends the reply `failed` with the error note owed, cancels its current span, and settles the sources or fails the approval that holds them; a reply that already ended keeps its end, a stray second create is redacted, and a refused row of an older span is stale; the store logs `reply_unmodeled` with the reason, and a claim reports such a refusal as nothing to run.
-Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered when the reply answered them, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen.
+Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered when the reply answered them, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, the retry of claims that waited for an approval to end, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen.
 
 Callers render a payload from the reply's revision before the transaction; a rule that would choose different content returns `recompute`, writes nothing, and the caller renders again.
 
@@ -65,14 +65,14 @@ Callers render a payload from the reply's revision before the transaction; a rul
 A claim runs under the conversation lock after the turn's first source gate and finds the reply through the span's sources, its bound event, or an interactive selection's acknowledgement:
 
 - No reply: create one in `active` with a `turn` span; a regeneration never creates one.
-- A new edit of an unheld reply that is not `gone`: a `regeneration` span with a rollback snapshot of a finished answer, or the rollback of the regeneration it re-runs when that one never wrote; a reply an approval holds, or one that is `gone`, regenerates nothing (`duplicate`).
+- A new edit of an unheld reply that is not `gone`: a `regeneration` span with a rollback snapshot of a finished answer, or the rollback of the regeneration it re-runs when that one never wrote; a reply an approval holds without a Stop or end recorded, or one that is `gone`, regenerates nothing (`duplicate`).
 - An edit the last span already answered (a sync restart's retry): `duplicate`, nothing runs.
 - A last span ended `released` or `lost`: a `replay`, or the same regeneration re-run.
 - A last span ended `superseded`: a span of the same kind.
-- Unresolved durable writes or an owed note: `deferred`; their resolution retries the sources.
+- Unresolved durable writes, an owed note, or an approval that still holds a reply after its Stop or end: `deferred`; their resolution, or the approval's end, retries the sources.
 
-The edit regenerator decides which edits reach a claim: only an edit of the latest message of its conversation, with no later message from someone other than an agent, whose reply showed something, no approval holds, and is not `gone`.
-It records a Stop on that reply first when a span still runs for it, and its claim then waits for the conversation lock that span holds.
+The edit regenerator decides which edits reach a claim: only an edit of the latest message of its conversation, with no later message from someone other than an agent, whose reply showed something and is not `gone`.
+It records a Stop on that reply first when a span still runs for it or an approval holds it, and its claim then waits for the conversation lock that span holds and for the approval the Stop fenced to end.
 It hands the edit to a regeneration on a runner-owned task without waiting for its claim, because the claim waits for the conversation, which another reply of the agent may hold for as long as that reply runs; once the claim succeeds the regeneration records the edit's text and revision in the turn ledger and prunes the history run it replaces, and a regeneration that ends without a span owning the edit settles the edit itself, unless its claim was deferred.
 An edit of a message still waiting in its coalescing queue changes that message's text instead and never reaches the regenerator.
 
@@ -101,7 +101,7 @@ A failure or Stop fences the continuation; its settlement writes the note and fi
 A response-local CLI approval waits in place: its span stays current through the wait, and once approved it runs for that approval as a resume does, so the continuation's finish or failure settles the sources and ends the reply.
 
 A reply is held by the continuation that names one of its spans; the store derives the hold when it loads the reply, so no rule writes it.
-While held, a Stop fences the approval, a deletion or sources that settle without an answer keep the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
+While held, a Stop or an edit's Stop fences the approval, a deletion or sources that settle without an answer keep the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
 A continuation finishes once a FINAL at its first source was acknowledged or refused for good.
 Its finish, release, or discard applies the reply rule while the continuation still exists and deletes the continuation in the same transaction.
 A release hands the run's sources back to replay, unless a Stop is recorded: the reply then ends cancelled instead of replaying what the user stopped.
@@ -157,8 +157,9 @@ The behavior below follows from deliberate decisions; a change that would restor
 
 - A restart continues an interrupted reply in place below what it showed, and a retried regeneration rewrites the same message; neither starts a second message, given an upgrade that runs while no reply is in flight.
 - An approval pauses and holds its reply, and later messages in the conversation are answered while it waits; a CLI approval that waits in place keeps its conversation for the wait; no approval holds the room's event lane.
-- An edit regenerates only the reply to the latest message of its conversation, and only when that reply showed something, no approval holds it, and it is not `gone`; any other edit changes no reply.
+- An edit regenerates only the reply to the latest message of its conversation, and only when that reply showed something and it is not `gone`; any other edit changes no reply.
 - An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
+- An edit of a reply that waits for an approval stops it, as a Stop reaction would, which cancels the approval and expires its cards, and regenerates it in place once the approval ended.
 - A regeneration that wrote nothing keeps the finished answer it was replacing.
 - A rule that meets a state it does not model never raises: the reply's current work ends `failed` with the error note, while a reply that already ended keeps its end and a stray second create is redacted with the first left bound.
 - After a restart the model is told which tool calls finished and which were cut short and may have taken effect, to check before repeating them, and nothing blocks a repeated call: a fast model rarely repeated a finished call (up to 1 of 24 real-model runs) but repeated a cut-short call whenever its tools gave it no way to check, which the owner accepted, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
@@ -176,7 +177,7 @@ Edits:
 - A regeneration whose history was redacted meanwhile is suppressed instead of rebuilt.
 - An edit a `message:received` hook suppresses still counts as its message's newest revision, so an older edit of that message arriving later regenerates nothing, nor does an earlier edit of another message of the same coalesced turn whose regeneration has not claimed the reply yet; a later edit of another message regenerates with the suppressed message's earlier text.
 - A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply's exit applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
-- When the stopped reply's terminal row is still unresolved, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps its cancelled note.
+- When the stopped reply's terminal row is still unresolved, or the approval its Stop cancelled has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps its cancelled note.
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
 - While a deferred claim stays blocked by an unresolved row, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves.
 - After a restart, a regeneration may be told about tool calls the attempt before the edit made, which errs toward not repeating a side effect.
@@ -227,5 +228,5 @@ Journal writes:
 - I17. No source is answered twice, one turn has one reply, and a reply writes only for its current span or, for a note it owes, its last.
 
 `tests/test_reply_lifecycle_fuzz.py` checks I1, I7, I9, I10, I13, I15, I16, I17, and that a paused reply is held, over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, and dropped replays.
-It keeps continuations as rows the hold is derived from, regenerates a running reply by stopping it first as the edit regenerator does, defers claims through the shared blocking predicate, and ends every run by draining every owner.
+It keeps continuations as rows the hold is derived from, regenerates a running or held reply by stopping it first as the edit regenerator does, defers claims through the shared blocking predicate, and ends every run by draining every owner.
 The unit tests cover stale and retired spans and the remaining rules.

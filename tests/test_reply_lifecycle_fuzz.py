@@ -368,14 +368,14 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     )
     @rule()
     def regenerate(self) -> None:
-        """An edit regenerates an unheld reply in place, stopping it first while it runs; any other stays as it is."""
+        """An edit regenerates a reply in place, stopping it first while it runs or an approval holds it."""
         reply = self.model.reply
         assert reply is not None
-        if reply.state is ReplyState.GONE or reply.approval_id is not None:
-            # The regenerator leaves a reply the user deleted, or one an approval holds, as it is.
+        if reply.state is ReplyState.GONE:
+            # The regenerator leaves a reply the user deleted as it is.
             return
         live = self._live()
-        if live is not None:
+        if live is not None or reply.approval_id is not None:
             # As a Stop reaction would; the regeneration's claim waits for the stopped span to end.
             self.stop()
             stopped = self.model.reply

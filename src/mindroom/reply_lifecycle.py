@@ -615,11 +615,17 @@ def _new_span(
 
 
 def claim_blocked(reply: Reply, *, durable_write_debt: bool) -> bool:
-    """Return whether a claim on the reply must wait, and retry once its earlier writes resolve.
+    """Return whether a claim on the reply must wait, and retry once what blocks it resolves.
 
-    Earlier writes still unresolved or a note still owed would be overtaken by the new span.
+    Earlier writes still unresolved or a note still owed would be overtaken by
+    the new span; a reply its approval still holds after a Stop or its end
+    waits for that approval to end.
     """
-    return durable_write_debt or reply.owed_write is not None
+    return (
+        durable_write_debt
+        or reply.owed_write is not None
+        or (reply.approval_id is not None and (reply.unapplied_stop or reply.terminal))
+    )
 
 
 def _make_current(reply: Reply, span: Span, now_ns: int, **changes: object) -> Reply:
@@ -740,11 +746,13 @@ def _regeneration(
 ) -> Transition:
     """Claim a new edit's regeneration of an unheld reply nothing runs for.
 
-    The regenerator stops a running reply before it claims. A reply an
-    approval holds, or one that is gone, regenerates nothing: the edit only
-    changed the message. Only a finished answer is kept to restore; a
-    regeneration that never answered passes its own on. An interrupted turn's
-    own replay finds its turn answered once the regeneration answers it.
+    The regenerator stops a running reply, or one an approval holds, before it
+    claims; a held reply's claim waits until its approval ended
+    (``claim_blocked``). A held reply without that Stop, or one that is gone,
+    regenerates nothing: the edit only changed the message. Only a finished
+    answer is kept to restore; a regeneration that never answered passes its
+    own on. An interrupted turn's own replay finds its turn answered once the
+    regeneration answers it.
     """
     if reply.state is ReplyState.GONE or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)

@@ -67,6 +67,7 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
+from mindroom.event_journal.replies import WakeClaims
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
     SQLITE_DIALECT,
@@ -7953,7 +7954,9 @@ class TestApprovalContinuations:
     ) -> None:
         """A paused run cannot disappear before its frozen final answer is visible."""
         await self.admit_sources(alice)
-        await paused_for_approval(alice, self.continuation())
+        paused = await paused_for_approval(alice, self.continuation())
+        assert paused is not None
+        assert paused.span_id is not None
         await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
 
         assert await alice.finish_approval_continuation("approval-1") is None
@@ -7976,7 +7979,12 @@ class TestApprovalContinuations:
             delivered_projections=(),
         )
 
-        assert await alice.finish_approval_continuation("approval-1") is not None
+        effects = await alice.finish_approval_continuation("approval-1")
+        assert effects is not None
+        # A claim that waited for the approval to end, such as an edit's regeneration, retries.
+        span = await alice.replies.span(paused.span_id)
+        assert span is not None
+        assert WakeClaims(span.reply_id) in effects
         assert await alice.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
@@ -7984,7 +7992,9 @@ class TestApprovalContinuations:
     async def test_release_hands_interrupted_sources_back_to_replay(self, alice: PrincipalStore) -> None:
         """A run a restart cut short gives its still-pending sources back to ordinary replay as a fresh attempt."""
         await self.admit_sources(alice)
-        await paused_for_approval(alice, self.continuation())
+        paused = await paused_for_approval(alice, self.continuation())
+        assert paused is not None
+        assert paused.span_id is not None
         claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
 
@@ -7999,9 +8009,11 @@ class TestApprovalContinuations:
         )
         assert failing is not None
 
-        assert (
-            await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is not None
-        )
+        effects = await alice.release_approval_continuation("approval-1", expected_generation=failing.generation)
+        assert effects is not None
+        span = await alice.replies.span(paused.span_id)
+        assert span is not None
+        assert WakeClaims(span.reply_id) in effects
 
         assert await alice.approval_continuation("approval-1") is None
         assert await alice.approval_continuation_for_source("$source-1") is None
