@@ -133,17 +133,19 @@ async def _register(homeserver: str, registration_token: str) -> _Account:
     """Register one disposable account and return a logged-in client."""
     username = f"jrnl{secrets.token_hex(6)}"
     password = secrets.token_urlsafe(24)
-    payload: dict[str, object] = {
-        "auth": {"type": "m.login.registration_token", "token": registration_token},
-        "username": username,
-        "password": password,
-    }
+    # A server with open registration takes the dummy stage; one that requires a token takes the token.
+    auth: dict[str, object] = (
+        {"type": "m.login.registration_token", "token": registration_token}
+        if registration_token
+        else {"type": "m.login.dummy"}
+    )
+    payload: dict[str, object] = {"auth": auth, "username": username, "password": password}
     async with httpx.AsyncClient(timeout=30) as http:
         response = await http.post(f"{homeserver}/_matrix/client/v3/register", json=payload)
         session = response.json().get("session") if response.status_code == httpx.codes.UNAUTHORIZED else None
         if isinstance(session, str):
-            # Token registration is interactive: the first request only opens the session.
-            payload["auth"] = {"type": "m.login.registration_token", "token": registration_token, "session": session}
+            # Registration is interactive: the first request only opens the session.
+            payload["auth"] = {**auth, "session": session}
             response = await http.post(f"{homeserver}/_matrix/client/v3/register", json=payload)
         response.raise_for_status()
         registered = response.json()
@@ -339,23 +341,29 @@ async def prove_edit_redaction(
 
     for event_id in (original, first_edit, second_edit):
         await _admit_from_server(client, store, room_id, event_id)
+    # Edits order by origin_server_ts, then event ID: two sent back to back can share a millisecond.
+    bodies_by_edit = {first_edit: "redaction first edit", second_edit: "redaction second edit"}
+    order = {event_id: await _revision_key(client, room_id, event_id) for event_id in bodies_by_edit}
+    newest = max(bodies_by_edit, key=order.__getitem__)
+    newest_body = bodies_by_edit[newest]
+    older_body = bodies_by_edit[min(bodies_by_edit, key=order.__getitem__)]
 
     page = await store.read_conversation(room_id=room_id, thread_id=None, limit=50)
     visible = [m for m in page.messages if m.logical_event_id == original]
     findings.record(
         "the newest edit is the visible revision before redaction",
-        bool(visible) and visible[0].content.get("body") == "redaction second edit",
+        bool(visible) and visible[0].content.get("body") == newest_body,
         f"visible body {visible[0].content.get('body')!r}" if visible else "no visible row",
     )
 
-    redaction = await client.room_redact(room_id, second_edit, reason="live proof")
+    redaction = await client.room_redact(room_id, newest, reason="live proof")
     if not isinstance(redaction, nio.RoomRedactResponse):
         msg = f"redaction failed: {redaction}"
         raise TypeError(msg)
     await _admit_from_server(client, store, room_id, redaction.event_id)
 
     page = await store.read_conversation(room_id=room_id, thread_id=None, limit=50)
-    hidden = all(message.content.get("body") != "redaction second edit" for message in page.messages)
+    hidden = all(message.content.get("body") != newest_body for message in page.messages)
     findings.record("the redacted revision is not readable before refetch", hidden)
     findings.record(
         "the message is reported as owing a refetch",
@@ -370,13 +378,22 @@ async def prove_edit_redaction(
     bodies = [str(message.content.get("body")) for message in page.messages]
     findings.record(
         "the restored revision is one the server still holds",
-        "redaction first edit" in bodies or "redaction original" in bodies,
+        older_body in bodies or "redaction original" in bodies,
         f"restored {[b for b in bodies if b.startswith('redaction')]}",
     )
     findings.record(
         "the deleted text is gone from every read",
-        "redaction second edit" not in bodies,
+        newest_body not in bodies,
     )
+
+
+async def _revision_key(client: nio.AsyncClient, room_id: str, event_id: str) -> tuple[int, str]:
+    """Return the server's ordering key for one edit."""
+    fetched = await client.room_get_event(room_id, event_id)
+    if not isinstance(fetched, nio.RoomGetEventResponse):
+        msg = f"could not fetch {event_id}: {fetched}"
+        raise TypeError(msg)
+    return fetched.event.server_timestamp, event_id
 
 
 async def prove_edit_churn(
