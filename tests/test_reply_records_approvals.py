@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.requirement import RunRequirement
@@ -15,9 +16,10 @@ from agno.run.requirement import RunRequirement
 from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.cancellation import request_task_cancel
-from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.reply_presentation import (
     NoteKind,
     Segment,
@@ -32,7 +34,7 @@ from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_store import TurnStore
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_reply_records_turns import (
     _admit_edit,
     _FlakyHomeserver,
@@ -224,6 +226,94 @@ async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: 
         assert await bot.journal_principal().approval_continuation_for_source("$event") is None
         # The Stop keeps what the reply showed and adds its note, as on any reply.
         assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
+
+
+async def test_a_pending_approval_keeps_its_conversation_busy_until_it_ends(tmp_path: Path) -> None:
+    """Later messages of the conversation wait while the approval is pending, as behind a running reply."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        await _respond(bot)
+        target = _target()
+        runner = bot._response_runner
+        assert runner.is_held_for_approval(target)
+        assert target.resolved_thread_id in runner.active_thread_ids_for_room(target.room_id)
+        idle = asyncio.create_task(runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id))
+        await asyncio.sleep(0)
+        assert not idle.done()
+        with _journal_wakes(bot) as wakes:
+            assert await asyncio.wait_for(await _stop(bot, "$sent1", 5), timeout=5)
+        await _run_approval_wakes(bot, wakes)
+        # The approval's end lets the conversation answer what waited.
+        assert not runner.is_held_for_approval(target)
+        await asyncio.wait_for(idle, timeout=5)
+
+
+async def test_a_hold_whose_approval_is_gone_does_not_keep_its_conversation_waiting(tmp_path: Path) -> None:
+    """A waiting message rechecks the approvals that hold its conversation, so a hold whose end was lost goes."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        target = _target()
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        runner._lifecycle_coordinator.hold_for_approval("approval-gone", target)
+        assert runner.is_held_for_approval(target)
+        await asyncio.wait_for(
+            runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id),
+            timeout=5,
+        )
+        assert not runner.is_held_for_approval(target)
+
+
+async def test_a_restart_keeps_the_conversation_of_a_pending_approval_busy(tmp_path: Path) -> None:
+    """The bot that takes over holds the conversation of every approval still pending, before it replays anything."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        await _respond(bot)
+        restarted = _bot(tmp_path)
+        assert not restarted._response_runner.is_held_for_approval(_target())
+        await restarted._reply_runtime.start()
+        assert restarted._response_runner.is_held_for_approval(_target())
+
+
+async def test_deleting_the_message_of_a_paused_reply_cancels_its_approval_and_removes_the_reply(
+    tmp_path: Path,
+) -> None:
+    """The deletion cancels the approval as a Stop would: its cards expire, the reply goes, and the conversation frees."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        await _respond(bot)
+        paused = await _reply(bot)
+        assert paused.event_id is not None
+        room = nio.MatrixRoom(_target().room_id, bot.matrix_id.full_id)
+        redaction = nio.Event.parse_event(
+            {
+                "event_id": "$redaction",
+                "type": "m.room.redaction",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "redacts": "$event",
+                "content": {},
+            },
+        )
+        assert isinstance(redaction, nio.RedactionEvent)
+        await bot.journal_principal().admit(
+            _inbound_event(room.room_id, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(room.room_id, redaction, EventKind.REDACTION, self_sender=room.own_user_id),
+        )
+        with _journal_wakes(bot) as wakes:
+            await bot._on_redaction(room, redaction)
+        assert wakes == [("$event",)]
+        await _run_approval_wakes(bot, wakes)
+
+        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot._journal_store.principal("router@shared").pending_approval_room_ids() == ()
+        assert not bot._response_runner.is_held_for_approval(_target())
+
+        async def redacted() -> rl.Reply:
+            while (reply := await _reply(bot)).redaction_pending:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            return reply
+
+        gone = await asyncio.wait_for(redacted(), timeout=5)
+        assert gone.state is rl.ReplyState.GONE
+        assert paused.event_id in [call.args[1] for call in bot.client.room_redact.await_args_list]
+        # No note is written over a reply that goes.
+        assert "Response cancelled by user" not in _sent_bodies(bot)[-1]
 
 
 async def _reply_in(bot: AgentBot, state: rl.ReplyState) -> rl.Reply:

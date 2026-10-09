@@ -56,7 +56,7 @@ Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`
 
 A rule returns one outcome: `applied`, `stale` (the span is no longer current), `duplicate` (already true), `deferred` (earlier writes are unresolved), `recompute` (a Stop, deletion, or departure committed after the caller rendered), or `stopped`.
 A rule that meets a state it does not model never raises: on a reply that has not ended it ends the reply `failed` with the error note owed, cancels its current span, and settles the sources or fails the approval that holds them; a reply that already ended keeps its end, a stray second create is redacted, and a refused row of an older span is stale; the store logs `reply_unmodeled` with the reason, and a claim reports such a refusal as nothing to run.
-Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered when the reply answered them, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, the retry of claims that waited for an approval to end, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen.
+Effects run in the rule's transaction (`SettleSources`, which settles the span's journal sources and marks the turn they index answered when the reply answered them, and `FenceApproval`) or after it commits (`CancelSpan`, `WakeApproval`, `ApprovalEnded`, which retries the claims that waited for that approval, settles its reply's debt, and lets its conversation answer what waited, and the turn ledger's cache learning the answered turn); post-commit effects are best effort because the records already say what must happen, except that an approval's finish or release runs its effects to completion even when its caller is cancelled.
 
 Callers render a payload from the reply's revision before the transaction; a rule that would choose different content returns `recompute`, writes nothing, and the caller renders again.
 
@@ -101,8 +101,13 @@ A failure or Stop fences the continuation; its settlement writes the note and fi
 A response-local CLI approval waits in place: its span stays current through the wait, and once approved it runs for that approval as a resume does, so the continuation's finish or failure settles the sources and ends the reply.
 
 A reply is held by the continuation that names one of its spans; the store derives the hold when it loads the reply, so no rule writes it.
-While held, a Stop or an edit's Stop fences the approval, a deletion or sources that settle without an answer keep the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
-A continuation finishes once a FINAL at its first source was acknowledged or refused for good.
+While held, a Stop or an edit's Stop fences the approval, a deletion of its message ends the reply `gone` and its current span in the tombstone's commit and fences the approval, sources that settle without an answer keep the reply, retention keeps it, and a span that runs for the approval leaves the reply's end to the approval's settlement.
+A continuation finishes once a FINAL at its first source was acknowledged or refused for good, or, failing, once its reply is `gone`, since nothing is left to show the failure.
+
+A pending approval keeps its conversation busy, as a running response does, so later messages to that agent there wait in the coalescing gate's follow-up queue and get a ⏳ reaction.
+The hold is an active turn of the response-lifecycle coordinator, not its lock: the resume, the failure settlement, an edit's regeneration, and approval recovery still take the lock.
+The runner holds the conversation before the pause row commits, so the approval's end cannot come first; `ApprovalEnded` releases it, a departure releases the room's holds, and each bot start holds the conversation of every continuation of its principal before journal replay.
+A message waiting behind a hold rechecks every 30 seconds that its approval still exists, so a hold whose end did not reach this bot ends.
 Its finish, release, or discard applies the reply rule while the continuation still exists and deletes the continuation in the same transaction.
 A release hands the run's sources back to replay, unless a Stop is recorded: the reply then ends cancelled instead of replaying what the user stopped.
 A restart leaves a reply an approval holds to approval recovery, including a span approved in place that an older instance ran.
@@ -132,7 +137,7 @@ A membership departure ends the room's replies `gone` inside the departure fence
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
-Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit, which records the reply and the span it cancelled; the bot then cancels exactly that span and redacts what the reply showed, while a reply an approval holds and a written answer are kept, including the finished answer an edit was regenerating before the regeneration showed anything.
+Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit, which records the reply and the span it cancelled; the bot then cancels exactly that span and redacts what the reply showed, and wakes the approval that held the reply, which it fenced; a written answer is kept, including the finished answer an edit was regenerating before the regeneration showed anything.
 An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes, and their sources settle unanswered; a reply an approval holds is left to that approval, whose discard ends it, or whose owner settles it on coming back.
 A removed entity's reply keeps the notes and redactions it still owes Matrix, which its bot delivers if the entity comes back.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
@@ -157,7 +162,8 @@ The behavior below follows from deliberate decisions; a change that would restor
 ### Decisions
 
 - A restart continues an interrupted reply in place below what it showed, and a retried regeneration rewrites the same message; neither starts a second message, given an upgrade that runs while no reply is in flight.
-- An approval pauses and holds its reply, and later messages in the conversation are answered while it waits; a CLI approval that waits in place keeps its conversation for the wait; no approval holds the room's event lane.
+- An approval pauses and holds its reply and its conversation: later messages to that agent in that conversation wait, as behind a running reply, until the approval ends; no approval holds the room's event lane.
+- Deleting the message a reply answers while an approval holds it cancels that approval, as a Stop would, and removes the reply.
 - An edit regenerates only the reply to the latest message of its conversation, and only when that reply showed something and it is not `gone`; any other edit changes no reply.
 - An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
 - An edit of a reply that waits for an approval stops it, as a Stop reaction would, which cancels the approval and expires its cards, and regenerates it in place once the approval ended.
@@ -194,7 +200,7 @@ Delivery and recovery:
 - A reply row written while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed; after a homeserver outage, an answer near the event size limit can then be refused and end with the delivery-failed note.
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message.
 - An approval the upgrade cancels leaves its Matrix message as it was, which can still show that it waits for approval, and a click on its card does nothing.
-- Deleting every source of a reply an approval holds keeps the reply and its approval cards (see [Approvals](#approvals)).
+- A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed (see [Lifetime](#lifetime)).
 - A note Matrix refused for good is not sent again (I15).
 

@@ -207,6 +207,7 @@ Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unav
 
 The check runs between completed tool batches and never interrupts a running tool.
 Queued messages are handled after the active response finishes either way.
+A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
 The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.

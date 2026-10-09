@@ -1472,18 +1472,13 @@ class TestAgentBot(AgentBotTestBase):
                 await bot._response_runner.wait_for_source_owned_inbox_responses()
                 assert "$source" not in bot._journal_dispatcher._worker._deferred
 
-    @pytest.mark.parametrize(
-        ("requires_human", "redact_while_waiting"),
-        [(False, False), (True, False), (True, True)],
-        ids=["automatic", "human", "human-redacted"],
-    )
+    @pytest.mark.parametrize("requires_human", [False, True], ids=["automatic", "human"])
     @pytest.mark.asyncio
-    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(  # noqa: C901, PLR0915 - full restart boundary
+    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(  # noqa: PLR0915 - full restart boundary
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         requires_human: bool,
-        redact_while_waiting: bool,
     ) -> None:
         """A fresh bot must execute the persisted tool once after policy or card consent."""
         config = self._config_for_storage(tmp_path)
@@ -1632,46 +1627,6 @@ class TestAgentBot(AgentBotTestBase):
             await shutdown_approval_runtime()
         assert persisted is not None
         assert persisted.state == ("waiting" if requires_human else "ready")
-        if redact_while_waiting:
-            # The durable approval card remains the explicit consent surface even
-            # when the requester removes the original room message.
-            redaction = InboundEvent(
-                event_id="$redaction",
-                room_id="!test:localhost",
-                thread_id=None,
-                kind=EventKind.REDACTION,
-                event_class=EventClass.CONTEXT_ONLY,
-                sender="@user:localhost",
-                origin_server_ts=2,
-                source={"event_id": "$redaction", "redacts": "$source", "content": {}},
-            )
-            projected_redaction = ProjectedEvent(
-                event_id="$redaction",
-                room_id="!test:localhost",
-                thread_id=None,
-                sender="@user:localhost",
-                origin_server_ts=2,
-                content={},
-                replaces_event_id=None,
-                redacts_event_id="$source",
-            )
-            assert await first.approval_store.admit(redaction, projected_redaction)
-            conversation = await first.approval_store.read_conversation(
-                room_id="!test:localhost",
-                thread_id=None,
-                limit=10,
-            )
-            assert conversation.messages == ()
-            assert await first.approval_store.approval_continuation_for_source("$source") == persisted
-            # Startup delivery recovery must preserve the approval's response,
-            # including when the redaction callback has already settled.
-            await first._delivery_gateway.recover_deliveries()
-            initial = await first.approval_store.load_matrix_delivery(
-                delivery_id="$source",
-                stage=DeliveryStage.INITIAL,
-            )
-            assert initial is not None
-            assert not initial.retired
         if first_agent.db is not None:
             first_agent.db.close()
 
@@ -2334,6 +2289,8 @@ class TestAgentBot(AgentBotTestBase):
         approval_action.assert_awaited_once()
         handle_text_event.assert_not_awaited()
         assert await restarted._journal_dispatcher.store.pending() == ()
+        # The card answered it: no message older than it is skipped as superseded by it.
+        assert restarted._turn_store.is_handled(event.event_id)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")

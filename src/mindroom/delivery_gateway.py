@@ -677,14 +677,15 @@ class DeliveryGateway:
     async def send_judgment_reaction(
         self,
         *,
-        identity: ResponseIdentity,
+        turn_id: str,
         room_id: str,
         event_id: str,
         key: str,
-        kind: Literal["participation_decline", "mid_turn_defer"],
+        kind: Literal["participation_decline", "mid_turn_defer", "approval_wait"],
     ) -> None:
-        """Best-effort acknowledgement of a deliberate judgment, stable across replays."""
-        if not await self._visible_notice_is_current(identity, room_id):
+        """Best-effort acknowledgement of a deliberate judgment on the turn ``turn_id``, stable across replays."""
+        # A reaction is direct transport, outside the outbox's durable refusal, so it checks the turn's membership itself.
+        if not await self.deps.outbox.turn_membership_is_current(turn_id=turn_id, room_id=room_id):
             return
         client = self._ready_client()
         # Exclude the emoji so a config reload cannot duplicate a replayed reaction.
@@ -769,19 +770,6 @@ class DeliveryGateway:
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
-        )
-
-    async def _visible_notice_is_current(self, identity: ResponseIdentity, room_id: str) -> bool:
-        """Return whether a terminal notice still belongs in the room it names.
-
-        Terminal notices -- cancellations, failure updates, suppression
-        cleanup -- are direct transport. They carry no answer, so they never
-        reach the outbox, and the durable refusal that protects a turn's
-        answer does not protect them.
-        """
-        return await self.deps.outbox.turn_membership_is_current(
-            turn_id=identity.response_envelope.source_event_id,
-            room_id=room_id,
         )
 
     async def _acknowledged_delivery(

@@ -808,7 +808,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 # Matrix refused the answer for good: the runtime settles the run as a failure.
                 continuation.state = "failing"
                 continuation.disposition = "failed"
-            if continuation.state == "failing":
+            if continuation.state == "failing" and not self._may_finish(continuation):
                 self._write_failure_note(continuation)
             if self._may_finish(continuation):
                 self._finish_approval(continuation, owner_available=self._bot())
@@ -851,7 +851,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         )
 
     def _may_finish(self, continuation: _Continuation) -> bool:
-        """The store's gate: a FINAL at its first source Matrix took or refused for good."""
+        """The store's gate: a FINAL at its first source Matrix took or refused for good, or a failure of a gone reply."""
+        reply = self.model.reply
+        if continuation.state == "failing" and reply is not None and reply.state is ReplyState.GONE:
+            return True
         return self.model.finals.get(continuation.delivery_id) in {"acknowledged", "refused"}
 
     def _finish_approval(self, continuation: _Continuation, *, owner_available: bool, retry: bool = True) -> None:

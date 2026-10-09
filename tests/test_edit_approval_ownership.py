@@ -122,6 +122,24 @@ class _ApprovalCase:
             await finish_edit_regenerations(self.bot)
         return outcome
 
+    async def redact(self, redacts: str) -> None:
+        """Admit the user's redaction of one event, as the journal records a deletion."""
+        event = nio.RedactionEvent.from_dict(
+            {
+                "type": "m.room.redaction",
+                "event_id": "$redaction",
+                "sender": "@user:localhost",
+                "origin_server_ts": 30,
+                "redacts": redacts,
+                "content": {},
+            },
+        )
+        await self.principal.admit(
+            _inbound_event(self.room.room_id, event, EventKind.REDACTION, EventClass.CONTEXT_ONLY),
+            _projected_event(self.room.room_id, event, EventKind.REDACTION, self_sender=self.bot.matrix_id.full_id),
+        )
+        await self.store.mark_source_redacted(redacts, room_id=self.room.room_id)
+
     async def stop(self) -> None:
         reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.gateway))
         assert await reconciler.finalize("$answer", 4, room_id=self.room.room_id)
@@ -500,27 +518,12 @@ class TestEditApprovalOwnership:
         await case.recover_final(claimed)
         assert ("$newer-edit",) in retried
 
-    @pytest.mark.parametrize("redaction", [None, "revision", "source"])
+    @pytest.mark.parametrize("redaction", [None, "revision"])
     async def test_resume_after_restart(self, approval_case: _ApprovalCase, redaction: str | None) -> None:
-        """Durable edited ownership survives restart and either kind of source redaction."""
+        """Durable edited ownership survives restart and the redaction of the edit revision."""
         case = approval_case
         if redaction is not None:
-            redacts = "$edit" if redaction == "revision" else "$source"
-            event = nio.RedactionEvent.from_dict(
-                {
-                    "type": "m.room.redaction",
-                    "event_id": "$redaction",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 30,
-                    "redacts": redacts,
-                    "content": {},
-                },
-            )
-            await case.principal.admit(
-                _inbound_event(case.room.room_id, event, EventKind.REDACTION, EventClass.CONTEXT_ONLY),
-                _projected_event(case.room.room_id, event, EventKind.REDACTION, self_sender=case.bot.matrix_id.full_id),
-            )
-            await case.store.mark_source_redacted(redacts, room_id=case.room.room_id)
+            await case.redact("$edit")
             assert await case.principal.is_pending("$edit")
         await case.approve()
         await case.restart()
@@ -539,11 +542,33 @@ class TestEditApprovalOwnership:
         if redaction == "revision":
             assert consumed.revision_replay["$edit"].redacted
             assert "$source" not in (consumed.source_event_prompts or {})
-        elif redaction == "source":
-            assert consumed.redacted_source_event_ids == ("$source",)
-            assert "$source" not in (consumed.source_event_prompts or {})
         else:
             assert consumed.source_event_revisions == {"$source": (20, "$edit")}
+
+    async def test_deleting_the_message_cancels_the_approval_and_removes_the_reply(
+        self,
+        approval_case: _ApprovalCase,
+    ) -> None:
+        """Deleting the message the held reply answers cancels its approval as a Stop would, and the reply goes."""
+        case = approval_case
+        await case.redact("$source")
+        failing = await case.principal.approval_continuation(case.approval.approval_id)
+        assert failing is not None
+        assert failing.state == "failing"
+        assert failing.failure_reason == "cancelled_by_user"
+        # An approval after the deletion runs nothing.
+        await case.approve()
+        resumed = AsyncMock(side_effect=AssertionError("A deleted message's approval must not execute"))
+        with patch.object(case.runner, "_continue_entity_call", resumed):
+            await case.runner.handoff_approval_source("$edit")
+            await case.runner.wait_for_source_owned_inbox_responses()
+        resumed.assert_not_awaited()
+        assert await case.principal.approval_continuation(case.approval.approval_id) is None
+        assert not await case.principal.is_pending("$edit")
+        reply = await case.principal.replies.for_event("$answer")
+        assert reply is not None
+        assert reply.state is rl.ReplyState.GONE
+        assert await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL) is None
 
     @pytest.mark.parametrize("transport_fails", [False, True])
     async def test_stop_settles_paused_edit(self, approval_case: _ApprovalCase, transport_fails: bool) -> None:

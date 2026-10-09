@@ -40,6 +40,8 @@ def _runtime(
         generation="gen-test",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=complete_turn or AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=lambda _ended: None,
     )
 
 

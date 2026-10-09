@@ -25,6 +25,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -176,7 +177,7 @@ if TYPE_CHECKING:
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
     from mindroom.event_journal.models import ResponseRecoveryState
-    from mindroom.handled_turns import TurnRecord
+    from mindroom.event_journal.replies import ApprovalEnded
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -642,6 +643,8 @@ class AgentBot:
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
+            hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
+            approval_ended=lambda ended: self._approval_ended(ended),
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
@@ -944,6 +947,11 @@ class AgentBot:
             )
             == "room"
         )
+
+    def _approval_ended(self, ended: ApprovalEnded) -> None:
+        """Let the ended approval's conversation answer its waiting messages, and settle what its reply owes."""
+        self._response_runner.release_approval_hold(ended.approval_id)
+        self._settle_reply_debt_later(ended.reply_id)
 
     def _reply_row_resolved(self, reply_id: str) -> None:
         """Wake claims that waited for this reply's rows, and settle any debt its rows left."""
@@ -1702,6 +1710,8 @@ class AgentBot:
                 self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
+            # The departure ended the room's approvals without their settlement.
+            self._response_runner.release_approval_holds_in_room(room_id)
             await self._room_lifecycle.forget_invited_room(room_id)
 
     async def ensure_rooms(self) -> None:
@@ -2681,6 +2691,8 @@ class AgentBot:
                 membership_index=self._runtime_view.agent_reply_memberships,
             )
             if approval_reply_claimed or approval_reply_handled:
+                # Its card answers it, so a message that waited for the approval is not skipped as older than it.
+                await self._turn_store.record_turn(TurnRecord.create([event.event_id]))
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             return await self._turn_controller.handle_text_event(
                 room,

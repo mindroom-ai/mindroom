@@ -1487,6 +1487,12 @@ class PrincipalStore:
         except _PauseRefusedError as refused:
             return refused.enqueue
 
+    async def pending_approvals(self) -> tuple[ApprovalContinuation, ...]:
+        """Return every approval continuation this principal owns."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.for_principal(transaction, self._principal_id),
+        )
+
     async def approval_continuation_for_source(
         self,
         event_id: str,
@@ -1920,7 +1926,7 @@ def _end_approval(
     approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
     effects = () if applied is None else applied.post_commit
     # A claim that waited for the approval to end, such as an edit's regeneration, retries now.
-    return effects if paused is None else (*effects, replies.WakeClaims(paused.reply_id))
+    return effects if paused is None else (*effects, replies.ApprovalEnded(approval_id, paused.reply_id))
 
 
 class _ReplyRowRefusedError(Exception):

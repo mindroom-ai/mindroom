@@ -1544,14 +1544,24 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     """Every logical source of the reply's current work was deleted.
 
     ``span`` is the reply's current span, or its last one when none runs.
-    A reply an approval holds, paused, resuming, or settling a resume that
-    ended, is its approval's: the card stays the consent surface, and the
-    approval's settlement ends the reply and settles its sources.
+    A reply an approval holds goes too, and the deletion cancels that
+    approval, as a Stop would: its settlement expires the cards and settles
+    the sources it holds.
     """
-    if reply.terminal or reply.approval_id is not None:
+    if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     live = span is not None and span.span_id == reply.current_span_id and not span.ended
     current = span if live else None
+    if reply.approval_id is not None:
+        # The span ends here, so a resume or an in-place wait starts no tool and writes no note before its cancel lands.
+        updated, spans = _end_running(reply, current, SpanOutcome.CANCELLED)
+        cancel = () if current is None else (CancelSpan(current.span_id),)
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_gone(updated, now_ns),
+            spans=spans,
+            effects=(FenceApproval(reply.approval_id, "cancelled_by_user"), *cancel, WakeApproval(reply.approval_id)),
+        )
     # A regeneration a restart or retry left waiting for its replay still holds the answer it would replace.
     waiting = span if not live and span is not None and span.outcome in _SOURCES_PENDING_OUTCOMES else None
     regeneration = current or waiting

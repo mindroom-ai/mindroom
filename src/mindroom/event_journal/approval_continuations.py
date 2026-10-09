@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
+from mindroom.reply_lifecycle import ReplyState
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
@@ -579,6 +580,19 @@ def all_owners(
     return _load_owners(transaction, rows)
 
 
+def for_principal(transaction: Transaction, principal_id: str) -> tuple[ApprovalContinuation, ...]:
+    """Return every continuation one principal owns."""
+    rows = transaction.fetchall(
+        f"""
+        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
+        WHERE principal_id = ?
+        ORDER BY approval_id/*bytes*/
+        """,  # noqa: S608 - a fixed column list, not input
+        (principal_id,),
+    )
+    return tuple(continuation for _owner, continuation in _load_owners(transaction, rows))
+
+
 def claim(transaction: Transaction, principal_id: str, *, approval_id: str, span_id: str) -> bool:
     """Name the span that runs a ready continuation; only one span claims each generation."""
     claimed = transaction.fetchone(
@@ -776,12 +790,16 @@ def fence(
 def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str) -> ApprovalContinuation | None:
     """Lock a paused run that may end: its FINAL was acknowledged or refused for good.
 
-    The caller applies the finish to the reply it paused while the run still
-    holds that reply, then deletes the run with ``delete``.
+    A failed run whose reply went with its deleted message ends without one,
+    since nothing is left to show it. The caller applies the finish to the
+    reply it paused while the run still holds that reply, then deletes the run
+    with ``delete``.
     """
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return None
+    if continuation.state == "failing" and _paused_reply_gone(transaction, principal_id, continuation):
+        return continuation
     delivered = transaction.fetchone(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox
@@ -791,6 +809,14 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
     return None if delivered is None else continuation
+
+
+def _paused_reply_gone(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
+    """Return whether the reply a continuation paused is gone."""
+    assert continuation.span_id is not None, "a stored continuation names the span whose pause created it"
+    span = reply_spans.load(transaction, principal_id, continuation.span_id)
+    reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
+    return reply is not None and reply.state is ReplyState.GONE
 
 
 def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:

@@ -7,7 +7,7 @@ import inspect
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -17,12 +17,19 @@ from mindroom.event_journal import (
     DeliveryStage,
     DepartureSource,
     EventKind,
+    PrincipalStore,
     replies,
     reply_messages,
     reply_spans,
     turn_records,
 )
-from mindroom.event_journal.replies import AppliedTransition, Decide, PreparedReplyRow, ReplyRowRequest
+from mindroom.event_journal.replies import (
+    AppliedTransition,
+    ApprovalEnded,
+    Decide,
+    PreparedReplyRow,
+    ReplyRowRequest,
+)
 from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
     ClaimContext,
@@ -45,7 +52,7 @@ from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
     from mindroom.cancellation import TaskCancelSource
-    from mindroom.event_journal import EventJournalStore, PrincipalStore
+    from mindroom.event_journal import EventJournalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -702,6 +709,8 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=lambda _ended: None,
     )
     await principal.replies.record_tool_call(
         span_id=first.span_id,
@@ -981,6 +990,8 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=lambda _ended: None,
     )
     runtime.spans.expect(span.span_id)
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -1006,6 +1017,8 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=lambda _ended: None,
         spans=spans,
     )
     await _delete(principal, "$source")
@@ -1234,6 +1247,8 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         generation="gen-2",
         retry_sources=lambda room_id, sources: retried.append((room_id, sources)),
         complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=lambda _ended: None,
     )
     await runtime.take_ownership()
     stored = await alice.approval_continuation("approval-1")
@@ -1276,25 +1291,64 @@ async def test_a_reply_is_held_by_the_continuation_that_names_its_span(journal_s
 async def test_an_approval_whose_sources_were_deleted_leaves_its_turn_unanswered(
     journal_store: EventJournalStore,
 ) -> None:
-    """The approval still settles the deleted sources it holds, but nothing answered them."""
+    """Deleting the held sources cancels the approval; it finishes without a FINAL and nothing answered them."""
     alice = journal_store.principal("agent@alice")
     await journal_tests.TestApprovalContinuations.admit_sources(alice)
     await _pending_turn(journal_store, "$source-1", "$source-2")
     paused = await paused_for_approval(alice, journal_tests.TestApprovalContinuations.continuation(state="waiting"))
     assert paused is not None
     await _delete(alice, "$source-1")
+    assert (await alice.approval_continuation("approval-1")).state == "waiting"
     await _delete(alice, "$source-2")
     held = await alice.replies.for_sources(("$source-1",))
     assert held is not None
-    assert held.state is ReplyState.PAUSED
-    failing = await alice.request_approval_failure("approval-1", "cancelled", expected_state="waiting")
+    # The reply goes with its message; the approval stays until its settlement expires its cards.
+    assert held.state is ReplyState.GONE
+    failing = await alice.approval_continuation("approval-1")
     assert failing is not None
-    finished = await journal_store.backend.write(
-        lambda tx: replies.approval_finished(tx, "agent@alice", failing, owner_available=True),
-    )
-    assert finished is not None
+    assert failing.state == "failing"
+    assert failing.failure_reason == "cancelled_by_user"
+    assert await alice.finish_approval_continuation("approval-1") is not None
     assert not await alice.is_pending("$source-1")
     assert not await _answered(journal_store, "$source-1")
+
+
+async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_cancelled(
+    journal_store: EventJournalStore,
+) -> None:
+    """A committed finish still releases the conversation it held: the commit and its effects finish together."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    paused = await paused_for_approval(alice, journal_tests.TestApprovalContinuations.continuation(state="waiting"))
+    assert paused is not None
+    await _delete(alice, "$source-1")
+    await _delete(alice, "$source-2")
+    ended: list[ApprovalEnded] = []
+    runtime = reply_scope.ReplyRuntime(
+        store=alice,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=ended.append,
+    )
+    committing = asyncio.Event()
+    finish = PrincipalStore.finish_approval_continuation
+
+    async def slow_finish(store: PrincipalStore, approval_id: str) -> object:
+        committing.set()
+        await asyncio.sleep(0)
+        return await finish(store, approval_id)
+
+    with patch.object(PrincipalStore, "finish_approval_continuation", slow_finish):
+        finishing = asyncio.create_task(runtime.finish_approval("approval-1"))
+        await committing.wait()
+        finishing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await finishing
+    assert await alice.approval_continuation("approval-1") is None
+    assert [end.approval_id for end in ended] == ["approval-1"]
 
 
 async def test_retention_keeps_a_reply_a_continuation_still_names(journal_store: EventJournalStore) -> None:

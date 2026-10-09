@@ -2787,6 +2787,7 @@ Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unav
 
 The check runs between completed tool batches and never interrupts a running tool.
 Queued messages are handled after the active response finishes either way.
+A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
 The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
@@ -13246,7 +13247,8 @@ tool_approval:
 - An unanswered card expires after its `timeout_days` and the call is denied.
 - A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 
-While approval is pending, the agent stops typing and the conversation can continue, except in minimal mode, where a command-line tool call waits in place and holds its conversation until you decide.
+While approval is pending, the agent stops typing and counts as still responding in that conversation: later messages to it there wait until the approval ends and get a ⏳ reaction, while other conversations and agents carry on.
+Stopping the reply with 🛑, or editing or deleting the message it answers, cancels the approval and expires its card; deleting the message also removes the reply.
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
 

@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal.replies import AppliedTransition, Decide, ReplyCreation, TurnCompleted, WakeClaims
+from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.event_journal.replies import AppliedTransition, ApprovalEnded, Decide, ReplyCreation, TurnCompleted
 from mindroom.logging_config import get_logger
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -250,6 +251,10 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Tells the turn ledger about a turn a reply's settlement already recorded answered.
     complete_turn: Callable[[TurnRecord], Awaitable[object]]
+    # Keeps a pending approval's conversation busy, for the approvals a start finds.
+    hold_conversation: Callable[[ApprovalContinuation], None]
+    # Releases the conversation the ended approval held, and settles what its reply owes.
+    approval_ended: Callable[[ApprovalEnded], None]
     clock: Callable[[], int] = field(default=time.time_ns)
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
@@ -271,8 +276,9 @@ class ReplyRuntime:
                 await self.complete_turn(effect.record)
             elif isinstance(effect, rl.WakeApproval):
                 await self._wake_fenced_approval(effect.approval_id)
-            elif isinstance(effect, WakeClaims):
+            elif isinstance(effect, ApprovalEnded):
                 self.claim_may_proceed(effect.reply_id)
+                self.approval_ended(effect)
         for effect in effects:
             if isinstance(effect, rl.CancelSpan):
                 self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
@@ -295,16 +301,21 @@ class ReplyRuntime:
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
-        return await self._ran(await self.store.finish_approval_continuation(approval_id))
+        return await run_coroutine_until_complete(self._ran(self.store.finish_approval_continuation(approval_id)))
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
         """Release an interrupted run's approval as ``rl.approval_released`` decides; return whether it was released."""
-        return await self._ran(
-            await self.store.release_approval_continuation(approval_id, expected_generation=expected_generation),
+        return await run_coroutine_until_complete(
+            self._ran(self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)),
         )
 
-    async def _ran(self, effects: tuple[PostCommitEffect, ...] | None) -> bool:
-        """Run what an ended approval's commit left, returning whether it ended."""
+    async def _ran(self, ending: Awaitable[tuple[PostCommitEffect, ...] | None]) -> bool:
+        """Run what an ended approval's commit left, returning whether it ended.
+
+        Callers run it to completion even when they are cancelled, so a
+        committed end always releases the conversation its approval held.
+        """
+        effects = await ending
         if effects is None:
             return False
         await self.run_effects(effects)
@@ -360,14 +371,20 @@ class ReplyRuntime:
             self.spans.cancel(span_id, cancel_source=None)
 
     async def deletions_ended(self) -> tuple[str, ...]:
-        """Cancel the spans source deletions ended; return the replies they ended, whose debt is now due.
+        """Cancel the spans source deletions ended and wake the approvals they cancelled; return the replies they ended.
 
-        Each tombstone's projection ended its replies in its own commit and recorded the span it cancelled.
+        Each tombstone's projection ended its replies, and fenced the approval
+        that held one, in its own commit and recorded the span it cancelled.
+        The debt of the replies it ended is now due.
         """
         endings = await self.store.replies.take_deletion_endings()
         for ending in endings:
             if ending.span_id is not None:
                 self.spans.cancel(ending.span_id, cancel_source=None)
+            reply = await self.store.replies.load(ending.reply_id)
+            if reply is not None and reply.approval_id is not None:
+                # Its settlement expires the cards and settles the sources the approval holds.
+                await self._wake_fenced_approval(reply.approval_id)
         return tuple(ending.reply_id for ending in endings)
 
     async def forget_finished(self) -> None:
@@ -392,6 +409,9 @@ class ReplyRuntime:
         await self.store.replies.take_deletion_endings()
         for applied in await self.store.replies.owner_lost(self.generation, now_ns=self.clock()):
             await self.run_effects(applied.post_commit)
+        # A message to a conversation an approval still holds waits for that approval, after a restart too.
+        for continuation in await self.store.pending_approvals():
+            self.hold_conversation(continuation)
 
     @asynccontextmanager
     async def span_scope(self) -> AsyncIterator[SpanSlot]:

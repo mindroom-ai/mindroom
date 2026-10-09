@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
 from mindroom.authorization import ensure_room_membership_synced, is_requester_joined_to_room
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescingKey,
@@ -564,7 +564,26 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
         else:
+            self._mark_waiting_for_approval(target, envelope)
             return _IngressAdmissionOutcome.DEFERRED
+
+    def _mark_waiting_for_approval(self, target: MessageTarget, envelope: MessageEnvelope) -> None:
+        """React ⏳ to a human message that waits because a pending approval holds its conversation."""
+        if not envelope.origin.may_answer_interactive_prompt or not self.deps.response_runner.is_held_for_approval(
+            target,
+        ):
+            return
+        create_background_task(
+            self.deps.delivery_gateway.send_judgment_reaction(
+                turn_id=envelope.source_event_id,
+                room_id=target.room_id,
+                event_id=envelope.source_event_id,
+                key="⏳",
+                kind="approval_wait",
+            ),
+            name=f"approval_wait_reaction_{envelope.source_event_id}",
+            owner=self.deps.runtime,
+        )
 
     async def _enqueue_media_for_dispatch(
         self,
@@ -610,6 +629,7 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
         else:
+            self._mark_waiting_for_approval(target, envelope)
             return _IngressAdmissionOutcome.DEFERRED
 
     async def _should_skip_router_before_shared_ingress_work(
@@ -2608,6 +2628,7 @@ class TurnController:
         else:
             reservation_released_or_handed_off = True
             claim_transferred = True
+            self._mark_waiting_for_approval(normalized_target, envelope)
             return ready
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:

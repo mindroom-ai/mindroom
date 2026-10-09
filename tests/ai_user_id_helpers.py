@@ -567,6 +567,8 @@ def _build_response_runner(
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
                 complete_turn=AsyncMock(),
+                hold_conversation=lambda _continuation: None,
+                approval_ended=lambda _ended: None,
             ),
         ),
     )

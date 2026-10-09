@@ -48,14 +48,19 @@ class TurnCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class WakeClaims:
-    """After commit: the claims that waited for this reply's approval to end retry."""
+class ApprovalEnded:
+    """After commit: the approval that held this reply ended.
 
+    The claims that waited for it retry, the reply's debt is due, and its
+    conversation stops waiting for it.
+    """
+
+    approval_id: str
     reply_id: str
 
 
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | WakeClaims | TurnCompleted
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -232,9 +237,10 @@ def end_replies_of_deleted_source(
 ) -> None:
     """End the replies whose current work lost every logical source to this deletion, settling their sources.
 
-    A paused reply, an approval resume, and an answer already written are
-    kept. The bot cancels the spans it runs and redacts what they showed after
-    the deletion commits, and the turn ledger loads the turns this answered.
+    An answer already written is kept; a reply an approval holds ends too, and
+    its approval is fenced for its settlement. The bot cancels the spans it
+    runs, wakes those approvals, and redacts what the replies showed after the
+    deletion commits, and the turn ledger loads the turns this answered.
     """
     for reply_id in reply_messages.naming_logical_source(transaction, principal_id, event_id):
         reply = reply_messages.lock(transaction, principal_id, reply_id)

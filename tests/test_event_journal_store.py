@@ -67,7 +67,7 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
-from mindroom.event_journal.replies import WakeClaims
+from mindroom.event_journal.replies import ApprovalEnded
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
     SQLITE_DIALECT,
@@ -7984,7 +7984,7 @@ class TestApprovalContinuations:
         # A claim that waited for the approval to end, such as an edit's regeneration, retries.
         span = await alice.replies.span(paused.span_id)
         assert span is not None
-        assert WakeClaims(span.reply_id) in effects
+        assert ApprovalEnded("approval-1", span.reply_id) in effects
         assert await alice.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
@@ -8013,7 +8013,7 @@ class TestApprovalContinuations:
         assert effects is not None
         span = await alice.replies.span(paused.span_id)
         assert span is not None
-        assert WakeClaims(span.reply_id) in effects
+        assert ApprovalEnded("approval-1", span.reply_id) in effects
 
         assert await alice.approval_continuation("approval-1") is None
         assert await alice.approval_continuation_for_source("$source-1") is None

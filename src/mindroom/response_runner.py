@@ -239,6 +239,8 @@ if TYPE_CHECKING:
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
+# How often a message waiting behind an approval rechecks that the approval still exists.
+_APPROVAL_HOLD_RECHECK_SECONDS = 30.0
 # A resume span that ended this way wrote its own ending; only a restart's or a release's hands work back.
 _UNANSWERED_RESUME_OUTCOMES = frozenset({rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED, rl.SpanOutcome.SUPPRESSED})
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
@@ -1664,6 +1666,9 @@ class ResponseRunner:
                 ),
                 runtime_generation=(self.deps.approval_runtime_generation if continuation_state == "waiting" else None),
             )
+            # Later messages of the conversation wait while the approval is pending, as behind a running reply.
+            # It is held before the pause commits, so the approval's end, which releases it, cannot come first.
+            self._lifecycle_coordinator.hold_for_approval(approval_id, target)
             if not await self._pause_reply(
                 shown.handle,
                 draft,
@@ -1703,6 +1708,9 @@ class ResponseRunner:
                 approval_id,
                 error=error,
             )
+            if await self.deps.approval_store.approval_continuation(approval_id) is None:
+                # No approval is pending, or its end already ran: nothing holds the conversation.
+                self._lifecycle_coordinator.release_approval_hold(approval_id)
             if handoff is not None:
                 return handoff
             raise
@@ -2934,9 +2942,41 @@ class ResponseRunner:
         """Return canonical thread IDs with active response lifecycles in one room."""
         return self._lifecycle_coordinator.active_thread_ids_for_room(room_id)
 
+    def hold_for_approval(self, continuation: ApprovalContinuation) -> None:
+        """Keep a pending approval's conversation busy, as a restart finds it."""
+        self._lifecycle_coordinator.hold_for_approval(continuation.approval_id, continuation_target(continuation))
+
+    def release_approval_hold(self, approval_id: str) -> None:
+        """Let the conversation of an approval that ended answer its waiting messages."""
+        self._lifecycle_coordinator.release_approval_hold(approval_id)
+
+    def release_approval_holds_in_room(self, room_id: str) -> None:
+        """Release the approval holds of a room this bot left."""
+        self._lifecycle_coordinator.release_approval_holds_in_room(room_id)
+
+    def is_held_for_approval(self, target: MessageTarget) -> bool:
+        """Return whether a pending approval keeps this conversation busy."""
+        return self._lifecycle_coordinator.is_held_for_approval(target)
+
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
-        """Wait until one canonical room/thread has no active response turn."""
-        await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
+        """Wait until one canonical room/thread has no active response turn.
+
+        While it waits it rechecks that each approval holding the conversation
+        still exists, so a hold whose end never reached this bot, as after a
+        cancellation or a departure it did not see, cannot keep it waiting.
+        """
+        while True:
+            for approval_id in self._lifecycle_coordinator.approval_holds(room_id, thread_id):
+                if await self.deps.approval_store.approval_continuation(approval_id) is None:
+                    self._lifecycle_coordinator.release_approval_hold(approval_id)
+            try:
+                await asyncio.wait_for(
+                    self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id),
+                    timeout=_APPROVAL_HOLD_RECHECK_SECONDS,
+                )
+            except TimeoutError:
+                continue
+            return
 
     def reserve_waiting_human_message(
         self,
@@ -3029,7 +3069,7 @@ class ResponseRunner:
 
         async def acknowledge_deferred(key: str, event_id: str) -> None:
             await self.deps.delivery_gateway.send_judgment_reaction(
-                identity=self._response_identity(request, response_kind=response_kind),
+                turn_id=request.response_envelope.source_event_id,
                 room_id=request.room_id,
                 event_id=event_id,
                 key=key,
@@ -5843,7 +5883,7 @@ class ResponseRunner:
                 and generation.delivery.failure_reason == "participation_declined"
             ):
                 await self.deps.delivery_gateway.send_judgment_reaction(
-                    identity=response_identity,
+                    turn_id=response_identity.response_envelope.source_event_id,
                     room_id=request.room_id,
                     event_id=request.sources.logical_source_event_ids[-1],
                     key=request.participation.decline_reaction,

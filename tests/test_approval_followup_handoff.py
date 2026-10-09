@@ -290,7 +290,10 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
 
 @pytest.mark.asyncio
 async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: Path) -> None:
-    """An unresolved human decision must not block a newer conversation turn."""
+    """A chained pause gives up the conversation's lock, so a turn that already waited on it runs.
+
+    Messages that arrive later wait for the approval, which still holds the conversation.
+    """
     bot, runner = await _runner_with_source(tmp_path)
     await _seed_ready_continuation(bot)
     target = _target(thread_id="$thread", reply_to_event_id="$source")
@@ -368,7 +371,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
     assert waiting.continuation_count == 2
     assert waiting.calls[0].decision is None
     assert await runner.deps.approval_store.is_pending("$source")
-    assert not runner.has_active_response_for_target(target)
+    assert runner.is_held_for_approval(target)
     assert not original.cancelled()
     assert follow_up is not None
     assert not follow_up.cancelled()

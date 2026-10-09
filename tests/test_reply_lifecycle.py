@@ -1516,19 +1516,52 @@ def test_a_regeneration_a_restart_lost_after_it_wrote_keeps_what_it_showed() -> 
     assert cancelled.reply.owed_write == rl.OwedWrite("span-3", rl.NoteKind.CANCELLED)
 
 
-def test_deleting_sources_keeps_paused_and_completed_replies() -> None:
-    """Replies an approval holds and finished answers survive their sources' deletion.
+def test_deleting_the_sources_of_a_held_reply_cancels_its_approval_and_keeps_a_finished_answer() -> None:
+    """A held reply goes with its message, and the deletion fences its approval; a finished answer survives it.
 
-    That includes one whose resume already ended while its approval's
-    settlement is still to come.
+    That includes a held reply whose resume already ended while its
+    approval's settlement is still to come; the settlement then only settles
+    the sources the approval holds.
     """
-    reply, _span, _transition = _paused()
-    assert rl.sources_deleted(reply, None, now_ns=NOW).outcome is Outcome.DUPLICATE
+    reply, span, transition = _paused()
+    cancel = (FenceApproval("approval-1", "cancelled_by_user"), WakeApproval("approval-1"))
     settling = replace(reply, state=ReplyState.ACTIVE, current_span_id=None)
     assert settling.approval_id is not None
-    assert rl.sources_deleted(settling, None, now_ns=NOW).outcome is Outcome.DUPLICATE
+    for held in (reply, settling):
+        deleted = rl.sources_deleted(held, None, now_ns=NOW)
+        assert deleted.effects == cancel
+        assert deleted.reply is not None
+        assert deleted.reply.state is ReplyState.GONE
+        assert deleted.reply.redaction_pending == ("$reply",)
     completed = replace(reply, state=ReplyState.COMPLETED)
     assert rl.sources_deleted(completed, None, now_ns=NOW).outcome is Outcome.DUPLICATE
+    gone = rl.sources_deleted(reply, None, now_ns=NOW).reply
+    assert gone is not None
+    settled = rl.approval_settled(
+        gone,
+        _span_after(transition, span.span_id),
+        approval_id="approval-1",
+        paused_span_id=span.span_id,
+        disposition="failed",
+        answers_turn=True,
+        now_ns=NOW,
+    )
+    assert settled.outcome is Outcome.DUPLICATE
+    assert settled.effects[0] == SettleSources(span.span_id)
+
+
+def test_deleting_the_message_of_a_reply_running_for_its_approval_ends_that_span() -> None:
+    """A resume or an in-place wait ends in the deletion's commit, so it starts no tool before its cancel lands."""
+    reply, span, _transition = _paused()
+    resume = rl.claim(_request("resume", delivery_id="$source", approval_id="approval-1"), _context(reply, span))
+    assert resume.reply is not None
+    assert resume.claimed is not None
+    deleted = rl.sources_deleted(resume.reply, resume.claimed, now_ns=NOW)
+    assert deleted.reply is not None
+    assert deleted.reply.state is ReplyState.GONE
+    assert deleted.reply.current_span_id is None
+    assert _span_after(deleted, "resume").outcome is SpanOutcome.CANCELLED
+    assert CancelSpan("resume") in deleted.effects
 
 
 def test_departure_ends_replies_without_touching_matrix() -> None:

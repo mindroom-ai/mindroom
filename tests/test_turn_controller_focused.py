@@ -30,6 +30,7 @@ from mindroom import constants, interactive
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
@@ -193,12 +194,17 @@ class _RecordingResponseRunner:
     admission_waiter: Callable[[], Awaitable[bool]] | None = None
     # Records a turn answered, as a reply's records do when its answer settles its sources.
     answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
+    # Whether a pending approval holds every conversation.
+    held_for_approval: bool = False
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return False
+
+    def is_held_for_approval(self, target: MessageTarget) -> bool:  # noqa: ARG002
+        return self.held_for_approval
 
     async def wait_for_admission_or_shutdown(self) -> bool:
         """Wait through a replacement when a focused test closes admission."""
@@ -303,6 +309,10 @@ class _RecordingDeliveryGateway:
     failed_dispatches: list[tuple[str, str]] = field(default_factory=list)
     # Records a turn answered, as a reply's records do when its failure notice settles its sources.
     answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
+    reactions: list[tuple[str, str, str]] = field(default_factory=list)
+
+    async def send_judgment_reaction(self, *, turn_id: str, room_id: str, event_id: str, key: str, kind: str) -> None:  # noqa: ARG002
+        self.reactions.append((event_id, key, kind))
 
     async def supersede_replay(self, _source_event_ids: tuple[str, ...]) -> bool | None:
         """No reply has the sources in this recording-only delivery fixture."""
@@ -610,6 +620,8 @@ def _build_harness(
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
                 complete_turn=AsyncMock(),
+                hold_conversation=lambda _continuation: None,
+                approval_ended=lambda _ended: None,
             ),
         ),
     )
@@ -1778,6 +1790,25 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert metadata is not None
     assert metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == [event.event_id]
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", [False, True])
+async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
+    config: Config,
+    tmp_path: Path,
+    held: bool,
+) -> None:
+    """A human message to a conversation an approval holds is marked as waiting; any other is not."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.held_for_approval = held
+    room = _room_with_members(config, "general")
+    event = _text_event("and what about tomorrow?")
+
+    await harness.deliver(room, event)
+    await wait_for_background_tasks(timeout=5.0, owner=harness.controller.deps.runtime)
+
+    assert harness.gateway.reactions == ([(event.event_id, "⏳", "approval_wait")] if held else [])
 
 
 @pytest.mark.asyncio
