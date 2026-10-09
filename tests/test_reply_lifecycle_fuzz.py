@@ -483,7 +483,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self._apply(
             rl.write_acknowledged(
                 reply,
-                WriteFacts(row.intent.stage, row.intent.sequence, row.intent.span_id, creates, row.placeholder_only),
+                WriteFacts(row.intent.stage, row.intent.sequence, creates, row.placeholder_only),
                 event_id="$reply",
                 membership_current=True,
                 now_ns=self._now(),
@@ -496,8 +496,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self._retry_deferred()
 
     @precondition(lambda self: self._bot() and bool(self.model.rows))
-    @rule(reason=st.sampled_from(["delivery_failed", "too_large"]))
-    def fail_row(self, reason: str) -> None:
+    @rule()
+    def fail_row(self) -> None:
         """Matrix refuses a row for good."""
         row = self.model.rows[0]
         span = self.model.spans[row.intent.span_id]
@@ -514,10 +514,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             rl.write_failed(
                 reply,
                 span,
-                rl.FailedWrite(
-                    WriteFacts(row.intent.stage, row.intent.sequence, row.intent.span_id, row.creates_event, False),
-                    reason,
-                ),
+                WriteFacts(row.intent.stage, row.intent.sequence, row.creates_event, False),
                 now_ns=self._now(),
             ),
         )
@@ -872,7 +869,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self._last(),
                 approval_id=continuation.approval_id,
                 paused_span_id=continuation.paused_span_id,
-                result="failed" if continuation.state == "failing" else "finished",
                 disposition=continuation.disposition,
                 answers_turn=answers_turn,
                 now_ns=self._now(),
@@ -1344,7 +1340,7 @@ def test_a_refused_answer_after_an_approved_regeneration_ends_with_the_delivery_
     machine.pause(in_place=False)
     machine.pause_shown_and_approved()
     machine.finish()
-    machine.fail_row(reason="too_large")
+    machine.fail_row()
     machine.a_finished_reply_shows_its_end()
     machine.teardown()
     reply = machine.model.reply

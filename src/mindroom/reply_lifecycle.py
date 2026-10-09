@@ -331,10 +331,6 @@ def _with_redactions(reply: Reply, *event_ids: str | None) -> Reply:
     return replace(reply, redaction_pending=tuple(pending))
 
 
-def _visible_event_ids(reply: Reply) -> tuple[str, ...]:
-    return () if reply.event_id is None else (reply.event_id,)
-
-
 def _leaves_active(reply: Reply, new_state: ReplyState) -> Reply:
     """Queue the Stop button's redaction when the reply stops being active (I8).
 
@@ -425,9 +421,28 @@ def _kept_answer(reply: Reply, span: Span) -> Rollback | None:
     return None if _wrote_anything(reply, span) else rollback
 
 
-def _rollback_after(reply: Reply, last: Span) -> Rollback | None:
-    """Return the rollback a regeneration claimed again carries: none once an earlier attempt wrote."""
-    return None if _wrote_anything(reply, last) else last.rollback
+def _end_span_only(reply: Reply, span: Span, outcome: SpanOutcome, now_ns: int) -> Transition:
+    """End a span, leaving the reply's state, answer, and sources as they are."""
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=_touch(_clear_current(reply, span.span_id), now_ns),
+        spans=(_end(span, outcome, now_ns),),
+    )
+
+
+def _cancelled(reply: Reply, span_id: str, now_ns: int) -> Reply:
+    """End a reply as its Stop decides: cancelled, with the cancel note owed on ``span_id``."""
+    return _set_state(
+        _stop_applied(reply),
+        ReplyState.CANCELLED,
+        now_ns,
+        owed_write=OwedWrite(span_id, _NOTE_CANCELLED),
+    )
+
+
+def _gone(reply: Reply, now_ns: int) -> Reply:
+    """End a reply gone, redacting the message it showed after its Stop button."""
+    return _with_redactions(_set_state(_stop_applied(reply), ReplyState.GONE, now_ns), reply.event_id)
 
 
 def _restore(reply: Reply, span: Span, rollback: Rollback, now_ns: int) -> Reply:
@@ -604,7 +619,6 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         # that does replays these sources.
         return _unchanged(Outcome.STALE, reply)
     changed: list[Span] = []
-    effects: list[Effect] = []
     if reply is not None and context.current_span is not None:
         current = context.current_span
         if current.bot_generation == context.active_generation:
@@ -623,14 +637,8 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         # sources instead.
         return Transition(outcome=Outcome.DEFERRED, reply=reply if changed else context.reply, spans=tuple(changed))
 
-    def claimed(transition_reply: Reply, span: Span, *extra_spans: Span) -> Transition:
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=transition_reply,
-            spans=(*changed, *extra_spans, span),
-            effects=tuple(effects),
-            claimed=span,
-        )
+    def claimed(transition_reply: Reply, span: Span) -> Transition:
+        return Transition(outcome=Outcome.APPLIED, reply=transition_reply, spans=(*changed, span), claimed=span)
 
     if request.approval_id is not None:
         if reply is None or reply.state is not ReplyState.PAUSED or reply.approval_id != request.approval_id:
@@ -652,12 +660,9 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
     if request.interactive_span_id is not None and interactive is not None and reply is not None:
         if interactive.outcome is None and not reply.terminal:
             return claimed(_make_current(reply, interactive, request.now_ns), interactive)
-        if interactive.outcome is None:
-            # A Stop ended the selection's reply before its claim: nothing runs for it.
-            return _unchanged(Outcome.DUPLICATE, reply)
         if interactive.outcome is not SpanOutcome.LOST:
-            # A Stop that reached the reply first ended the selection's span;
-            # Stops do not wait for the conversation lock claims hold.
+            # A Stop that reached the reply first ended the selection's reply or
+            # span; Stops do not wait for the conversation lock claims hold.
             return _unchanged(Outcome.DUPLICATE, reply)
         # The acknowledgement's bot instance is gone: the selection continues as a replay.
         span = _new_span(request, reply, SpanKind.REPLAY)
@@ -679,7 +684,7 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         request.driving_edit_id is not None
         and last is not None
         and last.ended
-        and last.outcome not in {SpanOutcome.RELEASED, SpanOutcome.LOST, SpanOutcome.SUPERSEDED}
+        and last.outcome not in _SOURCES_PENDING_OUTCOMES
     ):
         # A retry of the edit the last span already answered, as a sync
         # restart retries a regeneration that finished: nothing runs again.
@@ -692,11 +697,11 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
     if reply.state is not ReplyState.ACTIVE or reply.current_span_id is not None or last is None or not last.ended:
         return _unmodeled_claim(reply, last, reason="reply_not_reclaimable", now_ns=request.now_ns)
     if last.outcome is SpanOutcome.SUPERSEDED:
-        span = _new_span(request, reply, last.kind, rollback=_rollback_after(reply, last))
+        span = _new_span(request, reply, last.kind, rollback=_kept_answer(reply, last))
         return claimed(_make_current(reply, span, request.now_ns), span)
     if last.outcome in {SpanOutcome.RELEASED, SpanOutcome.LOST}:
         if last.kind is SpanKind.REGENERATION:
-            span = _new_span(request, reply, SpanKind.REGENERATION, rollback=_rollback_after(reply, last))
+            span = _new_span(request, reply, SpanKind.REGENERATION, rollback=_kept_answer(reply, last))
         else:
             span = _new_span(request, reply, SpanKind.REPLAY)
         return claimed(_make_current(reply, span, request.now_ns), span)
@@ -720,7 +725,7 @@ def _regeneration(
     if reply.state is ReplyState.GONE or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)
     if last is not None and last.kind is SpanKind.REGENERATION and last.outcome in _SOURCES_PENDING_OUTCOMES:
-        rollback = _rollback_after(reply, last)
+        rollback = _kept_answer(reply, last)
     else:
         rollback = _rollback_of(reply) if reply.terminal else None
     # Its rows belong to the membership its edit arrived in, which a leave and rejoin moved on.
@@ -749,7 +754,6 @@ class WriteFacts:
 
     stage: WriteStage
     sequence: int
-    span_id: str
     # The row created the reply's event rather than editing it.
     creates_event: bool
     # The row shows only the placeholder.
@@ -860,17 +864,8 @@ def write_acknowledged(
     return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns))
 
 
-@dataclass(frozen=True, slots=True)
-class FailedWrite:
-    """A durable row Matrix refused permanently."""
-
-    write: WriteFacts
-    reason: str
-
-
-def write_failed(reply: Reply, span: Span, failure: FailedWrite, *, now_ns: int) -> Transition:
-    """Apply a permanent row failure."""
-    write = failure.write
+def write_failed(reply: Reply, span: Span, write: WriteFacts, *, now_ns: int) -> Transition:
+    """Apply a permanent refusal of one of the span's rows."""
     if write.stage is WriteStage.FINAL:
         return _terminal_write_failed(reply, span, now_ns=now_ns)
     if (
@@ -954,10 +949,8 @@ def _terminal_row(
     now_ns: int,
     *,
     stop_applied: bool = False,
-    stage: WriteStage = WriteStage.FINAL,
 ) -> Transition:
     """Enqueue the span's terminal row and end it with the row's status."""
-    settles = stage is WriteStage.FINAL and bool(_settle_sources(reply, span))
     updated = _clear_current(confirm_progress(reply, write.confirms), span.span_id)
     if stop_applied:
         updated = _stop_applied(updated)
@@ -971,13 +964,12 @@ def _terminal_row(
         frozen_display=write.frozen_display,
     )
     shown = write.shown if write.frozen_display is None else write.frozen_display
-    updated, row = _row(updated, span, stage, shown=shown)
-    effects: tuple[Effect, ...] = (SettleSources(span.span_id),) if settles else ()
+    updated, row = _row(updated, span, WriteStage.FINAL, shown=shown)
     return Transition(
         outcome=Outcome.APPLIED,
         reply=updated,
         spans=(_end(span, outcome, now_ns),),
-        effects=effects,
+        effects=_settle_sources(reply, span),
         row=row,
     )
 
@@ -1012,39 +1004,27 @@ def stopped(  # noqa: PLR0911
     span: Span,
     write: TerminalWrite | None,
     *,
-    confirms: ProgressConfirmation | None = None,
     now_ns: int,
 ) -> Transition:
     """End a span cancelled by its reply's Stop."""
     # The write's own confirmation counts too: an acknowledged progress edit
     # means a regeneration already changed what the room shows.
-    reply = confirm_progress(reply, confirms or (None if write is None else write.confirms))
+    reply = confirm_progress(reply, None if write is None else write.confirms)
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
     if not reply.unapplied_stop:
         return _unmodeled(reply, span, reason="stop_never_recorded", now_ns=now_ns)
     if span.kind is SpanKind.APPROVAL_RESUME:
-        updated = _clear_current(reply, span.span_id)
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=_touch(updated, now_ns),
-            spans=(_end(span, SpanOutcome.CANCELLED, now_ns),),
-        )
+        return _end_span_only(reply, span, SpanOutcome.CANCELLED, now_ns)
     if (kept := _kept_answer(reply, span)) is not None:
         return _restored(reply, span, kept, now_ns, *_settle_sources(reply, span))
     if write is None:
         # An exit that rendered nothing (a release, an error before delivery)
         # still ends the reply as stopped; the cancel note it owes follows.
-        cancelled = _set_state(
-            _stop_applied(_clear_current(reply, span.span_id)),
-            ReplyState.CANCELLED,
-            now_ns,
-            owed_write=OwedWrite(span.span_id, _NOTE_CANCELLED),
-        )
         return Transition(
             outcome=Outcome.APPLIED,
-            reply=cancelled,
+            reply=_cancelled(_clear_current(reply, span.span_id), span.span_id, now_ns),
             spans=(_end(span, SpanOutcome.CANCELLED, now_ns),),
             effects=_settle_sources(reply, span),
         )
@@ -1065,7 +1045,6 @@ def fail(  # noqa: C901, PLR0911
     write: TerminalWrite | None,
     *,
     phase: _FailurePhase,
-    confirms: ProgressConfirmation | None = None,
     now_ns: int,
 ) -> Transition:
     """End a span that failed.
@@ -1076,7 +1055,7 @@ def fail(  # noqa: C901, PLR0911
     if span.ended:
         # A terminal row already decided this span; a later error report is the same outcome.
         return _unchanged(Outcome.DUPLICATE, reply)
-    reply = confirm_progress(reply, confirms or (None if write is None else write.confirms))
+    reply = confirm_progress(reply, None if write is None else write.confirms)
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
@@ -1088,12 +1067,7 @@ def fail(  # noqa: C901, PLR0911
             return _unchanged(Outcome.RECOMPUTE, reply)
         return stopped(reply, span, write, now_ns=now_ns)
     if span.kind is SpanKind.APPROVAL_RESUME:
-        updated = _clear_current(reply, span.span_id)
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=_touch(updated, now_ns),
-            spans=(_end(span, SpanOutcome.FAILED, now_ns),),
-        )
+        return _end_span_only(reply, span, SpanOutcome.FAILED, now_ns)
     if phase == "delivery" and (kept := _kept_answer(reply, span)) is not None:
         return _restored(reply, span, kept, now_ns, *_settle_sources(reply, span))
     if phase == "pre_delivery":
@@ -1151,17 +1125,15 @@ def suppress(
         # Its failure settlement writes the reply's end, the FINAL that lets the approval finish.
         return Transition(outcome=Outcome.APPLIED, reply=_touch(updated, now_ns), spans=ended)
     if reply.event_id is None or reply.placeholder_only:
-        gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
-        return Transition(outcome=Outcome.APPLIED, reply=gone, spans=ended, effects=effects)
+        return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=ended, effects=effects)
     if (kept := _kept_answer(reply, span)) is not None:
         return _restored(reply, span, kept, now_ns, *effects)
     # What the reply showed stays, ended by a note: nothing else would replace the in-progress status it shows.
     if outcome is SpanOutcome.CANCELLED:
-        updated, state, note = _stop_applied(updated), ReplyState.CANCELLED, _NOTE_CANCELLED
+        ending = _cancelled(updated, span.span_id, now_ns)
     else:
         state = ReplyState.CANCELLED if reason == "suppressed" else ReplyState.FAILED
-        note = _NOTE_INTERRUPTED
-    ending = _set_state(updated, state, now_ns, owed_write=OwedWrite(span.span_id, note))
+        ending = _set_state(updated, state, now_ns, owed_write=OwedWrite(span.span_id, _NOTE_INTERRUPTED))
     return Transition(outcome=Outcome.APPLIED, reply=ending, spans=ended, effects=effects)
 
 
@@ -1180,8 +1152,7 @@ def release(
     if reply.unapplied_stop and span.kind is not SpanKind.APPROVAL_RESUME and reply.current_span_id == span.span_id:
         # A recorded Stop outranks a retry: the sources settle and the reply ends stopped.
         return stopped(reply, span, None, now_ns=now_ns)
-    updated = _touch(_clear_current(reply, span.span_id), now_ns)
-    return Transition(outcome=Outcome.APPLIED, reply=updated, spans=(_end(span, outcome, now_ns),))
+    return _end_span_only(reply, span, outcome, now_ns)
 
 
 # ---------------------------------------------------------------------------
@@ -1257,60 +1228,38 @@ def resumed_in_place(reply: Reply, span: Span, *, approval_id: str, now_ns: int)
     return Transition(outcome=Outcome.APPLIED, reply=_set_state(reply, ReplyState.ACTIVE, now_ns))
 
 
-_ApprovalResult = Literal["failed", "finished"]
-
-
 def approval_settled(
     reply: Reply,
     last_span: Span | None,
     *,
     approval_id: str,
     paused_span_id: str,
-    result: _ApprovalResult,
     disposition: FailureDisposition | None,
     answers_turn: bool,
     now_ns: int,
 ) -> Transition:
     """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
 
-    The turn stays unanswered when no owner is left to answer it
-    (``answers_turn``); the store also leaves a deleted turn unanswered.
+    ``disposition`` is how a failed continuation failed, or ``None`` for one
+    that finished. The turn stays unanswered when no owner is left to answer
+    it (``answers_turn``); the store also leaves a deleted turn unanswered.
     """
-    decided = _approval_finish(
-        reply,
-        last_span,
-        approval_id=approval_id,
-        result=result,
-        disposition=disposition,
-        now_ns=now_ns,
-    )
-    settle = SettleSources(paused_span_id, answered=answers_turn)
-    return replace(decided, effects=(settle, *decided.effects))
-
-
-def _approval_finish(
-    reply: Reply,
-    last_span: Span | None,
-    *,
-    approval_id: str,
-    result: _ApprovalResult,
-    disposition: FailureDisposition | None,
-    now_ns: int,
-) -> Transition:
-    """Apply a continuation's finish to the reply it paused."""
     resumed = last_span is not None and last_span.kind is SpanKind.APPROVAL_RESUME and last_span.ended
     owns = reply.approval_id == approval_id or (
         resumed and last_span is not None and last_span.approval_id == approval_id
     )
     if not owns:
-        return _unchanged(Outcome.STALE, reply)
-    if reply.terminal:
+        decided = _unchanged(Outcome.STALE, reply)
+    elif reply.terminal:
         # Its terminal row or note already ended the reply; the finish only settles the sources.
-        return _unchanged(Outcome.DUPLICATE, reply)
-    if result == "failed":
-        return _approval_failed(reply, last_span, approval_id=approval_id, disposition=disposition, now_ns=now_ns)
-    # A finished run's acknowledged answer already ended the reply.
-    return _unchanged(Outcome.STALE, reply)
+        decided = _unchanged(Outcome.DUPLICATE, reply)
+    elif disposition is None:
+        # A finished run's acknowledged answer already ended the reply.
+        decided = _unchanged(Outcome.STALE, reply)
+    else:
+        decided = _approval_failed(reply, last_span, approval_id=approval_id, disposition=disposition, now_ns=now_ns)
+    settle = SettleSources(paused_span_id, answered=answers_turn)
+    return replace(decided, effects=(settle, *decided.effects))
 
 
 def _approval_failed(
@@ -1318,7 +1267,7 @@ def _approval_failed(
     last_span: Span | None,
     *,
     approval_id: str,
-    disposition: FailureDisposition | None,
+    disposition: FailureDisposition,
     now_ns: int,
 ) -> Transition:
     """End the reply a failed continuation held."""
@@ -1395,11 +1344,7 @@ def span_left_behind(reply: Reply, span: Span, *, active_generation: str | None,
     """End a span an older bot instance left current, so the reply's approval settlement can write it."""
     if span.ended or span.bot_generation == active_generation or reply.current_span_id != span.span_id:
         return _unchanged(Outcome.DUPLICATE, reply)
-    return Transition(
-        outcome=Outcome.APPLIED,
-        reply=_touch(_clear_current(reply, span.span_id), now_ns),
-        spans=(_end(span, SpanOutcome.LOST, now_ns),),
-    )
+    return _end_span_only(reply, span, SpanOutcome.LOST, now_ns)
 
 
 def approval_released(reply: Reply, span: Span | None, *, now_ns: int) -> Transition:
@@ -1413,10 +1358,9 @@ def approval_released(reply: Reply, span: Span | None, *, now_ns: int) -> Transi
     if reply.unapplied_stop:
         # A Stop the run never saw outranks the replay: the reply ends cancelled and the sources settle.
         updated = reply if span is None else _clear_current(reply, span.span_id)
-        owed = OwedWrite(reply.last_span_id, _NOTE_CANCELLED)
         return Transition(
             outcome=Outcome.APPLIED,
-            reply=_set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed),
+            reply=_cancelled(updated, reply.last_span_id, now_ns),
             spans=() if span is None else (_end(span, SpanOutcome.CANCELLED, now_ns),),
             effects=(SettleSources(reply.last_span_id),),
         )
@@ -1479,11 +1423,9 @@ def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> T
     if unended is not None:
         spans = (_end(unended, SpanOutcome.CANCELLED, now_ns),)
         updated = _clear_current(updated, unended.span_id)
-    owed = OwedWrite(reply.last_span_id, _NOTE_CANCELLED)
-    cancelled = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
     return Transition(
         outcome=Outcome.APPLIED,
-        reply=cancelled,
+        reply=_cancelled(updated, reply.last_span_id, now_ns),
         spans=spans,
         effects=(SettleSources(reply.last_span_id),),
     )
@@ -1528,8 +1470,7 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
         updated = _clear_current(updated, current.span_id)
     if stopped_first:
         # A Stop recorded before the failure decides what the reply shows.
-        owed = OwedWrite(reply.last_span_id, _NOTE_CANCELLED)
-        updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
+        updated = _cancelled(updated, reply.last_span_id, now_ns)
     else:
         owed = OwedWrite(reply.last_span_id, _NOTE_ERROR, error_text)
         updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
@@ -1555,14 +1496,12 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     if not span.ended:
         spans = (_end(span, SpanOutcome.SUPPRESSED, now_ns),)
     if reply.event_id is None or (reply.placeholder_only and reply.confirmed):
-        gone = _with_redactions(_set_state(_stop_applied(updated), ReplyState.GONE, now_ns), *_visible_event_ids(reply))
-        return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans, effects=effects)
+        return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=effects)
     if reply.unapplied_stop:
         # A Stop recorded before the sources settled decides how the reply ends.
-        owed = OwedWrite(span.span_id, _NOTE_CANCELLED)
         return Transition(
             outcome=Outcome.APPLIED,
-            reply=_set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed),
+            reply=_cancelled(updated, span.span_id, now_ns),
             spans=spans,
             effects=effects,
         )
@@ -1638,11 +1577,7 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
         updated = _clear_current(updated, current.span_id)
     else:
         effects.append(SettleSources(reply.last_span_id, answered=False))
-    gone = _with_redactions(
-        _set_state(_stop_applied(updated), ReplyState.GONE, now_ns),
-        *_visible_event_ids(reply),
-    )
-    return Transition(outcome=Outcome.APPLIED, reply=gone, spans=spans, effects=tuple(effects))
+    return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=tuple(effects))
 
 
 def departed(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
@@ -1687,9 +1622,12 @@ def _stop_left_unapplied(reply: Reply, updated: Reply, last: Span, ended: tuple[
             spans=tuple(replace(span, outcome=SpanOutcome.RESTORED) for span in ended),
             effects=(SettleSources(last.span_id),),
         )
-    owed = OwedWrite(last.span_id, _NOTE_CANCELLED)
-    cancelled = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns, owed_write=owed)
-    return Transition(outcome=Outcome.APPLIED, reply=cancelled, spans=ended, effects=(SettleSources(last.span_id),))
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=_cancelled(updated, last.span_id, now_ns),
+        spans=ended,
+        effects=(SettleSources(last.span_id),),
+    )
 
 
 def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) -> Transition:  # noqa: PLR0911
@@ -1702,11 +1640,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
     ):
         # An in-place approval wait an older instance ran ends as any pause
         # does: the reply waits for its decision, without the span's Stop button.
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=_touch(_clear_current(reply, last.span_id), now_ns),
-            spans=(_end(last, SpanOutcome.PAUSED, now_ns),),
-        )
+        return _end_span_only(reply, last, SpanOutcome.PAUSED, now_ns)
     if reply.state is not ReplyState.ACTIVE:
         return _unchanged(Outcome.DUPLICATE, reply)
     orphaned = (last.outcome is None and last.bot_generation != facts.active_generation) or (

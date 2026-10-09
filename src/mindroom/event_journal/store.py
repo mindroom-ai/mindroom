@@ -932,16 +932,7 @@ class PrincipalStore:
             effects: list[replies.PostCommitEffect] = []
             for failed_id, failed_stage in failed_rows:
                 delivery = outbox.load(transaction, self._principal_id, delivery_id=failed_id, stage=failed_stage)
-                applied = (
-                    None
-                    if delivery is None
-                    else replies.fail_row(
-                        transaction,
-                        self._principal_id,
-                        delivery,
-                        reason=delivery.permanent_failure_reason or reason,
-                    )
-                )
+                applied = None if delivery is None else replies.fail_row(transaction, self._principal_id, delivery)
                 if applied is not None:
                     effects.extend(applied.post_commit)
             return PermanentDeliveryFailure(acknowledged_event_id=acknowledged, reply_effects=tuple(effects))
@@ -2186,7 +2177,7 @@ def _enqueue_reply_row(
         # A payload refused before any send fails its row now, as a refusal from Matrix would.
         refused = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=stage)
         assert refused is not None
-        failed = replies.fail_row(transaction, principal_id, refused, reason=permanent_failure_reason)
+        failed = replies.fail_row(transaction, principal_id, refused)
         if failed is not None:
             applied = AppliedTransition(
                 transition=transition,

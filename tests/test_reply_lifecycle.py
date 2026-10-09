@@ -407,7 +407,7 @@ def test_initial_create_acknowledgement_binds_the_event() -> None:
     assert initial.reply is not None
     acked = rl.write_acknowledged(
         initial.reply,
-        WriteFacts(WriteStage.INITIAL, initial.row.sequence, span.span_id, creates_event=True, placeholder_only=True),
+        WriteFacts(WriteStage.INITIAL, initial.row.sequence, creates_event=True, placeholder_only=True),
         event_id="$reply",
         membership_current=True,
         now_ns=NOW,
@@ -419,7 +419,7 @@ def test_initial_create_acknowledgement_binds_the_event() -> None:
     # A second create of one reply keeps the first binding and redacts the stray event.
     stray = rl.write_acknowledged(
         acked.reply,
-        WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
+        WriteFacts(WriteStage.INITIAL, 1, creates_event=True, placeholder_only=True),
         event_id="$other",
         membership_current=True,
         now_ns=NOW,
@@ -432,11 +432,11 @@ def test_initial_create_acknowledgement_binds_the_event() -> None:
 
 def test_late_create_of_a_gone_reply_is_queued_for_redaction() -> None:
     """An event created after the reply was given up is removed."""
-    reply, span = _turn()
+    reply, _span = _turn()
     gone = replace(reply, state=ReplyState.GONE, current_span_id=None)
     acked = rl.write_acknowledged(
         gone,
-        WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
+        WriteFacts(WriteStage.INITIAL, 1, creates_event=True, placeholder_only=True),
         event_id="$late",
         membership_current=True,
         now_ns=NOW,
@@ -701,9 +701,9 @@ def test_a_refused_final_of_a_regeneration_ends_the_reply_failed_with_its_note()
     final = rl.finish(claimed.reply, claimed.claimed, _write(claimed.reply, ReplyState.COMPLETED, "new"), now_ns=NOW)
     assert final.reply is not None
     assert final.row is not None
-    facts = WriteFacts(WriteStage.FINAL, final.row.sequence, "span-2", creates_event=False, placeholder_only=False)
+    facts = WriteFacts(WriteStage.FINAL, final.row.sequence, creates_event=False, placeholder_only=False)
 
-    refused = rl.write_failed(final.reply, _span_after(final, "span-2"), rl.FailedWrite(facts, "refused"), now_ns=NOW)
+    refused = rl.write_failed(final.reply, _span_after(final, "span-2"), facts, now_ns=NOW)
 
     assert refused.reply is not None
     assert refused.reply.state is ReplyState.FAILED
@@ -927,7 +927,6 @@ def test_a_failed_approval_ends_a_resume_an_older_instance_left_current() -> Non
         orphan,
         approval_id="approval-1",
         paused_span_id="span-1",
-        result="failed",
         disposition="cancelled_by_user",
         answers_turn=True,
         now_ns=NOW,
@@ -1048,7 +1047,6 @@ def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        result="failed",
         disposition="cancelled_by_user",
         answers_turn=True,
         now_ns=NOW,
@@ -1086,7 +1084,6 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
         ended,
         approval_id="approval-1",
         paused_span_id="span-1",
-        result="failed",
         disposition="cancelled_by_user",
         answers_turn=True,
         now_ns=NOW,
@@ -1220,7 +1217,6 @@ def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> No
         ended,
         approval_id="approval-1",
         paused_span_id="span-1",
-        result="failed",
         disposition="failed",
         answers_turn=True,
         now_ns=NOW,
@@ -1282,16 +1278,7 @@ def test_permanently_failed_pause_row_fences_the_approval() -> None:
     failed = rl.write_failed(
         reply,
         ended,
-        rl.FailedWrite(
-            WriteFacts(
-                WriteStage.EDIT,
-                transition.row.sequence,
-                span.span_id,
-                creates_event=False,
-                placeholder_only=False,
-            ),
-            "refused",
-        ),
+        WriteFacts(WriteStage.EDIT, transition.row.sequence, creates_event=False, placeholder_only=False),
         now_ns=NOW,
     )
     assert failed.reply is not None
@@ -1309,7 +1296,6 @@ def test_approval_settlement_guards() -> None:
         None,
         approval_id="other",
         paused_span_id="span-1",
-        result="failed",
         disposition="failed",
         answers_turn=True,
         now_ns=NOW,
@@ -1320,7 +1306,6 @@ def test_approval_settlement_guards() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        result="failed",
         disposition="failed",
         answers_turn=True,
         now_ns=NOW,
@@ -1333,7 +1318,6 @@ def test_approval_settlement_guards() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        result="failed",
         disposition="failed",
         answers_turn=True,
         now_ns=NOW,
@@ -1784,7 +1768,6 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
         _span_after(transition, span.span_id),
         approval_id="approval-1",
         paused_span_id=span.span_id,
-        result="failed",
         disposition="failed",
         answers_turn=False,
         now_ns=NOW,
@@ -1811,7 +1794,6 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
         paused,
         approval_id="approval-1",
         paused_span_id=span.span_id,
-        result="failed",
         disposition="failed",
         answers_turn=True,
         now_ns=NOW,
@@ -1894,7 +1876,6 @@ def test_an_approval_settles_its_turn_unanswered_when_nothing_answers_it() -> No
             paused,
             approval_id="approval-1",
             paused_span_id=span.span_id,
-            result="failed",
             disposition="failed",
             answers_turn=answers_turn,
             now_ns=NOW,
@@ -1927,7 +1908,7 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
     assert initial.row is not None
     acked = rl.write_acknowledged(
         initial.reply,
-        WriteFacts(WriteStage.INITIAL, initial.row.sequence, span.span_id, creates_event=True, placeholder_only=True),
+        WriteFacts(WriteStage.INITIAL, initial.row.sequence, creates_event=True, placeholder_only=True),
         event_id="$reply",
         membership_current=True,
         now_ns=NOW,
@@ -1998,16 +1979,7 @@ def test_failed_pause_row_of_an_in_place_wait_fences_and_cancels_the_waiter(stag
     failed = rl.write_failed(
         _held(paused.reply),
         span,
-        rl.FailedWrite(
-            WriteFacts(
-                stage,
-                paused.row.sequence,
-                span.span_id,
-                creates_event=stage is WriteStage.INITIAL,
-                placeholder_only=False,
-            ),
-            "refused",
-        ),
+        WriteFacts(stage, paused.row.sequence, creates_event=stage is WriteStage.INITIAL, placeholder_only=False),
         now_ns=NOW,
     )
     assert failed.reply is not None
@@ -2025,7 +1997,7 @@ def test_late_create_after_departure_binds_without_redaction() -> None:
     assert departed.reply is not None
     acked = rl.write_acknowledged(
         departed.reply,
-        WriteFacts(WriteStage.INITIAL, 1, span.span_id, creates_event=True, placeholder_only=True),
+        WriteFacts(WriteStage.INITIAL, 1, creates_event=True, placeholder_only=True),
         event_id="$late",
         membership_current=False,
         now_ns=NOW,
@@ -2084,7 +2056,6 @@ def test_a_selection_whose_sources_settle_before_its_claim_removes_its_acknowled
         rl.WriteFacts(
             stage=WriteStage.INITIAL,
             sequence=created.row.sequence,
-            span_id=ack.span_id,
             creates_event=True,
             placeholder_only=True,
         ),
@@ -2154,7 +2125,6 @@ def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        result="failed",
         disposition="failed",
         answers_turn=True,
         now_ns=NOW,

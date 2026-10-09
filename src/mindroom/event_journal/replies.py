@@ -280,11 +280,9 @@ def approval_finished(
     if reply is None:
         return None
     assert continuation.span_id is not None, "a continuation with a reply names the span that paused it"
-    failed = continuation.state == "failing"
-    reason = continuation.failure_reason
     disposition: rl.FailureDisposition | None = None
-    if failed:
-        disposition = "cancelled_by_user" if reason == "cancelled_by_user" else "failed"
+    if continuation.state == "failing":
+        disposition = "cancelled_by_user" if continuation.failure_reason == "cancelled_by_user" else "failed"
     return apply(
         transaction,
         principal_id,
@@ -293,7 +291,6 @@ def approval_finished(
             reply_spans.load(transaction, principal_id, reply.last_span_id),
             approval_id=continuation.approval_id,
             paused_span_id=continuation.span_id,
-            result="failed" if failed else "finished",
             disposition=disposition,
             answers_turn=owner_available,
             now_ns=time.time_ns(),
@@ -664,7 +661,6 @@ def _write_facts(delivery: MatrixDelivery) -> rl.WriteFacts:
     return rl.WriteFacts(
         stage=rl.WriteStage(delivery.stage.value),
         sequence=delivery.reply_sequence,
-        span_id=delivery.span_id,
         creates_event=delivery.edits_event_id is None,
         placeholder_only=_row_placeholder_only(delivery),
     )
@@ -732,8 +728,6 @@ def fail_row(
     transaction: Transaction,
     principal_id: str,
     delivery: MatrixDelivery,
-    *,
-    reason: str,
 ) -> AppliedTransition | None:
     """Apply a permanent refusal of one reply row."""
     if delivery.reply_id is None or delivery.span_id is None or delivery.reply_sequence is None:
@@ -745,7 +739,7 @@ def fail_row(
     applied = apply(
         transaction,
         principal_id,
-        rl.write_failed(reply, span, rl.FailedWrite(_write_facts(delivery), reason), now_ns=time.time_ns()),
+        rl.write_failed(reply, span, _write_facts(delivery), now_ns=time.time_ns()),
     )
     if delivery.edits_event_id is None:
         reply_messages.drop_unbindable_stops(transaction, principal_id, reply.room_id)
