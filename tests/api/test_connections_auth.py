@@ -239,7 +239,7 @@ def test_signed_nonadmin_can_enter_personal_and_oauth_completion_routes(
 
 
 @pytest.mark.parametrize("portal_setting", [None, "", "   "])
-@pytest.mark.parametrize("path", ["/connections", "/connections/assets/portal.js"])
+@pytest.mark.parametrize("path", ["/connections", "/connections/nested"])
 def test_disabled_connections_frontend_is_unavailable(
     portal_setting: str | None,
     path: str,

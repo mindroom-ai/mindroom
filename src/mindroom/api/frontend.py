@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,9 +12,14 @@ from mindroom.api.auth import login_redirect_for_request, request_has_frontend_a
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
 router = APIRouter()
 
 _API_ROUTE_PREFIXES = frozenset({"api", "v1"})
+# The personal egress page and its bundle assets, served under trusted upstream auth without the portal.
+_EGRESS_PAGE_SEGMENTS = frozenset({"egress", "assets"})
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -42,6 +48,18 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
     return index_path if index_path.is_file() else None
 
 
+def _connections_frontend_enabled(runtime_paths: RuntimePaths, path: str) -> bool:
+    """Return whether the dedicated connections bundle may serve one request path."""
+    if (runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
+        return True
+    segments = path.split("/")
+    return (
+        len(segments) > 1
+        and segments[1] in _EGRESS_PAGE_SEGMENTS
+        and runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED")
+    )
+
+
 @router.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_frontend(request: Request, path: str = "") -> Response:
@@ -58,7 +76,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     runtime_paths = api_runtime_paths(request)
-    if first_segment == "connections" and not (runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
+    if first_segment == "connections" and not _connections_frontend_enabled(runtime_paths, path):
         raise HTTPException(status_code=404, detail="Connections are not enabled")
     frontend_dir = ensure_frontend_dist_dir(runtime_paths)
     if frontend_dir is None:

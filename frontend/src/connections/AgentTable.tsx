@@ -14,6 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { AgentTools } from "./AgentTools";
 import { AgentAvatar } from "./AgentAvatar";
+import { EgressServiceRows } from "./EgressServiceRows";
 import type { AgentConnections } from "./types";
 import type { McpSelectionState } from "./useMcpSelection";
 
@@ -118,11 +119,13 @@ export function AgentTable({
   mcp,
   refreshVersion,
   onConnectionChange,
+  onEgressChange,
 }: {
   agents: AgentConnections[];
   mcp: McpSelectionState;
   refreshVersion: number;
   onConnectionChange: () => void;
+  onEgressChange: () => void;
 }) {
   const [expanded, setExpanded] = useState<ExpandedState>({});
   const [search, setSearch] = useState("");
@@ -260,6 +263,18 @@ export function AgentTable({
                           refreshVersion={refreshVersion}
                           onConnectionChange={onConnectionChange}
                         />
+                        {row.original.egress_services?.length ? (
+                          <div className="border-t border-border/60">
+                            <h3 className="px-5 pt-4 text-xs font-medium text-muted-foreground">
+                              API keys
+                            </h3>
+                            <EgressServiceRows
+                              agentName={row.original.agent_name}
+                              services={row.original.egress_services}
+                              onChanged={onEgressChange}
+                            />
+                          </div>
+                        ) : null}
                       </section>
                     </td>
                   </tr>

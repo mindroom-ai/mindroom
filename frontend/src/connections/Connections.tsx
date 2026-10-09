@@ -16,6 +16,8 @@ export function Connections() {
   const [error, setError] = useState<string | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const refreshConnections = () => setRefreshVersion((version) => version + 1);
+  const [catalogVersion, setCatalogVersion] = useState(0);
+  const reloadCatalog = () => setCatalogVersion((version) => version + 1);
   useEffect(() => {
     const controller = new AbortController();
     void requestConnection<ConnectionList>(
@@ -34,7 +36,7 @@ export function Connections() {
           );
       });
     return () => controller.abort();
-  }, []);
+  }, [catalogVersion]);
 
   return (
     <main className="min-h-screen bg-muted/20 px-4 py-8 sm:px-6 sm:py-12">
@@ -98,6 +100,7 @@ export function Connections() {
             mcp={mcp}
             refreshVersion={refreshVersion}
             onConnectionChange={refreshConnections}
+            onEgressChange={reloadCatalog}
           />
         )}
         <ConnectedClients />

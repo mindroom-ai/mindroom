@@ -118,6 +118,62 @@ it("keeps account management available without offering MCP access to management
   expect(screen.getByText("Credential management only")).toBeInTheDocument();
 });
 
+describe("brokered API keys on agent cards", () => {
+  const egressService = {
+    name: "github",
+    display_name: "GitHub",
+    description: "GitHub API",
+    is_shared: false,
+    can_manage: true,
+    configured: false,
+    updated_at: null,
+  };
+
+  it("lists the agent's API keys and refreshes the catalog after a save", async () => {
+    let configured = false;
+    let catalogRequests = 0;
+    installApi({
+      "/api/connections": async () => {
+        catalogRequests += 1;
+        return json({
+          agents: [
+            {
+              ...catalog([service]).agents[0],
+              egress_services: [{ ...egressService, configured }],
+            },
+          ],
+        });
+      },
+      "/api/connections/egress/agents/personal/github": async () => {
+        configured = true;
+        return new Response(null, { status: 204 });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    expect(await screen.findByText("Not set")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Set GitHub API key" }));
+    fireEvent.change(screen.getByLabelText("GitHub API key"), {
+      target: { value: "abc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(
+      await screen.findByRole("button", { name: "Replace GitHub API key" }),
+    ).toBeInTheDocument();
+    expect(catalogRequests).toBe(2);
+    expect(
+      screen.getByRole("button", { name: "Collapse Personal assistant" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no API key section for agents without egress services", async () => {
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Connect Mail" });
+    expect(screen.queryByText("API keys")).toBeNull();
+  });
+});
+
 function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
   vi.mocked(fetch).mockImplementation(async (input, options) => {
     const path = String(input);

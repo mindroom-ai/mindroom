@@ -15,6 +15,7 @@ export interface AgentConnections {
   can_use: boolean;
   services: ConnectionService[];
   tools: ConnectionTool[];
+  egress_services?: EgressCredentialService[];
 }
 
 export interface ConnectionTool {
@@ -36,4 +37,24 @@ export interface ConnectionStatus {
   can_connect: boolean;
   reset_required: boolean;
   account_label: string | null;
+}
+
+export interface EgressCredentialService {
+  name: string;
+  display_name: string;
+  description: string;
+  is_shared: boolean;
+  can_manage: boolean;
+  configured: boolean;
+  updated_at: string | null;
+}
+
+export interface EgressCredentialAgent {
+  agent_name: string;
+  agent_display_name: string;
+  services: EgressCredentialService[];
+}
+
+export interface EgressCredentialList {
+  agents: EgressCredentialAgent[];
 }
