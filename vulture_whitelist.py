@@ -461,3 +461,11 @@ _.scrape_website
 _.custom_scrape_website
 _._execute_query
 _.membership_ts  # _SharedWith dataclass equality field (src/mindroom/matrix_rtc/frame_keys.py)
+_.validate_template  # Pydantic field validator (src/mindroom/config/egress_broker.py)
+_.validate_type_requirements  # Pydantic model validator (src/mindroom/config/egress_broker.py)
+_.validate_host  # Pydantic field validator (src/mindroom/config/egress_broker.py)
+_.validate_path_prefix  # Pydantic field validator (src/mindroom/config/egress_broker.py)
+_.validate_placeholder_env  # Pydantic field validator (src/mindroom/config/egress_broker.py)
+_.validate_service_names  # Pydantic field validator (src/mindroom/config/egress_broker.py)
+placeholder_env  # Pydantic field (src/mindroom/config/egress_broker.py)
+unmatched_hosts  # Pydantic field (src/mindroom/config/egress_broker.py)
