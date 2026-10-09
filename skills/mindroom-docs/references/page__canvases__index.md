@@ -119,11 +119,12 @@ Opening a page that uses a library tells jsDelivr the viewer's IP address and wh
 
 ## What the user sees
 
-Each canvas appears in the conversation as a notice with an **Open panel** button.
-Chat opens the panel by itself under the same conditions as other [Chat UI actions](https://docs.mindroom.chat/tools/chat-ui/#what-the-user-sees); otherwise the user chooses **Open panel**.
+Each canvas appears in the conversation as a notice with an **Open canvas** button.
+Chat opens the panel by itself under the same conditions as other [Chat UI actions](https://docs.mindroom.chat/tools/chat-ui/#what-the-user-sees); otherwise the user chooses **Open canvas**.
 The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
+The room header's **Canvas** button lists the conversation's canvases, newest update first, and reopens one after the user closed it.
 
-When the panel cannot open, the **Open panel** button is disabled and a message below it says why:
+When the panel cannot open, the **Open canvas** button is disabled and a message below it says why:
 
 | Message | Cause |
 |---|---|

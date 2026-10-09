@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     description=(
         "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. "
         "With worker routing, this controls the agent's worker browser. "
-        "To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). "
+        "If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel; "
+        "use chat_ui.open_panel(panel='computer') only to show it again. "
         "The user's local browser requires the separately configured desktop target."
     ),
     category=ToolCategory.RESEARCH,

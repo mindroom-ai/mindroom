@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from dataclasses import replace
@@ -13,9 +14,11 @@ import nio
 import pytest
 from nio.api import RelationshipType
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
+import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
-from mindroom.custom_tools.chat_ui import ChatUITools
+from mindroom.custom_tools.chat_ui import ChatUITools, show_computer_once
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.client_visible_messages import extract_visible_message, is_visible_room_message
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
@@ -40,6 +43,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+
+@pytest.fixture(autouse=True)
+def _no_computer_shown_yet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test before any conversation has seen the agent's computer."""
+    monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", set())
 
 
 @pytest.fixture(params=["show_computer", "open_panel"])
@@ -517,6 +526,185 @@ async def test_members_request_keeps_thread_transport_and_truthful_result(tmp_pa
     }
     assert result["status"] == "ok"
     assert result["message"] == "UI action request sent."
+
+
+def _show_computer_metadata(context: ToolRuntimeContext, thread_id: str | None) -> dict[str, object]:
+    return {
+        "version": 1,
+        "action": "show_computer",
+        "requester_id": REQUESTER_ID,
+        "agent_user_id": context.client.user_id,
+        "room_id": ROOM_ID,
+        "thread_id": thread_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_show_computer_once_sends_the_show_computer_notice_once_per_thread(tmp_path: Path) -> None:
+    """The first browser use announces the computer with the notice show_computer() sends, and only once."""
+    announced = _context(tmp_path)
+    explicit = _context(tmp_path)
+
+    with tool_runtime_context(announced):
+        await show_computer_once()
+        await show_computer_once()
+    with tool_runtime_context(explicit):
+        await ChatUITools().show_computer()
+
+    announced.client.room_send.assert_awaited_once()
+    content = _sent_content(announced)
+    assert content == _sent_content(explicit)
+    assert content["io.mindroom.ui_action"] == _show_computer_metadata(announced, THREAD_ID)
+    assert content["msgtype"] == "m.notice"
+    assert content["body"] == "Open this agent's worker computer in MindRoom Chat."
+
+
+@pytest.mark.asyncio
+async def test_explicit_computer_request_still_sends_after_the_first_browser_notice(tmp_path: Path) -> None:
+    """An agent can always show the panel again, for example after the user closed it or to ask for a login."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        await show_computer_once()
+        result = json.loads(await ChatUITools().open_panel(panel="computer"))
+
+    assert result["status"] == "ok"
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_show_computer_once_announces_each_thread_and_the_room_timeline(tmp_path: Path) -> None:
+    """Each thread, and the room timeline itself, gets its own single announcement."""
+    contexts = [
+        (_context(tmp_path), THREAD_ID),
+        (_context(tmp_path, thread_id="$other-root"), "$other-root"),
+        (_context(tmp_path, thread_id=None, reply_to_event_id=None), None),
+    ]
+    assert len({context.client.user_id for context, _thread_id in contexts}) == 1
+
+    for context, _thread_id in contexts:
+        with tool_runtime_context(context):
+            await show_computer_once()
+            await show_computer_once()
+
+    for context, thread_id in contexts:
+        context.client.room_send.assert_awaited_once()
+        assert _sent_content(context)["io.mindroom.ui_action"] == _show_computer_metadata(context, thread_id)
+    assert "m.relates_to" not in _sent_content(contexts[2][0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alice_shows", ["explicitly", "by browsing"])
+async def test_each_requester_in_a_thread_gets_one_announcement(tmp_path: Path, alice_shows: str) -> None:
+    """Each requester has their own computer, so one requester's notice does not cover another's."""
+    bob_id = "@bob:example.org"
+    alice = _context(tmp_path)
+    bob = _context(tmp_path, requester_id=bob_id)
+    assert alice.client.user_id == bob.client.user_id
+
+    with tool_runtime_context(alice):
+        if alice_shows == "explicitly":
+            await ChatUITools().show_computer()
+        await show_computer_once()
+        await show_computer_once()
+    with tool_runtime_context(bob):
+        await show_computer_once()
+        await show_computer_once()
+
+    for context, requester_id in ((alice, REQUESTER_ID), (bob, bob_id)):
+        context.client.room_send.assert_awaited_once()
+        assert _sent_content(context)["io.mindroom.ui_action"]["requester_id"] == requester_id
+        assert _sent_content(context)["io.mindroom.ui_action"]["thread_id"] == THREAD_ID
+
+
+@pytest.mark.asyncio
+async def test_explicit_show_computer_suppresses_the_announcement(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """A conversation the agent already showed its computer to gets no second notice from browsing."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        assert json.loads(await computer_request())["status"] == "ok"
+        await show_computer_once()
+
+    context.client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_announcement_is_retried(tmp_path: Path) -> None:
+    """A notice that was not delivered does not count, so the next browser call tries again."""
+    context = _context(tmp_path)
+    delivered = context.client.room_send.return_value
+    context.client.room_send.return_value = object()
+
+    with tool_runtime_context(context):
+        await show_computer_once()
+        context.client.room_send.return_value = delivered
+        await show_computer_once()
+        await show_computer_once()
+
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_arguments", "undelivered", "reason"),
+    [
+        ({}, True, "Failed to send the UI action request."),
+        ({"reply_to_event_id": None}, False, "Failed to resolve Matrix thread fallback for UI action request."),
+    ],
+    ids=["delivery-failed", "thread-fallback-unresolved"],
+)
+async def test_undelivered_announcement_logs_a_warning(
+    tmp_path: Path,
+    context_arguments: dict[str, None],
+    undelivered: bool,
+    reason: str,
+) -> None:
+    """A notice that cannot be sent is logged with the reason, so the silent retries are traceable."""
+    context = _context(tmp_path, **context_arguments)
+    if undelivered:
+        context.client.room_send.return_value = object()
+
+    with tool_runtime_context(context), capture_logs() as logs:
+        await show_computer_once()
+
+    warnings = [log for log in logs if log["event"] == "The worker computer notice was not delivered"]
+    assert [(log["log_level"], log["reason"], log["room_id"], log["thread_id"]) for log in warnings] == [
+        ("warning", reason, ROOM_ID, THREAD_ID),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_uses_send_one_notice(tmp_path: Path) -> None:
+    """Two browser calls racing in one thread send a single notice."""
+    context = _context(tmp_path)
+    delivered = context.client.room_send.return_value
+
+    async def slow_send(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0)
+        return delivered
+
+    context.client.room_send.side_effect = slow_send
+
+    with tool_runtime_context(context):
+        await asyncio.gather(show_computer_once(), show_computer_once())
+
+    context.client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_show_computer_once_ignores_invalid_contexts(tmp_path: Path) -> None:
+    """Without a runtime context, or for a team, nothing is sent and nothing is raised."""
+    await show_computer_once()
+    team = _context(tmp_path, agent_name="research", include_team=True)
+
+    with tool_runtime_context(team):
+        await show_computer_once()
+
+    team.client.room_send.assert_not_awaited()
 
 
 CANVAS_HTML = "<button onclick=\"mindroom.submit({plan: 'pro'}, {label: 'Pro'})\">Pro</button>"

@@ -18,6 +18,7 @@ from mindroom.constants import UI_ACTION_CONTENT_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.file_access import resolve_agent_file
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
     send_message_result,
@@ -47,8 +48,15 @@ _SettingsSection = Literal[
 ]
 _SidePanel = Literal["members", "computer"]
 
+logger = get_logger(__name__)
+
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
+_SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
+# Conversations, keyed by agent Matrix user, requester, room, and thread (None for the room timeline),
+# that got the show_computer notice in this process, so the agent's first browser use announces it only
+# once. Each requester has their own computer and Chat shows only notices addressed to its own user.
+_SHOWN_COMPUTERS: set[tuple[str, str, str, str | None]] = set()
 # Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
 _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
@@ -73,14 +81,14 @@ _CHAT_UI_INSTRUCTIONS = (
 _FUNCTION_INSTRUCTIONS: dict[str, str] = {
     "open_panel": (
         "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
-        "browser that browser_control drives with target='host'. Use it to let the user watch you on a real "
-        "website, or take over, for example to log in. "
+        "browser that browser_control drives with target='host'. The user can watch you on a real website or take "
+        "over, for example to log in. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_computer": (
         "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
-        "browser_control drives with target='host'. Use it to let the user watch you on a real website, or take "
-        "over, for example to log in."
+        "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
+        "example to log in."
     ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
@@ -101,7 +109,8 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
 # Lines that name another function; each is added only when every function it names is enabled.
 _SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
 _REAL_WEBSITE_HINT = (
-    "To show the user a real website, open it with browser_control and show the Computer panel; a canvas cannot."
+    "To show the user a real website, open it in your worker browser, whose first call in a conversation shows "
+    "the Computer panel; a canvas cannot."
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
@@ -123,6 +132,10 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
         "m.new_content": replacement,
         "m.relates_to": {"rel_type": "m.replace", "event_id": canvas_event_id},
     }
+
+
+def _computer_conversation(context: ToolRuntimeContext, requester_id: str) -> tuple[str, str, str, str | None]:
+    return (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
 
 
 def _canvas_title_is_valid(title: str) -> bool:
@@ -283,7 +296,7 @@ class ChatUITools(Toolkit):
     @classmethod
     async def _send_action(
         cls,
-        action: Literal["show_computer", "open_settings", "open_panel"],
+        action: Literal["open_settings", "open_panel"],
         body: str,
         **action_fields: object,
     ) -> str:
@@ -361,13 +374,21 @@ class ChatUITools(Toolkit):
         out watching. They can take control, for example to log in; while they have it
         your browser calls are blocked, and when they hand it back you get a message.
         Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
-        and it never opens or controls the user's own browser. Success means the
-        request was sent, not that the client opened the panel.
+        and it never opens or controls the user's own browser. Your first worker
+        browser call in a conversation (browser_control with target='host', or any
+        browser_mcp function) already shows the user this panel; call show_computer
+        only to show it again, for example when the user should log in or after they
+        closed it. Success means the request was sent, not that the client opened
+        the panel.
         """
-        return await self._send_action(
-            "show_computer",
-            "Open this agent's worker computer in MindRoom Chat.",
-        )
+        validated = self._validated_context("show_computer")
+        if isinstance(validated, str):
+            return validated
+        context, requester_id = validated
+        result = await self._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
+        if json.loads(result)["status"] == "ok":
+            _SHOWN_COMPUTERS.add(_computer_conversation(context, requester_id))
+        return result
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
         """Open the user's MindRoom Chat Settings dialog at one section.
@@ -397,7 +418,10 @@ class ChatUITools(Toolkit):
         it your browser calls are blocked, and when they hand it back you get a
         message. Opening the panel does not navigate to a URL, send a prompt to
         ChatGPT, or take control, and it never opens or controls the user's own
-        browser: navigate first with browser_control, then open the panel.
+        browser. Your first worker browser call in a conversation (browser_control
+        with target='host', or any browser_mcp function) already shows the user this
+        panel; call open_panel(panel='computer') only to show it again, for example
+        when the user should log in or after they closed it.
 
         panel='members' opens the Members panel, listing the people and agents in
         this room.
@@ -491,8 +515,10 @@ class ChatUITools(Toolkit):
 
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. Success means the request was sent, not that the user opened or
-        answered it.
+        canvas ID. Without it, show_canvas creates a separate canvas: use a new canvas for a
+        distinct artifact and an update for a new version of the same one. The user can
+        switch between this conversation's canvases from the room header. Success means
+        the request was sent, not that the user opened or answered it.
 
         Args:
             title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
@@ -842,6 +868,45 @@ class ChatUITools(Toolkit):
                 + ("; show a new canvas here instead." if update else "."),
             )
         return metadata
+
+
+async def show_computer_once() -> None:
+    """Send the show_computer notice unless this agent already showed the requester its computer here.
+
+    Contexts where Chat UI actions are unsupported, such as teams, the router, or a missing
+    runtime context, send nothing.
+    """
+    validated = ChatUITools._validated_context("show_computer")
+    if isinstance(validated, str):
+        return
+    context, requester_id = validated
+    conversation = _computer_conversation(context, requester_id)
+    if conversation in _SHOWN_COMPUTERS:
+        return
+    # Claim the conversation before awaiting the send, so concurrent first calls send one notice.
+    _SHOWN_COMPUTERS.add(conversation)
+    sent = False
+    try:
+        result = await ChatUITools._send_validated_action(
+            context,
+            requester_id,
+            "show_computer",
+            _SHOW_COMPUTER_BODY,
+            {},
+        )
+        payload = json.loads(result)
+        sent = payload["status"] == "ok"
+        if not sent:
+            logger.warning(
+                "The worker computer notice was not delivered",
+                reason=payload.get("message"),
+                room_id=context.room_id,
+                thread_id=context.resolved_thread_id,
+            )
+    finally:
+        # An undelivered notice does not count, so the next browser call tries again.
+        if not sent:
+            _SHOWN_COMPUTERS.discard(conversation)
 
 
 def _parsed_json(value: object) -> object:

@@ -19,6 +19,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent a
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.computer_announcement import attach_computer_announcement
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
@@ -1570,6 +1571,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         )
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
+            toolkit = attach_computer_announcement(
+                toolkit,
+                tool_name,
+                agent_name=agent_name,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
             _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
         return toolkit
 
