@@ -265,20 +265,26 @@ class BrokerFactory:
         dial_policy: DialPolicy | None = None,
         manage_url: ManageUrl | None = None,
         max_body_bytes: int = 1 << 30,
+        head_timeout: float = 30.0,
+        config_provider: Callable[[], EgressBrokerConfig] | None = None,
     ) -> EgressBroker:
-        """Start a broker on an ephemeral loopback port; `secrets` maps service names to secrets."""
+        """Start a broker on an ephemeral loopback port; `secrets` maps service names to secrets.
+
+        `config_provider` replaces the fixed `config` when a test needs a provider that changes or fails.
+        """
         current = config or EgressBrokerConfig()
         stored = dict(secrets or {})
         broker = EgressBroker(
             ca=self.ca,
             signer=self.signer,
-            config_provider=lambda: current,
+            config_provider=config_provider or (lambda: current),
             resolve_secret=lambda _claims, service: stored.get(service),
             audit=self.audit,
             dial_policy=dial_policy or DialPolicy(allow_loopback=True),
             upstream_ssl_context=self.upstream_ssl_context,
             manage_url=manage_url or (lambda _claims: None),
             max_body_bytes=max_body_bytes,
+            head_timeout=head_timeout,
         )
         await broker.start("127.0.0.1", 0)
         self.brokers.append(broker)
@@ -349,21 +355,26 @@ class RawResponse:
         return json.loads(self.body)
 
 
+async def read_raw_response(reader: asyncio.StreamReader) -> RawResponse:
+    """Read one response head and its Content-Length body (none for a CONNECT 200) from a raw socket."""
+    async with asyncio.timeout(10):
+        head = await reader.readuntil(b"\r\n\r\n")
+        lines = head.decode("latin-1").removesuffix("\r\n\r\n").split("\r\n")
+        headers = {
+            name.strip().lower(): value.strip() for name, _, value in (line.partition(":") for line in lines[1:])
+        }
+        body = await reader.readexactly(int(headers.get("content-length", "0")))
+    return RawResponse(status=int(lines[0].split(" ")[1]), headers=headers, body=body)
+
+
 async def _raw_proxy_request(port: int, request: bytes) -> RawResponse:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     try:
         writer.write(request)
         await writer.drain()
-        async with asyncio.timeout(10):
-            head = await reader.readuntil(b"\r\n\r\n")
-            lines = head.decode("latin-1").removesuffix("\r\n\r\n").split("\r\n")
-            headers = {
-                name.strip().lower(): value.strip() for name, _, value in (line.partition(":") for line in lines[1:])
-            }
-            body = await reader.readexactly(int(headers.get("content-length", "0")))
+        return await read_raw_response(reader)
     finally:
         writer.transport.abort()
-    return RawResponse(status=int(lines[0].split(" ")[1]), headers=headers, body=body)
 
 
 @pytest.fixture
