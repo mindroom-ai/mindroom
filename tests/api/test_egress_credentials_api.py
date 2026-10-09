@@ -65,7 +65,7 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
                 "role": "Team agent",
                 "tools": ["shell", "python"],
                 "worker_scope": "shared",
-                "credential_managers": ["@bob:example.org"],
+                "credential_managers": ["@bob:example.org", "@carol:example.org"],
                 "access": {"users": ["@alice:example.org", "@bob:example.org"]},
             },
             "no_shell": {
@@ -98,7 +98,7 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
             ),
             "Origin": "https://portal.example.org",
         }
-        for name in ("alice", "bob", "admin")
+        for name in ("alice", "bob", "carol", "admin")
     }
     return {
         "client": TestClient(main.app, base_url="https://portal.example.org"),
@@ -349,5 +349,28 @@ def test_ineligible_agents_return_404(egress_portal: dict[str, Any]) -> None:
         "/api/connections/egress/agents/other_private/github",
         json={"secret": "token"},
         headers=alice_headers,
+    )
+    assert response.status_code == 404, response.text
+
+
+def test_credential_manager_without_use_access_sees_no_egress_anywhere(egress_portal: dict[str, Any]) -> None:
+    """A manager who may not use the agent is shown no egress rows and cannot mutate them."""
+    client = egress_portal["client"]
+    carol_headers = egress_portal["headers"]["carol"]
+
+    catalog = client.get("/api/connections", headers=carol_headers)
+    assert catalog.status_code == 200, catalog.text
+    shared_dev = next(agent for agent in catalog.json()["agents"] if agent["agent_name"] == "shared_dev")
+    assert shared_dev["can_use"] is False
+    assert shared_dev["egress_services"] == []
+
+    listing = client.get("/api/connections/egress", headers=carol_headers)
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["agents"] == []
+
+    response = client.put(
+        "/api/connections/egress/agents/shared_dev/github",
+        json={"secret": "token"},
+        headers=carol_headers,
     )
     assert response.status_code == 404, response.text

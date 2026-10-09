@@ -69,20 +69,16 @@ def _check_agent_eligibility(
     requester_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    membership_index: AgentReplyMembershipIndex,  # type: ignore[name-defined]
+    membership_index: AgentReplyMembershipIndex,
 ) -> tuple[bool, bool] | None:
-    """Check if agent is eligible for egress operations.
+    """Return ``(is_shared, can_manage)`` for an eligible agent, else ``None``.
 
-    Returns (is_shared, can_manage) if eligible, None if not.
-    Eligibility requires: (shell or python) AND is_sender_allowed_for_responder.
+    Eligibility requires a ``shell`` or ``python`` tool and permission to use the agent.
+    Listing, portal catalog, and mutations all decide through this one rule.
     """
     entity = config.resolve_entity(agent_name)
-
-    # Must have shell or python
     if not any(tool in entity.available_tools for tool in ("shell", "python")):
         return None
-
-    # Must be allowed to use the agent
     if not is_sender_allowed_for_responder(
         requester_id,
         agent_name,
@@ -92,7 +88,6 @@ def _check_agent_eligibility(
         membership_index,
     ):
         return None
-
     is_shared = entity.execution_scope in {None, "shared"}
     can_manage = not is_shared or is_sender_allowed_for_agent_credential_management(
         requester_id,
@@ -100,54 +95,53 @@ def _check_agent_eligibility(
         config,
         runtime_paths,
     )
+    return is_shared, can_manage
 
-    return (is_shared, can_manage)
 
-
-def build_service_for_agent(
+def _build_service_for_agent(
     name: str,
     config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    requester_id: str,
+    target: ResolvedWorkerTarget,
     manager: CredentialsManager,
+    eligibility: tuple[bool, bool],
 ) -> EgressCredentialService:
-    """Build one service status with authorization and configuration info.
-
-    Caller must have already verified eligibility via check_agent_eligibility.
-    """
-    service_config = config.egress_broker.services[name]
-
-    # Get is_shared and can_manage from eligibility check
-    # (We recompute here since build_service_for_agent doesn't take those as params)
-    entity = config.resolve_entity(agent_name)
-    is_shared = entity.execution_scope in {None, "shared"}
-    can_manage = not is_shared or is_sender_allowed_for_agent_credential_management(
-        requester_id,
-        agent_name,
-        config,
-        runtime_paths,
-    )
-
-    # Always build a target for the agent to get the right scope
-    target = build_connection_agent_target(config, runtime_paths, requester_id, agent_name)
+    """Build one service row from the eligibility result and the stored secret status."""
+    is_shared, can_manage = eligibility
     status = secret_status(manager, target, name)
-    configured = status.configured
-    updated_at = status.updated_at
-
     return EgressCredentialService(
         name=name,
-        display_name=service_config.display_name or name.replace("_", " ").title(),
-        description=service_config.description,
+        display_name=config.egress_broker.services[name].display_name or name.replace("_", " ").title(),
+        description=config.egress_broker.services[name].description,
         is_shared=is_shared,
         can_manage=can_manage,
-        configured=configured,
-        updated_at=updated_at,
+        configured=status.configured,
+        updated_at=status.updated_at,
     )
+
+
+def egress_services_for_agent(
+    agent_name: str,
+    requester_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+    manager: CredentialsManager,
+) -> list[EgressCredentialService] | None:
+    """List the brokered services for one agent, or ``None`` when the requester may not use it.
+
+    ``requester_id`` must already be the resolved human requester alias.
+    """
+    eligibility = _check_agent_eligibility(agent_name, requester_id, config, runtime_paths, membership_index)
+    if eligibility is None:
+        return None
+    target = build_connection_agent_target(config, runtime_paths, requester_id, agent_name)
+    return [
+        _build_service_for_agent(name, config, target, manager, eligibility) for name in config.egress_broker.services
+    ]
 
 
 def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCredentialAgent]:
-    """List all eligible agents with their egress services."""
+    """List every agent the requester may use, with its egress services."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     if config is None:
@@ -160,30 +154,9 @@ def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCrede
 
     agents: list[EgressCredentialAgent] = []
     for agent_name, agent in config.agents.items():
-        # Check eligibility: must have shell/python AND be allowed
-        eligibility = _check_agent_eligibility(
-            agent_name,
-            human_requester,
-            config,
-            runtime_paths,
-            memberships,
-        )
-        if eligibility is None:
+        services = egress_services_for_agent(agent_name, human_requester, config, runtime_paths, memberships, manager)
+        if services is None:
             continue
-
-        # Build services
-        services = [
-            build_service_for_agent(
-                service_name,
-                config,
-                runtime_paths,
-                agent_name,
-                human_requester,
-                manager,
-            )
-            for service_name in config.egress_broker.services
-        ]
-
         agents.append(
             EgressCredentialAgent(
                 agent_name=agent_name,
@@ -191,7 +164,6 @@ def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCrede
                 services=services,
             ),
         )
-
     return agents
 
 
@@ -209,7 +181,7 @@ _EgressUser = Annotated[str, Depends(_egress_user)]
 
 @router.get("", response_model=EgressCredentialsResponse)
 def list_egress_credentials(request: Request, requester_id: _EgressUser) -> EgressCredentialsResponse:
-    """List all egress services for agents the user may use or manage."""
+    """List egress services for every agent the user may use."""
     agents = _load_egress_agents(request, requester_id)
     return EgressCredentialsResponse(agents=agents)
 

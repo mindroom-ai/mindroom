@@ -19,7 +19,7 @@ from mindroom.api.connection_agents import (
     resolve_connection_agent,
     resolve_connection_user,
 )
-from mindroom.api.egress_credentials import EgressCredentialService, build_service_for_agent
+from mindroom.api.egress_credentials import EgressCredentialService, egress_services_for_agent
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.users import create_agent_http_client
@@ -29,6 +29,7 @@ from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata
@@ -127,7 +128,8 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     providers = load_oauth_providers_for_snapshot(snapshot)
     metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, user.config, tolerate_plugin_load_errors=True)
-    agents = [_agent_connections(name, user, providers, metadata) for name in user.visible_agent_names]
+    memberships = config_lifecycle.app_state(request.app).agent_reply_memberships
+    agents = [_agent_connections(name, user, providers, metadata, memberships) for name in user.visible_agent_names]
     return _Connections(
         runtime_paths=snapshot.runtime_paths,
         user=user,
@@ -141,6 +143,7 @@ def _agent_connections(
     user: ConnectionUserContext,
     providers: dict[str, OAuthProvider],
     metadata: dict[str, ToolMetadata],
+    memberships: AgentReplyMembershipIndex,
 ) -> AgentConnections:
     """List assigned toolkits and group their browser connections by provider."""
     services: dict[str, ConnectionService] = {}
@@ -180,21 +183,18 @@ def _agent_connections(
         if tool_name not in service.tools:
             service.tools.append(tool_name)
 
-    # Build egress services only if the agent has shell or python
-    egress_services: list[EgressCredentialService] = []
-    if any(tool in entity.available_tools for tool in ("shell", "python")):
-        manager = get_runtime_credentials_manager(user.runtime_paths)
-        egress_services = [
-            build_service_for_agent(
-                service_name,
-                config,
-                user.runtime_paths,
-                agent_name,
-                user.owner.requester_id,
-                manager,
-            )
-            for service_name in config.egress_broker.services
-        ]
+    # Egress rows follow the personal egress API's eligibility rule: only agents the user may use.
+    egress_services = (
+        egress_services_for_agent(
+            agent_name,
+            user.owner.requester_id,
+            config,
+            user.runtime_paths,
+            memberships,
+            get_runtime_credentials_manager(user.runtime_paths),
+        )
+        or []
+    )
 
     agent = config.agents[agent_name]
     return AgentConnections(
