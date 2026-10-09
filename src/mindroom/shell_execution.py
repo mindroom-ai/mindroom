@@ -25,6 +25,7 @@ from mindroom.shell_output_capture import (
     ShellOutputDestination,
     format_shell_completion,
 )
+from mindroom.text_templates import FLOAT_FIELD, INT_FIELD, template_pattern
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
@@ -36,6 +37,73 @@ _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
+MAX_CHECK_WAIT_SECONDS = 300
+_HANDLE_FIELD = r"shell:[0-9a-f]+"
+SHELL_CALL_REFERENCE_PATTERN = re.compile(rf"\b(check_shell_command|kill_shell_command)\('({_HANDLE_FIELD})'\)")
+
+
+def _shell_call_reference(function_name: str, handle: str) -> str:
+    """Return how shell results tell the model to call a handle function."""
+    return f"{function_name}('{handle}')"
+
+
+_BACKGROUND_HANDLE_TEMPLATE = (
+    "Command timed out after {timeout}s. Still running (PID {pid}).\n"
+    "Handle: {handle}\n"
+    f"Use {_shell_call_reference('check_shell_command', '{handle}')} to poll or "
+    f"{_shell_call_reference('kill_shell_command', '{handle}')} to stop."
+)
+_BACKGROUND_HANDLE = template_pattern(
+    _BACKGROUND_HANDLE_TEMPLATE,
+    timeout=FLOAT_FIELD,
+    pid=INT_FIELD,
+    handle=_HANDLE_FIELD,
+)
+_FINISHED_HEADER_TEMPLATE = "Status: FINISHED (exit code {code}, ran for {elapsed}s)\n"
+_FINISHED_WITH_STDERR_TEMPLATE = _FINISHED_HEADER_TEMPLATE + "Stderr:\n{stderr}\nOutput:\n{output}"
+_FINISHED_TEMPLATE = _FINISHED_HEADER_TEMPLATE + "Output:\n{output}"
+_RUNNING_TEMPLATE = (
+    "Status: RUNNING (PID {pid}, elapsed {elapsed}s)\nPartial output ({buffered} lines buffered):\n{output}"
+)
+
+
+@dataclass(frozen=True)
+class _BackgroundHandle:
+    """Fields of the message returned when a command moves to the background."""
+
+    timeout: float
+    pid: int
+    handle: str
+
+
+def _format_background_handle_message(timeout: float, pid: int, handle: str) -> str:
+    """Return the message for a command that outlived its timeout."""
+    return _BACKGROUND_HANDLE_TEMPLATE.format(timeout=timeout, pid=pid, handle=handle)
+
+
+def parse_background_handle_message(text: str) -> _BackgroundHandle | None:
+    """Return the fields of a background-handle message, or None for any other text."""
+    match = _BACKGROUND_HANDLE.fullmatch(text)
+    if match is None:
+        return None
+    return _BackgroundHandle(timeout=float(match["timeout"]), pid=int(match["pid"]), handle=match["handle"])
+
+
+def _format_finished_status(*, return_code: int, elapsed: float, stderr: str, output: str) -> str:
+    """Return the status report of a finished background command."""
+    if return_code != 0 and stderr:
+        return _FINISHED_WITH_STDERR_TEMPLATE.format(
+            code=return_code,
+            elapsed=f"{elapsed:.1f}",
+            stderr=stderr,
+            output=output,
+        )
+    return _FINISHED_TEMPLATE.format(code=return_code, elapsed=f"{elapsed:.1f}", output=output)
+
+
+def _format_running_status(*, pid: int, elapsed: float, buffered_lines: int, partial: str) -> str:
+    """Return the status report of a still-running background command."""
+    return _RUNNING_TEMPLATE.format(pid=pid, elapsed=f"{elapsed:.1f}", buffered=buffered_lines, output=partial)
 
 
 @dataclass
@@ -395,12 +463,7 @@ async def _background_process(
             await monitor_task
         raise
     return ShellRunResult(
-        message=(
-            f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
-            f"Handle: {handle}\n"
-            f"Use check_shell_command('{handle}') to poll or "
-            f"kill_shell_command('{handle}') to stop."
-        ),
+        message=_format_background_handle_message(timeout, process.pid, handle),
         handle=handle,
         output_file_handled=output_capture is not None,
     )
@@ -427,19 +490,35 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     if record.finished:
         if record.output_receipt is not None:
             return record.output_receipt
-        output = record.stdout_buf.render(tail=record.tail)
-        errors = record.stderr_buf.render()
-        result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
-        if record.return_code != 0 and errors:
-            result += f"Stderr:\n{errors}\n"
-        result += f"Output:\n{output}"
-        return result
+        assert record.return_code is not None
+        return _format_finished_status(
+            return_code=record.return_code,
+            elapsed=elapsed,
+            stderr=record.stderr_buf.render(),
+            output=record.stdout_buf.render(tail=record.tail),
+        )
 
-    partial = record.stdout_buf.render(tail=50)
-    return (
-        f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)\n"
-        f"Partial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
+    return _format_running_status(
+        pid=record.pid,
+        elapsed=elapsed,
+        buffered_lines=len(record.stdout_buf),
+        partial=record.stdout_buf.render(tail=50),
     )
+
+
+async def wait_for_command(
+    registry: dict[str, ProcessRecord],
+    *,
+    namespace: str,
+    handle: str,
+    wait_seconds: float,
+) -> None:
+    """Wait up to *wait_seconds* (capped) for a background command in *registry* to finish."""
+    record = registry.get(handle)
+    if wait_seconds <= 0 or record is None or record.namespace != namespace or record._monitor_task is None:
+        return
+    # asyncio.wait neither cancels the monitor on timeout nor raises when the monitor is cancelled.
+    await asyncio.wait({record._monitor_task}, timeout=min(wait_seconds, MAX_CHECK_WAIT_SECONDS))
 
 
 def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str, force: bool = False) -> str:
@@ -456,7 +535,10 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
         return f"Process {record.pid} already exited"
 
     action = "Force-killed" if force else "Terminated"
-    return f"{action} process {record.pid} ({sig_name} sent). Use check_shell_command('{handle}') to confirm exit."
+    return (
+        f"{action} process {record.pid} ({sig_name} sent). "
+        f"Use {_shell_call_reference('check_shell_command', handle)} to confirm exit."
+    )
 
 
 def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:

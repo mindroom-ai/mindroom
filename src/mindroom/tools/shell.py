@@ -25,12 +25,13 @@ from mindroom.shell_execution import (
     check_command,
     kill_command,
     run_command,
+    wait_for_command,
 )
 from mindroom.shell_output_capture import ShellOutputDestination
 from mindroom.shell_supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
-    check_command_via_supervisor,
     kill_command_via_supervisor,
+    poll_command_via_supervisor,
     run_command_via_supervisor,
 )
 from mindroom.tool_system.declarations import (
@@ -84,7 +85,7 @@ _SHELL_ARGS_ERROR = (
     '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
 )
 _SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
-_WORKSPACE_CWD_NOTE = (
+WORKSPACE_CWD_NOTE = (
     "The command runs in your agent workspace as its working directory "
     "(echoed as a `[cwd: ...]` first line in the result). Always use relative paths or "
     "`$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` "
@@ -93,7 +94,7 @@ _WORKSPACE_CWD_NOTE = (
 # Working method distilled from RRSI harness-search runs on graded terminal tasks, where these habits
 # removed the most common silent failures of a shell agent (wrong field matched, merged file boundaries,
 # reserialized edits, unverified renames, truncated reads).
-_WORKING_METHOD_NOTE = (
+WORKING_METHOD_NOTE = (
     "Working method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead "
     "of printing everything, but compute results over the full input. Match filters against the extracted field "
     "value, not the whole line, and check them on a few sample records. When combining the lines or words of "
@@ -104,6 +105,18 @@ _WORKING_METHOD_NOTE = (
     "spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run "
     "available tests, and recheck suspicious results such as a zero count."
 )
+
+_CWD_PREFIX = "[cwd: {cwd}]\n"
+_CWD_PREFIX_PATTERN = re.compile(r"\[cwd: (?P<cwd>[^\n]*)\]\n")
+
+
+def split_cwd_prefix(text: str) -> tuple[str | None, str]:
+    """Return the working directory echoed by ``run_shell_command`` and the remaining result."""
+    match = _CWD_PREFIX_PATTERN.match(text)
+    if match is None:
+        return None, text
+    return match["cwd"], text[match.end() :]
+
 
 # Module-level process registry shared across all MindRoomShellTools instances.
 # This ensures handles survive toolkit re-creation for local execution; when a
@@ -391,9 +404,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             self._base_process_env = dict(runtime_paths.process_env)
             if run_shell_command_function is not None:
                 notes = (
-                    (_WORKSPACE_CWD_NOTE, _WORKING_METHOD_NOTE)
-                    if self.base_dir is not None
-                    else (_WORKING_METHOD_NOTE,)
+                    (WORKSPACE_CWD_NOTE, WORKING_METHOD_NOTE) if self.base_dir is not None else (WORKING_METHOD_NOTE,)
                 )
                 run_shell_command_function.description = "\n\n".join(
                     (run_shell_command_function.description or "", *notes),
@@ -410,6 +421,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             args: list[str] | str,
             tail: int = 100,
             timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS,  # noqa: ASYNC109
+            workdir: str | None = None,
         ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
@@ -432,6 +444,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 args: The command to run as a shell command string or a list of argv strings.
                 tail: The number of lines to return from the output.
                 timeout: Maximum seconds to wait before backgrounding the command.
+                workdir: Directory to run the command in, relative to the working directory. Defaults to it.
 
             Returns:
                 The command output, an error message, or a background handle.
@@ -458,6 +471,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
+            if workdir is not None:
+                cwd = os.path.normpath(Path(cwd or Path.cwd()) / Path(workdir).expanduser())
+                if not Path(cwd).is_dir():
+                    return f"Error: workdir not found: {workdir}"
             output_request = current_tool_output_file_request()
             output_destination = (
                 ShellOutputDestination(
@@ -497,7 +514,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 return message
             return f"[cwd: {cwd}]\n{message}"
 
-        def check_shell_command(self, handle: str) -> str:
+        async def check_shell_command(self, handle: str, wait: int = 0) -> str:
             """Poll the status of a backgrounded shell command.
 
             Safe to call multiple times — the record is kept until automatic
@@ -506,17 +523,25 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             Args:
                 handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
+                wait: Seconds to wait for the command to finish before reporting, at most 300. 0 reports at once.
 
             Returns:
                 Output if the command finished, or a status summary if still running.
 
             """
             if self._supervisor_socket is not None:
-                return check_command_via_supervisor(
+                return await poll_command_via_supervisor(
                     self._supervisor_socket,
                     namespace=self._handle_namespace,
                     handle=handle,
+                    wait=wait,
                 )
+            await wait_for_command(
+                _process_registry,
+                namespace=self._handle_namespace,
+                handle=handle,
+                wait_seconds=wait,
+            )
             return check_command(_process_registry, namespace=self._handle_namespace, handle=handle)
 
         def kill_shell_command(self, handle: str, force: bool = False) -> str:

@@ -13,7 +13,18 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.shell_execution import ProcessRecord, kill_all_records, kill_command, run_command, signal_record
+from mindroom.shell_execution import (
+    SHELL_CALL_REFERENCE_PATTERN,
+    ProcessRecord,
+    _BackgroundHandle,
+    _format_background_handle_message,
+    _shell_call_reference,
+    kill_all_records,
+    kill_command,
+    parse_background_handle_message,
+    run_command,
+    signal_record,
+)
 from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
@@ -267,3 +278,17 @@ async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_fini
         assert list(registry) == [result.handle]
     finally:
         capture.release()
+
+
+def test_background_handle_message_round_trips() -> None:
+    """The background-handle message parses back into its fields and nothing else matches."""
+    text = _format_background_handle_message(10, 4242, "shell:0123abcd")
+
+    assert parse_background_handle_message(text) == _BackgroundHandle(timeout=10, pid=4242, handle="shell:0123abcd")
+    assert parse_background_handle_message(text + "\nextra") is None
+    assert parse_background_handle_message("Command timed out") is None
+    assert SHELL_CALL_REFERENCE_PATTERN.findall(text) == [
+        ("check_shell_command", "shell:0123abcd"),
+        ("kill_shell_command", "shell:0123abcd"),
+    ]
+    assert _shell_call_reference("check_shell_command", "shell:0123abcd") == "check_shell_command('shell:0123abcd')"

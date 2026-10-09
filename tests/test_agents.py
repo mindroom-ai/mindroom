@@ -5556,3 +5556,4 @@ def test_create_agent_installs_tool_dialect_for_runtime_model(mock_storage: Magi
 
     assert vars(default_agent.model)[_TOOL_DIALECT_MARKER] == resolve_tool_dialect(config.models["default"]).name
     assert vars(override_agent.model)[_TOOL_DIALECT_MARKER] == resolve_tool_dialect(config.models["sonnet"]).name
+    assert vars(override_agent.model)[_TOOL_DIALECT_MARKER] == "claude"

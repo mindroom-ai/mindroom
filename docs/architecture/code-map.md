@@ -119,7 +119,8 @@ Matrix sync callback
 | `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
 | `tool_dialects.py` | Per-model-family tool dialects: dialect resolution, wire tool definitions, incoming-call translation, and per-request history rendering |
-| `tool_dialect_types.py` | Tool dialect and wire-function types shared by the dialect tables |
+| `tool_dialect_types.py` | Tool dialect and wire-function types and argument helpers shared by the dialect tables |
+| `tool_dialect_claude.py` | Claude Code tool names and argument shapes for the canonical shell and coding functions |
 | `agno_compat_tool_dialect.py` | Binds one tool dialect to an Agno model's tool formatting, call dispatch, and request messages |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
@@ -202,6 +203,7 @@ Matrix sync callback
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
+| `text_templates.py` | Regex patterns derived from fixed tool-output templates so formatters and parsers share one source |
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |

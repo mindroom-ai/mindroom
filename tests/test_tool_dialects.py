@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -276,3 +277,15 @@ def test_render_result_applies_only_to_mapped_tool_results() -> None:
     assert rendered[0] is other
     assert rendered[1] is media
     assert (rendered[2].content, rendered[2].compressed_content) == ("Poll", "Poll short")
+
+
+def test_wire_definition_carries_notes_present_on_the_canonical_function() -> None:
+    """Notes MindRoom adds to a canonical description follow it into the wire description."""
+    dialect = ToolDialect(name="claude", functions=(replace(_TOY.functions[0], carried_notes=("Note A.", "Note B.")),))
+    function = _function("run_shell_command", "shell")
+    function.description = "canonical run\n\nNote A."
+
+    [presented] = wire_tools(dialect, [function], custom_tools=False)
+
+    assert isinstance(presented, dict)
+    assert presented["function"]["description"] == "Run a command.\n\nNote A."

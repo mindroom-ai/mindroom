@@ -27,9 +27,9 @@ from mindroom.shell_supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
     _ShellSupervisorManager,
-    check_command_via_supervisor,
     kill_command_via_supervisor,
     parse_shell_supervisor_status,
+    poll_command_via_supervisor,
     run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -138,8 +138,8 @@ def _extract_handle(message: str) -> str:
     return message.split("Handle: ")[1].split("\n", maxsplit=1)[0]
 
 
-async def _check(socket_path: str, handle: str, *, namespace: str = "ns") -> str:
-    return await asyncio.to_thread(check_command_via_supervisor, socket_path, namespace=namespace, handle=handle)
+async def _check(socket_path: str, handle: str, *, namespace: str = "ns", wait: int = 0) -> str:
+    return await poll_command_via_supervisor(socket_path, namespace=namespace, handle=handle, wait=wait)
 
 
 async def _kill(socket_path: str, handle: str, *, namespace: str = "ns", force: bool = False) -> str:
@@ -1225,9 +1225,9 @@ async def test_toolkit_routes_through_supervisor_across_instances(
 
     await asyncio.sleep(0.3)
     tool_check = _get_toolkit(tmp_path)
-    check_fn = tool_check.functions["check_shell_command"].entrypoint
+    check_fn = tool_check.async_functions["check_shell_command"].entrypoint
     assert check_fn is not None
-    status = await asyncio.to_thread(check_fn, handle)
+    status = await check_fn(handle)
     assert "RUNNING" in status
     assert "client-mode" in status
 
@@ -1350,3 +1350,16 @@ def test_shell_subprocess_dispatch_context_injects_socket_and_budget(
     assert updated_context.subprocess_env[SHELL_SUPERVISOR_SOCKET_ENV] == socket_path
     assert updated_context.template_env == {"PATH": "/usr/bin"}
     assert timeout_seconds == 630.0
+
+
+@pytest.mark.asyncio
+async def test_check_wait_through_supervisor() -> None:
+    """A supervisor check with wait returns once the background command finishes."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        handle = _extract_handle(await _run(socket_path, ["bash", "-c", "sleep 1; echo waited"], timeout=0))
+
+        status = await _check(socket_path, handle, wait=5)
+
+        assert status.startswith("Status: FINISHED (exit code 0")
+        assert "waited" in status

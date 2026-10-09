@@ -10,12 +10,16 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.custom_tools.coding import (
+    EDIT_NOT_FOUND_ERROR,
     CodingTools,
     _find_all_matches,
+    _format_read_output,
     _normalize_for_fuzzy,
     _run_ripgrep,
     _truncate_head,
     _truncate_line,
+    parse_edit_multiple_matches_error,
+    split_read_output,
 )
 from mindroom.tools.file import file_tools
 from mindroom.tools.path_safety import (
@@ -1637,3 +1641,41 @@ class TestRegistration:
         func_names = {f.name for f in tools.functions.values()}
         expected = {"read_file", "edit_file", "write_file", "grep", "find_files", "ls"}
         assert expected == func_names
+
+
+def test_edit_file_replace_all_replaces_every_match(tools: CodingTools, tmp_base: Path) -> None:
+    """replace_all rewrites every occurrence instead of demanding a unique match."""
+    (tmp_base / "dup.txt").write_text("a = 1\nb = 1\na = 1\n")
+
+    result = tools.edit_file("dup.txt", "a = 1", "a = 2", replace_all=True)
+
+    assert result.startswith("Applied 2 edits")
+    assert (tmp_base / "dup.txt").read_text() == "a = 2\nb = 1\na = 2\n"
+
+
+def test_edit_errors_round_trip_through_parsers(tools: CodingTools, tmp_base: Path) -> None:
+    """Edit match errors come from named templates that dialect renderers can recognize."""
+    (tmp_base / "dup.txt").write_text("x\nx\n")
+
+    assert tools.edit_file("hello.py", "missing text", "x") == EDIT_NOT_FOUND_ERROR
+    assert parse_edit_multiple_matches_error(tools.edit_file("dup.txt", "x", "y")) == 2
+    assert parse_edit_multiple_matches_error("Error: something else") is None
+
+
+def test_split_read_output_round_trips_format_read_output() -> None:
+    """Read output splits back into numbered lines and the pagination hint."""
+    content = "\n".join(f"line {number} | pipe" for number in range(1, 13))
+
+    paged = split_read_output(_format_read_output(content, 3, 5))
+    whole = split_read_output(_format_read_output("a\n\nb", None, None))
+    truncated = split_read_output(_format_read_output("x" * (60 * 1024), None, None))
+
+    assert paged == (
+        [(number, f"line {number} | pipe") for number in range(3, 8)],
+        "\n\n[Showing lines 3-7 of 12. Use offset=8 to continue.]",
+    )
+    assert whole == ([(1, "a"), (2, ""), (3, "b")], "")
+    assert truncated is not None
+    assert truncated[0][0][1].endswith(" [truncated]")
+    assert split_read_output("Error: File not found: x") is None
+    assert split_read_output("") is None

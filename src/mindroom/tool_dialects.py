@@ -17,6 +17,7 @@ from agno.tools.function import Function
 
 from mindroom.logging_config import get_logger
 from mindroom.model_loading import canonical_provider
+from mindroom.tool_dialect_claude import CLAUDE_DIALECT
 from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError, DialectName, ToolDialect, WireFunction
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -35,7 +36,7 @@ _CODEX_PROVIDERS = frozenset({"codex", "openai_codex"})
 _OPENAI_MODEL_PROVIDERS = frozenset({"openai", "azure"})
 _OPENAI_MODEL_ID = re.compile(r"gpt-|o\d|codex")
 
-_DIALECTS: dict[DialectName, ToolDialect] = {"mindroom": ToolDialect(name="mindroom")}
+_DIALECTS: dict[DialectName, ToolDialect] = {"mindroom": ToolDialect(name="mindroom"), "claude": CLAUDE_DIALECT}
 
 
 @dataclass(frozen=True)
@@ -87,12 +88,18 @@ def _wire_function_for(dialect: ToolDialect, function: Function) -> WireFunction
     )
 
 
+def _wire_description(function: Function, wire_function: WireFunction) -> str:
+    canonical_description = function.description or ""
+    notes = [note for note in wire_function.carried_notes if note in canonical_description]
+    return "\n\n".join((wire_function.description, *notes))
+
+
 def _wire_tool_dict(function: Function, wire_function: WireFunction, *, custom_tools: bool) -> dict[str, Any]:
     if custom_tools and wire_function.custom_format is not None:
         return {
             "type": "custom",
             "name": wire_function.wire_name,
-            "description": wire_function.description,
+            "description": _wire_description(function, wire_function),
             "format": wire_function.custom_format,
         }
     definition = function.to_dict()
@@ -100,7 +107,7 @@ def _wire_tool_dict(function: Function, wire_function: WireFunction, *, custom_t
     definition.pop("strict", None)
     definition.update(
         name=wire_function.wire_name,
-        description=wire_function.description,
+        description=_wire_description(function, wire_function),
         parameters=wire_function.parameters,
     )
     return {"type": "function", "function": definition}

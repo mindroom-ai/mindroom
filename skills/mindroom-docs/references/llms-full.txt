@@ -8319,6 +8319,12 @@ agents:
 
 Here `file_generation` saves into `exports` and `visualization` into `charts`, both inside the agent workspace.
 
+### Tool names per model family
+
+Claude and OpenAI models see `shell` and `coding` under the names and arguments of the coding agents they were trained in, chosen by the model's [`tool_dialect`](https://docs.mindroom.chat/configuration/models/#tool-dialect).
+Claude models see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
+Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees.
+
 ## [`file`]
 
 `file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
@@ -8376,8 +8382,9 @@ Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"
 If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
+`workdir` runs the command in a directory relative to the workspace instead of the workspace itself.
 A command that exceeds `timeout` keeps running in the background, and the tool returns a `shell:...` handle.
-Poll it with `check_shell_command(handle)` and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
+Poll it with `check_shell_command(handle)`, passing `wait` to wait up to that many seconds (at most 300) for it to finish, and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
 A backgrounded command with `mindroom_output_path` saves its output when it finishes, and `check_shell_command()` then returns the file receipt.
 Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
 Records of finished commands are cleared about 10 minutes after they finish.
@@ -8465,7 +8472,7 @@ pip_install_package("rich")
 
 `coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
-`edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`.
+`edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`, or pass `replace_all=True` to replace every match.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
