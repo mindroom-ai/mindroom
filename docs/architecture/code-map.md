@@ -278,6 +278,7 @@ Matrix sync callback
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
+| `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded router relays, tag copy, and the moved notice in the source thread |
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
