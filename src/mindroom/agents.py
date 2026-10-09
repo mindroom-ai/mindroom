@@ -20,7 +20,7 @@ from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, na
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
-from mindroom.delegation.personas import persona_disabled_toolkits, persona_function_filter
+from mindroom.delegation.personas import caller_toolkit_names, persona_disabled_toolkits, persona_function_filter
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
@@ -789,6 +789,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
+                workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -1432,27 +1433,27 @@ def _persona_tool_policy(
     agent_name: str,
     config: Config,
     *,
-    session_id: str | None,
     delegation_depth: int,
     tool_function_filter: Callable[[Function], bool] | None,
     disabled_tool_names: frozenset[str],
-) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
-    """Narrow this agent's own tools to an authored persona's subset; its principal is unchanged."""
+    required_tool_names: tuple[str, ...],
+) -> tuple[Callable[[Function], bool] | None, frozenset[str], tuple[str, ...]]:
+    """Narrow this agent's own tools to an authored persona's subset; its principal is unchanged.
+
+    Named toolkits load eagerly, so a deferred toolkit the persona names is present from the start.
+    """
     persona_filter = persona_function_filter(persona)
-    if persona_filter is None:
-        return tool_function_filter, disabled_tool_names
-    unused = persona_disabled_toolkits(
-        persona,
-        get_agent_toolkit_names(agent_name, config, session_id=session_id, delegation_depth=delegation_depth),
-    )
-    if tool_function_filter is None:
-        return persona_filter, disabled_tool_names | unused
+    if persona is None or persona.tools is None or persona_filter is None:
+        return tool_function_filter, disabled_tool_names, required_tool_names
+    available = caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth)
+    unused = persona_disabled_toolkits(persona, available)
+    named = tuple(toolkit for toolkit in available if toolkit not in unused and toolkit not in required_tool_names)
     caller_filter = tool_function_filter
 
     def visible(function: Function) -> bool:
-        return caller_filter(function) and persona_filter(function)
+        return persona_filter(function) and (caller_filter is None or caller_filter(function))
 
-    return visible, disabled_tool_names | unused
+    return visible, disabled_tool_names | unused, (*required_tool_names, *named)
 
 
 def _apply_persona(agent: Agent, persona: SubagentPersona) -> None:
@@ -1979,14 +1980,14 @@ def create_agent(
         )
     )
 
-    tool_function_filter, disabled_tool_names = _persona_tool_policy(
+    tool_function_filter, disabled_tool_names, required_tool_names = _persona_tool_policy(
         persona,
         agent_name,
         config,
-        session_id=session_id,
         delegation_depth=delegation_depth,
         tool_function_filter=tool_function_filter,
         disabled_tool_names=disabled_tool_names,
+        required_tool_names=required_tool_names,
     )
     tool_assembly = _assemble_agent_toolkits(
         agent_name,

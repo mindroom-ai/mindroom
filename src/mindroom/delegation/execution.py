@@ -44,6 +44,7 @@ from mindroom.delegation.lifecycle import (
     settle_child_response,
     start_child_turn,
 )
+from mindroom.delegation.personas import caller_toolkit_names, missing_persona_tool, resolve_persona_request
 from mindroom.delegation.recovery import interrupt_child, read_child_run, resolve_subagent
 from mindroom.delegation.sessions import (
     SubagentSessionError,
@@ -55,7 +56,7 @@ from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
-from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.output_files import (
@@ -82,7 +83,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import ChildResponseRunner
+    from mindroom.delegation.state import ChildResponseRunner, SubagentPersona
     from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -123,6 +124,8 @@ class _DelegationTarget:
     task: str
     previous_child: DelegationChild | None = None
     agent_mode: AgentMode = "standard"
+    persona: SubagentPersona | None = None
+    model: str | None = None
 
 
 def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequirement]:
@@ -630,36 +633,107 @@ async def _resolve_delegation_target(
 ) -> _DelegationTarget | str:
     """Resolve fresh/follow-up arguments, returning a user-facing rejection if invalid."""
     args = tool.tool_args or {}
-    previous_child = None
     if tool.tool_name == "continue_subagent":
-        subagent_id, task = args.get("subagent_id"), args.get("message")
-        if not isinstance(subagent_id, str) or not isinstance(task, str):
-            return "Cannot continue: subagent_id and message must be strings."
-        try:
-            previous_child = retained or await resolve_subagent(
-                subagent_id,
-                owner=caller_identity,
-                config=config,
-                runtime_paths=runtime_paths,
-                depth=depth,
-            )
-        except SubagentSessionError as error:
-            return str(error)
-        if previous_child.subagent_id != subagent_id:
-            msg = "Subagent ID no longer matches its retained requirement"
-            raise RuntimeError(msg)
-        child_name = previous_child.child_agent_name
-        agent_mode = previous_child.agent_mode
-    else:
-        child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
-        if child_name is None:
-            child_name = caller_identity.agent_name
-        if minimal is not None and not isinstance(minimal, bool):
-            return "Cannot delegate: minimal must be a boolean or null."
-        agent_mode = "minimal" if minimal else "standard"
+        return await _resolve_follow_up_target(
+            args,
+            retained,
+            caller_identity=caller_identity,
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=depth,
+        )
+    return _resolve_fresh_target(
+        args,
+        retained,
+        caller_identity=caller_identity,
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=depth,
+    )
+
+
+async def _resolve_follow_up_target(
+    args: dict[str, object],
+    retained: DelegationChild | None,
+    *,
+    caller_identity: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> _DelegationTarget | str:
+    """Resolve a follow-up to its retained child, which keeps its model, mode, and persona."""
+    subagent_id, task = args.get("subagent_id"), args.get("message")
+    if not isinstance(subagent_id, str) or not isinstance(task, str):
+        return "Cannot continue: subagent_id and message must be strings."
+    try:
+        previous_child = retained or await resolve_subagent(
+            subagent_id,
+            owner=caller_identity,
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=depth,
+        )
+    except SubagentSessionError as error:
+        return str(error)
+    if previous_child.subagent_id != subagent_id:
+        msg = "Subagent ID no longer matches its retained requirement"
+        raise RuntimeError(msg)
+    if retained is None and previous_child.persona is not None:
+        missing = missing_persona_tool(
+            previous_child.persona.tools,
+            caller_toolkit_names(caller_identity.agent_name, config, delegation_depth=depth),
+        )
+        if missing is not None:
+            return f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
+    return _DelegationTarget(
+        previous_child.child_agent_name,
+        task,
+        previous_child,
+        previous_child.agent_mode,
+        previous_child.persona,
+    )
+
+
+def _resolve_fresh_target(
+    args: dict[str, object],
+    retained: DelegationChild | None,
+    *,
+    caller_identity: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> _DelegationTarget | str:
+    """Resolve a fresh child and any persona it authors; a started child keeps its frozen persona."""
+    child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
+    model = cast("str | None", args.get("model"))
+    if child_name is None:
+        child_name = caller_identity.agent_name
+    if minimal is not None and not isinstance(minimal, bool):
+        return "Cannot delegate: minimal must be a boolean or null."
     if not isinstance(child_name, str) or not isinstance(task, str):
         return "Cannot delegate: task must be a string and agent_name must be a string or null."
-    return _DelegationTarget(child_name, task, previous_child, agent_mode)
+    if retained is not None:
+        # A resumed call never rereads a profile the worker could have changed.
+        return _DelegationTarget(child_name, task, None, retained.agent_mode, retained.persona, model)
+    workspace = (
+        resolve_agent_runtime(caller_identity.agent_name, config, runtime_paths, caller_identity).workspace
+        if args.get("profile") is not None
+        else None
+    )
+    request = resolve_persona_request(
+        caller_name=caller_identity.agent_name,
+        agent_name=child_name,
+        system_prompt=args.get("system_prompt"),
+        tools=args.get("tools"),
+        profile=args.get("profile"),
+        model=model,
+        minimal=bool(minimal),
+        workspace_root=workspace.root if workspace is not None else None,
+        available_toolkits=caller_toolkit_names(caller_identity.agent_name, config, delegation_depth=depth),
+    )
+    if isinstance(request, str):
+        return request
+    return _DelegationTarget(child_name, task, None, request.agent_mode, request.persona, request.model)
 
 
 def _validate_child_scope(
@@ -682,11 +756,12 @@ def _validate_child_scope(
     ):
         msg = "Delegation child scope no longer matches its parent execution identity"
         raise RuntimeError(msg)
-    if (child.caller_agent_name, child.child_agent_name, child.task, child.depth) != (
+    if (child.caller_agent_name, child.child_agent_name, child.task, child.depth, child.persona) != (
         caller_identity.agent_name,
         target.agent_name,
         target.task,
         depth + 1,
+        target.persona,
     ):
         msg = "Delegation child no longer matches its parent requirement"
         raise RuntimeError(msg)
@@ -755,7 +830,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         on_event=on_event,
     )
     args = tool.tool_args or {}
-    model = args.get("model") if tool.tool_name == "run_subagent" else None
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
     target = await _resolve_delegation_target(
         tool,
@@ -768,6 +842,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if isinstance(target, str):
         resolve_result(target)
         return False
+    model = target.model
 
     # Recheck current authorization and output policy, including resumed calls.
     authorization = authorize_delegation(
@@ -881,6 +956,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             previous=target.previous_child,
             parent_tool_call_id=tool.tool_call_id,
             parent_requirement_id=requirement.id,
+            persona=target.persona,
         )
         state.children.append(child)
     if child.result is None:

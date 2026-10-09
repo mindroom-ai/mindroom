@@ -21,12 +21,12 @@ from mindroom.delegation.audit import (
     start_child_record,
 )
 from mindroom.delegation.audit import observe_child_event as record_child_event
+from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.error_handling import run_error_event_text
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
@@ -260,8 +260,11 @@ def _caller_grants_child(caller_name: str, agent_name: str, config: Config, gran
         return False
     if grant == "delegate":
         return agent_name in caller.delegate_to
-    names = {entry.name for entry in visible_tool_surface(agent_name=caller_name, config=config).runtime_tool_configs}
-    return agent_name == caller_name and "dynamic_workflow" in names
+    return agent_name == caller_name and "dynamic_workflow" in caller_toolkit_names(
+        caller_name,
+        config,
+        delegation_depth=0,
+    )
 
 
 def _target_refusal(
@@ -279,7 +282,7 @@ def _target_refusal(
     if grant == "dynamic_workflow":
         if agent_name == caller_name:
             return None
-        return f"Cannot author a subagent for '{agent_name}': system_prompt, tools, and profile apply only to yourself."
+        return self_only_refusal(agent_name)
     if allowed_targets is None:
         caller = config.agents.get(caller_name)
         allowed_targets = caller.delegate_to if caller is not None else []

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.delegation.state import SubagentPersona
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skills import SkillMarkdownError, parse_skill_markdown, workspace_entry_names
 
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
 
     from mindroom.agent_modes import AgentMode
+    from mindroom.config.main import Config
     from mindroom.delegation.state import PersonaSourceKind
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
@@ -222,12 +224,23 @@ def render_profile_listing(entries: Sequence[PersonaProfile | InvalidPersonaProf
     return f"{len(entries)} subagent profiles are saved in {_PROFILE_DIRNAME}/; list that directory to see them."
 
 
-def validate_persona_tools(tools: tuple[str, ...] | None, available_toolkits: Sequence[str]) -> None:
-    """Require every entry to name one of the caller's toolkits, or a known function of one."""
-    if tools is None:
-        return
+def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: int) -> list[str]:
+    """Return every toolkit this agent may use, including deferred toolkits it loads on demand."""
+    deferred = [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
+    surface = visible_tool_surface(
+        agent_name=agent_name,
+        config=config,
+        loaded_tools=deferred,
+        delegation_depth=delegation_depth,
+        enable_dynamic_tools_manager=True,
+    )
+    return [entry.name for entry in surface.runtime_tool_configs]
+
+
+def missing_persona_tool(tools: tuple[str, ...] | None, available_toolkits: Sequence[str]) -> str | None:
+    """Return the first entry naming neither a caller toolkit nor a known function of one."""
     available = set(available_toolkits)
-    for entry in tools:
+    for entry in tools or ():
         toolkit, separator, function = entry.partition(".")
         metadata = TOOL_METADATA.get(toolkit)
         known = toolkit in available and (
@@ -238,8 +251,70 @@ def validate_persona_tools(tools: tuple[str, ...] | None, available_toolkits: Se
             )
         )
         if not known:
-            msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(sorted(available))}."
-            raise PersonaError(msg)
+            return entry
+    return None
+
+
+def validate_persona_tools(tools: tuple[str, ...] | None, available_toolkits: Sequence[str]) -> None:
+    """Require every entry to name one of the caller's toolkits, or a known function of one."""
+    entry = missing_persona_tool(tools, available_toolkits)
+    if entry is not None:
+        msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(sorted(set(available_toolkits)))}."
+        raise PersonaError(msg)
+
+
+def self_only_refusal(agent_name: str) -> str:
+    """Explain that a caller may author only its own subagents."""
+    return f"Cannot author a subagent for '{agent_name}': system_prompt, tools, and profile apply only to yourself."
+
+
+@dataclass(frozen=True)
+class PersonaRequest:
+    """The persona, model, and mode one ``run_subagent`` call asks for."""
+
+    persona: SubagentPersona | None
+    model: str | None
+    agent_mode: AgentMode
+
+
+def resolve_persona_request(  # noqa: PLR0911
+    *,
+    caller_name: str,
+    agent_name: str,
+    system_prompt: object,
+    tools: object,
+    profile: object,
+    model: str | None,
+    minimal: bool,
+    workspace_root: Path | None,
+    available_toolkits: Sequence[str],
+) -> PersonaRequest | str:
+    """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid."""
+    mode: AgentMode = "minimal" if minimal else "standard"
+    if system_prompt is None and tools is None and profile is None:
+        return PersonaRequest(persona=None, model=model, agent_mode=mode)
+    if agent_name != caller_name:
+        return self_only_refusal(agent_name)
+    if profile is not None and (system_prompt is not None or tools is not None):
+        return "Cannot delegate: pass either profile or system_prompt and tools, not both."
+    try:
+        if profile is None:
+            persona = inline_persona(system_prompt, tools)
+            validate_persona_tools(persona.tools, available_toolkits)
+            return PersonaRequest(persona=persona, model=model, agent_mode=mode)
+        if not isinstance(profile, str):
+            return "Cannot delegate: profile must be a profile name."
+        if workspace_root is None:
+            return "Cannot delegate: subagent profiles need an agent workspace."
+        loaded = load_profile(workspace_root, profile)
+        validate_persona_tools(loaded.persona.tools, available_toolkits)
+    except PersonaError as exc:
+        return str(exc)
+    return PersonaRequest(
+        persona=loaded.persona,
+        model=model or loaded.model,
+        agent_mode="minimal" if minimal else loaded.mode or "standard",
+    )
 
 
 def persona_function_filter(persona: SubagentPersona | None) -> Callable[[Function], bool] | None:

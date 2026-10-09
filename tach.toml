@@ -1426,6 +1426,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.delegation.personas",
     "mindroom.delegation.sessions",
     "mindroom.agent_descriptions",
     "mindroom.ai",
@@ -6923,6 +6924,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.delegation.personas",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.error_handling",
     "mindroom.approval_tools",
@@ -6951,6 +6953,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.personas"
 depends_on = [
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.delegation.state",
     "mindroom.path_confinement",
     "mindroom.tool_system.catalog",
@@ -7131,7 +7134,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
-    "mindroom.tool_system.dynamic_toolkits",
+    "mindroom.delegation.personas",
     "mindroom.error_handling",
     "mindroom.delegation.audit",
     "mindroom.delegation.records",
