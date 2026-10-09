@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from mindroom.custom_tools import coding as coding_module
 from mindroom.custom_tools.apply_patch import AddFile, DeleteFile, PatchError, _UpdateChunk, _UpdateFile, parse_patch
 from mindroom.custom_tools.coding import CodingTools
 
@@ -212,6 +213,31 @@ def test_moving_a_link_onto_its_target_removes_the_link(tmp_path: Path) -> None:
     assert result == "Success. Updated the following files:\nM real.txt"
     assert (tmp_path / "real.txt").read_text() == "y\n"
     assert not (tmp_path / "link.txt").is_symlink()
+
+
+def test_write_failure_names_the_files_already_changed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write that fails after verification reports which files the patch already changed."""
+    (tmp_path / "a.txt").write_text("one\n")
+    (tmp_path / "b.txt").write_text("two\n")
+    write = coding_module.write_resolved_file
+
+    def refuse_b(base_dir: Path, resolved: Path, payload: bytes) -> None:
+        if resolved.name == "b.txt":
+            raise PermissionError(13, "Permission denied")
+        write(base_dir, resolved, payload)
+
+    monkeypatch.setattr(coding_module, "write_resolved_file", refuse_b)
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+ONE\n*** Update File: b.txt\n@@\n-two\n+TWO\n"
+        "*** End Patch",
+    )
+
+    assert result == (
+        "Error applying patch to b.txt: [Errno 13] Permission denied\n"
+        "The patch already changed these files before the error:\na.txt"
+    )
+    assert (tmp_path / "a.txt").read_text() == "ONE\n"
 
 
 def test_path_outside_workspace_rejected(tmp_path: Path) -> None:

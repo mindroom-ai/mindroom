@@ -750,14 +750,21 @@ class CodingTools(Toolkit):
             writes, summary = self._plan_patch(hunks)
         except PatchError as e:
             return f"apply_patch verification failed: {e}"
+        changed: list[str] = []
         for resolved, payload in writes:
+            path = format_path_for_output(resolved, self.base_dir)
             try:
                 if payload is None:
                     remove_resolved_path(self.base_dir, resolved)
                 else:
                     write_resolved_file(self.base_dir, resolved, payload)
             except OSError as e:
-                return f"Error applying patch to {format_path_for_output(resolved, self.base_dir)}: {e}"
+                lines = [f"Error applying patch to {path}: {e}"]
+                if changed:
+                    # The model must know what changed before resending the rest.
+                    lines += ["The patch already changed these files before the error:", *changed]
+                return "\n".join(lines)
+            changed.append(path)
         return "\n".join(["Success. Updated the following files:", *summary])
 
     def _plan_patch(self, hunks: list[PatchHunk]) -> tuple[list[tuple[Path, bytes | None]], list[str]]:

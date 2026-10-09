@@ -46,7 +46,8 @@ _CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"}
 _CODEX_PROVIDERS = frozenset({"codex", "openai_codex"})
 # These providers also front OpenAI-compatible servers, so only OpenAI model IDs select the Codex dialect.
 _OPENAI_MODEL_PROVIDERS = frozenset({"openai", "azure"})
-_OPENAI_MODEL_ID = re.compile(r"gpt-|o\d|codex")
+# Fine-tuned OpenAI models keep their base model's ID after the ft: prefix.
+_OPENAI_MODEL_ID = re.compile(r"(?:ft:)?(?:gpt-|o\d|codex)")
 
 # apply_patch exists for Codex models; every other dialect edits with edit_file and write_file.
 _MINDROOM_DIALECT = ToolDialect(name="mindroom", replaced={APPLY_PATCH: FILE_EDITS})

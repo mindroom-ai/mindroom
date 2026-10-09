@@ -91,6 +91,7 @@ def _names(tools: list[Function | dict[str, Any]]) -> list[str]:
         ("openrouter", "anthropic/claude-sonnet-5.5", "claude"),
         ("openai", "gpt-6-astra", "codex"),
         ("openai", "o4-mini", "codex"),
+        ("openai", "ft:gpt-4.1-mini:acme::abc123", "codex"),
         ("azure", "gpt-6.1-sol", "codex"),
         ("codex", "gpt-6.1-sol", "codex"),
         ("openai-codex", "gpt-6-luna", "codex"),
