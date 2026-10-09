@@ -27,6 +27,8 @@ from mindroom.credentials import (
     load_scoped_credentials,
     save_scoped_credentials,
 )
+from mindroom.tool_system.catalog import ensure_tool_registry_loaded
+from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -288,11 +290,20 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
         allowed_shared_services=target.allowed_shared_services,
         worker_credentials_manager=target.target_manager,
         allow_shared_mirror=False,
+        primary_built_tool=target_primary_owns_tool_settings(service, target),
     )
 
 
 def _service_uses_primary_runtime_global_store(service: str, target: RequestCredentialsTarget) -> bool:
     return credential_service_policy(service, target.worker_scope).uses_primary_runtime_global_credentials
+
+
+def target_primary_owns_tool_settings(service: str, target: RequestCredentialsTarget) -> bool:
+    """Return whether the primary owns the scoped settings of the tool that this service configures."""
+    if target.worker_scope is None or target.agent_name is None:
+        return False
+    ensure_tool_registry_loaded(target.runtime_paths)
+    return primary_owns_tool_settings(service, runtime_paths=target.runtime_paths)
 
 
 def worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
@@ -320,6 +331,7 @@ def save_credentials_for_target(service: str, credentials: dict[str, Any], targe
         credentials_manager=target.base_manager,
         worker_target=worker_target_for_credentials_target(target),
         worker_credentials_manager=target.target_manager,
+        primary_built_tool=target_primary_owns_tool_settings(service, target),
     )
 
 
@@ -331,12 +343,21 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
     if target.worker_scope is None:
         target.target_manager.delete_credentials(service)
         return
+    primary_built_tool = target_primary_owns_tool_settings(service, target)
     delete_scoped_credentials(
         service,
         credentials_manager=target.base_manager,
         worker_target=worker_target_for_credentials_target(target),
         worker_credentials_manager=target.target_manager,
+        primary_built_tool=primary_built_tool,
     )
+    if primary_built_tool:
+        # LEGACY_COMPAT: Worker-store copies of settings the primary now owns.
+        # Legacy format: `<service>_credentials.json` in the agent's worker store, where the dashboard saved a scoped agent's tool settings; the dashboard no longer lists or reads that copy.
+        # Last legacy release: v2026.10.39 for `openai` and `groq`, v2026.10.8 for `homeassistant` and `spotify`, whose dedicated dashboard routes kept saving there, v2026.9.414 for other tools routed to a worker, and v2026.9.404 for the rest; replacement: v2026.10.40, v2026.10.9, v2026.9.415, and v2026.9.405 respectively save them in the primary's agent- or requester-scoped stores.
+        # Handling: deleting the settings also deletes that worker copy, so a deleted value stops reaching worker code.
+        # Coverage: tests/test_credentials.py::test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings.
+        target.target_manager.delete_credentials(service)
 
 
 def primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget) -> set[str]:
@@ -348,7 +369,11 @@ def primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget)
         return {
             service
             for service in agent_scoped_manager.list_services()
-            if credential_service_policy(service, target.worker_scope).uses_primary_runtime_agent_scoped_credentials
+            if credential_service_policy(
+                service,
+                target.worker_scope,
+                primary_built_tool=target_primary_owns_tool_settings(service, target),
+            ).uses_primary_runtime_agent_scoped_credentials
         }
     if target.worker_scope not in {"user", "user_agent"}:
         return set()
@@ -362,5 +387,9 @@ def primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget)
     return {
         service
         for service in scoped_manager.list_services()
-        if credential_service_policy(service, target.worker_scope).uses_primary_runtime_scoped_credentials
+        if credential_service_policy(
+            service,
+            target.worker_scope,
+            primary_built_tool=target_primary_owns_tool_settings(service, target),
+        ).uses_primary_runtime_scoped_credentials
     }

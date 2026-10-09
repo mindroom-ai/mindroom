@@ -30,6 +30,9 @@ CLASSIC_SYNC_TIMELINE_LIMIT = 5000
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 DEFAULT_TOOL_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+# Largest attachment MindRoom retains, received from Matrix or registered by a tool;
+# also the default inline primary-to-worker save cap, so every retained attachment can reach a worker.
+RETAINED_MEDIA_MAX_BYTES = 64 * 1024 * 1024
 KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
 DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
 MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 128
@@ -686,8 +689,7 @@ def trusted_tool_runtime_env_values(
 
 def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied execution tools."""
-    process_env = runtime_env_policy.execution_tool_runtime_env(runtime_paths.process_env)
-    env_file_values = runtime_env_policy.execution_tool_runtime_env(runtime_paths.env_file_values)
+    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     merged_env = dict(env_file_values)
     merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
@@ -936,6 +938,15 @@ def tracking_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "tracking"
 
 
+def primary_records_dir(state_root: Path, runtime_paths: RuntimePaths) -> Path:
+    """Map a canonical state root to the primary-only directory for the records the primary trusts about it.
+
+    The Kubernetes sandbox runner sidecar mounts `agents` and `private_instances` read-write,
+    so these records keep the state root's storage-relative path below the tracking directory, which no worker mounts.
+    """
+    return tracking_dir(runtime_paths) / state_root.relative_to(runtime_paths.storage_root.expanduser().resolve())
+
+
 def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
     return runtime_paths.storage_root / "encryption_keys"
@@ -1066,6 +1077,8 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
+# The human or configured bot account an entity's reply was written for; entities it mentions act for that requester.
+ACTING_REQUESTER_KEY = "com.mindroom.acting_requester"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
 PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
@@ -1097,6 +1110,9 @@ MATRIX_SOURCE_EVENT_METADATA_KEY = "matrix_source_event_metadata"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
+SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
+UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
+THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 DURABLE_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
 DURABLE_FINAL_OUTCOME_VERSION = 2

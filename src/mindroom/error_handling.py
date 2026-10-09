@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Shared by provider retry policy and final user-message routing. Status 200 is
-# the Claude mid-stream SSE error case: the HTTP response was already committed
-# before the provider emitted an error event.
+# the mid-stream SSE case: the HTTP response was already committed before a
+# Claude error event or an early Responses end without visible output.
 TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 
@@ -56,8 +56,10 @@ class MinimalModeUnavailableError(RuntimeError):
     """Minimal mode cannot serve a turn; the message already names its recovery command."""
 
 
-def minimal_mode_failure_message(reason: str, agent_name: str) -> str:
-    """Include the command that recovers a conversation from unavailable minimal mode."""
+def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool) -> str:
+    """Include how to recover from unavailable minimal mode: the mode command, or a standard subagent."""
+    if subagent:
+        return f"{reason.rstrip('.')}. Start a new subagent without minimal."
     return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
 
 

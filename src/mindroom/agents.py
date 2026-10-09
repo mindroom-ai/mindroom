@@ -8,19 +8,18 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.db.base import BaseDb, SessionType
 from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
+from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
-from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
+from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.computer_announcement import attach_computer_announcement
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
@@ -62,7 +61,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
-from mindroom.tool_system.skills import build_agent_skills
+from mindroom.tool_system.skills import agent_workspace_skills_root, build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
@@ -77,6 +76,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
+    from agno.db.base import BaseDb
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
     from agno.skills import Skills
@@ -155,6 +155,7 @@ class _AgentToolAssembly:
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
+    tool_hook_bridge: Callable[..., Any] | None
 
     @property
     def deferred_tool_names(self) -> tuple[str, ...]:
@@ -562,6 +563,7 @@ def _build_registered_agent_tool(
     agent_name: str,
     tool_config_overrides: dict[str, object] | None,
     workspace_path: Path | None,
+    agent_state_root: Path,
     tool_output_auto_save_threshold_bytes: int,
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
@@ -592,6 +594,7 @@ def _build_registered_agent_tool(
         worker_tools_override=worker_tools,
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=workspace_path,
+        agent_state_root=agent_state_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
     )
@@ -800,6 +803,20 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
+    if tool_name == "skill_manage":
+        from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
+
+        return SkillManageTools(
+            agent_name,
+            config,
+            runtime_paths,
+            agent_workspace_skills_root(
+                runtime_paths,
+                agent_name,
+                workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+            ),
+        )
+
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
 
@@ -888,6 +905,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         agent_name,
         tool_config_overrides,
         agent_runtime.tool_base_dir,
+        agent_runtime.state_root,
         config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.execution.is_private,
         execution_identity,
@@ -925,12 +943,9 @@ def resolve_runtime_worker_tools(
     tool_registry_preloaded: bool = False,
 ) -> list[str]:
     """Return worker-routed tools for one concrete runtime tool selection."""
-    agent_config = config.get_agent(agent_name)
-    configured = agent_config.worker_tools
-    if configured is None:
-        configured = config.defaults.worker_tools
+    configured = config.get_agent_worker_tools(agent_name)
     if configured is not None:
-        return config.expand_tool_names(list(configured))
+        return configured
 
     if not tool_registry_preloaded:
         ensure_tool_registry_loaded(runtime_paths, config)
@@ -1178,83 +1193,6 @@ def enable_all_history_replay(entity: Agent | Team) -> None:
     entity.num_history_runs = None
 
 
-def remove_run_by_event_id(
-    storage: BaseDb,
-    session_id: str,
-    event_id: str,
-    *,
-    session_type: SessionType = SessionType.AGENT,
-    include_seen_event_ids: bool = False,
-    remove_following_runs: bool = False,
-) -> bool:
-    """Remove a run whose Matrix source identity or consumed history matches.
-
-    Redaction cleanup can also remove the causal suffix after the first match,
-    because later model output may depend on content from the matching run.
-    Returns True if any run was removed.
-    """
-    session = (
-        agent_storage.get_team_session(storage, session_id)
-        if session_type is SessionType.TEAM
-        else agent_storage.get_agent_session(
-            storage,
-            session_id,
-        )
-    )
-    if session is None or not session.runs:
-        return False
-    removed_runs: list[RunOutput | TeamRunOutput] = []
-    matched_run = False
-    for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)):
-            continue
-        if matched_run and remove_following_runs:
-            removed_runs.append(run)
-            continue
-        if not run.metadata:
-            continue
-        raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        raw_discovery_event_ids = run.metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
-        raw_seen_event_ids = run.metadata.get(constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
-        source_event_ids = (
-            [candidate for candidate in raw_source_event_ids if isinstance(candidate, str)]
-            if isinstance(raw_source_event_ids, list)
-            else []
-        )
-        discovery_event_ids = (
-            [candidate for candidate in raw_discovery_event_ids if isinstance(candidate, str)]
-            if isinstance(raw_discovery_event_ids, list)
-            else []
-        )
-        seen_event_ids = (
-            [candidate for candidate in raw_seen_event_ids if isinstance(candidate, str)]
-            if include_seen_event_ids and isinstance(raw_seen_event_ids, list)
-            else []
-        )
-        revisions = run.metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
-        if include_seen_event_ids and isinstance(revisions, dict):
-            seen_event_ids.extend(
-                revision[1]
-                for revision in revisions.values()
-                if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
-            )
-        matches_event_id = run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
-        if (
-            matches_event_id
-            or event_id in source_event_ids
-            or event_id in discovery_event_ids
-            or event_id in seen_event_ids
-        ):
-            matched_run = True
-            removed_runs.append(run)
-    if not removed_runs:
-        return False
-    # Team member runs hang off the team run through parent_run_id and go with it.
-    kept = agent_storage.runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
-    agent_storage.replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
-    return True
-
-
 @timed("system_prompt_assembly.agent_create.load_plugins")
 def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
     return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
@@ -1317,7 +1255,13 @@ def apply_tool_approval_capability(
             and function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
             and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
         )
-        return not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name)
+        # A scheduled call runs only with the approval its requester gave when it was scheduled.
+        is_scheduled_call_runner = registered_tool_name == "scheduler" and function.name == "run_scheduled_call"
+        return (
+            not is_matrix_room_runtime_function
+            and not is_scheduled_call_runner
+            and tool_may_require_approval(config, function.name)
+        )
 
     if supports_native_tool_approval:
         for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
@@ -1459,12 +1403,26 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
         "Callable[[Function], bool] | None",
         agent_kwargs.pop("tool_function_filter", None),
     )
+    tool_hook_bridge = cast("Callable[..., Any] | None", agent_kwargs.pop("tool_hook_bridge", None))
     install_message_builder_patch()
-    agent_class = MinimalAgent if agent_kwargs.pop("agent_mode") == "minimal" else Agent
+    cli_shell = agent_kwargs.pop("cli_shell")
+    agent_class = MinimalAgent if agent_kwargs.pop("agent_mode") == "minimal" else CliShellAgent if cli_shell else Agent
     agent = agent_class(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
+    agent.tool_hook_bridge = tool_hook_bridge
     return agent
+
+
+def _generated_function_visible(
+    config: Config,
+    tool_function_filter: Callable[[Function], bool] | None,
+    function: Function,
+) -> bool:
+    """Hide generated functions an approval rule may gate, because they have no toolkit origin to pause and resume."""
+    return not tool_may_require_approval(config, function.name) and (
+        tool_function_filter is None or tool_function_filter(function)
+    )
 
 
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
@@ -1613,6 +1571,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         )
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
+            toolkit = attach_computer_announcement(
+                toolkit,
+                tool_name,
+                agent_name=agent_name,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
             _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
         return toolkit
 
@@ -1656,14 +1621,18 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                     )
         except _MatrixRoomRuntimeToolCollisionError:
             raise
-        except (ValueError, ImportError) as exc:
+        except Exception as exc:
+            # One toolkit's construction failure must never stop the agent.
             if minimal_mode:
-                raise MinimalModeUnavailableError(minimal_mode_failure_message(str(exc), agent_name)) from exc
+                raise MinimalModeUnavailableError(
+                    minimal_mode_failure_message(str(exc), agent_name, subagent=delegation_depth > 0),
+                ) from exc
             logger.warning(
                 "Could not load tool for agent construction",
                 tool=tool_name,
                 agent=agent_name,
                 error=str(exc),
+                exc_info=not isinstance(exc, ValueError | ImportError),
             )
     return _AgentToolAssembly(
         tools=tools,
@@ -1674,6 +1643,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
+        tool_hook_bridge=tool_hook_bridge,
     )
 
 
@@ -1876,6 +1846,7 @@ def create_agent(
     eager_deferred_tools: bool = False,
     required_tool_names: tuple[str, ...] = (),
     agent_mode: AgentMode = "standard",
+    agent_cli_in_shell: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1919,6 +1890,8 @@ def create_agent(
             omit the dynamic-tools manager for a runtime with an immutable tool
             schema.
         agent_mode: Operating mode frozen by the response owner; standard by default.
+        agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
+            reach MindRoom; only callers that bind the response turn to the agent pass True.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -2051,12 +2024,17 @@ def create_agent(
             ),
         )
     )
+    # Approval rules hide generated functions, so prompts must not advertise skills whose functions are all hidden.
+    skill_functions_hidden = skills is not None and all(
+        tool_may_require_approval(config, function.name) for function in skills.get_tools()
+    )
+    prompt_skills = None if skill_functions_hidden else skills
     instructions = _build_agent_instructions(
         agent_name,
         agent_config,
         config,
         agent_runtime,
-        skills=skills,
+        skills=prompt_skills,
         session_id=session_id,
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,
@@ -2067,9 +2045,23 @@ def create_agent(
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
+    # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
+    cli_shell = (
+        agent_cli_in_shell
+        and agent_mode == "standard"
+        and not disable_runtime_capabilities
+        and standard_cli_eligible(config, runtime_paths, agent_name, execution_identity)
+        and wrap_native_shell_window(tool_assembly.tools)
+    )
+    if cli_shell:
+        instructions = [*instructions, STANDARD_CLI_NOTE]
 
     entity_view = config.resolve_entity(agent_name)
-    knowledge_enabled = not disable_runtime_capabilities and knowledge is not None
+    knowledge_enabled = (
+        not disable_runtime_capabilities
+        and knowledge is not None
+        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
+    )
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )
@@ -2086,12 +2078,14 @@ def create_agent(
 
     agent = _initialize_agent_instance(
         agent_mode=agent_mode,
+        cli_shell=cli_shell,
         name=agent_config.display_name,
         id=agent_name,
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,
-        skills=skills,
+        # Minimal mode presents skill contents as context documents instead of through skill functions.
+        skills=skills if agent_mode == "minimal" else prompt_skills,
         instructions=instructions,
         additional_context=render_session_context(
             render_date_context(
@@ -2104,7 +2098,8 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
-        tool_function_filter=tool_function_filter,
+        tool_function_filter=partial(_generated_function_visible, config, tool_function_filter),
+        tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
         add_session_summary_to_context=persist_runtime_state,
@@ -2142,6 +2137,14 @@ def create_agent(
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
         )
+    if isinstance(agent, CliShellAgent):
+        agent.output_file_policy = _agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+        agent.delegation_depth = delegation_depth
+        agent.refresh_scheduler = refresh_scheduler
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
 
@@ -2165,7 +2168,6 @@ __all__ = [
     "enable_all_history_replay",
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
-    "remove_run_by_event_id",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
 ]

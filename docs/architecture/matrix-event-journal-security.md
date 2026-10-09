@@ -100,8 +100,11 @@ Compact grant identity remains so duplicate actions cannot recreate a window or 
 `approval_grant_cards` retains scope and exact-call identity while eligible cards are pending and keeps the grant reference for automatically decided calls as audit facts.
 Grant maintenance deletes retired scope rows that were never associated with a grant.
 `approval_grant_locks` contains only the principal identity used to serialize grant changes, maintenance, and card reservation.
+`scheduled_call_approvals` retains each scheduled call: task, room, thread, requester, agent, toolkit, tool, the unredacted arguments as canonical JSON, task fingerprint, send time, approver, approved scope, its one claim and outcome, and the receipt it published; Matrix task state and the trigger carry only the task ID.
+Its card and decision live in the detached exact-call ledger shared with background scripts, and a claim spends the approval and reserves its receipt in one commit before the call runs, so an interrupted call has an unknown outcome and is never retried.
+Grant maintenance prunes a binding 30 days after its send time or withdrawal once its card has retired and any receipt is settled.
 
-The [automatic Nio 1.0 migration](../deployment/nio-upgrade.md) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.
+The [automatic Nio 1.0 migration](../deployment/upgrades.md#upgrading-to-nio-10) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.
 
 ## Sidecar previews are never stored as bodies
 
@@ -114,6 +117,27 @@ Storing the preview would hand every reader a body that looks complete and is no
 There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
 
 Resolved content carries no sidecar metadata of its own, so storing the resolution is what clears the debt, and nothing has to remember to clear it separately.
+
+The file is downloaded as a stream that stops at 2 MiB, so a reference to a larger file never holds more than that in memory.
+
+A file that cannot be read settles the debt as a plain text message holding the preview and a notice that the rest could not be loaded, with no sidecar or file reference, so neither later reads nor thread attachment collection download it again.
+
+Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
+
+Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 16 MiB of stored content, newest messages first.
+
+Decoding stored JSON can take about 10 times its size in memory for a list of short strings or numbers, and about 45 times for nested empty containers.
+So a page also stops once its estimated decoded size passes 64 MiB, counting its bytes plus 96 bytes per JSON array, 192 per JSON object and 56 per comma or colon.
+
+A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
+Such a thread loses what needs its complete history, as one past the row limit does: untagged continuation in rooms with several responders, thread summaries, and mid-turn judgment.
+
+A page always keeps at least one message, even when that message alone is over the budget.
+
+A message still waiting for its file costs that budget nothing, so a strict read refetches the waiting messages newest first and stops once what it stored passes 16 MiB.
+Without that stop, one read would download and store every file the waiting messages name, even when they all name one large file.
+The page then ends at or before the last message refetched, and the waiting messages behind it are refetched only when a reader asks for that history.
+This stop bounds stored content, not downloads: a file that cannot be read settles its message to the preview and a notice, so each waiting message that names such a file still costs one download.
 
 ## Edits
 
@@ -145,7 +169,18 @@ A point refetch is refused if the revision it chose has since been tombstoned, w
 
 A refetch is also refused if the content it returns still holds a sidecar preview, because installing it would satisfy the debt with the very text the debt was raised about.
 
+A refetch ignores relations it cannot read unless their cleartext relation makes them the original sender's edit of the message, because no other relation can replace what is on screen.
+
+When such an edit cannot be read and is newer than every readable revision, the refetch installs the newest readable revision with a notice that a later edit could not be read.
+
+Keeping the debt instead would let the edit's sender make every strict read of that conversation fail for as long as the edit stays unreadable.
+
+When the screen held an edit and the relation walk stops at its event ceiling before finding any edit by the original sender, the refetch installs the original with the same notice, because other members' relations can push the sender's surviving edits past the ceiling.
+
 Membership fencing deliberately does not sweep up pending redactions along with unanswerable turns, because a redaction still owes real cleanup in durable turn and session state, and settling it silently would let redacted content survive in later context.
+
+Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
+An event for which no turn has recorded a room is tombstoned in the turn ledger only when the journal admitted it in the redaction's room, so a redaction cannot mark another room's event as handled, even before the bot sees it there.
 
 ## Membership
 
@@ -200,7 +235,7 @@ The one-time upgrade resets pre-durable membership tenures and converts v2/v3 co
 ## Storage and connections
 
 SQLite stores the journal at `<storage>/tracking/event_journal.db`, which is `mindroom_data/tracking/event_journal.db` with the default storage root.
-PostgreSQL requires `event_journal.backend: postgres` and a connection URL; see [Event Journal configuration](../configuration/index.md#event-journal) for URL resolution and restart requirements.
+PostgreSQL requires `event_journal.backend: postgres` and a connection URL; see [Event Journal configuration](../deployment/storage.md#event-journal) for URL resolution and restart requirements.
 
 That URL carries a password, so it is excluded from the backend's dataclass representation, which would otherwise reach logs and tracebacks without anyone choosing to print it.
 

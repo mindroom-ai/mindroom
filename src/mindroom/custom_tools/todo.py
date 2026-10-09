@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -14,8 +15,6 @@ import yaml
 from agno.agent import Agent
 from agno.team.team import Team  # noqa: TC002 - Agno resolves tool annotations at runtime.
 from agno.tools import Toolkit
-from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
-from jinja2.sandbox import SandboxedEnvironment, SecurityError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mindroom import yaml_io
@@ -32,9 +31,16 @@ from mindroom.custom_tools.todo_state import (
     state_root,
     todos_path,
 )
-from mindroom.path_confinement import read_regular_file_within_root, resolve_path_within_root
+from mindroom.custom_tools.todo_template_render import render_trusted_template, render_workspace_template
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    read_regular_file_within_root,
+    resolve_path_within_root,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
+from mindroom.tool_system.skills import workspace_entry_names
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
@@ -42,6 +48,8 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
+
+logger = get_logger(__name__)
 
 _VALID_PRIORITIES = frozenset(PRIORITY_ORDER)
 _PRIORITY_EMOJI: dict[str, str] = {
@@ -51,8 +59,13 @@ _PRIORITY_EMOJI: dict[str, str] = {
     "low": "green",
 }
 _TEMPLATE_RECURSION_LIMIT = 3
+# Workspace templates are worker-written, so one apply_template call must stay small however they nest.
+_MAX_TEMPLATE_SIZE = 64 * 1024
+_MAX_TEMPLATE_TODOS = 100
+_MAX_TEMPLATE_RENDER_SECONDS = 5.0
+# One list_templates call stops reading workspace templates after this many bytes, however many worker code planted.
+_MAX_TEMPLATE_LISTING_BYTES = 1024 * 1024
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
-_JINJA_ENV = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
 
 
 class MindroomDevParams(BaseModel):
@@ -95,7 +108,8 @@ class TemplateTodo(BaseModel):
     sub_template: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     priority: Literal["low", "medium", "high", "critical"] = "medium"
-    depends_on: list[int] = Field(default_factory=list)
+    # A set, so a repeated index cannot multiply the edges a sub-template's terminals add.
+    depends_on: set[int] = Field(default_factory=set)
     assigned_agent: str | None = None
 
     @model_validator(mode="after")
@@ -148,11 +162,56 @@ class _TemplateRoot:
     source: str
     workspace_root: Path | None = None
 
+    def template_paths(self, templates_dir: Path) -> list[Path]:
+        """Return this root's template files by name; a workspace scan examines only its first entries."""
+        if self.workspace_root is None:
+            return sorted(templates_dir.glob("*.yaml.j2"))
+        relative = templates_dir.relative_to(self.workspace_root.resolve())
+        with open_directory_within_root(self.workspace_root, relative) as directory_fd:
+            listing = workspace_entry_names(directory_fd, directories=False)
+        if not listing.complete:
+            logger.warning("Listing only the first workspace todo template entries", path=str(templates_dir))
+        return [templates_dir / name for name in listing.names if name.endswith(".yaml.j2")]
+
+    def read_bytes(self, path: Path) -> bytes:
+        """Return one template's bytes from this root."""
+        if self.workspace_root is None:
+            return path.read_bytes()
+        # Template paths are canonical; open them below the workspace as spelled so a replaced workspace is refused.
+        relative = path.relative_to(self.workspace_root.resolve())
+        return read_regular_file_within_root(self.workspace_root, relative, max_bytes=_MAX_TEMPLATE_SIZE)
+
     def read_text(self, path: Path) -> str:
         """Return one template's text from this root."""
-        if self.workspace_root is None:
-            return path.read_text(encoding="utf-8")
-        return read_regular_file_within_root(self.workspace_root, path.relative_to(self.workspace_root)).decode("utf-8")
+        return self.read_bytes(path).decode("utf-8")
+
+
+@dataclass(slots=True)
+class _TemplateBudget:
+    """Template text one `apply_template` call may still read and render, shared by every sub-template it expands."""
+
+    remaining_read_bytes: int = _MAX_TEMPLATE_SIZE
+    remaining_rendered_chars: int = _MAX_TEMPLATE_SIZE
+    render_deadline: float = field(default_factory=lambda: time.monotonic() + _MAX_TEMPLATE_RENDER_SECONDS)
+
+    def charge_read(self, path: Path, text: str) -> None:
+        self.remaining_read_bytes -= len(text.encode("utf-8"))
+        if self.remaining_read_bytes < 0:
+            raise _template_value_error(path, f"templates read by one call exceed {_MAX_TEMPLATE_SIZE} bytes")
+
+    def charge_rendered(self, path: Path, chunk: str) -> None:
+        self.remaining_rendered_chars -= len(chunk)
+        if self.remaining_rendered_chars < 0:
+            raise _template_value_error(path, f"templates rendered by one call exceed {_MAX_TEMPLATE_SIZE} characters")
+
+    def remaining_render_seconds(self, path: Path) -> float:
+        remaining = self.render_deadline - time.monotonic()
+        if remaining <= 0:
+            raise _template_value_error(
+                path,
+                f"templates rendered by one call exceed {_MAX_TEMPLATE_RENDER_SECONDS:g} seconds",
+            )
+        return remaining
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +346,7 @@ def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_Templat
             msg = "Workspace todo template directory escapes workspace"
             raise ValueError(msg) from None
         roots.append(
-            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root.resolve()),
+            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root),
         )
     roots.append(_TemplateRoot(path=_templates_dir(), source="builtin"))
     return tuple(roots)
@@ -303,19 +362,43 @@ def _resolve_template_path(name: str, template_roots: Sequence[_TemplateRoot]) -
     raise ValueError(msg)
 
 
+def _builtin_applies(name: str, template_roots: Sequence[_TemplateRoot]) -> bool:
+    """Return whether apply_template would use the built-in template of this name."""
+    try:
+        return _resolve_template_path(name, template_roots)[1].source == "builtin"
+    except ValueError:
+        return False
+
+
 def _template_value_error(path: Path, message: str) -> ValueError:
     return ValueError(f"Invalid template '{path.name}': {message}")
 
 
-def _render_jinja_template(template_text: str, params: Mapping[str, Any], *, path: Path) -> str:
+def _render_jinja_template(
+    template_text: str,
+    params: Mapping[str, Any],
+    *,
+    path: Path,
+    template_root: _TemplateRoot,
+    budget: _TemplateBudget,
+) -> str:
+    workspace = template_root.source == "workspace"
+    timeout_seconds = budget.remaining_render_seconds(path) if workspace else 0.0
     try:
-        return _JINJA_ENV.from_string(template_text).render(**params)
-    except SecurityError as exc:
-        raise _template_value_error(path, f"unsafe template expression: {exc}") from exc
-    except UndefinedError as exc:
-        raise _template_value_error(path, f"undefined variable: {exc}") from exc
-    except TemplateSyntaxError as exc:
-        raise _template_value_error(path, f"syntax error: {exc}") from exc
+        if workspace:
+            rendered_text = render_workspace_template(
+                template_text,
+                params,
+                max_chars=budget.remaining_rendered_chars,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            # Built-in templates ship with MindRoom, so they render in this process.
+            rendered_text = render_trusted_template(template_text, params, max_chars=budget.remaining_rendered_chars)
+    except ValueError as exc:
+        raise _template_value_error(path, str(exc)) from exc
+    budget.charge_rendered(path, rendered_text)
+    return rendered_text
 
 
 def _format_validation_error(exc: ValidationError) -> str:
@@ -328,7 +411,7 @@ def _format_validation_error(exc: ValidationError) -> str:
 
 def _load_template_document(path: Path, text: str) -> dict[str, Any]:
     try:
-        document = yaml_io.safe_load(text)
+        document = yaml_io.safe_load_without_aliases(text)
     except yaml.YAMLError as exc:
         raise _template_value_error(path, str(exc)) from exc
     if not isinstance(document, dict):
@@ -372,8 +455,8 @@ def _validate_dependency_cycle(template_name: str, todos: list[dict[str, Any]]) 
         visit(node_id)
 
 
-def _load_template_metadata(path: Path, template_root: _TemplateRoot) -> dict[str, str]:
-    template = _load_template_document(path, template_root.read_text(path))
+def _load_template_metadata(path: Path, text: str) -> dict[str, str]:
+    template = _load_template_document(path, text)
     expected_name = path.name.removesuffix(".yaml.j2")
     name = template.get("name")
     version = template.get("version")
@@ -418,7 +501,9 @@ def _render_template_definition(
     params: dict[str, Any],
     *,
     template_roots: Sequence[_TemplateRoot],
+    budget: _TemplateBudget,
     depth: int = 1,
+    max_todos: int = _MAX_TEMPLATE_TODOS,
 ) -> dict[str, Any]:
     if depth > _TEMPLATE_RECURSION_LIMIT:
         msg = f"Template recursion depth exceeded while expanding '{name}'"
@@ -426,8 +511,9 @@ def _render_template_definition(
 
     path, template_root = _resolve_template_path(name, template_roots)
     raw_text = template_root.read_text(path)
-    raw_template = _load_template_document(path, raw_text)
-    _validate_template_document(raw_template, path)
+    budget.charge_read(path, raw_text)
+    # The unrendered template must be YAML, so Jinja stays inside values; the rendered document is validated below.
+    _load_template_document(path, raw_text)
     schema = _PARAMS_SCHEMAS.get(name) if template_root.source == "builtin" else None
     if schema is None:
         resolved_params = dict(params)
@@ -437,12 +523,24 @@ def _render_template_definition(
         except ValidationError as exc:
             raise _template_value_error(path, f"params validation failed: {_format_validation_error(exc)}") from exc
 
-    rendered_text = _render_jinja_template(raw_text, resolved_params, path=path)
+    rendered_text = _render_jinja_template(
+        raw_text,
+        resolved_params,
+        path=path,
+        template_root=template_root,
+        budget=budget,
+    )
     rendered_template = _load_template_document(path, rendered_text)
     rendered_document = _validate_template_document(rendered_template, path)
     rendered_todos = rendered_document.model_dump(mode="python", exclude_none=True)["todos"]
     _validate_depends_on_indexes(rendered_todos, path=path)
-    expanded_todos = _expand_template_todos(rendered_todos, template_roots=template_roots, depth=depth)
+    expanded_todos = _expand_template_todos(
+        rendered_todos,
+        template_roots=template_roots,
+        budget=budget,
+        depth=depth,
+        max_todos=max_todos,
+    )
     _validate_dependency_cycle(rendered_document.name, expanded_todos)
 
     return {
@@ -458,12 +556,18 @@ def _expand_template_todos(
     todos: list[dict[str, Any]],
     *,
     template_roots: Sequence[_TemplateRoot],
+    budget: _TemplateBudget,
     depth: int,
+    max_todos: int,
 ) -> list[dict[str, Any]]:
     expanded: list[dict[str, Any]] = []
     index_map: dict[int, _ExpandedTemplateIndex] = {}
 
     for original_index, entry in enumerate(todos, start=1):
+        # Every entry adds at least one todo, so this budget also bounds sub-template renders.
+        if len(expanded) >= max_todos:
+            msg = f"Templates may expand to at most {_MAX_TEMPLATE_TODOS} todos"
+            raise ValueError(msg)
         if entry.get("title") is not None:
             expanded.append(
                 {
@@ -482,7 +586,9 @@ def _expand_template_todos(
             entry["sub_template"],
             entry.get("params", {}),
             template_roots=template_roots,
+            budget=budget,
             depth=depth + 1,
+            max_todos=max_todos - len(expanded),
         )
         offset = len(expanded)
         expanded.extend(
@@ -934,7 +1040,12 @@ class TodoTools(Toolkit):
     ) -> str:
         """Apply a named todo template to the current thread's work plan."""
         template_roots = _visible_template_roots(agent)
-        rendered_template = _render_template_definition(name, params, template_roots=template_roots)
+        rendered_template = _render_template_definition(
+            name,
+            params,
+            template_roots=template_roots,
+            budget=_TemplateBudget(),
+        )
         if dry_run:
             return _format_template_preview(
                 rendered_template["name"],
@@ -994,26 +1105,33 @@ class TodoTools(Toolkit):
     def list_templates(self, agent: Agent | Team) -> str:
         """List available todo templates."""
         templates: list[dict[str, Any]] = []
-        seen_names: set[str] = set()
-        for template_root in _visible_template_roots(agent):
+        remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES
+        template_roots = _visible_template_roots(agent)
+        for template_root in template_roots:
             templates_root = template_root.path.resolve()
             if not templates_root.is_dir():
                 continue
-            for path in sorted(templates_root.glob("*.yaml.j2")):
+            for path in template_root.template_paths(templates_root):
                 try:
                     resolve_path_within_root(templates_root, path, symlinks="internal")
                 except ValueError:
                     msg = f"Template '{path.name}' escapes templates dir via symlink"
                     raise ValueError(msg) from None
                 try:
-                    metadata = _load_template_metadata(path, template_root)
+                    payload = template_root.read_bytes(path)
+                    if template_root.source == "workspace":
+                        remaining_workspace_bytes -= len(payload)
+                        if remaining_workspace_bytes < 0:
+                            logger.warning("Listing only the first workspace todo templates", template=path.name)
+                            break
+                    metadata = _load_template_metadata(path, payload.decode("utf-8"))
                 except (OSError, ValueError):
                     if template_root.source == "workspace":
                         continue
                     raise
-                if metadata["name"] in seen_names:
+                # A workspace file of the same name, listed or not, is what apply_template uses instead.
+                if template_root.source == "builtin" and not _builtin_applies(metadata["name"], template_roots):
                     continue
-                seen_names.add(metadata["name"])
                 schema = _PARAMS_SCHEMAS.get(metadata["name"]) if template_root.source == "builtin" else None
                 templates.append(
                     {

@@ -9,13 +9,19 @@ from typing import TYPE_CHECKING, cast
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.legacy_session_storage import decode_persisted_session_json
+from mindroom.logging_config import get_logger
 from mindroom.usage_storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
+
+# Startup skips a locked store at once; the store's owner retries it with the full timeout.
+_STARTUP_LOCK_TIMEOUT_SECONDS = 0.0
 
 
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
@@ -36,11 +42,11 @@ def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str,
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
 # Handling: Detect by schema; seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
 # Coverage: tests/test_legacy_usage_storage.py.
-def migrate_usage_database(path: Path, session_table: str) -> None:
+def migrate_usage_database(path: Path, session_table: str, *, timeout: float = 30) -> None:
     """Seed an existing database once; publication and all imported records commit together."""
     if not path.is_file():
         return
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=30)
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=timeout)
     try:
         if not _needs_migration(connection, session_table):
             return
@@ -127,13 +133,21 @@ def _migrate_stores(runtime_paths: RuntimePaths) -> None:
     for directory in directories:
         session_dir = directory / "sessions"
         path = session_dir / f"{directory.name}.db"
-        if not session_dir.is_symlink() and not path.is_symlink():
-            migrate_usage_database(path, f"{directory.name}_sessions")
+        try:
+            if not session_dir.is_symlink() and not path.is_symlink():
+                migrate_usage_database(path, f"{directory.name}_sessions", timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
+        except (sqlite3.Error, OSError) as error:
+            # Worker code can write session databases, so one unreadable or locked store must not stop startup.
+            # Its owner retries the import with the full lock timeout when it next opens the store.
+            logger.warning("usage_migration_skipped_unreadable_store", path=str(path), error=str(error))
 
 
-def _directories(root: Path) -> Iterator[Path]:
+def _directories(root: Path) -> list[Path]:
     if root.is_symlink() or not root.is_dir():
-        return
-    for child in sorted(root.iterdir()):
-        if not child.is_symlink() and child.is_dir():
-            yield child
+        return []
+    try:
+        return [child for child in sorted(root.iterdir()) if not child.is_symlink() and child.is_dir()]
+    except OSError as error:
+        # Worker code can make a state directory unlistable; skip the stores beneath it instead of stopping startup.
+        logger.warning("usage_migration_skipped_unreadable_store", path=str(root), error=str(error))
+        return []

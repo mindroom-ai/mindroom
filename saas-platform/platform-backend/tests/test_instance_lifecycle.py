@@ -3,33 +3,46 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
-from backend.deps import verify_admin, verify_user
-from backend.openrouter import CreatedOpenRouterKey, OpenRouterKeyNotFoundError
+import stripe
+from backend.deps import verify_admin, verify_user, verify_user_allow_deleted
+from backend.openrouter import CreatedOpenRouterKey, OpenRouterError, OpenRouterKeyNotFoundError
 from backend.pricing import get_plan_details
 from backend.services.instance_lifecycle import (
+    DELETION_BILLING_MARKER,
     LifecycleSummary,
+    lifecycle_overview,
     reconcile_all_subscriptions,
     reconcile_subscription_instances,
 )
-from backend.services.provisioner_service import provision_instance, set_instance_openrouter_key_disabled
+from backend.services.provisioner_service import (
+    InstanceClaimLostError,
+    provision_instance,
+    revoke_instance_openrouter_key,
+    set_instance_openrouter_key_disabled,
+)
 from backend.tasks.cleanup import run_cleanup_job
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
+from supabase import PostgrestAPIError
 
-from tests.fake_supabase import FakeSupabase
+from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
 
 ACCOUNT_ID = "00000000-0000-0000-0000-000000000001"
 SUBSCRIPTION_ID = "11111111-1111-1111-1111-111111111111"
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
+LEGACY = "backend.services.legacy_instance_lifecycle"
+PERIOD_END = 1_790_000_000
 
 
 @dataclass
@@ -42,6 +55,7 @@ class Platform:
     provision: AsyncMock
     uninstall: AsyncMock
     set_key_disabled: AsyncMock
+    limit_key: AsyncMock
     stripe: Mock
 
     def instance(self) -> dict[str, Any]:
@@ -78,6 +92,8 @@ def _instance(status: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
         "status": status,
         "tier": "hobby",
         "openrouter_key_hash": "key_hash_7",
+        "openrouter_key_limit_usd": get_plan_details("hobby").included_ai_budget_usd,
+        "openrouter_key_limit_reset": "monthly",
         "lifecycle_stopped_at": None,
         "teardown_after": None,
         "lifecycle_error": None,
@@ -110,11 +126,12 @@ def platform() -> Iterator[Platform]:
         *,
         data: dict[str, Any],
         background_tasks: Any,  # noqa: ANN401, ARG001
-        resume_lifecycle_hold: bool,
+        resume_lifecycle_hold: bool,  # noqa: ARG001
+        expected_status: str | None,  # noqa: ARG001
     ) -> dict[str, Any]:
-        assert resume_lifecycle_hold
+        # Like provision_instance, a successful deploy records the tier it deployed.
         db.row("instances", instance_id=data["instance_id"]).update(
-            {"status": "running", "openrouter_key_hash": "key_hash_new"}
+            {"status": "running", "tier": data["tier"], "openrouter_key_hash": "key_hash_new"}
         )
         return {"success": True}
 
@@ -126,6 +143,7 @@ def platform() -> Iterator[Platform]:
         provision=AsyncMock(side_effect=provision),
         uninstall=mark("deprovisioned"),
         set_key_disabled=AsyncMock(),
+        limit_key=AsyncMock(),
         stripe=Mock(api_key=""),
     )
     with (
@@ -134,10 +152,12 @@ def platform() -> Iterator[Platform]:
         patch("backend.tasks.cleanup.ensure_supabase", return_value=db),
         patch(f"{lifecycle}.run_kubectl", platform.kubectl),
         patch(f"{lifecycle}.check_deployment_exists", AsyncMock(return_value=True)),
+        patch(f"{LEGACY}.check_deployment_exists", AsyncMock(return_value=True)),
         patch(f"{lifecycle}.start_instance", platform.start),
         patch(f"{lifecycle}.provision_instance", platform.provision),
         patch(f"{lifecycle}.uninstall_instance", platform.uninstall),
         patch(f"{lifecycle}.set_instance_openrouter_key_disabled", platform.set_key_disabled),
+        patch(f"{lifecycle}.set_instance_openrouter_key_limit", platform.limit_key),
         patch(f"{lifecycle}.stripe", platform.stripe),
         patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", "whsec_test"),
     ):
@@ -147,23 +167,73 @@ def platform() -> Iterator[Platform]:
 def _send_webhook(event_type: str, obj: dict[str, Any]) -> dict[str, Any]:
     event = Mock(id=f"evt_{event_type}", type=event_type)
     event.data.object = obj
-    with patch("backend.routes.webhooks.stripe.Webhook.construct_event", return_value=event):
+    with (
+        patch("backend.routes.webhooks.stripe.Webhook.construct_event", return_value=event),
+        patch("backend.routes.webhooks.stripe.Subscription.retrieve", return_value=obj)
+        if event_type == "customer.subscription.updated"
+        else contextlib.nullcontext(),
+    ):
         response = TestClient(app).post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
     assert response.status_code == 200
     return response.json()
 
 
-def _stripe_subscription(status: str) -> dict[str, Any]:
+def _stripe_subscription(status: str, tier: str = "hobby") -> dict[str, Any]:
     return {
         "id": "sub_stripe_1",
         "customer": "cus_1",
         "status": status,
-        "items": {
-            "data": [{"price": {"id": "price_hobby", "metadata": {"tier": "hobby", "billing_cycle": "monthly"}}}]
-        },
+        "items": {"data": [{"price": {"id": f"price_{tier}", "metadata": {"tier": tier, "billing_cycle": "monthly"}}}]},
         "trial_end": None,
         "canceled_at": None,
     }
+
+
+def _pro_key() -> dict[str, Any]:
+    """Stored metadata of the platform-paid key a pro instance was provisioned with."""
+    return {
+        "openrouter_key_hash": "key_hash_pro",
+        "openrouter_key_limit_usd": get_plan_details("pro").included_ai_budget_usd,
+        "openrouter_key_limit_reset": "monthly",
+    }
+
+
+def _held(now: datetime) -> dict[str, Any]:
+    return {
+        "lifecycle_stopped_at": (now - timedelta(days=2)).isoformat(),
+        "teardown_after": (now + timedelta(days=28)).isoformat(),
+    }
+
+
+def _pending_deletion(platform: Platform, *, days_ago: float = 1) -> None:
+    deleted_at = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    platform.db.row("accounts", id=ACCOUNT_ID).update({"deleted_at": deleted_at, "status": "deleted"})
+
+
+def _stripe_lists(platform: Platform, *subscriptions: Mock) -> None:
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.list.return_value.auto_paging_iter.return_value = list(subscriptions)
+
+
+def _stripe_sub(
+    stripe_id: str, status: str, *, ends: bool = False, ends_on: int | None = None, marked: bool = False
+) -> MagicMock:
+    """A Stripe subscription as the list API returns it, optionally already set to end with its period or on a date.
+
+    Its paid period ends at PERIOD_END. Stripe sets `cancel_at` in both cases, and `cancel_at_period_end` only in the
+    first.
+    """
+    metadata = {DELETION_BILLING_MARKER: "none"} if marked else {}
+    cancel_at = PERIOD_END if ends else ends_on
+    subscription = MagicMock(id=stripe_id, status=status, cancel_at_period_end=ends, cancel_at=cancel_at)
+    subscription.metadata = metadata
+    subscription.__getitem__.side_effect = {"items": {"data": [{"current_period_end": PERIOD_END}]}}.__getitem__
+    return subscription
+
+
+def _claimable(platform: Platform) -> None:
+    """Let the nightly cleanup claim the pending account, as claim_account_hard_delete does after the grace period."""
+    platform.db.rpc_results["claim_account_hard_delete"] = True
 
 
 def test_webhook_cancel_stops_instance_disables_key_and_schedules_teardown(platform: Platform) -> None:
@@ -240,6 +310,157 @@ async def test_resubscribe_after_teardown_reprovisions_instance(platform: Platfo
     assert platform.instance()["lifecycle_stopped_at"] is None
 
 
+@pytest.mark.asyncio
+async def test_resume_of_a_torn_down_instance_another_replica_claimed_mints_no_key(platform: Platform) -> None:
+    """A torn-down instance that another backend replica starts reprovisioning first is not deployed again."""
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "deprovisioned",
+            openrouter_key_hash=None,
+            lifecycle_stopped_at=(now - timedelta(days=40)).isoformat(),
+            teardown_after=(now - timedelta(days=10)).isoformat(),
+        )
+    )
+    read_instances = FakeQuery.execute
+
+    def claim_after_read(query: FakeQuery) -> FakeResult:
+        result = read_instances(query)
+        if query.table_name == "instances" and query.action == "select":
+            platform.instance()["status"] = "provisioning"
+        return result
+
+    service = "backend.services.provisioner_service"
+    with (
+        patch("backend.services.instance_lifecycle.provision_instance", provision_instance),
+        patch.object(FakeQuery, "execute", claim_after_read),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.create_openrouter_key") as mint,
+    ):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    mint.assert_not_called()
+    platform.set_key_disabled.assert_not_awaited()
+    assert summary.instances_resumed == 0
+    assert summary.errors == []
+    assert platform.instance()["status"] == "provisioning"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_plan_redeploy_never_revokes_the_key_another_replica_recorded_but_has_not_published(
+    platform: Platform,
+) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="hobby"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+    read_instances = FakeQuery.execute
+
+    def claim_after_read(query: FakeQuery) -> FakeResult:
+        # Another replica claims the instance right after this run read it, and records its new key before it
+        # writes the key into the still empty instance Secret.
+        result = read_instances(query)
+        if query.table_name == "instances" and query.action == "select":
+            platform.instance().update({"status": "provisioning", "openrouter_key_hash": "hash_other"})
+        return result
+
+    service = "backend.services.provisioner_service"
+    with (
+        patch("backend.services.instance_lifecycle.provision_instance", provision_instance),
+        patch.object(FakeQuery, "execute", claim_after_read),
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.set_openrouter_key_limit", Mock()),
+        patch(f"{service}.delete_openrouter_key") as delete_key,
+        patch(f"{service}.create_openrouter_key") as mint,
+    ):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    delete_key.assert_not_called()
+    mint.assert_not_called()
+    assert summary.errors == []
+    assert platform.instance()["openrouter_key_hash"] == "hash_other"
+    assert platform.instance()["status"] == "provisioning"
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_instance_held_when_its_account_deletion_lands_meanwhile(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+    start = platform.start.side_effect
+
+    async def start_while_the_account_deletion_lands(instance_id: Any) -> dict[str, Any]:  # noqa: ANN401
+        # A deletion request on another backend replica marks the account while this replica starts the instance.
+        _pending_deletion(platform, days_ago=0)
+        return await start(instance_id)
+
+    platform.start.side_effect = start_while_the_account_deletion_lands
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    platform.start.assert_awaited_once_with(7)
+    assert summary.instances_resumed == 0
+    assert platform.scaled_down()
+    assert [key_call.kwargs for key_call in platform.set_key_disabled.await_args_list] == [{"disabled": True}]
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_instance_held_when_its_account_deletion_lands_while_a_vanished_key_is_replaced(
+    platform: Platform,
+) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+    platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
+    provision = platform.provision.side_effect
+
+    async def provision_while_the_account_deletion_lands(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        # A deletion request on another backend replica marks the account while this replica replaces the key.
+        _pending_deletion(platform, days_ago=0)
+        return await provision(*args, **kwargs)
+
+    platform.provision.side_effect = provision_while_the_account_deletion_lands
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    platform.provision.assert_awaited_once()
+    assert summary.instances_resumed == 0
+    assert platform.scaled_down()
+    assert [key_call.kwargs for key_call in platform.set_key_disabled.await_args_list] == [
+        {"disabled": False},
+        {"disabled": True},
+    ]
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_replacement_key_another_run_recorded_after_the_old_one_vanished(
+    platform: Platform,
+) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+
+    async def key_gone(_instance_row: dict[str, Any], *, disabled: bool) -> None:
+        if not disabled:
+            # Another run that found the key gone too recorded its replacement and claimed the redeploy first.
+            platform.instance()["openrouter_key_hash"] = "hash_other"
+            msg = "OpenRouter key not found"
+            raise OpenRouterKeyNotFoundError(msg)
+
+    platform.set_key_disabled.side_effect = key_gone
+    platform.provision.side_effect = InstanceClaimLostError
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    assert platform.instance()["openrouter_key_hash"] == "hash_other"
+
+
 def test_manually_stopped_instance_of_entitled_subscription_stays_stopped(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active"))
     platform.db.tables["instances"].append(_instance("stopped"))
@@ -271,9 +492,10 @@ async def test_nightly_job_catches_missed_cancellation_and_records_run(platform:
     platform.db.tables["instances"].append(_instance("error"))
 
     with (
-        patch("backend.tasks.cleanup.cleanup_soft_deleted_accounts", return_value={"accounts_deleted": 0}),
+        patch(
+            "backend.tasks.cleanup.cleanup_soft_deleted_accounts", return_value={"accounts_deleted": 0, "errors": []}
+        ),
         patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0}),
-        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", return_value={"usage_metrics_deleted": 0}),
     ):
         run = await run_cleanup_job()
 
@@ -358,18 +580,15 @@ async def test_teardown_skipped_when_subscription_became_entitled(platform: Plat
 @pytest.mark.asyncio
 async def test_one_failing_cleanup_task_does_not_skip_the_others(platform: Platform) -> None:
     audit_logs = Mock(return_value={"audit_logs_deleted": 3})
-    usage_metrics = Mock(return_value={"usage_metrics_deleted": 4})
     reconcile = AsyncMock(return_value=LifecycleSummary())
     with (
         patch("backend.tasks.cleanup.cleanup_soft_deleted_accounts", side_effect=RuntimeError("rpc denied")),
         patch("backend.tasks.cleanup.cleanup_old_audit_logs", audit_logs),
-        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", usage_metrics),
         patch("backend.tasks.cleanup.reconcile_all_subscriptions", reconcile),
     ):
         run = await run_cleanup_job()
 
     audit_logs.assert_called_once()
-    usage_metrics.assert_called_once()
     reconcile.assert_awaited_once()
     assert run["ok"] is False
     assert run["summary"]["accounts"] == {"error": "rpc denied"}
@@ -454,7 +673,7 @@ async def test_stale_stored_status_is_corrected_from_stripe_instead_of_stopping(
     platform.db.tables["subscriptions"].append(_subscription("incomplete"))
     platform.db.tables["instances"].append(_instance("running"))
     platform.stripe.api_key = "sk_test"
-    platform.stripe.Subscription.retrieve.return_value = {"status": "active", "trial_end": None}
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("active")
 
     summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
 
@@ -483,8 +702,8 @@ async def test_resubscription_during_stripe_refresh_is_not_overwritten(platform:
         if stripe_subscription_id == "sub_stripe_1":
             # The resubscription webhook rebinds the row while the old subscription is being fetched.
             platform.subscription().update({"stripe_subscription_id": "sub_stripe_2", "status": "active"})
-            return {"status": "canceled", "trial_end": None}
-        return {"status": "active", "trial_end": None}
+            return _stripe_subscription("canceled")
+        return {**_stripe_subscription("active"), "id": stripe_subscription_id}
 
     platform.stripe.Subscription.retrieve.side_effect = retrieve
 
@@ -508,7 +727,7 @@ async def test_payment_recovery_during_stripe_refresh_is_not_overwritten(platfor
         )
     )
     platform.stripe.api_key = "sk_test"
-    responses = iter([{"status": "unpaid", "trial_end": None}, {"status": "active", "trial_end": None}])
+    responses = iter([_stripe_subscription("unpaid"), _stripe_subscription("active")])
 
     def retrieve(_stripe_subscription_id: str) -> dict[str, Any]:
         response = next(responses)
@@ -532,7 +751,7 @@ async def test_nightly_run_stops_instance_restarted_by_a_stale_active_event(plat
     platform.db.tables["subscriptions"].append(_subscription("active"))
     platform.db.tables["instances"].append(_instance("running"))
     platform.stripe.api_key = "sk_test"
-    platform.stripe.Subscription.retrieve.return_value = {"status": "canceled", "trial_end": None}
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("canceled")
 
     summary = await reconcile_all_subscriptions()
 
@@ -555,7 +774,7 @@ async def test_nightly_run_reprovisions_torn_down_instance_after_a_missed_paymen
         )
     )
     platform.stripe.api_key = "sk_test"
-    platform.stripe.Subscription.retrieve.return_value = {"status": "active", "trial_end": None}
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("active")
 
     await reconcile_all_subscriptions()
 
@@ -576,7 +795,7 @@ async def test_held_instance_is_not_resumed_on_a_stale_active_status(platform: P
         )
     )
     platform.stripe.api_key = "sk_test"
-    platform.stripe.Subscription.retrieve.return_value = {"status": "canceled", "trial_end": None}
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("canceled")
 
     await reconcile_subscription_instances(SUBSCRIPTION_ID)
 
@@ -940,7 +1159,7 @@ def test_customer_start_is_refused_when_stripe_contradicts_the_stored_active_sta
         )
     )
     platform.stripe.api_key = "sk_test"
-    platform.stripe.Subscription.retrieve.return_value = {"status": "canceled", "trial_end": None}
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("canceled")
     app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
     try:
         with (
@@ -960,7 +1179,7 @@ def test_customer_start_is_refused_when_stripe_contradicts_the_stored_active_sta
 @pytest.mark.asyncio
 async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_unpublished_key() -> None:
     hobby_budget = get_plan_details("hobby").included_ai_budget_usd
-    # The stored key is stale (old budget), so provisioning mints a replacement.
+    # The stored key needs a lower limit; a failed Secret publication must preserve its identity.
     db = FakeSupabase(
         {
             "instances": [
@@ -1008,6 +1227,7 @@ async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_
         patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
         patch(f"{service}.create_openrouter_key", create_key),
         patch(f"{service}.delete_openrouter_key", delete_key),
+        patch(f"{service}.set_openrouter_key_limit", Mock()),
         patch(f"{service}._apply_instance_secret", apply_secret),
         patch(f"{service}.run_kubectl", kubectl),
         patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
@@ -1015,12 +1235,157 @@ async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_
     ):
         with pytest.raises(HTTPException):
             await provision_instance(db, data=data, background_tasks=None, resume_lifecycle_hold=True)
+        # The limit changed, but the published key and stored identity survive.
         assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_A"
+        assert alive == {"hash_A"}
         await provision_instance(db, data=data, background_tasks=None, resume_lifecycle_hold=True)
 
-    assert published["openrouter_key"] == "key_C"
-    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_C"
-    assert alive == {"hash_C"}
+    assert published["openrouter_key"] == "key_A"
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_A"
+    assert alive == {"hash_A"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_redeploys_keep_only_the_first_recorded_key() -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+    alive: set[str] = set()
+    published: dict[str, str] = {}
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        # A redeploy on another backend replica, which claimed the instance at the same time, records and publishes
+        # its key first.
+        alive.update({"hash_other", "hash_ours"})
+        db.row("instances", instance_id=7)["openrouter_key_hash"] = "hash_other"
+        published["openrouter_key"] = "key_other"
+        return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        alive.discard(key_hash)
+
+    async def apply_secret(_instance_id: str, _namespace: str, secret_data: dict[str, str]) -> str:
+        published.update(secret_data)
+        return "hash"
+
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", delete_key),
+        patch(f"{service}._apply_instance_secret", apply_secret),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.run_helm", helm),
+        patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        pytest.raises(InstanceClaimLostError),
+    ):
+        await provision_instance(db, data=data, background_tasks=None)
+
+    assert alive == {"hash_other"}
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_other"
+    assert published["openrouter_key"] == "key_other"
+    assert db.row("instances", instance_id=7)["status"] == "provisioning"
+    helm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recorded_during_publication", "expected_hash"),
+    [
+        pytest.param(None, None, id="still-ours"),
+        pytest.param("hash_other", "hash_other", id="replaced-by-another-run"),
+    ],
+)
+async def test_a_recorded_key_whose_secret_publication_fails_is_deleted_and_forgotten(
+    recorded_during_publication: str | None, expected_hash: str | None
+) -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+    alive: set[str] = set()
+    recorded_at_publication: list[str | None] = []
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        alive.add("hash_ours")
+        return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        alive.discard(key_hash)
+
+    async def apply_secret(_instance_id: str, _namespace: str, _secret_data: dict[str, str]) -> str:
+        recorded_at_publication.append(db.row("instances", instance_id=7)["openrouter_key_hash"])
+        if recorded_during_publication is not None:
+            # Another run revoked this key and recorded its own replacement.
+            db.row("instances", instance_id=7)["openrouter_key_hash"] = recorded_during_publication
+        msg = "Failed to apply instance Secret mindroom-api-keys-7"
+        raise RuntimeError(msg)
+
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", delete_key),
+        patch(f"{service}._apply_instance_secret", apply_secret),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.run_helm", helm),
+        pytest.raises(HTTPException),
+    ):
+        await provision_instance(db, data=data, background_tasks=None)
+
+    assert recorded_at_publication == ["hash_ours"]
+    assert alive == set()
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == expected_hash
+    helm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revoking_a_key_keeps_the_replacement_another_run_recorded_meanwhile() -> None:
+    db = FakeSupabase({"instances": [_instance("running", openrouter_key_hash="hash_old")]})
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        # Another provision, which also found the old key gone, records its replacement while this delete runs.
+        db.row("instances", instance_id=7)["openrouter_key_hash"] = "hash_new"
+
+    with patch("backend.services.provisioner_service.delete_openrouter_key", delete_key):
+        await revoke_instance_openrouter_key(db, 7)
+
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_new"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delete_error", "expected_hash"),
+    [
+        pytest.param(OpenRouterError("OpenRouter key deletion failed with status 503"), "hash_ours", id="delete-fails"),
+        pytest.param(OpenRouterKeyNotFoundError("OpenRouter key deletion failed with status 404"), None, id="gone"),
+    ],
+)
+async def test_a_recorded_key_whose_secret_publication_fails_stays_recorded_until_it_is_gone(
+    delete_error: OpenRouterError, expected_hash: str | None
+) -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
+
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", Mock(side_effect=delete_error)),
+        patch(f"{service}._apply_instance_secret", AsyncMock(side_effect=RuntimeError("Secret apply failed"))),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        pytest.raises(HTTPException),
+    ):
+        await provision_instance(db, data=data, background_tasks=None)
+
+    # A key that may still be live keeps its record, so disabling or revoking the instance's key can reach it.
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == expected_hash
 
 
 def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:
@@ -1039,3 +1404,1057 @@ def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:
         assert "REVOKE ALL ON TABLE cleanup_runs FROM PUBLIC, anon, authenticated;" in sql
         assert "GRANT ALL ON TABLE cleanup_runs TO service_role;" in sql
         assert "'incomplete', 'incomplete_expired', 'unpaid'" in sql
+
+
+def _request_deletion(platform: Platform) -> Any:  # noqa: ANN401
+    # The soft_delete_account RPC is recorded, not run, so the account is marked pending deletion up front.
+    _pending_deletion(platform, days_ago=0)
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with patch("backend.routes.gdpr.ensure_supabase", return_value=platform.db):
+            return TestClient(app).post("/my/gdpr/request-deletion", json={"confirmation": True})
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_deletion_request_stops_instances_and_lets_paid_billing_end_with_its_period(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    _stripe_lists(
+        platform,
+        _stripe_sub("sub_stripe_1", "active"),
+        _stripe_sub("sub_customer_ends", "active", ends=True),
+        _stripe_sub("sub_customer_ends_on_date", "active", ends_on=PERIOD_END - 86_400),
+        _stripe_sub("sub_unpaid_checkout", "incomplete"),
+        _stripe_sub("sub_stripe_old", "canceled"),
+    )
+
+    response = _request_deletion(platform)
+
+    assert response.status_code == 200
+    assert platform.db.rpc_calls[0][0] == "soft_delete_account"
+    # Only the paid subscription that would renew is set to end, and marked so cancelling the deletion undoes it;
+    # the customer's own end dates stay.
+    platform.stripe.Subscription.modify.assert_called_once_with(
+        "sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"}
+    )
+    # A first invoice left unpaid has no period to finish and must not be paid during the grace period.
+    platform.stripe.Subscription.cancel.assert_called_once_with("sub_unpaid_checkout")
+    assert platform.scaled_down()
+    assert platform.set_key_disabled.await_args.kwargs == {"disabled": True}
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_account_pending_deletion_stays_stopped_while_stripe_still_reports_active(platform: Platform) -> None:
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(datetime.now(UTC))))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("active")
+
+    summary = await reconcile_all_subscriptions()
+
+    platform.stripe.Subscription.retrieve.assert_not_called()
+    platform.start.assert_not_awaited()
+    platform.provision.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+    assert summary.instances_resumed == 0
+
+
+@pytest.mark.asyncio
+async def test_account_pending_deletion_stops_instances_during_a_stripe_outage(platform: Platform) -> None:
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.side_effect = RuntimeError("stripe unavailable")
+
+    summary = await reconcile_all_subscriptions()
+
+    assert summary.errors == []
+    assert platform.scaled_down()
+    assert platform.instance()["status"] == "stopped"
+
+
+def _cleanup_with_other_tasks_stubbed() -> Any:  # noqa: ANN401
+    return patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0})
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_uninstalls_every_instance_and_cancels_billing_before_deleting_rows(
+    platform: Platform,
+) -> None:
+    _pending_deletion(platform, days_ago=8)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "past_due", ends=True, marked=True))
+    # The fake RPCs delete no rows, so the nightly lifecycle run after the cleanup still sees the instance.
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("canceled")
+    order: list[str] = []
+    platform.uninstall.side_effect = lambda instance_id: order.append(f"uninstall {instance_id}")
+    platform.stripe.Subscription.cancel.side_effect = lambda stripe_id: order.append(f"cancel {stripe_id}")
+
+    _claimable(platform)
+
+    with _cleanup_with_other_tasks_stubbed():
+        run = await run_cleanup_job()
+
+    assert order == ["cancel sub_stripe_1", "uninstall 7"]
+    assert [name for name, _params in platform.db.rpc_calls] == ["claim_account_hard_delete", "hard_delete_account"]
+    # The login goes last and takes the account row with it.
+    assert platform.db.auth.admin.deleted_users == [ACCOUNT_ID]
+    assert platform.db.tables["accounts"] == []
+    assert run["summary"]["accounts"]["accounts_deleted"] == 1
+    assert run["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_failed_auth_user_deletion_is_retried_by_the_next_run(platform: Platform) -> None:
+    _pending_deletion(platform, days_ago=8)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    _claimable(platform)
+    platform.db.auth.admin.error = RuntimeError("auth unavailable")
+
+    with _cleanup_with_other_tasks_stubbed():
+        failed = await run_cleanup_job()
+    # The account row, and with it the login, survives the failure, so the next run finds the account again.
+    assert platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] is not None
+    assert failed["summary"]["accounts"]["errors"] == [f"account {ACCOUNT_ID}: auth unavailable"]
+
+    platform.db.auth.admin.error = None
+    with _cleanup_with_other_tasks_stubbed():
+        retried = await run_cleanup_job()
+
+    assert platform.db.auth.admin.deleted_users == [ACCOUNT_ID]
+    assert platform.db.tables["accounts"] == []
+    assert retried["summary"]["accounts"]["accounts_deleted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_teardown_keeps_the_account_rows_for_the_next_run(platform: Platform) -> None:
+    _pending_deletion(platform, days_ago=8)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+    platform.uninstall.side_effect = HTTPException(status_code=500, detail="Failed to uninstall instance: timeout")
+    _claimable(platform)
+
+    with _cleanup_with_other_tasks_stubbed():
+        run = await run_cleanup_job()
+
+    assert [name for name, _params in platform.db.rpc_calls] == ["claim_account_hard_delete"]
+    assert run["ok"] is False
+    assert run["summary"]["accounts"]["accounts_deleted"] == 0
+    assert "Failed to uninstall instance: timeout" in run["summary"]["accounts"]["errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_account_the_database_does_not_let_cleanup_claim_is_not_torn_down(platform: Platform) -> None:
+    # The backend clock says the grace period ended, but restore_account's clock, the database's, disagrees.
+    _pending_deletion(platform, days_ago=7.01)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+    platform.db.rpc_results["claim_account_hard_delete"] = False
+
+    with _cleanup_with_other_tasks_stubbed():
+        run = await run_cleanup_job()
+
+    platform.uninstall.assert_not_awaited()
+    assert [name for name, _params in platform.db.rpc_calls] == ["claim_account_hard_delete"]
+    assert run["summary"]["accounts"] == {**run["summary"]["accounts"], "accounts_deleted": 0, "errors": []}
+
+
+@pytest.mark.asyncio
+async def test_account_inside_its_grace_period_is_not_torn_down(platform: Platform) -> None:
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+
+    with _cleanup_with_other_tasks_stubbed():
+        await run_cleanup_job()
+
+    platform.uninstall.assert_not_awaited()
+    assert platform.db.rpc_calls == []
+
+
+def _cancel_deletion(platform: Platform) -> Any:  # noqa: ANN401
+    record_rpc = platform.db.rpc
+    platform.db.rpc_results["restore_account"] = True
+
+    def restore_account(name: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
+        platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] = None
+        return record_rpc(name, params)
+
+    app.dependency_overrides[verify_user_allow_deleted] = lambda: {
+        "account_id": ACCOUNT_ID,
+        "email": "customer@example.com",
+    }
+    try:
+        with (
+            patch("backend.routes.gdpr.ensure_supabase", return_value=platform.db),
+            patch.object(platform.db, "rpc", side_effect=restore_account),
+        ):
+            return TestClient(app).post("/my/gdpr/cancel-deletion")
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(("stripe_status", "restarted"), [("canceled", False), ("active", True)])
+def test_cancelled_deletion_restarts_instances_only_for_a_subscription_stripe_still_bills(
+    platform: Platform, stripe_status: str, *, restarted: bool
+) -> None:
+    now = datetime.now(UTC)
+    _pending_deletion(platform)
+    # Stored as active, as the old restore_account wrote it; Stripe decides.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+    _stripe_lists(
+        platform,
+        _stripe_sub("sub_stripe_1", "active", ends=True, marked=True),
+        _stripe_sub("sub_customer_ends", "active", ends=True),
+    )
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription(stripe_status)
+
+    response = _cancel_deletion(platform)
+
+    assert response.status_code == 200
+    assert platform.db.rpc_calls == [("restore_account", {"target_account_id": ACCOUNT_ID})]
+    # Only the billing the deletion set to end renews again; the customer's own cancellation stays.
+    platform.stripe.Subscription.modify.assert_called_once_with(
+        "sub_stripe_1", cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""}
+    )
+    assert platform.start.await_count == int(restarted)
+    assert (platform.instance()["lifecycle_stopped_at"] is None) is restarted
+
+
+def test_cancelled_deletion_gives_a_held_instance_its_full_teardown_grace_period_again(platform: Platform) -> None:
+    # While the account was pending deletion, the teardown date of the held instance passed before anything moved it.
+    now = datetime.now(UTC)
+    _pending_deletion(platform, days_ago=3)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=3)).isoformat(),
+            teardown_after=(now - timedelta(hours=2)).isoformat(),
+        )
+    )
+    _stripe_lists(platform)
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("canceled")
+
+    assert _cancel_deletion(platform).status_code == 200
+
+    platform.uninstall.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+    assert datetime.fromisoformat(platform.instance()["teardown_after"]) >= now + timedelta(days=30)
+
+
+def test_fresh_provision_confirms_the_stored_status_with_stripe(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("canceled")
+    provision = AsyncMock(return_value={"success": True, "customer_id": "7"})
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
+            patch("backend.services.provisioner_service.provision_instance", provision),
+        ):
+            response = TestClient(app).post("/my/instances/provision")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 402
+    provision.assert_not_awaited()
+    assert platform.subscription()["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_resume_on_a_cheaper_tier_reprovisions_instead_of_reenabling_the_old_key(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key(), **_held(datetime.now(UTC))))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.start.assert_not_awaited()
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "byok"
+    assert platform.provision.await_args.kwargs["resume_lifecycle_hold"] is True
+    assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+def test_start_of_a_stopped_instance_redeploys_it_for_its_tier(platform: Platform) -> None:
+    # The pro key was revoked while the customer had it stopped after a downgrade to hobby.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", openrouter_key_hash=None))
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
+            patch("backend.services.provisioner_service.start_instance", platform.start),
+        ):
+            response = TestClient(app).post("/my/instances/7/start")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    platform.start.assert_awaited_once_with(7)
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "hobby"
+
+
+@pytest.mark.asyncio
+async def test_tier_change_with_the_same_budget_redeploys_a_running_instance(platform: Platform) -> None:
+    # Enterprise and byok both include no AI budget, but run different resource profiles.
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("running", tier="enterprise", openrouter_key_hash=None))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "byok"
+
+
+def test_plan_change_redeploys_a_running_instance_with_the_new_budget(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+
+    _send_webhook("customer.subscription.updated", _stripe_subscription("active", tier="hobby"))
+
+    assert platform.subscription()["tier"] == "hobby"
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "hobby"
+    # Not a resume, so a hold or an account deletion that lands during the redeploy keeps the instance stopped.
+    assert platform.provision.await_args.kwargs["resume_lifecycle_hold"] is False
+    platform.limit_key.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_after_failure", ["error", "running"])
+async def test_failed_plan_redeploy_is_recorded_and_retried(platform: Platform, status_after_failure: str) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="hobby"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+    redeploy = platform.provision.side_effect
+
+    async def helm_fails_once(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        if platform.provision.await_count == 1:
+            # Like provision_instance, the hobby key is published before Helm fails, which marks the instance
+            # errored; a Kubernetes status sync may set it back to running before the next run.
+            platform.instance().update(
+                {
+                    "status": status_after_failure,
+                    "openrouter_key_limit_usd": get_plan_details("hobby").included_ai_budget_usd,
+                }
+            )
+            msg = "Helm install failed: timed out"
+            raise RuntimeError(msg)
+        return await redeploy(*args, **kwargs)
+
+    platform.provision.side_effect = helm_fails_once
+
+    first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+    assert "Helm install failed" in platform.instance()["lifecycle_error"]
+    # The tier is recorded only after a successful deploy, so the instance still reads as pro.
+    assert platform.instance()["tier"] == "pro"
+
+    second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+    third = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert first.errors
+    assert second.errors == third.errors == []
+    assert platform.provision.await_count == 2
+    assert platform.instance()["tier"] == "hobby"
+    assert platform.instance()["lifecycle_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_redeploy_that_another_run_claimed_first_is_skipped_without_an_error(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="hobby"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+    platform.provision.side_effect = InstanceClaimLostError
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.provision.assert_awaited_once()
+    assert summary.errors == []
+    assert platform.instance()["lifecycle_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_change_limits_a_larger_key_of_a_stopped_instance_without_starting_it(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.limit_key.assert_awaited_once()
+    assert platform.limit_key.await_args.args[1]["instance_id"] == 7
+    platform.start.assert_not_awaited()
+    platform.provision.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_plan_upgrade_keeps_the_smaller_key_of_a_stopped_instance(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.limit_key.assert_not_awaited()
+    platform.provision.assert_not_awaited()
+    platform.start.assert_not_awaited()
+
+
+_SERVICE = "backend.services.provisioner_service"
+_REPROVISION_7 = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "instance_id": 7}
+
+
+def _pvc_listing(size: str) -> str:
+    return json.dumps(
+        {
+            "items": [
+                {"spec": {"storageClassName": "hcloud-volumes", "resources": {"requests": {"storage": size}}}},
+                {"spec": {"storageClassName": "hcloud-volumes", "resources": {"requests": {"storage": size}}}},
+            ]
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_reprovisioning_on_a_tier_without_budget_zeros_the_stored_key_limit() -> None:
+    db = FakeSupabase({"instances": [_instance("stopped", tier="pro", **_pro_key())]})
+    published: dict[str, str] = {}
+    set_limit = Mock(return_value=None)
+
+    async def apply_secret(_instance_id: str, _namespace: str, secret_data: dict[str, str]) -> str:
+        published.update(secret_data)
+        return "hash"
+
+    with (
+        patch(f"{_SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}.create_openrouter_key", Mock(side_effect=AssertionError("byok has no budget"))),
+        patch(f"{_SERVICE}.set_openrouter_key_limit", set_limit),
+        patch(f"{_SERVICE}._existing_instance_secret_value", AsyncMock(return_value="same-key")),
+        patch(f"{_SERVICE}._apply_instance_secret", apply_secret),
+        patch(f"{_SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+    ):
+        await provision_instance(
+            db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None, resume_lifecycle_hold=True
+        )
+
+    set_limit.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="key_hash_pro", limit_usd=0)
+    assert published["openrouter_key"] == "same-key"
+    row = db.row("instances", instance_id=7)
+    assert row["openrouter_key_hash"] == "key_hash_pro"
+    assert row["openrouter_key_limit_usd"] == 0
+    assert row["tier"] == "byok"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_redeploy_keeps_the_previously_deployed_tier() -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="pro", openrouter_key_hash=None)]})
+    with (
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{_SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(1, "", "timed out"))),
+        pytest.raises(HTTPException),
+    ):
+        await provision_instance(db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None)
+
+    # The lifecycle compares this tier with the subscription's, so it keeps retrying until a deploy succeeds.
+    assert db.row("instances", instance_id=7)["tier"] == "pro"
+    assert db.row("instances", instance_id=7)["status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tier", "existing_size", "expected_size"),
+    [("hobby", "25Gi", "25Gi"), ("pro", "10Gi", "25Gi"), ("pro", "50Gi", "50Gi")],
+)
+async def test_reprovisioning_never_shrinks_the_instance_volumes(
+    tier: str, existing_size: str, expected_size: str
+) -> None:
+    db = FakeSupabase({"instances": [_instance("running", openrouter_key_hash=None)]})
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+
+    async def kubectl(args: list[str], namespace: str | None = None) -> tuple[int, str, str]:  # noqa: ARG001
+        return (0, _pvc_listing(existing_size), "") if args[:2] == ["get", "pvc"] else (0, "", "")
+
+    created = CreatedOpenRouterKey("key", "hash_new", "label", get_plan_details(tier).included_ai_budget_usd, "monthly")
+    with (
+        patch(f"{_SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}.create_openrouter_key", Mock(return_value=created)),
+        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{_SERVICE}.run_kubectl", kubectl),
+        patch(f"{_SERVICE}.run_helm", helm),
+        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+    ):
+        await provision_instance(db, data={**_REPROVISION_7, "tier": tier}, background_tasks=None)
+
+    helm_args = helm.await_args.args[0]
+    storage_sets = [
+        value for flag, value in zip(helm_args, helm_args[1:]) if flag == "--set" and value.startswith("storage=")
+    ]
+    assert storage_sets[-1] == f"storage={expected_size}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("constraint", "status_code"), [("instances_subscription_id_key", 409), ("instances_subdomain_key", 500)]
+)
+async def test_a_second_instance_for_one_subscription_is_refused_by_the_database(
+    constraint: str, status_code: int
+) -> None:
+    create_key = Mock()
+    helm = AsyncMock()
+    duplicate = PostgrestAPIError(
+        {"code": "23505", "message": f'duplicate key value violates unique constraint "{constraint}"'}
+    )
+    with (
+        patch(f"{_SERVICE}.create_instance", Mock(side_effect=duplicate)),
+        patch(f"{_SERVICE}.create_openrouter_key", create_key),
+        patch(f"{_SERVICE}.run_helm", helm),
+        pytest.raises(HTTPException) as refused,
+    ):
+        await provision_instance(
+            FakeSupabase({"instances": []}),
+            data={"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "pro"},
+            background_tasks=None,
+        )
+
+    assert refused.value.status_code == status_code
+    create_key.assert_not_called()
+    helm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_soft_deleted_instance_that_kept_running_is_held(platform: Platform) -> None:
+    # An older soft_delete_account marked the instance deprovisioned without stopping its deployment.
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned"))
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert summary.errors == []
+    assert platform.scaled_down()
+    assert platform.set_key_disabled.await_args.kwargs == {"disabled": True}
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["teardown_after"] is not None
+
+
+@pytest.mark.asyncio
+async def test_legacy_soft_deleted_instance_of_a_paying_restored_account_runs(platform: Platform) -> None:
+    # An older soft delete stored the subscription as cancelled; the account was restored and Stripe still bills.
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("active")
+
+    await reconcile_all_subscriptions()
+
+    assert platform.subscription()["status"] == "active"
+    platform.kubectl.assert_not_awaited()
+    assert platform.instance()["status"] == "running"
+    assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_webhook_reconcile_does_not_look_for_legacy_deployments(platform: Platform) -> None:
+    # Only the nightly run and accounts pending deletion pay a Kubernetes call per torn-down instance.
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned", openrouter_key_hash=None))
+    check = AsyncMock(return_value=True)
+
+    with patch(f"{LEGACY}.check_deployment_exists", check):
+        await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    check.assert_not_awaited()
+    assert platform.instance()["status"] == "deprovisioned"
+
+
+@pytest.mark.asyncio
+async def test_nightly_run_sets_billing_of_accounts_inside_their_grace_period_to_end(platform: Platform) -> None:
+    # Deletion was requested before a release that set billing to end at request time.
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active"), _stripe_sub("sub_unpaid", "incomplete"))
+
+    with _cleanup_with_other_tasks_stubbed():
+        run = await run_cleanup_job()
+
+    platform.stripe.Subscription.modify.assert_called_once_with(
+        "sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"}
+    )
+    # Also a retry for a cancellation the deletion request could not finish.
+    platform.stripe.Subscription.cancel.assert_called_once_with("sub_unpaid")
+    assert platform.db.rpc_calls == []
+    assert run["summary"]["accounts"]["errors"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored", ["before the billing change", "during the billing change"])
+async def test_nightly_billing_change_leaves_an_account_restored_meanwhile_billed(
+    platform: Platform, restored: str
+) -> None:
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active"), _stripe_sub("sub_unpaid", "incomplete"))
+    account = platform.db.row("accounts", id=ACCOUNT_ID)
+    real_table = platform.db.table
+    listed = False
+
+    def restore_after_listing(name: str) -> Any:  # noqa: ANN401
+        # The customer cancels the deletion right after the nightly job listed the pending accounts.
+        nonlocal listed
+        query = real_table(name)
+        if name == "accounts" and not listed and restored == "before the billing change":
+            listed = True
+            execute = query.execute
+
+            def execute_then_restore() -> Any:  # noqa: ANN401
+                result = execute()
+                account["deleted_at"] = None
+                return result
+
+            query.execute = execute_then_restore
+        return query
+
+    def modify(_stripe_id: str, **params: Any) -> None:  # noqa: ANN401
+        if params["cancel_at_period_end"] and restored == "during the billing change":
+            account["deleted_at"] = None
+
+    platform.stripe.Subscription.modify.side_effect = modify
+
+    with _cleanup_with_other_tasks_stubbed(), patch.object(platform.db, "table", side_effect=restore_after_listing):
+        await run_cleanup_job()
+
+    ends = call("sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"})
+    resumes = call("sub_stripe_1", cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""})
+    expected = [] if restored == "before the billing change" else [ends, resumes]
+    assert platform.stripe.Subscription.modify.call_args_list == expected
+    # A cancellation cannot be undone, so a restored account never loses a subscription to it.
+    platform.stripe.Subscription.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deprovisioned_instance_without_a_deployment_is_left_alone(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned", openrouter_key_hash=None))
+
+    with patch(f"{LEGACY}.check_deployment_exists", AsyncMock(return_value=False)):
+        await reconcile_all_subscriptions()
+
+    platform.kubectl.assert_not_awaited()
+    assert platform.instance()["status"] == "deprovisioned"
+    assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+def test_failed_billing_schedule_undoes_the_subscriptions_it_already_set_to_end(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    _stripe_lists(platform, _stripe_sub("sub_a", "active"), _stripe_sub("sub_b", "trialing"))
+    platform.stripe.StripeError = stripe.StripeError
+
+    def modify(stripe_id: str, **params: Any) -> None:  # noqa: ANN401
+        if stripe_id == "sub_b" and params["cancel_at_period_end"]:
+            msg = "stripe unavailable"
+            raise stripe.APIConnectionError(msg)
+
+    platform.stripe.Subscription.modify.side_effect = modify
+
+    response = _request_deletion(platform)
+
+    assert response.status_code == 502
+    assert platform.db.rpc_calls == []
+    assert platform.stripe.Subscription.modify.call_args_list == [
+        call("sub_a", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"}),
+        call("sub_b", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"}),
+        call("sub_a", cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""}),
+    ]
+    assert platform.instance()["status"] == "running"
+
+
+@pytest.mark.parametrize(("path", "instances"), [("/my/instances/provision", []), ("/my/instances/7/start", [7])])
+def test_account_pending_deletion_cannot_provision_or_start_instances(
+    platform: Platform, path: str, instances: list[int]
+) -> None:
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].extend(_instance("stopped", instance_id=instance_id) for instance_id in instances)
+    provision = AsyncMock()
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
+            patch("backend.services.provisioner_service.provision_instance", provision),
+            patch("backend.services.provisioner_service.start_instance", platform.start),
+        ):
+            response = TestClient(app).post(path)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    provision.assert_not_awaited()
+    platform.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_lifecycle_hold", [False, True])
+async def test_an_instance_provisioned_for_an_account_pending_deletion_stays_stopped(
+    *, resume_lifecycle_hold: bool
+) -> None:
+    # The deletion request's hold ran before this instance row existed, or after a resume read the account, so only
+    # the account says to hold it.
+    db = FakeSupabase(
+        {
+            "accounts": [{"id": ACCOUNT_ID, "deleted_at": "2026-09-28T03:00:00+00:00"}],
+            "instances": [_instance("running", tier="byok", openrouter_key_hash=None)],
+        }
+    )
+    kubectl = AsyncMock(return_value=(0, "", ""))
+    with (
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{_SERVICE}.run_kubectl", kubectl),
+        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+    ):
+        result = await provision_instance(
+            db,
+            data={**_REPROVISION_7, "tier": "byok"},
+            background_tasks=None,
+            resume_lifecycle_hold=resume_lifecycle_hold,
+        )
+
+    assert "kept stopped" in result["message"]
+    assert db.row("instances", instance_id=7)["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during", ["helm", "readiness"])
+async def test_a_hold_that_lands_while_provisioning_keeps_the_instance_stopped(during: str) -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+    kubectl = AsyncMock(return_value=(0, "", ""))
+
+    def hold_now(step: str) -> None:
+        # A webhook reconcile holds the instance concurrently; the provisioning request does not take its lock.
+        if step == during:
+            db.row("instances", instance_id=7)["lifecycle_stopped_at"] = "2026-09-28T03:00:00+00:00"
+
+    async def helm(_args: list[str]) -> tuple[int, str, str]:
+        hold_now("helm")
+        return 0, "deployed", ""
+
+    async def wait_ready(*_args: Any, **_kwargs: Any) -> bool:  # noqa: ANN401
+        hold_now("readiness")
+        return True
+
+    with (
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{_SERVICE}.run_kubectl", kubectl),
+        patch(f"{_SERVICE}.run_helm", helm),
+        patch(f"{_SERVICE}.wait_for_deployment_ready", wait_ready),
+    ):
+        result = await provision_instance(db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None)
+
+    assert "kept stopped" in result["message"]
+    assert call(["scale", "deployment/mindroom-7", "--replicas=0"], namespace="mindroom-instances") in (
+        kubectl.await_args_list
+    )
+    assert db.row("instances", instance_id=7)["status"] == "stopped"
+
+
+def test_a_trial_after_an_ended_earlier_trial_ends_at_once(platform: Platform) -> None:
+    # A checkout opened before the earlier trial was cancelled still carried a trial.
+    platform.db.tables["subscriptions"].append(_subscription("cancelled", stripe_subscription_id="sub_stripe_old"))
+    trialing = {**_stripe_subscription("trialing"), "created": 1_750_000_000, "trial_start": 1_750_000_000}
+    history = [
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_old", status="canceled", created=1_700_000_000, trial_start=1_700_000_000),
+    ]
+    ended = {**_stripe_subscription("active"), "trial_start": 1_750_000_000}
+    webhooks = "backend.routes.webhooks.stripe.Subscription"
+
+    with (
+        patch(f"{webhooks}.list") as list_subscriptions,
+        patch(f"{webhooks}.retrieve", side_effect=[{"created": 1_700_000_000}, {"status": "trialing"}]),
+        patch(f"{webhooks}.modify", return_value=ended) as modify,
+    ):
+        list_subscriptions.return_value.auto_paging_iter.return_value = history
+        _send_webhook("customer.subscription.created", trialing)
+
+    modify.assert_called_once_with("sub_stripe_1", trial_end="now")
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_1"
+    assert platform.subscription()["status"] == "active"
+
+
+def test_a_redelivered_event_for_a_cancelled_duplicate_trial_keeps_the_binding(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("trialing", stripe_subscription_id="sub_stripe_first"))
+    later = {**_stripe_subscription("trialing"), "created": 1_750_000_100, "trial_start": 1_750_000_100}
+    history = [
+        Mock(id="sub_stripe_first", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_100, trial_start=1_750_000_100),
+    ]
+    webhooks = "backend.routes.webhooks.stripe.Subscription"
+    # Each delivery checks the account's binding, then the new subscription, which the first delivery cancelled.
+    cancelled = {**later, "status": "canceled"}
+    retrieved = [{"created": 1_750_000_000}, {"status": "trialing"}, {"created": 1_750_000_000}, cancelled]
+
+    with (
+        patch(f"{webhooks}.list") as list_subscriptions,
+        patch(f"{webhooks}.retrieve", side_effect=retrieved),
+        patch(f"{webhooks}.cancel") as cancel,
+        patch(f"{webhooks}.modify") as modify,
+    ):
+        list_subscriptions.return_value.auto_paging_iter.return_value = history
+        first = _send_webhook("customer.subscription.created", later)
+        redelivered = _send_webhook("customer.subscription.created", later)
+
+    assert first == redelivered == {"received": True, "error": None}
+    cancel.assert_called_once_with("sub_stripe_1")
+    modify.assert_not_called()
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_first"
+    assert platform.subscription()["status"] == "trialing"
+
+
+def test_a_trial_duplicating_a_running_earlier_trial_is_cancelled_and_not_bound(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("trialing", stripe_subscription_id="sub_stripe_first"))
+    later = {**_stripe_subscription("trialing"), "created": 1_750_000_100, "trial_start": 1_750_000_100}
+    history = [
+        Mock(id="sub_stripe_first", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_100, trial_start=1_750_000_100),
+    ]
+    webhooks = "backend.routes.webhooks.stripe.Subscription"
+
+    with (
+        patch(f"{webhooks}.list") as list_subscriptions,
+        patch(f"{webhooks}.retrieve", side_effect=[{"created": 1_750_000_000}, {"status": "trialing"}]),
+        patch(f"{webhooks}.cancel") as cancel,
+        patch(f"{webhooks}.modify") as modify,
+    ):
+        list_subscriptions.return_value.auto_paging_iter.return_value = history
+        _send_webhook("customer.subscription.created", later)
+
+    cancel.assert_called_once_with("sub_stripe_1")
+    modify.assert_not_called()
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_first"
+
+
+def test_an_update_arriving_before_its_creation_never_binds_a_duplicate_trial(platform: Platform) -> None:
+    # A first subscriber's free-tier row has no Stripe subscription yet, and Stripe delivers events in any order.
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="free", stripe_subscription_id=None))
+    first = {
+        **_stripe_subscription("trialing"),
+        "id": "sub_stripe_first",
+        "created": 1_750_000_000,
+        "trial_start": 1_750_000_000,
+    }
+    later = {**_stripe_subscription("trialing"), "created": 1_750_000_100, "trial_start": 1_750_000_100}
+    history = [
+        Mock(id="sub_stripe_first", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_100, trial_start=1_750_000_100),
+    ]
+    webhooks = "backend.routes.webhooks.stripe.Subscription"
+    stripe_status = {"status": "trialing"}
+
+    with (
+        patch(f"{webhooks}.list") as list_subscriptions,
+        patch(f"{webhooks}.retrieve", side_effect=lambda _stripe_id: {**later, **stripe_status}),
+        patch(f"{webhooks}.cancel", side_effect=lambda _stripe_id: stripe_status.update(status="canceled")) as cancel,
+    ):
+        list_subscriptions.return_value.auto_paging_iter.return_value = history
+        _send_webhook("customer.subscription.updated", later)
+        _send_webhook("customer.subscription.created", later)
+        _send_webhook("customer.subscription.created", first)
+
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_first"
+    assert platform.subscription()["status"] == "trialing"
+    cancel.assert_called_once_with("sub_stripe_1")
+
+
+def test_the_earliest_of_two_parallel_trials_is_kept(platform: Platform) -> None:
+    trialing = {**_stripe_subscription("trialing"), "created": 1_750_000_000, "trial_start": 1_750_000_000}
+    webhooks = "backend.routes.webhooks.stripe.Subscription"
+    history = [
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_later", status="trialing", created=1_750_000_100, trial_start=1_750_000_100),
+    ]
+
+    with patch(f"{webhooks}.list") as list_subscriptions, patch(f"{webhooks}.modify") as modify:
+        list_subscriptions.return_value.auto_paging_iter.return_value = history
+        _send_webhook("customer.subscription.created", trialing)
+
+    modify.assert_not_called()
+    assert [row["status"] for row in platform.db.tables["subscriptions"]] == ["trialing"]
+
+
+@pytest.mark.asyncio
+async def test_short_teardown_grace_never_uninstalls_inside_the_account_deletion_grace_period(
+    platform: Platform,
+) -> None:
+    # With INSTANCE_TEARDOWN_GRACE_DAYS below 7 the held instance's teardown date comes first; the account's own
+    # cleanup, which the customer can still cancel, decides.
+    now = datetime.now(UTC)
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now - timedelta(days=1)).isoformat(),
+        )
+    )
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    platform.uninstall.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+    # A restored account gets the instance's full teardown grace period again, not a date already past.
+    assert datetime.fromisoformat(platform.instance()["teardown_after"]) == now + timedelta(days=30)
+
+
+def test_admin_overview_does_not_flag_the_deferred_teardown_of_an_account_pending_deletion(
+    platform: Platform,
+) -> None:
+    now = datetime.now(UTC)
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=9)).isoformat(),
+            teardown_after=(now - timedelta(days=3)).isoformat(),
+        )
+    )
+
+    _pending, stuck = lifecycle_overview(now=now)
+
+    assert stuck == []
+
+
+def test_deletion_moves_a_later_end_date_to_the_period_end_and_cancelling_it_restores_that_date(
+    platform: Platform,
+) -> None:
+    later = PERIOD_END + 30 * 86_400
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active", ends_on=later))
+
+    assert _request_deletion(platform).status_code == 200
+    platform.stripe.Subscription.modify.assert_called_once_with(
+        "sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: str(later)}
+    )
+
+    platform.stripe.Subscription.modify.reset_mock()
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active", ends=True, marked=True))
+    platform.stripe.Subscription.list.return_value.auto_paging_iter.return_value[0].metadata = {
+        DELETION_BILLING_MARKER: str(later)
+    }
+    assert _cancel_deletion(platform).status_code == 200
+
+    platform.stripe.Subscription.modify.assert_called_once_with(
+        "sub_stripe_1", cancel_at=later, metadata={DELETION_BILLING_MARKER: ""}
+    )
+
+
+@pytest.mark.parametrize("ends", [False, True], ids=["renewed-in-the-portal", "still-ending"])
+def test_deletion_ends_a_marked_subscription_only_while_it_renews(platform: Platform, *, ends: bool) -> None:
+    # A failed resume after a cancelled deletion leaves the marker behind when the customer renews in the portal.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active", ends=ends, marked=True))
+
+    assert _request_deletion(platform).status_code == 200
+
+    expected = (
+        [] if ends else [call("sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"})]
+    )
+    assert platform.stripe.Subscription.modify.call_args_list == expected
+
+
+def test_unpaid_subscriptions_are_cancelled_only_once_the_deletion_is_recorded(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("incomplete"))
+    _stripe_lists(platform, _stripe_sub("sub_unpaid", "incomplete"))
+    recorded_first: list[bool] = []
+    platform.stripe.Subscription.cancel.side_effect = lambda _stripe_id: recorded_first.append(
+        [name for name, _params in platform.db.rpc_calls] == ["soft_delete_account"]
+    )
+
+    assert _request_deletion(platform).status_code == 200
+
+    assert recorded_first == [True]
+
+
+@pytest.mark.asyncio
+async def test_nightly_cleanup_pages_through_every_pending_account(platform: Platform) -> None:
+    second_account = "00000000-0000-0000-0000-000000000002"
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["accounts"].append(
+        {
+            "id": second_account,
+            "stripe_customer_id": "cus_2",
+            "deleted_at": platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"],
+        }
+    )
+    seen: list[str] = []
+
+    async def record(account_id: str) -> list[Any]:
+        seen.append(account_id)
+        return []
+
+    with (
+        _cleanup_with_other_tasks_stubbed(),
+        patch("backend.tasks.cleanup._PAGE_SIZE", 1),
+        patch("backend.tasks.cleanup.end_account_billing_at_period_end", side_effect=record),
+        patch("backend.tasks.cleanup.cancel_unpaid_subscriptions", AsyncMock()),
+    ):
+        await run_cleanup_job()
+
+    assert sorted(seen) == sorted([ACCOUNT_ID, second_account])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,stored_status", [("canceled", "cancelled"), ("unpaid", "unpaid")])
+async def test_unknown_price_still_holds_inactive_subscription(
+    platform: Platform, status: str, stored_status: str
+) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    remote = _stripe_subscription(status)
+    remote["items"]["data"][0]["price"] = {"id": "price_retired_unknown"}
+    platform.stripe.api_key = "test"
+    platform.stripe.Subscription.retrieve.return_value = remote
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, refresh_from_stripe=True)
+
+    assert summary.errors == []
+    assert platform.subscription()["status"] == stored_status
+    assert platform.subscription()["tier"] == "hobby"
+    assert platform.scaled_down()
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_stopped_instance_clears_a_deleted_key_when_lowering_its_limit(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))
+    platform.limit_key.side_effect = OpenRouterKeyNotFoundError("key gone")
+    with patch(f"{_SERVICE}.delete_openrouter_key", side_effect=OpenRouterKeyNotFoundError("key gone")):
+        first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+        second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert first.errors == second.errors == []
+    assert platform.instance()["openrouter_key_hash"] is None
+    assert platform.instance()["openrouter_key_limit_usd"] is None
+    assert platform.instance()["status"] == "stopped"
+    platform.limit_key.assert_awaited_once()
+    platform.start.assert_not_awaited()
+    platform.provision.assert_not_awaited()

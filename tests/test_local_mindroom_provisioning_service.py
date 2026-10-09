@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import sqlite3
+import tomllib
+from contextlib import closing
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Self
 from urllib.parse import urlparse
@@ -21,7 +26,19 @@ from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+
+def test_service_script_pins_its_whole_dependency_set() -> None:
+    """A newly published release of a direct or transitive dependency must not change what the service imports."""
+    source = Path(provisioning.__file__).read_text(encoding="utf-8")
+    block = re.search(r"(?m)^# /// script$\s(?P<content>(^#(| .*)$\s)+)^# ///$", source)
+    assert block is not None
+    lines = block.group("content").splitlines(keepends=True)
+    metadata = tomllib.loads("".join(line[2:] if line.startswith("# ") else line[1:] for line in lines))
+
+    assert metadata["dependencies"]
+    assert all(re.fullmatch(r"[a-z0-9-]+==[0-9.]+", dependency) for dependency in metadata["dependencies"])
+    assert datetime.fromisoformat(metadata["tool"]["uv"]["exclude-newer"]).tzinfo is not None
 
 
 def _service_config(
@@ -121,12 +138,12 @@ def _start_device_pairing(client: TestClient, client_name: str = "alice-macbook"
     return response.json()
 
 
-def _pair_local_client(client: TestClient) -> dict[str, str]:
+def _pair_local_client(client: TestClient, headers: dict[str, str] = ALICE_OPENID_HEADERS) -> dict[str, str]:
     started = _start_device_pairing(client)
     approved = client.post(
         "/v1/local-mindroom/pair/device/approve",
         json={"pair_code": started["pair_code"]},
-        headers=ALICE_OPENID_HEADERS,
+        headers=headers,
     )
     assert approved.status_code == 200
     polled = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
@@ -134,16 +151,17 @@ def _pair_local_client(client: TestClient) -> dict[str, str]:
     return polled.json()
 
 
+def _stored_rows(state_path: Path, table: str) -> list[dict[str, str | None]]:
+    """Read one table of the state database through a separate connection."""
+    with closing(sqlite3.connect(state_path)) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(row) for row in db.execute(f"SELECT * FROM {table}")]  # noqa: S608
+
+
 def _set_connection_namespace(state_path: Path, connection_id: str, namespace: str | None) -> None:
-    """Edit the persisted state file the way an operator would (service stopped)."""
-    payload = json.loads(state_path.read_text(encoding="utf-8"))
-    for item in payload["connections"]:
-        if item["id"] == connection_id:
-            if namespace is None:
-                item.pop("namespace", None)
-            else:
-                item["namespace"] = namespace
-    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    """Edit the state database the way an operator would (service stopped)."""
+    with closing(sqlite3.connect(state_path)) as db, db:
+        db.execute("UPDATE connections SET namespace = ? WHERE id = ?", (namespace, connection_id))
 
 
 def _install_fake_register(monkeypatch: pytest.MonkeyPatch, register_calls: list[str]) -> None:
@@ -161,15 +179,41 @@ def _install_fake_register(monkeypatch: pytest.MonkeyPatch, register_calls: list
     monkeypatch.setattr(provisioning, "_register_agent_with_matrix", _fake_register)
 
 
-def _post_register_agent(client: TestClient, complete: dict[str, str], username: str) -> httpx.Response:
+def _install_fake_homeserver(monkeypatch: pytest.MonkeyPatch, response: httpx.Response) -> list[dict[str, object]]:
+    """Answer the service's Matrix registration with `response` and record each request body."""
+    register_payloads: list[dict[str, object]] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+        async def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            assert url.endswith("/_matrix/client/v3/register")
+            register_payloads.append(json)
+            return response
+
+    monkeypatch.setattr(provisioning.httpx, "AsyncClient", _FakeAsyncClient)
+    return register_payloads
+
+
+def _post_register_agent(
+    client: TestClient,
+    complete: dict[str, str],
+    username: str,
+    password: str | None = "agent-pass-123",  # noqa: S107
+) -> httpx.Response:
+    payload = {"homeserver": "https://mindroom.chat", "username": username, "display_name": "CodeAgent"}
+    if password is not None:
+        payload["password"] = password
     return client.post(
         "/v1/local-mindroom/register-agent",
-        json={
-            "homeserver": "https://mindroom.chat",
-            "username": username,
-            "password": "agent-pass-123",
-            "display_name": "CodeAgent",
-        },
+        json=payload,
         headers={
             "X-Local-MindRoom-Client-Id": complete["client_id"],
             "X-Local-MindRoom-Client-Secret": complete["client_secret"],
@@ -182,7 +226,7 @@ def test_register_agent_flow_until_revoked(tmp_path: Path, monkeypatch: pytest.M
     _patch_openid_auth(monkeypatch)
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         payload = _pair_local_client(client)
@@ -214,7 +258,7 @@ def test_paired_client_fetches_google_oauth_client(tmp_path: Path, monkeypatch: 
     _patch_openid_auth(monkeypatch)
     app = provisioning.create_app(
         _service_config(
-            tmp_path / "state.json",
+            tmp_path / "state.sqlite3",
             google_oauth_client_id="google-client-id",
             google_oauth_client_secret="google-client-secret",  # noqa: S106
         ),
@@ -260,7 +304,7 @@ def _listed_last_seen(client: TestClient) -> datetime:
 def test_heartbeat_requires_paired_client_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Heartbeats authenticate exactly like register-agent."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         complete = _pair_local_client(client)
@@ -279,7 +323,7 @@ def test_heartbeat_requires_paired_client_credentials(tmp_path: Path, monkeypatc
 def test_heartbeat_rejects_revoked_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A revoked install learns that its connection was revoked."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         complete = _pair_local_client(client)
@@ -297,21 +341,21 @@ def test_heartbeat_updates_last_seen_with_throttled_persistence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Heartbeats refresh the listed last-seen time but rewrite the state file at most every ten minutes."""
+    """Heartbeats refresh the listed last-seen time but write the connection at most every ten minutes."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     app = provisioning.create_app(_service_config(state_path))
     persisted: list[datetime] = []
-    real_persist = provisioning._persist_state_unlocked
+    real_save = provisioning._save_connection
 
-    def _counting_persist(state: provisioning.ProvisioningState, path: Path) -> None:
-        persisted.append(state.connections[complete["client_id"]].last_seen_at)
-        real_persist(state, path)
+    def _counting_save(db: sqlite3.Connection, connection: provisioning.LocalConnection) -> None:
+        persisted.append(connection.last_seen_at)
+        real_save(db, connection)
 
     paired_at = provisioning._now_utc()
     with TestClient(app) as client:
         complete = _pair_local_client(client)
-        monkeypatch.setattr(provisioning, "_persist_state_unlocked", _counting_persist)
+        monkeypatch.setattr(provisioning, "_save_connection", _counting_save)
 
         first = paired_at + provisioning.timedelta(minutes=11)
         monkeypatch.setattr(provisioning, "_now_utc", lambda: first)
@@ -329,14 +373,63 @@ def test_heartbeat_updates_last_seen_with_throttled_persistence(
         assert _listed_last_seen(client) == later
 
     assert persisted == [first, later]
-    [stored] = json.loads(state_path.read_text(encoding="utf-8"))["connections"]
+    [stored] = _stored_rows(state_path, "connections")
     assert stored["last_seen_at"] == provisioning._as_utc_iso(later)
+
+
+def test_register_agent_and_google_client_rewrite_state_at_most_every_ten_minutes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-authenticated calls refresh last_seen_at like heartbeats instead of writing the connection each time."""
+    _patch_openid_auth(monkeypatch)
+    _install_fake_register(monkeypatch, [])
+    app = provisioning.create_app(
+        _service_config(
+            tmp_path / "state.sqlite3",
+            google_oauth_client_id="google-client-id",
+            google_oauth_client_secret="google-client-secret",  # noqa: S106
+        ),
+    )
+    persisted: list[datetime] = []
+    real_save = provisioning._save_connection
+
+    def _counting_save(db: sqlite3.Connection, connection: provisioning.LocalConnection) -> None:
+        persisted.append(connection.last_seen_at)
+        real_save(db, connection)
+
+    def _call_both() -> None:
+        username = _managed_agent_username("code", complete["namespace"])
+        assert _post_register_agent(client, complete, username).status_code == 200
+        google = client.get(
+            "/v1/local-mindroom/oauth/google-client",
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+        assert google.status_code == 200
+
+    paired_at = provisioning._now_utc()
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        monkeypatch.setattr(provisioning, "_save_connection", _counting_save)
+        for _ in range(5):
+            _call_both()
+        assert persisted == []
+
+        later = paired_at + provisioning.timedelta(minutes=11)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+        _call_both()
+        assert _listed_last_seen(client) == later
+
+    assert persisted == [later]
 
 
 def test_heartbeat_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A misbehaving install cannot hammer the heartbeat endpoint."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         complete = _pair_local_client(client)
@@ -350,7 +443,7 @@ def test_heartbeat_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytes
 def test_google_oauth_client_endpoint_requires_server_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A paired client receives an explicit error when the server has no Google app."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         complete = _pair_local_client(client)
@@ -384,7 +477,7 @@ def test_register_agent_rejects_username_outside_connection_namespace(
 ) -> None:
     """A local client must not register Matrix users outside its assigned namespace."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
 
@@ -420,7 +513,7 @@ def test_register_agent_allows_plain_username_for_namespace_exempt_connection(
 ) -> None:
     """A connection with operator-set namespace "" may register plain mindroom_<entity> usernames."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
 
@@ -454,7 +547,7 @@ def test_register_agent_namespace_exempt_connection_still_requires_managed_prefi
 ) -> None:
     """Namespace-exempt connections still only get mindroom_-prefixed valid localparts."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
 
@@ -470,27 +563,22 @@ def test_register_agent_namespace_exempt_connection_still_requires_managed_prefi
         assert register_calls == []
 
 
-@pytest.mark.parametrize("corrupt_namespace", [None, "null", " "], ids=["missing_key", "json_null", "whitespace"])
+@pytest.mark.parametrize("corrupt_namespace", [None, " "], ids=["null", "whitespace"])
 def test_state_load_fails_closed_for_missing_or_blank_namespace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     corrupt_namespace: str | None,
 ) -> None:
-    """Only a literal "" exempts; missing, null, or whitespace namespaces must fail closed to a derived one."""
+    """Only a literal "" exempts; null or whitespace namespaces must fail closed to a derived one."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         complete = _pair_local_client(client)
 
-    if corrupt_namespace == "null":
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-        payload["connections"][0]["namespace"] = None
-        state_path.write_text(json.dumps(payload), encoding="utf-8")
-    else:
-        _set_connection_namespace(state_path, complete["client_id"], corrupt_namespace)
+    _set_connection_namespace(state_path, complete["client_id"], corrupt_namespace)
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         register = _post_register_agent(client, complete, "mindroom_foo")
@@ -509,7 +597,7 @@ def test_state_load_fails_closed_for_missing_or_blank_namespace(
 def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator-set empty namespace must survive load and re-persist cycles."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
 
@@ -526,11 +614,12 @@ def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch:
         assert listed.status_code == 200
         assert listed.json()["connections"][0]["namespace"] == ""
 
-        # Registering updates last_seen_at and re-persists state to disk.
+        # Registering after the last-seen resolution updates last_seen_at and writes the connection again.
+        later = provisioning._now_utc() + provisioning.LAST_SEEN_RESOLUTION
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
         assert _post_register_agent(client, complete, "mindroom_foo").status_code == 200
 
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert [item["namespace"] for item in persisted["connections"]] == [""]
+    assert [item["namespace"] for item in _stored_rows(state_path, "connections")] == [""]
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         assert _post_register_agent(client, complete, "mindroom_bar").status_code == 200
@@ -539,7 +628,7 @@ def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch:
 def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Register-agent should reject homeserver mismatches."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     async def _fake_register(
         config: provisioning.ServiceConfig,
@@ -570,9 +659,9 @@ def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest
 
 
 def test_state_persists_between_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Connections should survive process restarts via JSON state file."""
+    """Connections should survive process restarts via the state database."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         _pair_local_client(client)
@@ -598,7 +687,7 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
         matrix_server_name="mindroom.chat",
         matrix_ssl_verify=True,
         matrix_registration_token="server-secret-token",  # noqa: S106
-        state_path=tmp_path / "state.json",
+        state_path=tmp_path / "state.sqlite3",
         pair_code_ttl_seconds=600,
         pair_poll_interval_seconds=3,
         cors_origins=["https://chat.mindroom.chat"],
@@ -606,39 +695,10 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
         listen_port=8776,
     )
 
-    class _FakeResponse:
-        status_code = 400
-        is_success = False
-        text = "M_USER_IN_USE"
-
-        @staticmethod
-        def json() -> dict[str, str]:
-            return {
-                "errcode": "M_USER_IN_USE",
-                "error": "User ID already taken",
-            }
-
-    class _FakeAsyncClient:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            del args, kwargs
-
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-            del exc_type, exc, tb
-
-        async def post(
-            self,
-            url: str,
-            *,
-            json: dict[str, object],
-            headers: dict[str, str] | None = None,
-        ) -> _FakeResponse:
-            del url, json, headers
-            return _FakeResponse()
-
-    monkeypatch.setattr(provisioning.httpx, "AsyncClient", _FakeAsyncClient)
+    _install_fake_homeserver(
+        monkeypatch,
+        httpx.Response(400, json={"errcode": "M_USER_IN_USE", "error": "User ID already taken"}),
+    )
     payload = provisioning.RegisterAgentRequest(
         homeserver="https://internal-matrix:8448",
         username="mindroom_code",
@@ -649,6 +709,63 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
     result = await provisioning._register_agent_with_matrix(config, payload)
     assert result.status == "user_in_use"
     assert result.user_id == "@mindroom_code:mindroom.chat"
+
+
+def test_register_agent_without_password_returns_the_generated_password(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that sends no password gets back the one-time password the homeserver registered."""
+    _patch_openid_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))) as client:
+        complete = _pair_local_client(client)
+        username = _managed_agent_username("code", complete["namespace"])
+        registered = _install_fake_homeserver(
+            monkeypatch,
+            httpx.Response(200, json={"user_id": f"@{username}:mindroom.chat"}),
+        )
+        response = _post_register_agent(client, complete, username, password=None)
+
+    assert response.status_code == 200
+    generated_password = registered[0]["password"]
+    assert isinstance(generated_password, str)
+    assert len(generated_password) >= 32
+    assert response.json() == {
+        "status": "created",
+        "user_id": f"@{username}:mindroom.chat",
+        "password": generated_password,
+    }
+
+
+def test_register_agent_with_client_password_registers_it_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older clients still register their own password and get no password back."""
+    _patch_openid_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))) as client:
+        complete = _pair_local_client(client)
+        username = _managed_agent_username("code", complete["namespace"])
+        registered = _install_fake_homeserver(
+            monkeypatch,
+            httpx.Response(200, json={"user_id": f"@{username}:mindroom.chat"}),
+        )
+        response = _post_register_agent(client, complete, username, password="agent-pass-123")  # noqa: S106
+
+    assert registered[0]["password"] == "agent-pass-123"  # noqa: S105
+    assert response.json() == {"status": "created", "user_id": f"@{username}:mindroom.chat"}
+
+
+def test_register_agent_user_in_use_returns_no_password(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An existing account keeps its password, so the service returns none."""
+    _patch_openid_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))) as client:
+        complete = _pair_local_client(client)
+        username = _managed_agent_username("code", complete["namespace"])
+        _install_fake_homeserver(monkeypatch, httpx.Response(400, json={"errcode": "M_USER_IN_USE", "error": "taken"}))
+        response = _post_register_agent(client, complete, username, password=None)
+
+    assert response.json() == {"status": "user_in_use", "user_id": f"@{username}:mindroom.chat"}
 
 
 def test_client_error_detail_constants_match_service() -> None:
@@ -676,14 +793,15 @@ def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> Non
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint=cli_connect.local_client_fingerprint(config_path=tmp_path / "config.yaml"),
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=lambda _seconds: None,
     )
 
     (start_url, start_payload), (poll_url, poll_payload) = calls
-    service_paths = {route.path for route in provisioning.create_app(_service_config(tmp_path / "state.json")).routes}
+    service_paths = {
+        route.path for route in provisioning.create_app(_service_config(tmp_path / "state.sqlite3")).routes
+    }
     assert urlparse(start_url).path in service_paths
     assert urlparse(poll_url).path in service_paths
     provisioning.DevicePairStartRequest.model_validate(start_payload)
@@ -692,11 +810,52 @@ def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> Non
     provisioning.DevicePairPollResponse.model_validate(_CONNECTED)
 
 
+@pytest.mark.asyncio
+async def test_cli_register_agent_messages_match_service_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI's register-agent request sends no password and reads the service's one-time password."""
+    service_response = {"status": "created", "user_id": "@mindroom_code:mindroom.chat", "password": "one-time-pass"}
+    requests: list[httpx.Request] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=service_response)
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        matrix_provisioning.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_async_client(transport=httpx.MockTransport(_handle), **kwargs),
+    )
+
+    result = await matrix_provisioning.register_user_via_provisioning_service(
+        provisioning_url="https://provisioning.example",
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        homeserver="https://mindroom.chat",
+        username="mindroom_code",
+        display_name="CodeAgent",
+    )
+
+    (request,) = requests
+    service_paths = {
+        route.path for route in provisioning.create_app(_service_config(tmp_path / "state.sqlite3")).routes
+    }
+    assert request.url.path in service_paths
+    payload = json.loads(request.content)
+    assert "password" not in payload
+    provisioning.RegisterAgentRequest.model_validate(payload)
+    assert provisioning.RegisterAgentResponse.model_validate(service_response).model_dump() == service_response
+    assert result.password == service_response["password"]
+
+
 def test_device_start_retries_colliding_pair_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A generated pair code already held by a live session is replaced before it is handed out."""
     codes = iter(["AAAA-BBBB", "AAAA-BBBB", "CCCC-DDDD"])
     monkeypatch.setattr(provisioning, "_generate_pair_code", lambda: next(codes))
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         first = _start_device_pairing(client)
@@ -709,7 +868,7 @@ def test_device_start_retries_colliding_pair_codes(tmp_path: Path, monkeypatch: 
 def test_device_pairing_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A local client starts, a browser user approves, and the first poll returns credentials once."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -761,7 +920,7 @@ def test_device_pairing_credentials_register_agents(tmp_path: Path, monkeypatch:
     _patch_openid_auth(monkeypatch)
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -783,7 +942,7 @@ def test_device_pairing_credentials_register_agents(tmp_path: Path, monkeypatch:
 def test_device_approve_requires_matrix_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only a signed-in Matrix user may inspect or approve a device code."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -798,7 +957,7 @@ def test_device_code_approved_by_one_user_cannot_be_taken_by_another(
 ) -> None:
     """A second user cannot re-approve a code another user already approved."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -831,7 +990,7 @@ def test_device_code_approved_by_one_user_cannot_be_taken_by_another(
 def test_device_code_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Expired device codes can neither be approved nor polled into credentials."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -851,7 +1010,7 @@ def test_device_code_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_device_poll_rejects_unknown_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Polling with a secret the service never issued fails without revealing sessions."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         response = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": "not-issued"})
@@ -861,7 +1020,7 @@ def test_device_poll_rejects_unknown_secret(tmp_path: Path, monkeypatch: pytest.
 def test_device_start_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unauthenticated device starts are limited per client address."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         for _ in range(10):
@@ -902,7 +1061,7 @@ def test_homeserver_token_lookups_are_rate_limited_per_client_before_the_lookup(
 ) -> None:
     """Unauthenticated callers cannot make the service call the homeserver more than the per-address limit."""
     lookups = _count_homeserver_lookups(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
     limit = provisioning.HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE
 
     with TestClient(app) as client:
@@ -921,7 +1080,7 @@ def test_homeserver_token_lookup_limit_is_shared_across_browser_endpoints(
 ) -> None:
     """One address shares a single lookup budget across every browser-authenticated endpoint."""
     lookups = _count_homeserver_lookups(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
     limit = provisioning.HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE
     endpoints = ("inspect", "approve", "connections-list")
 
@@ -939,7 +1098,7 @@ def test_verified_users_behind_one_address_reach_their_own_limits(
 ) -> None:
     """The per-address lookup limit leaves room for several users behind one NAT to reach their per-user limits."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         statuses = {
@@ -962,7 +1121,7 @@ def test_verified_users_behind_one_address_reach_their_own_limits(
 def test_device_poll_is_rate_limited_per_device_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One polling client cannot use up the budget of other clients behind the same address."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
     per_secret = provisioning.DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE
     per_address = provisioning.DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE
 
@@ -987,7 +1146,7 @@ def test_device_poll_is_rate_limited_per_device_secret(tmp_path: Path, monkeypat
 def test_device_poll_allows_many_clients_behind_one_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The per-address poll limit leaves room for many CLIs polling every few seconds behind one NAT."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         statuses = [
@@ -1001,7 +1160,7 @@ def test_device_poll_allows_many_clients_behind_one_address(tmp_path: Path, monk
 def test_unknown_device_secrets_do_not_grow_rate_limit_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A flood of random device secrets from one address only ever touches that address's bucket."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
     per_address = provisioning.DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE
 
     with TestClient(app) as client:
@@ -1018,7 +1177,7 @@ def test_unknown_device_secrets_do_not_grow_rate_limit_state(tmp_path: Path, mon
 def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An approval persisted before a restart can still be claimed after it."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         started = _start_device_pairing(client)
@@ -1028,8 +1187,7 @@ def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: p
             headers=ALICE_OPENID_HEADERS,
         )
 
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert started["device_secret"] not in json.dumps(persisted)
+    assert started["device_secret"] not in json.dumps(_stored_rows(state_path, "pair_sessions"))
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
         inspected = restarted.post(
@@ -1058,21 +1216,22 @@ def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> No
 
 def _throttled_polls(monkeypatch: pytest.MonkeyPatch, interval_seconds: int) -> int:
     """Count polls the per-device limit rejects for one client polling at a fixed interval for two minutes."""
-    state = provisioning._new_runtime_state()
     now = [1000.0]
     monkeypatch.setattr(provisioning, "time", SimpleNamespace(monotonic=lambda: now[0]))
     throttled = 0
-    for _ in range(120 // interval_seconds + 1):
-        try:
-            provisioning._enforce_rate_limit_unlocked(
-                state,
-                key="pair:device:poll:secret:hash",
-                limit=provisioning.DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
-                window_seconds=60,
-            )
-        except HTTPException:
-            throttled += 1
-        now[0] += interval_seconds
+    with closing(sqlite3.connect(":memory:")) as db:
+        state = provisioning._new_runtime_state(db)
+        for _ in range(120 // interval_seconds + 1):
+            try:
+                provisioning._enforce_rate_limit_unlocked(
+                    state,
+                    key="pair:device:poll:secret:hash",
+                    limit=provisioning.DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
+                    window_seconds=60,
+                )
+            except HTTPException:
+                throttled += 1
+            now[0] += interval_seconds
     return throttled
 
 
@@ -1102,7 +1261,7 @@ def test_service_config_rejects_poll_interval_below_device_poll_limit(monkeypatc
 def test_expired_pair_sessions_are_pruned_on_new_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Sessions expired for longer than one more code lifetime are removed when new pairing starts."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     app = provisioning.create_app(_service_config(state_path))
 
     with TestClient(app) as client:
@@ -1113,8 +1272,7 @@ def test_expired_pair_sessions_are_pruned_on_new_start(tmp_path: Path, monkeypat
 
         _start_device_pairing(client, "new-machine")
 
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert [session["client_name"] for session in persisted["pair_sessions"]] == ["new-machine"]
+    assert [session["client_name"] for session in _stored_rows(state_path, "pair_sessions")] == ["new-machine"]
 
     with TestClient(app) as restarted:
         inspect = restarted.post(
@@ -1136,7 +1294,7 @@ def test_recently_expired_device_code_still_reports_expired_after_another_start(
 ) -> None:
     """A renewed CLI start keeps the old code answering 410 and the old poll answering expired for one more TTL."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
     started_at = provisioning._now_utc()
 
     with TestClient(app) as client:
@@ -1178,7 +1336,7 @@ def test_connected_pair_sessions_are_pruned_after_one_more_code_lifetime(
 ) -> None:
     """Claimed sessions keep answering 410 for one code lifetime, then disappear while their connections stay."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     app = provisioning.create_app(_service_config(state_path))
     started_at = provisioning._now_utc()
 
@@ -1210,17 +1368,145 @@ def test_connected_pair_sessions_are_pruned_after_one_more_code_lifetime(
         assert replay.status_code == 404
         listed = client.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()
 
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert [session["client_name"] for session in persisted["pair_sessions"]] == ["latest"]
+    assert [session["client_name"] for session in _stored_rows(state_path, "pair_sessions")] == ["latest"]
     connection_ids = {first_complete["client_id"], device_complete["client_id"]}
-    assert {connection["id"] for connection in persisted["connections"]} == connection_ids
+    assert {connection["id"] for connection in _stored_rows(state_path, "connections")} == connection_ids
     assert {connection["id"] for connection in listed["connections"]} == connection_ids
+
+
+def test_pairing_beyond_the_per_user_cap_deletes_revoked_then_least_recently_seen_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairing keeps each user's persisted connections at the cap, and deleted ones stay gone after restart."""
+    _patch_openid_auth(monkeypatch)
+    monkeypatch.setattr(provisioning, "MAX_CONNECTIONS_PER_USER", 2)
+    state_path = tmp_path / "state.sqlite3"
+    started_at = provisioning._now_utc()
+
+    def _at(minutes: int) -> None:
+        moment = started_at + provisioning.timedelta(minutes=minutes)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: moment)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        _at(0)
+        oldest = _pair_local_client(client)
+        _at(1)
+        revoked = _pair_local_client(client)
+        client.delete(
+            f"/v1/local-mindroom/connections/{revoked['client_id']}",
+            headers=ALICE_OPENID_HEADERS,
+        )
+        _at(2)
+        bob = _pair_local_client(client, BOB_OPENID_HEADERS)
+        _at(3)
+        kept = _pair_local_client(client)
+        # The revoked connection went first even though `oldest` was seen less recently.
+        assert _post_heartbeat(client, oldest["client_id"], oldest["client_secret"]).status_code == 200
+        assert _post_heartbeat(client, revoked["client_id"], revoked["client_secret"]).status_code == 401
+        _at(4)
+        newest = _pair_local_client(client)
+
+    expected_ids = {kept["client_id"], newest["client_id"], bob["client_id"]}
+    assert {connection["id"] for connection in _stored_rows(state_path, "connections")} == expected_ids
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        listed = restarted.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()
+        assert {connection["id"] for connection in listed["connections"]} == {kept["client_id"], newest["client_id"]}
+        assert _post_heartbeat(restarted, oldest["client_id"], oldest["client_secret"]).status_code == 401
+        assert _post_heartbeat(restarted, kept["client_id"], kept["client_secret"]).status_code == 200
+
+
+def test_loading_state_over_the_per_user_cap_trims_and_persists_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State saved with more connections per user than the cap is trimmed at startup and written back."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.sqlite3"
+    started_at = provisioning._now_utc()
+    paired = []
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        for minutes in range(3):
+            moment = started_at + provisioning.timedelta(minutes=minutes)
+            monkeypatch.setattr(provisioning, "_now_utc", lambda moment=moment: moment)
+            paired.append(_pair_local_client(client))
+    oldest, kept, newest = paired
+
+    monkeypatch.setattr(provisioning, "MAX_CONNECTIONS_PER_USER", 2)
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        persisted = _stored_rows(state_path, "connections")
+        assert _post_heartbeat(restarted, oldest["client_id"], oldest["client_secret"]).status_code == 401
+        assert _post_heartbeat(restarted, kept["client_id"], kept["client_secret"]).status_code == 200
+
+    assert {connection["id"] for connection in persisted} == {kept["client_id"], newest["client_id"]}
+
+
+def test_each_change_writes_only_the_records_it_touches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With thousands of stored records, pairing, last-seen updates, and revocation each write a few rows."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.sqlite3"
+    with TestClient(provisioning.create_app(_service_config(state_path))):
+        pass
+    now = provisioning._now_utc()
+    stored_at = provisioning._as_utc_iso(now)
+    expires_at = provisioning._as_utc_iso(now + provisioning.timedelta(days=1))
+    with closing(sqlite3.connect(state_path)) as db, db:
+        db.executemany(
+            "INSERT INTO connections VALUES (?, ?, 'laptop', 'sha256:x', ?, 'hash', ?, ?, NULL)",
+            [
+                (f"c{index}", f"@user{index // 20}:mindroom.chat", f"n{index}", stored_at, stored_at)
+                for index in range(5000)
+            ],
+        )
+        db.executemany(
+            "INSERT INTO pair_sessions "
+            "(id, pair_code_hash, status, created_at, expires_at, device_secret_hash, client_name, fingerprint) "
+            "VALUES (?, ?, 'pending', ?, ?, ?, 'laptop', 'sha256:x')",
+            [(f"s{index}", f"h{index}", stored_at, expires_at, f"d{index}") for index in range(5000)],
+        )
+
+    app = provisioning.create_app(_service_config(state_path))
+    rows_written: list[int] = []
+    with TestClient(app) as client:
+        db = app.state.runtime_state.db
+
+        def _call(method: str, path: str, **kwargs: object) -> dict[str, str]:
+            before = db.total_changes
+            response = client.request(method, path, **kwargs)
+            assert response.status_code == 200
+            rows_written.append(db.total_changes - before)
+            return response.json()
+
+        device = _call(
+            "POST",
+            "/v1/local-mindroom/pair/device/start",
+            json={"client_name": "alice-desktop", "client_pubkey_or_fingerprint": "sha256:b"},
+        )
+        approve = {"pair_code": device["pair_code"]}
+        _call("POST", "/v1/local-mindroom/pair/device/approve", json=approve, headers=ALICE_OPENID_HEADERS)
+        complete = _call("POST", "/v1/local-mindroom/pair/device/poll", json={"device_secret": device["device_secret"]})
+
+        credentials = {
+            "X-Local-MindRoom-Client-Id": complete["client_id"],
+            "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+        }
+        later = provisioning._now_utc() + provisioning.LAST_SEEN_RESOLUTION
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+        _call("POST", "/v1/local-mindroom/heartbeat", headers=credentials)
+        _call("POST", "/v1/local-mindroom/heartbeat", headers=credentials)
+        _call("DELETE", f"/v1/local-mindroom/connections/{complete['client_id']}", headers=ALICE_OPENID_HEADERS)
+
+    # device start, approve, poll, heartbeat, throttled heartbeat, revoke
+    assert rows_written == [1, 1, 2, 1, 0, 1]
+    assert len(_stored_rows(state_path, "connections")) == 5001
+    assert len(_stored_rows(state_path, "pair_sessions")) == 5001
 
 
 def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Approval near expiry extends the window so CLI can still claim credentials."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -1246,7 +1532,7 @@ def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_poll_expires_after_grace_period(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Poll after grace period returns expired."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -1272,7 +1558,7 @@ def test_poll_expires_after_grace_period(tmp_path: Path, monkeypatch: pytest.Mon
 def test_approve_and_inspect_reject_connected_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """After credentials are claimed, approve and inspect return 409."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         started = _start_device_pairing(client)
@@ -1293,13 +1579,15 @@ def test_approve_and_inspect_reject_connected_sessions(tmp_path: Path, monkeypat
             assert response.json()["detail"] == "Pair code already used"
 
 
+@pytest.mark.parametrize("legacy_store", ["state_database", "legacy_state_file"])
 def test_state_drops_browser_initiated_sessions_and_keeps_connections(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    legacy_store: str,
 ) -> None:
-    """A state file with sessions from the removed browser-initiated flow loads with every connection intact."""
+    """Sessions from the removed browser-initiated flow are dropped at startup while every connection stays intact."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / "state.sqlite3"
     now = provisioning._now_utc()
     created_at = provisioning._as_utc_iso(now)
     expires_at = provisioning._as_utc_iso(now + provisioning.timedelta(seconds=600))
@@ -1329,46 +1617,48 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
         _connection("alice-revoked", "@alice:mindroom.chat", "jkmn2345", revoked_at=paired_at),
         _connection("bob-browser", "@bob:mindroom.chat", "efgh6789"),
     ]
-
-    with TestClient(provisioning.create_app(_service_config(tmp_path / "seed.json"))) as seed:
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "seed.sqlite3"))) as seed:
         device = _start_device_pairing(seed)
-    [device_session] = json.loads((tmp_path / "seed.json").read_text(encoding="utf-8"))["pair_sessions"]
-    state_path.write_text(
-        json.dumps(
-            {
-                "pair_sessions": [
-                    # Written by the removed pair/start endpoint, before and after device fields existed.
-                    {
-                        "id": "browser-pending",
-                        "user_id": "@alice:mindroom.chat",
-                        "pair_code_hash": provisioning._hash_token("AAAA-BBBB"),
-                        "status": "pending",
-                        "created_at": created_at,
-                        "expires_at": expires_at,
-                        "completed_at": None,
-                        "connection_id": None,
-                    },
-                    {
-                        "id": "browser-connected",
-                        "user_id": "@alice:mindroom.chat",
-                        "pair_code_hash": provisioning._hash_token("CCCC-DDDD"),
-                        "status": "connected",
-                        "created_at": created_at,
-                        "expires_at": expires_at,
-                        "completed_at": created_at,
-                        "connection_id": "alice-browser",
-                        "device_secret_hash": None,
-                        "client_name": None,
-                        "fingerprint": None,
-                        "approved_at": None,
-                    },
-                    device_session,
-                ],
-                "connections": connections,
-            },
-        ),
-        encoding="utf-8",
-    )
+    [device_session] = _stored_rows(tmp_path / "seed.sqlite3", "pair_sessions")
+    pair_sessions = [
+        # Written by the removed pair/start endpoint, before and after device fields existed.
+        {
+            "id": "browser-pending",
+            "user_id": "@alice:mindroom.chat",
+            "pair_code_hash": provisioning._hash_token("AAAA-BBBB"),
+            "status": "pending",
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "completed_at": None,
+            "connection_id": None,
+        },
+        {
+            "id": "browser-connected",
+            "user_id": "@alice:mindroom.chat",
+            "pair_code_hash": provisioning._hash_token("CCCC-DDDD"),
+            "status": "connected",
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "completed_at": created_at,
+            "connection_id": "alice-browser",
+            "device_secret_hash": None,
+            "client_name": None,
+            "fingerprint": None,
+            "approved_at": None,
+        },
+        device_session,
+    ]
+    if legacy_store == "legacy_state_file":
+        legacy_state = {"pair_sessions": pair_sessions, "connections": connections}
+        (tmp_path / "state.json").write_text(json.dumps(legacy_state), encoding="utf-8")
+    else:
+        with TestClient(provisioning.create_app(_service_config(state_path))):
+            pass
+        with closing(sqlite3.connect(state_path)) as db, db:
+            for table, rows in (("pair_sessions", pair_sessions), ("connections", connections)):
+                for row in rows:
+                    placeholders = ", ".join("?" * len(row))
+                    db.execute(f"INSERT INTO {table} ({', '.join(row)}) VALUES ({placeholders})", tuple(row.values()))  # noqa: S608
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         alice = client.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()["connections"]
@@ -1404,26 +1694,27 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
         )
         assert approved.status_code == 200
 
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert [session["id"] for session in persisted["pair_sessions"]] == [device_session["id"]]
-    [registered, *unchanged] = persisted["connections"]
+    assert [session["id"] for session in _stored_rows(state_path, "pair_sessions")] == [device_session["id"]]
+    stored = {connection["id"]: connection for connection in _stored_rows(state_path, "connections")}
+    registered = stored.pop("alice-browser")
     assert registered["last_seen_at"] != paired_at
     assert {**registered, "last_seen_at": paired_at} == connections[0]
-    assert unchanged == connections[1:]
+    assert list(stored.values()) == connections[1:]
 
 
 def test_legacy_state_loads_device_sessions_without_client_ip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Device sessions persisted before requester addresses were recorded still load and show no address."""
     _patch_openid_auth(monkeypatch)
-    state_path = tmp_path / "state.json"
-    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))) as client:
         started = _start_device_pairing(client)
-    payload = json.loads(state_path.read_text(encoding="utf-8"))
-    for item in payload["pair_sessions"]:
+    sessions = _stored_rows(tmp_path / "state.sqlite3", "pair_sessions")
+    for item in sessions:
         del item["client_ip"]
-    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    (legacy_dir / "state.json").write_text(json.dumps({"pair_sessions": sessions, "connections": []}), encoding="utf-8")
 
-    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+    with TestClient(provisioning.create_app(_service_config(legacy_dir / "state.sqlite3"))) as restarted:
         inspected = restarted.post(
             "/v1/local-mindroom/pair/device/inspect",
             json={"pair_code": started["pair_code"]},
@@ -1432,6 +1723,58 @@ def test_legacy_state_loads_device_sessions_without_client_ip(tmp_path: Path, mo
 
     assert inspected.status_code == 200
     assert inspected.json()["client_ip"] is None
+
+
+def test_first_start_imports_the_legacy_state_file_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A state.json from earlier versions is imported by the first start that succeeds and never read again."""
+    _patch_openid_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "old.sqlite3"))) as client:
+        paired = _pair_local_client(client)
+    legacy_payload = {
+        "pair_sessions": _stored_rows(tmp_path / "old.sqlite3", "pair_sessions"),
+        "connections": _stored_rows(tmp_path / "old.sqlite3", "connections"),
+    }
+    state_path = tmp_path / "state.sqlite3"
+    legacy_path = tmp_path / "state.json"
+
+    legacy_path.write_text('{"connections": [{"id": "truncated"}]}', encoding="utf-8")
+    with pytest.raises(KeyError), TestClient(provisioning.create_app(_service_config(state_path))):
+        pass
+
+    legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        assert _post_heartbeat(client, paired["client_id"], paired["client_secret"]).status_code == 200
+
+    legacy_path.write_text("not json", encoding="utf-8")
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        assert _post_heartbeat(restarted, paired["client_id"], paired["client_secret"]).status_code == 200
+    assert [connection["id"] for connection in _stored_rows(state_path, "connections")] == [paired["client_id"]]
+
+
+def test_legacy_json_state_path_opens_the_database_beside_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployment still configured with the old state.json path imports it into state.sqlite3 and keeps the file."""
+    _patch_openid_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "old.sqlite3"))) as client:
+        paired = _pair_local_client(client)
+    legacy_path = tmp_path / "state.json"
+    legacy_text = json.dumps(
+        {
+            "pair_sessions": _stored_rows(tmp_path / "old.sqlite3", "pair_sessions"),
+            "connections": _stored_rows(tmp_path / "old.sqlite3", "connections"),
+        },
+    )
+    legacy_path.write_text(legacy_text, encoding="utf-8")
+
+    with TestClient(provisioning.create_app(_service_config(legacy_path))) as client:
+        assert _post_heartbeat(client, paired["client_id"], paired["client_secret"]).status_code == 200
+    assert legacy_path.read_text(encoding="utf-8") == legacy_text
+    state_path = tmp_path / "state.sqlite3"
+    assert [connection["id"] for connection in _stored_rows(state_path, "connections")] == [paired["client_id"]]
+
+    legacy_path.write_text("not json", encoding="utf-8")
+    for configured_path in (legacy_path, state_path):
+        with TestClient(provisioning.create_app(_service_config(configured_path))) as restarted:
+            assert _post_heartbeat(restarted, paired["client_id"], paired["client_secret"]).status_code == 200
 
 
 def _install_homeserver(
@@ -1458,7 +1801,7 @@ async def test_openid_userinfo_returns_local_user(tmp_path: Path, monkeypatch: p
 
     _install_homeserver(monkeypatch, _handler)
 
-    user_id = await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+    user_id = await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.sqlite3"), "openid-secret")
 
     assert user_id == "@alice:mindroom.chat"
     [request] = requests
@@ -1482,7 +1825,7 @@ async def test_openid_userinfo_rejects_users_of_other_servers(
     _install_homeserver(monkeypatch, lambda _request: httpx.Response(200, json={"sub": sub}))
 
     with pytest.raises(HTTPException) as exc_info:
-        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.sqlite3"), "openid-secret")
 
     assert exc_info.value.status_code == 401
 
@@ -1506,7 +1849,7 @@ async def test_openid_userinfo_rejects_invalid_tokens(
     _install_homeserver(monkeypatch, lambda _request: httpx.Response(status_code, json=body))
 
     with pytest.raises(HTTPException) as exc_info:
-        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.sqlite3"), "openid-secret")
 
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == "Invalid Matrix OpenID token"
@@ -1526,7 +1869,7 @@ async def test_openid_userinfo_reports_unreachable_homeserver_without_token(
     _install_homeserver(monkeypatch, _handler)
 
     with pytest.raises(HTTPException) as exc_info:
-        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.sqlite3"), "openid-secret")
 
     assert exc_info.value.status_code == 502
     assert "openid-secret" not in str(exc_info.value.detail)
@@ -1547,7 +1890,7 @@ async def test_openid_userinfo_reports_homeserver_failures(
     _install_homeserver(monkeypatch, lambda _request: response)
 
     with pytest.raises(HTTPException) as exc_info:
-        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.sqlite3"), "openid-secret")
 
     assert exc_info.value.status_code == 502
 
@@ -1564,7 +1907,7 @@ def test_browser_endpoints_reject_access_tokens(
 ) -> None:
     """Device inspect/approve and connection list/revoke accept only OpenID tokens, never Matrix access tokens."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         complete = _pair_local_client(client)
@@ -1603,7 +1946,7 @@ def test_browser_initiated_pairing_endpoints_are_removed(
 ) -> None:
     """The browser-initiated pairing flow is gone; only device pairing issues credentials."""
     _patch_openid_auth(monkeypatch)
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         response = client.request(
@@ -1623,7 +1966,7 @@ def test_browser_initiated_pairing_endpoints_are_removed(
 )
 def test_cors_rejects_removed_browser_headers(tmp_path: Path, header: str) -> None:
     """Browsers may no longer send access-token or pair-session headers cross-origin."""
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         response = client.options(
@@ -1641,7 +1984,7 @@ def test_cors_rejects_removed_browser_headers(tmp_path: Path, header: str) -> No
 
 def test_cors_allows_openid_token_header(tmp_path: Path) -> None:
     """Browsers may send the OpenID token header cross-origin from the chat client."""
-    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
     with TestClient(app) as client:
         response = client.options(
@@ -1665,7 +2008,7 @@ def test_app_silences_httpx_request_url_logging(tmp_path: Path, caplog: pytest.L
     # An operator enabling INFO logging globally must still not see request URLs.
     caplog.set_level(logging.INFO)
     try:
-        provisioning.create_app(_service_config(tmp_path / "state.json"))
+        provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
 
         assert httpx_logger.level >= logging.WARNING
         assert not httpx_logger.isEnabledFor(logging.INFO)

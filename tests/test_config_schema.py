@@ -133,6 +133,7 @@ def test_secret_fields_are_annotated() -> None:
     assert defs["EventJournalConfig"]["properties"]["database_url"][HINT_KEY] == {"secret": True}
     assert defs["MCPServerConfig"]["properties"]["headers"][HINT_KEY] == {"secret": True}
     assert defs["KnowledgeGitConfig"]["properties"]["repo_url"][HINT_KEY] == {"secret": True}
+    assert defs["MCPOAuthConfig"]["properties"]["extra_token_params"][HINT_KEY] == {"secret": True}
 
 
 def test_optional_blocks_default_to_their_model_defaults() -> None:
@@ -172,3 +173,15 @@ def test_dashboard_schema_snapshot_is_current() -> None:
     )
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot == dashboard_config_schema(), "Run .venv/bin/python .github/scripts/generate_config_schema.py"
+
+
+def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_fallback() -> None:
+    """Built-in branches pin their name, and the plugin branch accepts any other name but never a built-in one."""
+    schema = dashboard_config_schema()
+    union = schema["$defs"]["AgentConfig"]["properties"]["automations"]["anyOf"][0]["items"]
+    defs = schema["$defs"]
+
+    assert union["discriminator"] == {"propertyName": "name"}
+    names = [defs[branch["$ref"].removeprefix("#/$defs/")]["properties"]["name"] for branch in union["oneOf"]]
+    assert [name.get("const") for name in names] == ["prompt_curation", "dreaming", None]
+    assert names[2]["not"] == {"enum": ["prompt_curation", "dreaming"]}

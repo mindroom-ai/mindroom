@@ -1588,6 +1588,50 @@ async def test_raw_voice_download_failure_dispatches_text_only_fallback(mock_hom
 
 
 @pytest.mark.asyncio
+async def test_text_only_voice_fallback_drops_sender_supplied_attachment_ids(mock_home_bot: AgentBot) -> None:
+    """The fallback registers no audio, so attachment IDs the sender wrote must not become trusted metadata."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$audio-preparers-fail")
+    voice_event.source["content"][ATTACHMENT_IDS_KEY] = ["att_other_room"]
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
+
+    normalizer = bot._turn_controller.deps.normalizer
+    with (
+        patch.object(normalizer, "prepare_voice_event", new=AsyncMock(side_effect=RuntimeError("stt failed"))),
+        patch.object(
+            normalizer,
+            "prepare_raw_voice_fallback_event",
+            new=AsyncMock(side_effect=RuntimeError("registration failed")),
+        ),
+        patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+    ):
+        await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
+
+    dispatched_event = _assert_voice_fallback_dispatch(
+        dispatches,
+        source_event_id="$audio-preparers-fail",
+        thread_id="$thread_root",
+    )
+    assert ATTACHMENT_IDS_KEY not in dispatched_event.source["content"]
+
+
+@pytest.mark.asyncio
 async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guessed_fallback(
     mock_home_bot: AgentBot,
 ) -> None:

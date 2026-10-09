@@ -13,15 +13,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.runtime_env_policy import (
-    CREDENTIALS_ENCRYPTION_KEY_ENV,
-    SANDBOX_RUNTIME_ENV_BY_KEY,
-    credentials_encryption_key_value,
-)
-from mindroom.script_runs.legacy_recovery import (
-    legacy_kubernetes_backend_recovery_signature,
-    legacy_pre_seccomp_recovery_digest,
-)
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import (
     WorkerBackendError,
@@ -48,7 +40,6 @@ from mindroom.workers.worker_retirement import open_worker_state_root
 from . import kubernetes_resources as resources
 from .kubernetes_config import (
     KubernetesWorkerBackendConfig,
-    credentials_encryption_key_hash,
     kubernetes_backend_config_signature,
 )
 
@@ -86,7 +77,6 @@ class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
     handle: WorkerHandle
     validated_at: float
-    credentials_encryption_key_hash: str | None
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
 
 
@@ -343,46 +333,24 @@ class KubernetesWorkerBackend:
         payload = self._script_recovery_payload()
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
-    def legacy_pre_seccomp_script_recovery_signature(self) -> str | None:
-        """Reproduce an exact backend digest from before optional seccomp configuration."""
-        return legacy_pre_seccomp_recovery_digest(self._script_recovery_payload())
-
-    # LEGACY_COMPAT: Kubernetes recovery digests without the optional RuntimeClass name.
-    # Legacy format: v2 and unversioned backend config payloads omitted runtime_class_name entirely.
-    # Last legacy release: v2026.9.199.
-    # Replacement: Unreleased optional runtime_class_name; unset configurations retain the prior bytes.
-    # Handling: current and legacy digest writers omit only None; configured values bind worker authority.
-    # Coverage: tests/test_kubernetes_worker_backend.py::test_script_recovery_contract_omits_unset_runtime_class_but_rejects_a_configured_change.
     def _script_recovery_payload(self) -> dict[str, object]:
         config = asdict(self.config)
         config.pop("image")
         config.pop("image_pull_policy")
+        config.pop("image_pull_secrets")
         config.pop("default_script_resource_profile")
         config.pop("script_resource_profiles")
         config.pop("resource_requests")
         config.pop("resource_limits")
-        if config["runtime_class_name"] is None:
-            config.pop("runtime_class_name")
+        config.pop("tmp_size_limit")
+        config.pop("user_resources")
         return {
             "config": config,
             "owner": self.cleanup_locator,
             "auth_token": self.auth_token,
-            "encryption_key": self._current_credentials_encryption_key_hash(),
             "storage_root": str(self.storage_root),
             "grantable_credentials": sorted(self.worker_grantable_credentials),
         }
-
-    def legacy_script_recovery_signature(self) -> str:
-        """Reproduce the pre-v2 authority digest for exact durable-record migration."""
-        return legacy_kubernetes_backend_recovery_signature(
-            config=self.config,
-            owner=self.cleanup_locator,
-            auth_token=self.auth_token,
-            encryption_key=self._current_credentials_encryption_key_hash(),
-            storage_root=str(self.storage_root),
-            config_snapshot=self._resources.config_snapshot,
-            grantable_credentials=self.worker_grantable_credentials,
-        )
 
     def __init__(
         self,
@@ -988,12 +956,6 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(str(exc)) from exc
         return handle
 
-    def _current_credentials_encryption_key_hash(self) -> str | None:
-        encryption_key = credentials_encryption_key_value(
-            self.runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV),
-        )
-        return credentials_encryption_key_hash(encryption_key)
-
     def _store_ready_worker(
         self,
         spec: WorkerSpec,
@@ -1006,7 +968,6 @@ class KubernetesWorkerBackend:
             spec=spec,
             handle=handle,
             validated_at=validated_at,
-            credentials_encryption_key_hash=self._current_credentials_encryption_key_hash(),
             workspace_mounts=workspace_mounts,
         )
         with self._ready_workers_lock:
@@ -1029,7 +990,6 @@ class KubernetesWorkerBackend:
                 return None
             cache_invalid = (
                 (spec is not None and entry.spec != spec)
-                or entry.credentials_encryption_key_hash != self._current_credentials_encryption_key_hash()
                 or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
                 or now - entry.handle.last_used_at >= self.idle_timeout_seconds
             )

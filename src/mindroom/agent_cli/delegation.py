@@ -11,7 +11,7 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.delegation.execution import advance_delegation_call, persist_delegation_state, prepare_delegation_state
-from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 
@@ -35,6 +35,7 @@ def approval_calls_for_cli_pause(paused: PausedAttempt, agent_name: str) -> tupl
             tool_name=str(tool.tool_name),
             invoking_agent=invoking_agent,
             toolkit_name=paused.toolkit_owners.get((invoking_agent, str(tool.tool_name))),
+            arguments_digest=approval_arguments_digest(tool.tool_args),
             expires_at_ns=0,
         )
         for tool in paused.tools
@@ -83,6 +84,10 @@ async def advance_cli_delegation(
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
+    if decisions is None:
+        # A CLI requirement has no member agent, so its gate key is the bare call ID, which the CLI caller
+        # chooses; a fresh call therefore never inherits an approval saved under the same ID.
+        state.gates.pop(str(tool.tool_call_id), None)
     persist = partial(persist_delegation_state, catalog.agent, response)
 
     # Same mutation/authorization owner as ordinary prepared dispatch. No parent

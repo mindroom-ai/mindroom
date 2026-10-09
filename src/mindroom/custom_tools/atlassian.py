@@ -18,6 +18,7 @@ from agno.tools import Toolkit
 from mindroom.attachments import register_bytes_attachment
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.atlassian_client import (
     AtlassianAccessRejectedError,
@@ -31,7 +32,6 @@ from mindroom.custom_tools.atlassian_client import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import media_payload_exceeds_limit
 from mindroom.oauth.atlassian import (
     ATLASSIAN_PRODUCTS,
     AtlassianProduct,
@@ -324,6 +324,29 @@ def _attachment_summary(item: object) -> dict[str, object]:
     }
 
 
+def _person(user: object) -> dict[str, str | None] | None:
+    """Return a Confluence user's display name and account ID, or None for a missing or anonymous user."""
+    user_data = _mapping(user)
+    # displayName is null when the profile hides it, while publicName always has a value.
+    name = user_data.get("displayName") or user_data.get("publicName")
+    account_id = user_data.get("accountId")
+    person = {
+        "display_name": name if isinstance(name, str) and name else None,
+        "account_id": account_id if isinstance(account_id, str) and account_id else None,
+    }
+    return person if user_data.get("type") != "anonymous" and any(person.values()) else None
+
+
+def _content_people(content: Mapping[str, Any]) -> dict[str, object]:
+    """Name who created, owns, and last edited content read with its history, history.ownedBy, and version."""
+    history = _mapping(content.get("history"))
+    return {
+        "created_by": _person(history.get("createdBy")),
+        "owned_by": _person(history.get("ownedBy")),
+        "last_modified_by": _person(_mapping(content.get("version")).get("by")),
+    }
+
+
 def _search_result_summary(item: object, base: object) -> dict[str, object]:
     item_data = _mapping(item)
     content = _mapping(item_data.get("content"))
@@ -333,7 +356,9 @@ def _search_result_summary(item: object, base: object) -> dict[str, object]:
         "title": item_data.get("title") or content.get("title"),
         "excerpt": item_data.get("excerpt"),
         "space": _mapping(item_data.get("resultGlobalContainer")).get("title"),
+        "created": _mapping(content.get("history")).get("createdDate"),
         "last_modified": item_data.get("lastModified"),
+        **_content_people(content),
         "url": _absolute_url(base, item_data.get("url")),
     }
 
@@ -477,6 +502,7 @@ class AtlassianToolkit(Toolkit):
 
         Args:
             jql: Jira Query Language expression, for example "project = PROJ AND statusCategory != Done ORDER BY updated DESC".
+                For the requester's own issues, use assignee = currentUser() or reporter = currentUser().
             max_results: Maximum issues to return; values above 50 are capped.
             fields: Jira field IDs to include, for example ["summary", "status", "assignee"].
             next_page_token: The next_page_token from a previous call, to fetch the next page.
@@ -682,10 +708,11 @@ class AtlassianToolkit(Toolkit):
         return await self._call("jira", transition_issue)
 
     async def confluence_search(self, cql: str, limit: int = 10, cursor: str | None = None) -> str:
-        """Search Confluence with CQL.
+        """Search Confluence with CQL; each result names who created, owns, and last edited it.
 
         Args:
             cql: Confluence Query Language expression, for example 'type = page AND text ~ "release plan"'.
+                For the requester's own content, use creator = currentUser() or contributor = currentUser().
             limit: Maximum results to return; values above 50 are capped.
             cursor: The next_cursor from a previous call, to fetch the next page.
 
@@ -695,6 +722,7 @@ class AtlassianToolkit(Toolkit):
                 "cql": _required_text(cql, "cql"),
                 "limit": _page_size(limit, "limit"),
                 "excerpt": "indexed",
+                "expand": "content.history,content.history.ownedBy,content.version",
             }
             if next_cursor := _cursor(cursor, "cursor"):
                 # Search's own next links pair the cursor with next=true.
@@ -720,6 +748,8 @@ class AtlassianToolkit(Toolkit):
     async def confluence_get_page(self, page_id: str) -> str:
         """Get a Confluence page with its storage-format body and current version number.
 
+        The result names who created, owns, and last edited the page.
+
         Args:
             page_id: Numeric Confluence page ID.
 
@@ -729,7 +759,7 @@ class AtlassianToolkit(Toolkit):
         except AtlassianError as exc:
             return self._error(exc)
         # Any content type is matched, so an ID that is not a page is reported as such instead of as missing.
-        params = {"cql": f"id = {page}", "limit": 1, "expand": "body.storage,version,space"}
+        params = {"cql": f"id = {page}", "limit": 1, "expand": "body.storage,version,space,history,history.ownedBy"}
 
         async def get_page(access_token: str, site: AtlassianSite) -> dict[str, object]:
             path = "/wiki/rest/api/content/search"
@@ -761,6 +791,7 @@ class AtlassianToolkit(Toolkit):
                     "space_key": space.get("key"),
                     "space_name": space.get("name"),
                     "version": _mapping(item.get("version")).get("number"),
+                    **_content_people(item),
                     "body_storage": _mapping(_mapping(item.get("body")).get("storage")).get("value"),
                     "url": _absolute_url(_mapping(data.get("_links")).get("base"), links.get("webui")),
                 },
@@ -832,7 +863,10 @@ class AtlassianToolkit(Toolkit):
                 message="Attachment downloads require a conversation with MindRoom attachment storage.",
             )
         storage_path = context.storage_path
-        max_bytes = inline_attachment_byte_limit(self._runtime_paths)
+        inline_limit = inline_attachment_byte_limit(self._runtime_paths)
+        max_bytes = min(inline_limit, RETAINED_MEDIA_MAX_BYTES)
+        # Raising the setting helps only while an operator has lowered it below the fixed attachment limit.
+        max_bytes_setting = INLINE_ATTACHMENT_BYTES_ENV if inline_limit < RETAINED_MEDIA_MAX_BYTES else None
 
         async def download_attachment(access_token: str, site: AtlassianSite) -> dict[str, object]:
             path = f"/wiki/rest/api/content/{page}/child/attachment/{confluence_attachment_id}/download"
@@ -842,14 +876,8 @@ class AtlassianToolkit(Toolkit):
                 "confluence",
                 path,
                 max_bytes=max_bytes,
-                max_bytes_setting=INLINE_ATTACHMENT_BYTES_ENV,
+                max_bytes_setting=max_bytes_setting,
             )
-            if media_payload_exceeds_limit(downloaded.content):
-                raise AtlassianError(
-                    code="attachment_too_large",
-                    message="The attachment exceeds MindRoom's fixed retained media size limit, "
-                    f"which {INLINE_ATTACHMENT_BYTES_ENV} cannot raise.",
-                )
             display_name = _display_filename(downloaded.content_disposition, filename) or confluence_attachment_id
             mime_type = _mime_type(downloaded.content_type, display_name)
             # Like MindRoom's own media registration, a cancelled call still finishes storing,

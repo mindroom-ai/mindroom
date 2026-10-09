@@ -54,7 +54,6 @@ from mindroom.workers.backends.kubernetes import (
 )
 from mindroom.workers.backends.kubernetes_config import KubernetesAgentVaultConfig
 from mindroom.workers.backends.kubernetes_resources import (
-    _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH,
     _ANNOTATION_PRIVATE_AGENT_NAMES,
     _ANNOTATION_RUNNER_TOKEN_HASH,
     _ANNOTATION_STARTUP_MANIFEST_HASH,
@@ -505,84 +504,25 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     """A compatible main-image rollout does not invalidate a live script worker."""
     backend, _apps, _core = _backend(config_snapshot={})
     initial = backend.script_recovery_signature()
-    backend.config = replace(backend.config, image="mindroom:upgraded", image_pull_policy="Always")
+    backend.config = replace(
+        backend.config,
+        image="mindroom:upgraded",
+        image_pull_policy="Always",
+        image_pull_secrets=("private-registry-pull",),
+    )
 
     assert backend.script_recovery_signature() == initial
 
 
-def test_script_recovery_contract_omits_unset_runtime_class_but_rejects_a_configured_change() -> None:
-    """Existing scripts retain the default authority and cannot cross a RuntimeClass boundary."""
+def test_script_recovery_contract_rejects_a_runtime_class_change() -> None:
+    """Existing scripts cannot cross a RuntimeClass boundary."""
     backend, _apps, _core = _backend(config_snapshot={})
-    initial_payload = backend._script_recovery_payload()
     initial_signature = backend.script_recovery_signature()
-
-    assert "runtime_class_name" not in initial_payload["config"]
 
     backend.config = replace(backend.config, runtime_class_name="sandboxed")
 
     assert backend.script_recovery_signature() != initial_signature
     assert backend._script_recovery_payload()["config"]["runtime_class_name"] == "sandboxed"
-
-
-@pytest.mark.parametrize("seccomp_enabled", [False, True])
-def test_pre_seccomp_recovery_preserves_exact_backend_authority(tmp_path: Path, seccomp_enabled: bool) -> None:
-    """Only an unset seccomp policy can match the historical backend serialization."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "storage",
-        process_env={},
-    )
-    backend, _apps, _core = _backend(
-        runtime_paths=runtime_paths,
-        config_snapshot={},
-        seccomp_profile={"type": "Localhost", "localhostProfile": "worker.json"} if seccomp_enabled else None,
-    )
-    historical_payload = {
-        "config": {
-            "namespace": "chat",
-            "worker_port": 8766,
-            "service_account_name": "mindroom-worker",
-            "storage_pvc_name": "mindroom-storage",
-            "storage_mount_path": "/app/worker",
-            "storage_subpath_prefix": "workers",
-            "config_map_name": "mindroom-config",
-            "config_key": "config.yaml",
-            "config_path": "/app/config.yaml",
-            "idle_timeout_seconds": 60.0,
-            "ready_timeout_seconds": 5.0,
-            "name_prefix": "mindroom-worker",
-            "node_name": None,
-            "colocate_with_control_plane_node": False,
-            "extra_env": {},
-            "extra_labels": {"mindroom.ai/tenant": "test"},
-            "extra_annotations": {},
-            "owner_deployment_name": None,
-            "enable_service_links": False,
-            "auth_secret_name": None,
-            "reconcile_pod_templates": True,
-            "agent_vault": None,
-            "extra_containers": [],
-            "extra_volumes": [],
-        },
-        "owner": None,
-        "auth_token": _TEST_AUTH_TOKEN,
-        "encryption_key": None,
-        "storage_root": str(tmp_path / "storage"),
-        "grantable_credentials": [],
-    }
-    expected = hashlib.sha256(
-        json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode(),
-    ).hexdigest()
-    historical = backend.legacy_pre_seccomp_script_recovery_signature()
-    if seccomp_enabled:
-        assert historical is None
-    else:
-        assert historical == expected
-        assert historical != backend.script_recovery_signature()
-        backend.config = replace(backend.config, extra_env={"SCRIPT_ACCESS": "changed"})
-        assert backend.legacy_pre_seccomp_script_recovery_signature() != historical
 
 
 def test_script_recovery_contract_survives_unrelated_tool_catalog_upgrade() -> None:
@@ -632,7 +572,6 @@ def test_script_recovery_contract_survives_unrelated_agent_delegation_change() -
     )
 
     assert updated.script_recovery_signature() == original.script_recovery_signature()
-    assert updated.legacy_script_recovery_signature() != original.legacy_script_recovery_signature()
 
 
 @pytest.mark.parametrize(
@@ -662,29 +601,14 @@ def test_script_recovery_contract_rejects_rotated_worker_authentication() -> Non
     assert "rotated-worker-auth" not in backend.script_recovery_signature()
 
 
-@pytest.mark.parametrize(
-    ("initial_key", "updated_key", "compatible"),
-    [
-        (None, " \t\n", True),
-        ("encryption-material", " encryption-material\n", True),
-        ("old-material", "new-material", False),
-    ],
-)
-def test_script_recovery_contract_compares_effective_encryption_key(
-    initial_key: str | None,
-    updated_key: str,
-    compatible: bool,
-) -> None:
-    """Equivalent key formatting preserves scripts while actual key rotation invalidates them."""
+def test_script_recovery_contract_ignores_credentials_encryption_key() -> None:
+    """Workers hold no credential encryption key, so rotating it leaves script worker authority unchanged."""
     backend, _apps, _core = _backend(config_snapshot={})
-    backend.runtime_paths = replace(
-        backend.runtime_paths,
-        process_env={} if initial_key is None else {CREDENTIALS_ENCRYPTION_KEY_ENV: initial_key},
-    )
+    backend.runtime_paths = replace(backend.runtime_paths, process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: "old-material"})
     initial = backend.script_recovery_signature()
-    backend.runtime_paths = replace(backend.runtime_paths, process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: updated_key})
+    backend.runtime_paths = replace(backend.runtime_paths, process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: "new-material"})
 
-    assert (backend.script_recovery_signature() == initial) is compatible
+    assert backend.script_recovery_signature() == initial
 
 
 def test_script_recovery_contract_rejects_changed_grantable_credentials() -> None:
@@ -694,6 +618,15 @@ def test_script_recovery_contract_rejects_changed_grantable_credentials() -> Non
     backend.worker_grantable_credentials = frozenset({"github"})
 
     assert backend.script_recovery_signature() != initial
+
+
+def test_script_recovery_contract_ignores_user_resource_overrides() -> None:
+    """Per-user main-worker resources are pod resources, not script recovery authority."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    initial = backend.script_recovery_signature()
+    backend.config = replace(backend.config, user_resources={"@alice:example.org": {"limits": {"memory": "4Gi"}}})
+
+    assert backend.script_recovery_signature() == initial
 
 
 def test_script_recovery_resources_track_only_the_selected_profile() -> None:
@@ -748,8 +681,6 @@ def _backend(
     worker_port: int = 8766,
     storage_subpath_prefix: str = "workers",
     storage_mount_path: str = "/app/worker",
-    config_map_name: str | None = "mindroom-config",
-    worker_config_path: str = "/app/config.yaml",
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
@@ -770,6 +701,9 @@ def _backend(
     runtime_class_name: str | None = None,
     agent_vault: KubernetesAgentVaultConfig | None = None,
     config_snapshot: dict[str, object] | None = None,
+    tmp_size_limit: str | None = None,
+    user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
+    image_pull_secrets: tuple[str, ...] = (),
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -786,9 +720,6 @@ def _backend(
         storage_pvc_name="mindroom-storage",
         storage_mount_path=storage_mount_path,
         storage_subpath_prefix=storage_subpath_prefix,
-        config_map_name=config_map_name,
-        config_key="config.yaml",
-        config_path=worker_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
         ready_timeout_seconds=5.0,
         name_prefix=name_prefix,
@@ -807,6 +738,9 @@ def _backend(
         seccomp_profile=seccomp_profile,
         runtime_class_name=runtime_class_name,
         agent_vault=agent_vault,
+        tmp_size_limit=tmp_size_limit,
+        user_resources=user_resources or {},
+        image_pull_secrets=image_pull_secrets,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -1084,6 +1018,44 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     }
 
 
+def test_kubernetes_worker_tmp_has_an_eviction_size_limit(tmp_path: Path) -> None:
+    """Tool code writing past 1 GiB to /tmp gets its own pod evicted instead of filling the node's ephemeral storage."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    pod_spec = apps_api.created_bodies[0]["spec"]["template"]["spec"]
+    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+    assert volumes["worker-tmp"] == {"name": "worker-tmp", "emptyDir": {"sizeLimit": "1Gi"}}
+    assert {"name": "worker-tmp", "mountPath": "/tmp"} in pod_spec["containers"][0]["volumeMounts"]  # noqa: S108
+    assert pod_spec["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+
+
+def test_kubernetes_worker_tmp_size_limit_also_sizes_container_ephemeral_storage(tmp_path: Path) -> None:
+    """A configured /tmp size must not be undercut by a cluster-default container ephemeral-storage limit."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+        tmp_size_limit="8Gi",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    pod_spec = apps_api.created_bodies[0]["spec"]["template"]["spec"]
+    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+    assert volumes["worker-tmp"] == {"name": "worker-tmp", "emptyDir": {"sizeLimit": "8Gi"}}
+    resources = pod_spec["containers"][0]["resources"]
+    assert resources["requests"] == {"memory": "256Mi", "cpu": "100m", "ephemeral-storage": "8Gi"}
+    assert resources["limits"] == {"memory": "1Gi", "cpu": "500m", "ephemeral-storage": "8Gi"}
+
+
 def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_path: Path) -> None:
     """A browser-compatible Localhost profile must not broaden pod-level or helper-container policy."""
     profile: _WorkerSeccompProfile = {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"}
@@ -1143,111 +1115,55 @@ def test_kubernetes_worker_omits_runtime_class_when_unset(tmp_path: Path) -> Non
     assert "runtimeClassName" not in apps_api.created_bodies[0]["spec"]["template"]["spec"]
 
 
-def test_kubernetes_worker_startup_manifest_omits_credentials_encryption_key(tmp_path: Path) -> None:
-    """Worker manifests should not persist credential encryption key material beside worker state."""
-    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+def test_kubernetes_worker_pod_uses_image_pull_secrets_only_when_configured(tmp_path: Path) -> None:
+    """Configured pull secrets recreate workers with them; unset secrets leave the pod template unchanged."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
-        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
     backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
-    worker_key = _TEST_SCOPED_WORKER_KEY_A
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    assert "imagePullSecrets" not in apps_api.created_bodies[0]["spec"]["template"]["spec"]
 
-    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, image_pull_secrets=("private-registry-pull",))
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+    updated_backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    deployment = apps_api.created_bodies[0]
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_by_name = {env["name"]: env for env in container["env"]}
-    startup_manifest = _load_startup_manifest(backend, worker_key=worker_key)
-    committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
-
-    assert env_by_name[CREDENTIALS_ENCRYPTION_KEY_ENV] == {
-        "name": CREDENTIALS_ENCRYPTION_KEY_ENV,
-        "valueFrom": {
-            "secretKeyRef": {
-                "name": handle.worker_id,
-                "key": CREDENTIALS_ENCRYPTION_KEY_ENV,
-            },
-        },
-    }
-    assert committed_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) is None
-    assert core_api.created_secret_bodies[0]["stringData"][CREDENTIALS_ENCRYPTION_KEY_ENV] == encryption_key
-    assert encryption_key not in json.dumps(deployment)
-    assert encryption_key not in json.dumps(startup_manifest)
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert apps_api.created_bodies[-1]["spec"]["template"]["spec"]["imagePullSecrets"] == [
+        {"name": "private-registry-pull"},
+    ]
 
 
-def test_kubernetes_worker_credentials_encryption_key_uses_runtime_source_not_extra_env(tmp_path: Path) -> None:
-    """Worker credential encryption should use the same runtime key source as CredentialsManager."""
-    runtime_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+def test_kubernetes_worker_never_receives_credentials_encryption_key(tmp_path: Path) -> None:
+    """Workers get no copy of the primary's credential encryption key in their env, Secret, or startup manifest."""
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     extra_env_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
-    carrier_env = json.dumps({CREDENTIALS_ENCRYPTION_KEY_ENV: extra_env_key})
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
         process_env={
-            CREDENTIALS_ENCRYPTION_KEY_ENV: runtime_key,
-            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": carrier_env,
+            CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({CREDENTIALS_ENCRYPTION_KEY_ENV: extra_env_key}),
         },
     )
     backend, apps_api, core_api = _backend(
         runtime_paths=runtime_paths,
         extra_env={CREDENTIALS_ENCRYPTION_KEY_ENV: extra_env_key},
     )
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
 
-    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
     deployment = apps_api.created_bodies[0]
-    startup_manifest = _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)
-    assert core_api.created_secret_bodies[0]["stringData"][CREDENTIALS_ENCRYPTION_KEY_ENV] == runtime_key
-    assert extra_env_key not in json.dumps(deployment)
-    assert extra_env_key not in json.dumps(core_api.created_secret_bodies)
-    assert extra_env_key not in json.dumps(startup_manifest)
-    assert "MINDROOM_KUBERNETES_WORKER_ENV_JSON" not in json.dumps(startup_manifest)
-
-
-def test_kubernetes_worker_credentials_encryption_key_rotation_changes_template_hash(tmp_path: Path) -> None:
-    """Rotating the credential encryption key should restart workers without exposing the key."""
-    first_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
-    second_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
-
-    def deployment_for_key(encryption_key: str) -> dict[str, object]:
-        runtime_paths = resolve_primary_runtime_paths(
-            config_path=Path("config.yaml"),
-            storage_path=tmp_path / f"mindroom-test-storage-{encryption_key[:4]}",
-            process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
-        )
-        backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-        return apps_api.created_bodies[0]
-
-    first_deployment = deployment_for_key(first_key)
-    second_deployment = deployment_for_key(second_key)
-    first_template_annotations = first_deployment["spec"]["template"]["metadata"]["annotations"]
-    second_template_annotations = second_deployment["spec"]["template"]["metadata"]["annotations"]
-
-    assert (
-        first_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH]
-        == hashlib.sha256(
-            first_key.encode("utf-8"),
-        ).hexdigest()
-    )
-    assert (
-        second_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH]
-        == hashlib.sha256(
-            second_key.encode("utf-8"),
-        ).hexdigest()
-    )
-    assert (
-        first_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH]
-        != (second_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH])
-    )
-    assert (
-        first_deployment["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH]
-        != (second_deployment["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH])
-    )
-    assert first_key not in json.dumps(first_deployment)
-    assert second_key not in json.dumps(second_deployment)
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    startup_manifest = _load_startup_manifest(backend, worker_key=worker_key)
+    worker_objects = json.dumps([deployment, core_api.created_secret_bodies, startup_manifest])
+    assert CREDENTIALS_ENCRYPTION_KEY_ENV not in {env["name"] for env in container["env"]}
+    assert CREDENTIALS_ENCRYPTION_KEY_ENV not in core_api.created_secret_bodies[0]["stringData"]
+    assert encryption_key not in worker_objects
+    assert extra_env_key not in worker_objects
+    assert hashlib.sha256(encryption_key.encode("utf-8")).hexdigest() not in worker_objects
 
 
 def test_kubernetes_backend_config_signature_changes_with_credentials_encryption_key(tmp_path: Path) -> None:
@@ -1324,26 +1240,13 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
             },
         },
     }
-    assert env_by_name[CREDENTIALS_ENCRYPTION_KEY_ENV] == {
-        "name": CREDENTIALS_ENCRYPTION_KEY_ENV,
-        "valueFrom": {
-            "secretKeyRef": {
-                "name": auth_secret_name,
-                "key": f"{handle.worker_id}.credentials-encryption-key",
-            },
-        },
-    }
+    assert CREDENTIALS_ENCRYPTION_KEY_ENV not in env_by_name
     assert encryption_key not in json.dumps(deployment)
     assert core_api.created_secret_bodies == []
-    expected_secret_data = _encoded_secret_data(
-        {
-            handle.worker_id: handle.auth_token,
-            f"{handle.worker_id}.credentials-encryption-key": encryption_key,
-        },
-    )
+    expected_secret_data = _encoded_secret_data({handle.worker_id: handle.auth_token})
     assert core_api.patched_secret_bodies[0] == (
         auth_secret_name,
-        {"data": expected_secret_data},
+        {"data": {**expected_secret_data, f"{handle.worker_id}.credentials-encryption-key": None}},
     )
     assert core_api.secrets[auth_secret_name].data == expected_secret_data
 
@@ -1453,62 +1356,43 @@ def test_kubernetes_backend_refuses_retirement_without_exact_state_identity(tmp_
     assert state_root.is_dir()
 
 
-def test_kubernetes_backend_reapply_without_encryption_removes_worker_secret_key(tmp_path: Path) -> None:
-    """Reapplying a worker Secret after disabling encryption should remove stale key data."""
+def test_kubernetes_backend_reapply_removes_worker_secret_key(tmp_path: Path) -> None:
+    """Reapplying a worker Secret removes the encryption key an earlier release stored there."""
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
-    encrypted_runtime_paths = resolve_primary_runtime_paths(
+    runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
         process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
-    backend, _apps_api, core_api = _backend(runtime_paths=encrypted_runtime_paths)
+    backend, _apps_api, core_api = _backend(runtime_paths=runtime_paths)
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-    assert CREDENTIALS_ENCRYPTION_KEY_ENV in core_api.secrets[handle.worker_id].data
-
-    unencrypted_runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=tmp_path / "mindroom-test-storage",
-    )
-    backend.runtime_paths = unencrypted_runtime_paths
-    backend._resources.runtime_paths = unencrypted_runtime_paths
+    core_api.secrets[handle.worker_id].data |= _encoded_secret_data({CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key})
+    backend._invalidate_ready_worker(_TEST_SCOPED_WORKER_KEY_A)
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
 
-    assert CREDENTIALS_ENCRYPTION_KEY_ENV not in core_api.secrets[handle.worker_id].data
-    assert any(
-        name == handle.worker_id and body.get("data", {}).get(CREDENTIALS_ENCRYPTION_KEY_ENV) is None
-        for name, body in core_api.patched_secret_bodies
+    assert core_api.secrets[handle.worker_id].data == _encoded_secret_data(
+        {"MINDROOM_SANDBOX_PROXY_TOKEN": handle.auth_token},
     )
 
 
-def test_kubernetes_backend_reapply_without_encryption_removes_shared_secret_key(tmp_path: Path) -> None:
-    """Reapplying a shared Secret entry after disabling encryption should remove stale worker key data."""
+def test_kubernetes_backend_reapply_removes_shared_secret_key(tmp_path: Path) -> None:
+    """Reapplying a shared Secret entry removes the worker encryption key an earlier release stored there."""
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
-    encrypted_runtime_paths = resolve_primary_runtime_paths(
+    runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
         process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
     auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
-    backend, _apps_api, core_api = _backend(runtime_paths=encrypted_runtime_paths, auth_secret_name=auth_secret_name)
+    backend, _apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
+    worker_id = backend._worker_id(_TEST_SCOPED_WORKER_KEY_A)
+    encryption_secret_key = f"{worker_id}.credentials-encryption-key"
+    core_api.secrets[auth_secret_name].data = _encoded_secret_data({encryption_secret_key: encryption_key})
+
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-    encryption_secret_key = f"{handle.worker_id}.credentials-encryption-key"
-    assert encryption_secret_key in core_api.secrets[auth_secret_name].data
 
-    unencrypted_runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=tmp_path / "mindroom-test-storage",
-    )
-    backend.runtime_paths = unencrypted_runtime_paths
-    backend._resources.runtime_paths = unencrypted_runtime_paths
-
-    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
-
-    assert encryption_secret_key not in core_api.secrets[auth_secret_name].data
-    assert any(
-        name == auth_secret_name and body.get("data", {}).get(encryption_secret_key) is None
-        for name, body in core_api.patched_secret_bodies
-    )
+    assert core_api.secrets[auth_secret_name].data == _encoded_secret_data({worker_id: handle.auth_token})
 
 
 def test_kubernetes_backend_startup_failure_removes_key_from_tenant_auth_secret(tmp_path: Path) -> None:
@@ -1801,88 +1685,45 @@ def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Pat
         )
 
 
-def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
-    """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
-    config_path = tmp_path / "workspace-config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths, config_map_name=None)
-
-    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-
-    committed_runtime = deserialize_runtime_paths(
-        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
-    )
-
-    assert committed_runtime.config_path == config_path.resolve()
-
-
 @pytest.mark.parametrize(
-    ("config_relative_path", "worker_config_path", "expected_mount_path", "expected_subpath"),
-    [
-        (
-            "content-bundles/team-config/agent-config.yaml",
-            "/app/agent_data/content-bundles/team-config/agent-config.yaml",
-            "/app/agent_data/content-bundles",
-            "content-bundles",
-        ),
-        (
-            "team-config/content/environments/prod/agent-config.yaml",
-            "/app/agent_data/team-config/content/environments/prod/agent-config.yaml",
-            "/app/agent_data/team-config",
-            "team-config",
-        ),
-    ],
+    "config_relative_path",
+    ["content-bundles/team-config/agent-config.yaml", "team-config/content/environments/prod/agent-config.yaml"],
 )
-def test_kubernetes_backend_mounts_config_storage_subtree_without_configmap(
-    tmp_path: Path,
-    config_relative_path: str,
-    worker_config_path: str,
-    expected_mount_path: str,
-    expected_subpath: str,
-) -> None:
-    """File-backed configs need bundle visibility without broadening worker state mounts."""
+def test_kubernetes_worker_never_receives_the_primary_config(tmp_path: Path, config_relative_path: str) -> None:
+    """Workers keep the primary's config path for resolving snapshot paths but mount nothing that holds its config."""
     config_path = tmp_path / "storage" / config_relative_path
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config-secret\n"
+        "agents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
+    (config_path.parent / ".env").write_text("OPENAI_API_KEY=sk-env-secret\n", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        storage_mount_path="/app/agent_data",
-        config_map_name=None,
-        worker_config_path=worker_config_path,
-    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, storage_mount_path="/app/agent_data")
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     deployment = apps_api.created_bodies[0]
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_by_name = {env["name"]: env for env in container["env"]}
-    mount_paths = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
-    expected_worker_root = f"/app/agent_data/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
-
-    assert mount_paths[expected_mount_path] == {
-        "name": "worker-storage",
-        "mountPath": expected_mount_path,
-        "subPath": expected_subpath,
-        "readOnly": True,
-    }
-    assert "/app/agent_data" not in mount_paths
-    assert "/app/agent_data/agents/code" not in mount_paths
-    assert mount_paths["/app/agent_data/agents/code/workspace"]["subPath"] == "agents/code/workspace"
-    assert mount_paths[expected_worker_root]["subPath"] == f"workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
-    assert not any(mount["name"] == "worker-config" for mount in container["volumeMounts"])
+    worker_config_path = f"/app/agent_data/{config_relative_path}"
+    config_top_level = f"/app/agent_data/{config_relative_path.split('/', maxsplit=1)[0]}"
+    assert env_by_name["MINDROOM_CONFIG_PATH"]["value"] == str(config_path.resolve())
+    assert not any(
+        worker_config_path.startswith(mount["mountPath"]) or mount["mountPath"].startswith(config_top_level)
+        for mount in container["volumeMounts"]
+    )
     assert deployment["spec"]["template"]["spec"]["volumes"] == [
         {"name": "worker-storage", "persistentVolumeClaim": {"claimName": "mindroom-storage"}},
-        {"name": "worker-tmp", "emptyDir": {}},
+        {"name": "worker-tmp", "emptyDir": {"sizeLimit": "1Gi"}},
     ]
-    assert env_by_name["MINDROOM_CONFIG_PATH"]["value"] == worker_config_path
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    assert committed_runtime.config_path == config_path.resolve()
+    assert "sk-config-secret" not in json.dumps(deployment)
+    assert "sk-env-secret" not in json.dumps(_load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A))
 
 
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
@@ -1932,6 +1773,7 @@ def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Pat
             "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT=8Gi\n"
             "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST=500m\n"
             "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT=2\n"
+            "MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT=8Gi\n"
         ),
         encoding="utf-8",
     )
@@ -1941,6 +1783,7 @@ def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Pat
 
     assert config.resource_requests == {"memory": "2Gi", "cpu": "500m"}
     assert config.resource_limits == {"memory": "8Gi", "cpu": "2"}
+    assert config.tmp_size_limit == "8Gi"
 
 
 def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Path) -> None:
@@ -1966,6 +1809,8 @@ def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Pa
 
     assert config.resource_requests == {"memory": "256Mi", "cpu": "100m"}
     assert config.resource_limits == {"memory": "1Gi", "cpu": "500m"}
+    assert config.tmp_size_limit is None
+    assert config.user_resources == {}
     assert config.enable_service_links is False
 
 
@@ -2026,6 +1871,62 @@ def test_kubernetes_backend_config_rejects_partial_script_resource_profiles(tmp_
         KubernetesWorkerBackendConfig.from_runtime(resolve_primary_runtime_paths(config_path=config_path))
 
 
+def test_kubernetes_backend_config_reads_user_resource_overrides(tmp_path: Path) -> None:
+    """Per-user overrides may set any subset of cpu and memory requests and limits."""
+    overrides = {
+        "@alice:example.org": {"limits": {"memory": "4Gi"}},
+        "@bob:example.org": {"requests": {"cpu": "1"}, "limits": {"cpu": "2", "memory": "8Gi"}},
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+            "MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON": json.dumps(overrides),
+        },
+    )
+
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.user_resources == overrides
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("[]", "must contain a JSON object"),
+        ('{"alice": {"limits": {"memory": "4Gi"}}}', "keys must be Matrix user IDs"),
+        ('{"@alice:example.org": {"limit": {"memory": "4Gi"}}}', "must define requests, limits, or both"),
+        ('{"@alice:example.org": {}}', "must define requests, limits, or both"),
+        ('{"@alice:example.org": {"limits": {"ephemeral-storage": "4Gi"}}}', "non-empty cpu or memory"),
+        ('{"@alice:example.org": {"limits": {"memory": 4}}}', "non-empty cpu or memory"),
+    ],
+)
+def test_kubernetes_backend_config_rejects_invalid_user_resource_overrides(
+    tmp_path: Path,
+    raw: str,
+    message: str,
+) -> None:
+    """Overrides stay as strict as the script resource profiles."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+            "MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON": raw,
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match=message):
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+
 def test_kubernetes_backend_config_allows_service_links_override(tmp_path: Path) -> None:
     """Worker service-link env injection remains opt-in."""
     config_dir = tmp_path / "cfg"
@@ -2068,6 +1969,47 @@ def test_kubernetes_backend_renders_configured_resources_on_worker_container(tmp
     container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["requests"] == {"memory": "2Gi", "cpu": "500m"}
     assert container["resources"]["limits"] == {"memory": "8Gi", "cpu": "2"}
+
+
+def test_kubernetes_worker_user_resources_apply_only_to_that_requesters_workers(tmp_path: Path) -> None:
+    """A listed requester's workers merge its overrides; other workers and script runs keep their resources."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault=_test_agent_vault_config(),
+        user_resources={"@alice:example.org": {"requests": {"memory": "1Gi"}, "limits": {"memory": "4Gi"}}},
+    )
+    alice_user_agent_key = "v1:tenant-123:user_agent:~@alice:example.org:code"
+    alice_resources = {"requests": {"memory": "1Gi", "cpu": "100m"}, "limits": {"memory": "4Gi", "cpu": "500m"}}
+    global_resources = {"requests": {"memory": "256Mi", "cpu": "100m"}, "limits": {"memory": "1Gi", "cpu": "500m"}}
+    script_key = script_worker_key_for_run(alice_user_agent_key, f"script-{'a' * 32}")
+    cases = [
+        (WorkerSpec("v1:tenant-123:user:~@alice:example.org"), alice_resources),
+        (WorkerSpec(alice_user_agent_key, private_agent_names=frozenset()), alice_resources),
+        (WorkerSpec("v1:tenant-123:user:~@bob:example.org"), global_resources),
+        (WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), global_resources),
+        (
+            WorkerSpec(
+                script_key,
+                private_agent_names=frozenset(),
+                state_scope_worker_key=alice_user_agent_key,
+                resource_profile="large",
+            ),
+            backend.config.script_resource_profiles["large"],
+        ),
+    ]
+
+    for spec, expected in cases:
+        handle = backend.ensure_worker(spec, now=10.0)
+        deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
+        template_spec = deployment["spec"]["template"]["spec"]
+        assert template_spec["containers"][0]["resources"] == expected, spec.worker_key
+        # The Agent Vault init container must keep matching the worker so the pod stays memory-bounded.
+        init_resources = [container["resources"] for container in template_spec.get("initContainers", [])]
+        assert init_resources == ([] if spec.state_scope_worker_key else [expected]), spec.worker_key
 
 
 def test_kubernetes_script_worker_uses_selected_bounded_resource_profile(tmp_path: Path) -> None:
@@ -2942,7 +2884,6 @@ router:
         expected_worker_root,
         f"{expected_worker_root}/.shared_credentials",
         f"{expected_worker_root}/.runtime",
-        "/app/config.yaml",
         "/tmp",  # noqa: S108
     }
 
@@ -5256,6 +5197,9 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert any(m["name"] == "agent-vault-bootstrap" for m in mint["volumeMounts"])
 
     main = template_spec["containers"][0]
+    # Without its own limits the init container would leave the pod without a memory limit.
+    assert mint["resources"] == main["resources"]
+    assert "memory" in mint["resources"]["limits"]
     assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
     assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
     main_env = {e["name"]: e.get("value") for e in main["env"]}

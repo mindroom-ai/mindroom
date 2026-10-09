@@ -614,7 +614,7 @@ class TestEditApprovalOwnership:
                 _inbound_event(case.room.room_id, event, EventKind.REDACTION, EventClass.CONTEXT_ONLY),
                 _projected_event(case.room.room_id, event, EventKind.REDACTION, self_sender=case.bot.matrix_id.full_id),
             )
-            await case.store.mark_source_redacted(redacts)
+            await case.store.mark_source_redacted(redacts, room_id=case.room.room_id)
             assert await case.principal.is_pending("$edit")
         await case.approve()
         await case.restart()

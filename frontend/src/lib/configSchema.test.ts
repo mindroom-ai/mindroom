@@ -10,6 +10,7 @@ import {
   type JsonSchema,
   type ReferenceOptions,
 } from "./configSchema";
+import realConfigSchema from "@/test/fixtures/config-schema.json";
 
 // Shapes below mirror what Pydantic's model_json_schema() emits.
 const ROOT: JsonSchema = {
@@ -310,5 +311,49 @@ describe("setObjectKey", () => {
     expect(setObjectKey(original, "a", undefined)).toEqual({ b: 2 });
     expect(original).toEqual({ a: 1, b: 2 });
     expect(setObjectKey(undefined, "a", null)).toEqual({ a: null });
+  });
+});
+
+describe("automation entries", () => {
+  // Regenerated from the backend models by .github/scripts/generate_config_schema.py.
+  const REAL = realConfigSchema as JsonSchema;
+  const automations = REAL.$defs!.AgentConfig.properties!.automations;
+  const node = classifySchemaNode(
+    classifySchemaNode(automations, REAL).schema.items!,
+    REAL,
+  );
+
+  it("lists the built-ins by name and plugin automations as the fallback", () => {
+    expect(node.kind).toBe("union");
+    expect(node.discriminator).toBe("name");
+    expect(node.variants.map((variant) => variant.label)).toEqual([
+      "Prompt curation",
+      "Dreaming",
+      "Plugin automation",
+    ]);
+    expect(node.variants.map((variant) => variant.errorTag)).toEqual([
+      "prompt_curation",
+      "dreaming",
+      "plugin",
+    ]);
+  });
+
+  it("matches an entry by its name, and any other name as a plugin automation", () => {
+    expect(matchUnionVariant(node, { name: "dreaming" }, REAL)).toBe(1);
+    expect(
+      matchUnionVariant(
+        node,
+        { name: "weekly_digest", cron: "0 9 * * 1" },
+        REAL,
+      ),
+    ).toBe(2);
+    expect(matchUnionVariant(node, {}, REAL)).toBe(-1);
+  });
+
+  it("starts a built-in entry with its name, so the backend knows which it is", () => {
+    const dreaming = classifySchemaNode(node.variants[1].schema, REAL);
+    expect(initialValue(dreaming, REAL, REFERENCES)).toEqual({
+      name: "dreaming",
+    });
   });
 });

@@ -44,6 +44,43 @@
 {{- if not (kindIs "string" .Values.config.bootstrapBundleRevision) -}}
 {{- fail "config.bootstrapBundleRevision must be a string" -}}
 {{- end -}}
+{{- $bootstrapKey := "config.bootstrapBundlePath" -}}
+{{- $bootstrapContentBundle := .Values.config.bootstrapContentBundle -}}
+{{- if not (and (kindIs "string" $bootstrapContentBundle.name) (kindIs "string" $bootstrapContentBundle.subPath)) -}}
+{{- fail "config.bootstrapContentBundle.name and .subPath must be strings" -}}
+{{- end -}}
+{{- if $bootstrapContentBundle.name -}}
+{{- $bootstrapKey = "config.bootstrapContentBundle" -}}
+{{- if or .Values.config.bootstrapBundlePath .Values.config.bootstrapBundleRevision -}}
+{{- fail "config.bootstrapContentBundle cannot be combined with config.bootstrapBundlePath or config.bootstrapBundleRevision" -}}
+{{- end -}}
+{{- $selectedBundle := dict -}}
+{{- range $bundle := .Values.contentBundles -}}
+{{- if eq (toString $bundle.name) $bootstrapContentBundle.name -}}
+{{- $selectedBundle = $bundle -}}
+{{- end -}}
+{{- end -}}
+{{- if not $selectedBundle -}}
+{{- fail (printf "config.bootstrapContentBundle.name %q must match a contentBundles entry" $bootstrapContentBundle.name) -}}
+{{- end -}}
+{{- if and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite) -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled, so the source matches its image digest" $bootstrapContentBundle.name) -}}
+{{- end -}}
+{{- $bundlePaths := dict "targetPath" (include "mindroom-runtime.contentBundleTargetPath" (list $ $selectedBundle)) "sourcePath" (include "mindroom-runtime.contentBundleSourcePath" (list $ $selectedBundle)) -}}
+{{- range $mount := $selectedBundle.volumeMounts -}}
+{{- $mountPath := clean (printf "/%s" $mount.mountPath) -}}
+{{- range $key, $path := $bundlePaths -}}
+{{- if or (eq $mountPath $path) (hasPrefix (printf "%s/" (trimSuffix "/" $mountPath)) $path) (hasPrefix (printf "%s/" (trimSuffix "/" $path)) $mountPath) -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q volumeMounts to stay clear of its %s %s; mountPath %s overlaps it" $bootstrapContentBundle.name $key $path $mountPath) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if or (hasPrefix "/" $bootstrapContentBundle.subPath) (has ".." (splitList "/" $bootstrapContentBundle.subPath)) -}}
+{{- fail "config.bootstrapContentBundle.subPath must be a relative path without .. segments" -}}
+{{- end -}}
+{{- else if $bootstrapContentBundle.subPath -}}
+{{- fail "config.bootstrapContentBundle.subPath requires config.bootstrapContentBundle.name" -}}
+{{- end -}}
 {{- if .Values.config.bootstrapBundleRevision -}}
 {{- if not .Values.config.bootstrapBundlePath -}}
 {{- fail "config.bootstrapBundleRevision requires config.bootstrapBundlePath" -}}
@@ -52,43 +89,26 @@
 {{- fail "config.bootstrapBundleRevision must be nonempty, at most 128 bytes, and contain no control characters" -}}
 {{- end -}}
 {{- end -}}
-{{- if .Values.config.bootstrapBundlePath -}}
+{{- $bootstrap := include "mindroom-runtime.bootstrapBundle" . | fromJson -}}
+{{- if $bootstrap.path -}}
 {{- if eq .Values.workers.backend "static_runner" -}}
-{{- fail "config.bootstrapBundlePath cannot be combined with workers.backend=static_runner; sidecar startup is concurrent" -}}
+{{- fail (printf "%s cannot be combined with workers.backend=static_runner; sidecar startup is concurrent" $bootstrapKey) -}}
+{{- end -}}
+{{- if gt (int64 .Values.replicaCount) 1 -}}
+{{- fail (printf "%s requires replicaCount 0 or 1; concurrent pods would install into the same config directory at once" $bootstrapKey) -}}
 {{- end -}}
 {{- $storageRoot := clean .Values.storage.mountPath -}}
 {{- $target := dir (clean .Values.config.path) -}}
 {{- if or (ne $configSource "file") (not (hasPrefix (printf "%s/" $storageRoot) $target)) -}}
-{{- fail "config.bootstrapBundlePath requires config.source=file and a config directory below storage.mountPath" -}}
+{{- fail (printf "%s requires config.source=file and a config directory below storage.mountPath" $bootstrapKey) -}}
 {{- end -}}
-{{- if not (hasPrefix "/" .Values.config.bootstrapBundlePath) -}}
-{{- fail "config.bootstrapBundlePath must be absolute" -}}
+{{- if not (hasPrefix "/" $bootstrap.path) -}}
+{{- fail (printf "%s must be absolute" $bootstrapKey) -}}
 {{- end -}}
-{{- $source := clean .Values.config.bootstrapBundlePath -}}
-{{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $source)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
-{{- fail "config.bootstrapBundlePath must not overlap the config.path directory" -}}
-{{- end -}}
-{{- $mountPaths := list (clean .Values.storage.mountPath) -}}
-{{- if .Values.stateStorage.enabled -}}
-{{- if .Values.stateStorage.mountPath -}}
-{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.mountPath) -}}
-{{- end -}}
-{{- if .Values.stateStorage.encryptionKeys.enabled -}}
-{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.encryptionKeys.mountPath) -}}
-{{- end -}}
-{{- if .Values.stateStorage.syncContinuity.enabled -}}
-{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.syncContinuity.mountPath) -}}
-{{- end -}}
-{{- end -}}
-{{- range .Values.extraVolumeMounts -}}
-{{- if .mountPath -}}
-{{- $mountPaths = append $mountPaths (clean .mountPath) -}}
-{{- end -}}
-{{- end -}}
-{{- range $mount := $mountPaths -}}
-{{- if or (eq $target $mount) (hasPrefix (printf "%s/" $target) $mount) -}}
-{{- fail "config.path directory overlaps a mounted volume" -}}
-{{- end -}}
+{{- $source := clean $bootstrap.path -}}
+{{- $copyRoot := clean $bootstrap.root -}}
+{{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $copyRoot)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
+{{- fail (printf "%s must not overlap the config.path directory" $bootstrapKey) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
@@ -158,6 +178,89 @@
 {{- fail "stateStorage.syncContinuity.subPath is required when stateStorage.syncContinuity.enabled=true" -}}
 {{- end -}}
 {{- end -}}
+{{- /* Mount paths and state subpaths already claimed in the runtime container, keyed to the value that claims them. */ -}}
+{{- $claimedMountPaths := dict (clean .Values.storage.mountPath) "storage.mountPath" -}}
+{{- range $index, $mount := include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray -}}
+{{- if $mount.mountPath -}}
+{{- $label := printf "extraVolumeMounts[%d].mountPath" $index -}}
+{{- if kindIs "map" $.Values.extraVolumeMounts -}}
+{{- $label = printf "extraVolumeMounts.%s.mountPath" $mount.name -}}
+{{- end -}}
+{{- $_ := set $claimedMountPaths (clean $mount.mountPath) $label -}}
+{{- end -}}
+{{- end -}}
+{{- $claimedSubPaths := dict -}}
+{{- if .Values.stateStorage.enabled -}}
+{{- if .Values.stateStorage.mountPath -}}
+{{- $_ := set $claimedMountPaths (clean .Values.stateStorage.mountPath) "stateStorage.mountPath" -}}
+{{- end -}}
+{{- if .Values.stateStorage.encryptionKeys.enabled -}}
+{{- $_ := set $claimedMountPaths (clean .Values.stateStorage.encryptionKeys.mountPath) "stateStorage.encryptionKeys.mountPath" -}}
+{{- $_ := set $claimedSubPaths .Values.stateStorage.encryptionKeys.subPath "stateStorage.encryptionKeys.subPath" -}}
+{{- end -}}
+{{- if .Values.stateStorage.syncContinuity.enabled -}}
+{{- $_ := set $claimedMountPaths (clean .Values.stateStorage.syncContinuity.mountPath) "stateStorage.syncContinuity.mountPath" -}}
+{{- $_ := set $claimedSubPaths .Values.stateStorage.syncContinuity.subPath "stateStorage.syncContinuity.subPath" -}}
+{{- end -}}
+{{- $extraNames := dict -}}
+{{- range $index, $entry := .Values.stateStorage.extraSubPaths -}}
+{{- $label := printf "stateStorage.extraSubPaths[%d]" $index -}}
+{{- if not $entry.name -}}
+{{- fail (printf "%s.name is required" $label) -}}
+{{- end -}}
+{{- if hasKey $extraNames $entry.name -}}
+{{- fail (printf "%s.name %q duplicates another stateStorage.extraSubPaths entry" $label $entry.name) -}}
+{{- end -}}
+{{- $_ := set $extraNames $entry.name true -}}
+{{- if not (hasPrefix "/" (default "" $entry.mountPath)) -}}
+{{- fail (printf "%s.mountPath must be an absolute path" $label) -}}
+{{- end -}}
+{{- $mountPath := clean $entry.mountPath -}}
+{{- if hasKey $claimedMountPaths $mountPath -}}
+{{- fail (printf "%s.mountPath must differ from %s" $label (get $claimedMountPaths $mountPath)) -}}
+{{- end -}}
+{{- $_ := set $claimedMountPaths $mountPath (printf "%s.mountPath" $label) -}}
+{{- $subPath := default $entry.name $entry.subPath -}}
+{{- $segments := splitList "/" $subPath -}}
+{{- if or (not (regexMatch "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$" $subPath)) (has "." $segments) (has ".." $segments) -}}
+{{- fail (printf "%s.subPath %q must be a relative path of letters, digits, '.', '_', and '-' without '.' or '..' segments" $label $subPath) -}}
+{{- end -}}
+{{- if hasKey $claimedSubPaths $subPath -}}
+{{- fail (printf "%s.subPath must differ from %s" $label (get $claimedSubPaths $subPath)) -}}
+{{- end -}}
+{{- $_ := set $claimedSubPaths $subPath (printf "%s.subPath" $label) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.sessionStorage.enabled -}}
+{{- if not (hasPrefix "/" (default "" .Values.sessionStorage.mountPath)) -}}
+{{- fail "sessionStorage.mountPath must be an absolute path" -}}
+{{- end -}}
+{{- $mountPath := clean .Values.sessionStorage.mountPath -}}
+{{- if hasKey $claimedMountPaths $mountPath -}}
+{{- fail (printf "sessionStorage.mountPath must differ from %s" (get $claimedMountPaths $mountPath)) -}}
+{{- end -}}
+{{- $_ := set $claimedMountPaths $mountPath "sessionStorage.mountPath" -}}
+{{- range include "mindroom-runtime.envList" (list $ .Values.env.extra "env.extra") | fromJsonArray -}}
+{{- if eq (default "" .name) "MINDROOM_SESSION_STORAGE_PATH" -}}
+{{- fail "env.extra must not set MINDROOM_SESSION_STORAGE_PATH when sessionStorage.enabled=true; the chart sets it to sessionStorage.mountPath" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.knowledgeStorage.enabled -}}
+{{- $mountPath := include "mindroom-runtime.knowledgeStorageMountPath" . -}}
+{{- if hasKey $claimedMountPaths $mountPath -}}
+{{- fail (printf "%s, where knowledgeStorage is mounted, must differ from %s" $mountPath (get $claimedMountPaths $mountPath)) -}}
+{{- end -}}
+{{- $_ := set $claimedMountPaths $mountPath "knowledgeStorage" -}}
+{{- end -}}
+{{- if $bootstrap.path -}}
+{{- $target := dir (clean .Values.config.path) -}}
+{{- range $mount := keys $claimedMountPaths -}}
+{{- if or (eq $target $mount) (hasPrefix (printf "%s/" $target) $mount) -}}
+{{- fail "config.path directory overlaps a mounted volume" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $contentBundleNames := dict -}}
 {{- range $index, $bundle := .Values.contentBundles -}}
 {{- if not $bundle.name -}}
@@ -201,6 +304,23 @@
 {{- fail (printf "contentBundles[%d].seed.command is required when seed.enabled=true" $index) -}}
 {{- end -}}
 {{- end -}}
+{{- if .Values.apiAuth.existingSecret -}}
+{{- if .Values.apiAuth.allowUnauthenticatedPrimary -}}
+{{- fail "apiAuth.existingSecret cannot be set when apiAuth.allowUnauthenticatedPrimary=true" -}}
+{{- end -}}
+{{- if not .Values.apiAuth.key -}}
+{{- fail "apiAuth.key is required when apiAuth.existingSecret is set" -}}
+{{- end -}}
+{{- $generatedApiKeySecretName := printf "%s-api-key" (include "mindroom-runtime.fullname" .) -}}
+{{- if eq .Values.apiAuth.existingSecret $generatedApiKeySecretName -}}
+{{- fail (printf "apiAuth.existingSecret must name a Secret the chart does not manage, not %s, which the chart stops rendering when apiAuth.existingSecret is set" $generatedApiKeySecretName) -}}
+{{- end -}}
+{{- range include "mindroom-runtime.envList" (list $ .Values.env.extra "env.extra") | fromJsonArray -}}
+{{- if eq (default "" .name) "MINDROOM_API_KEY" -}}
+{{- fail "apiAuth.existingSecret and env.extra both set MINDROOM_API_KEY; remove one of them" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $providerCredentialEnvMap := include "mindroom-runtime.providerCredentialEnvMap" . | fromYaml -}}
 {{- $providerCredentialProviders := dict -}}
 {{- range $index, $entry := .Values.providerCredentials -}}
@@ -221,7 +341,7 @@
 {{- fail (printf "providerCredentials[%d].key is required" $index) -}}
 {{- end -}}
 {{- $envName := index $providerCredentialEnvMap $entry.provider -}}
-{{- range $extraEnv := $.Values.env.extra -}}
+{{- range $extraEnv := include "mindroom-runtime.envList" (list $ $.Values.env.extra "env.extra") | fromJsonArray -}}
 {{- if eq (default "" $extraEnv.name) $envName -}}
 {{- fail (printf "providerCredentials[%d] and env.extra both set %s; remove one of them" $index $envName) -}}
 {{- end -}}
@@ -301,14 +421,17 @@
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- if not (has $agentVault.jobNaming (list "fixed" "contentHash")) -}}
+{{- fail "workers.kubernetes.agentVault.jobNaming must be fixed or contentHash" -}}
+{{- end -}}
 {{- if $agentVault.server.enabled -}}
 {{- $managedVaultEnv := list "AGENT_VAULT_MASTER_PASSWORD" -}}
 {{- if $agentVault.server.smtp.enabled -}}
 {{- $managedVaultEnv = concat $managedVaultEnv (list "AGENT_VAULT_SMTP_HOST" "AGENT_VAULT_SMTP_PORT" "AGENT_VAULT_SMTP_TLS_MODE" "AGENT_VAULT_SMTP_FROM_NAME" "AGENT_VAULT_SMTP_USERNAME" "AGENT_VAULT_SMTP_PASSWORD" "AGENT_VAULT_SMTP_FROM") -}}
 {{- end -}}
-{{- range $index, $entry := $agentVault.server.extraEnv -}}
+{{- range $entry := include "mindroom-runtime.envList" (list $ $agentVault.server.extraEnv "workers.kubernetes.agentVault.server.extraEnv") | fromJsonArray -}}
 {{- if has (default "" $entry.name) $managedVaultEnv -}}
-{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv[%d] cannot override chart-managed %s" $index $entry.name) -}}
+{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv cannot override chart-managed %s" $entry.name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

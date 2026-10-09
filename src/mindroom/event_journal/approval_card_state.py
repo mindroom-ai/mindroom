@@ -41,6 +41,7 @@ class ApprovalDecisionMetadata:
     resolved_at: str | None = None
     provenance: Mapping[str, Any] | None = None
     auto_approval: Mapping[str, Any] | None = None
+    scheduled_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +171,14 @@ def terminal_content(
     if status == "approved" and metadata is None:
         msg = "An approved card requires its authenticated decision metadata."
         raise ValueError(msg)
-    excluded = {"auto_approve_options", "auto_approval", "approval_provenance", "resolved_at", "resolution_reason"}
+    excluded = {
+        "auto_approve_options",
+        "auto_approval",
+        "approval_provenance",
+        "resolved_at",
+        "resolution_reason",
+        "scheduled_scope_options",
+    }
     if publication == "edit":
         excluded.add("full_arguments")
     resolution = {key: value for key, value in content.items() if key not in excluded}
@@ -183,6 +191,8 @@ def terminal_content(
         resolution["approval_provenance"] = dict(metadata.provenance or {"kind": "once"})
         if publication == "edit" and metadata.auto_approval is not None:
             resolution["auto_approval"] = dict(metadata.auto_approval)
+        if metadata.scheduled_scope is not None:
+            resolution["scheduled_scope"] = metadata.scheduled_scope
     tool_name = resolution.get("tool_name")
     label = "Auto-approved" if publication == "receipt" and status == "approved" else status.title()
     resolution["body"] = f"{label}: {tool_name}" if isinstance(tool_name, str) else f"Approval {status}"

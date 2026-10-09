@@ -84,6 +84,7 @@ Requester-scoped actions require the original authenticated browser user, while 
 3. Read and validate the credential snapshot.
 4. Return before the provider adapter when the credential is missing or unusable.
 5. Call the provider adapter while retaining the transaction; the adapter may determine locally that refresh is unnecessary.
+   When a grant's response is lost after the request was sent, the adapter repeats it once, and both attempts share one deadline below the store's lock-wait timeout.
 6. Publish a rotation or atomically clear a terminally rejected credential.
 7. Commit once.
 
@@ -95,8 +96,8 @@ Later same-scope callers observe the committed rotation and do not consume the s
 2. Enter a cancellation-safe lifecycle operation.
 3. Acquire the same SQLite transaction used by refresh.
 4. Compare the pending connection generation with the current generation.
-5. Exchange the authorization code and validate claims.
-6. Preserve an existing refresh token only for the same verified external identity and OAuth client.
+5. Exchange the authorization code at the token endpoint recorded in the pending state, then validate claims.
+6. Preserve an existing refresh token only for the same verified external identity, OAuth client, and token endpoint.
 7. Publish the credential and advance both revisions.
 8. Commit before propagating cancellation.
 

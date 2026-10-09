@@ -10,24 +10,21 @@ from agno.exceptions import ContextWindowExceededError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
 from agno.utils.tokens import count_schema_tokens
+from anthropic import BadRequestError
 
 from mindroom.agno_compat_vertex_claude_tools import (
     format_tools_for_vertex_claude,
     strip_vertex_claude_tool_strict,
 )
 from mindroom.claude_compat import ClaudeProviderCompat
-from mindroom.claude_prompt_cache import (
-    SERVER_TOOL_USE_BLOCK_TYPE,
-    TOOL_SEARCH_RESULT_BLOCK_TYPE,
-    TOOL_SEARCH_TOOL_TYPE,
-    prepare_claude_request_kwargs,
-)
+from mindroom.claude_prompt_cache import prepare_claude_request_kwargs
+from mindroom.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, TOOL_SEARCH_TOOL_TYPE
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import common_native_endpoint
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
@@ -41,6 +38,7 @@ _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
 _VERTEX_COUNT_AS_TEXT_BLOCK_TYPES = frozenset(
     {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
 )
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 # Before any tools are discovered, Vertex generation reports 213 input tokens
 # for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
 # Keep a small margin because count_tokens cannot count that server-tool prefix.
@@ -142,6 +140,42 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
     return count_messages, referenced_tool_names
 
 
+def _thinking_block_field(block: object, field: str) -> str:
+    value = cast("dict[str, Any]", block).get(field) if isinstance(block, dict) else getattr(block, field, None)
+    return value if isinstance(value, str) else ""
+
+
+def _messages_with_thinking_as_text(messages: list[Any]) -> tuple[list[Any], int]:
+    """Count thinking as its visible text, and return an allowance for its hidden reasoning.
+
+    The visible text is a summary, possibly empty; the base64 signature (or a
+    redacted block's data) encrypts the full reasoning that generation counts.
+    Measured on live Opus 5.5 tool turns, allowing one token per four base64
+    characters (three decoded bytes) stays just above the real input. Messages
+    left without blocks are dropped.
+    """
+    text_messages: list[Any] = []
+    hidden_tokens = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            text_messages.append(message)
+            continue
+        text_content: list[Any] = []
+        for block in content:
+            # Agno emits stored turns as dicts and rebuilt turns as SDK block objects.
+            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+            if block_type not in _THINKING_BLOCK_TYPES:
+                text_content.append(block)
+                continue
+            if (thinking := _thinking_block_field(block, "thinking")).strip():
+                text_content.append({"type": "text", "text": thinking})
+            hidden_tokens += len(_thinking_block_field(block, "signature") or _thinking_block_field(block, "data")) // 4
+        if text_content:
+            text_messages.append({**message, "content": text_content})
+    return text_messages, hidden_tokens
+
+
 def _is_vertex_tool_search(tool: object) -> bool:
     """Return whether one wire tool is Vertex's unsupported count entry."""
     return isinstance(tool, dict) and cast("dict[str, Any]", tool).get("type") == TOOL_SEARCH_TOOL_TYPE
@@ -194,14 +228,19 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
     if count_messages is None and count_tools is None:
         return request_kwargs, 0
     count_kwargs = dict(request_kwargs)
+    hidden_thinking_tokens = 0
     if count_messages is not None:
-        count_kwargs["messages"] = count_messages
+        # With thinking enabled, the endpoint rejects a request whose rewritten
+        # blocks sit among signed thinking blocks, as the text conversion above
+        # does. Count that thinking as text and send no thinking setting.
+        count_kwargs["messages"], hidden_thinking_tokens = _messages_with_thinking_as_text(count_messages)
+        count_kwargs.pop("thinking", None)
     if count_tools:
         count_kwargs["tools"] = count_tools
     elif count_tools is not None:
         count_kwargs.pop("tools", None)
     reserve = _VERTEX_TOOL_SEARCH_TOKEN_RESERVE if has_native_search else 0
-    return count_kwargs, reserve
+    return count_kwargs, reserve + hidden_thinking_tokens
 
 
 @dataclass
@@ -302,10 +341,10 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
+        count_kwargs, reserve = _request_for_vertex_token_count(request_kwargs)
         client = self.get_async_client()
         response = await client.messages.count_tokens(**count_kwargs)
-        return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
+        return response.input_tokens + reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
     def _replay_trim_candidates(messages: list[Message]) -> list[int]:
@@ -325,6 +364,18 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     def _messages_after_history_cut(messages: list[Message], cut: int) -> list[Message]:
         """Drop only replay messages older than one safe history boundary."""
         return [message for index, message in enumerate(messages) if not message.from_history or index >= cut]
+
+    @staticmethod
+    async def _advisory_count(count: Awaitable[int], *, input_budget: int) -> int | None:
+        """Return an exact count, or None when the endpoint rejects the count payload.
+
+        The count only advises; generation still enforces the real limit.
+        """
+        try:
+            return await count
+        except BadRequestError as exc:
+            logger.warning("vertex_claude_token_count_rejected", input_budget=input_budget, error=str(exc.message))
+            return None
 
     async def _fit_request_messages(
         self,
@@ -363,8 +414,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
                 compress_tool_results=compress_tool_results,
             )
 
-        original_tokens = await _count(messages)
-        if original_tokens <= input_budget:
+        original_tokens = await self._advisory_count(_count(messages), input_budget=input_budget)
+        if original_tokens is None or original_tokens <= input_budget:
             return messages
 
         if self.native_compaction is not None:

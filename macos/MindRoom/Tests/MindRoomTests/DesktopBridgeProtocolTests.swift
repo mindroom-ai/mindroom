@@ -5,13 +5,8 @@ import XCTest
 
 @MainActor
 final class DesktopBridgeProtocolTests: XCTestCase {
-    #if arch(arm64)
     private static let helperExecutablePath =
-        "Contents/Helpers/arm64/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
-    #else
-    private static let helperExecutablePath =
-        "Contents/Helpers/x86_64/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
-    #endif
+        "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
     private static let completeStatusData = """
     {
       "config":{"state":"ready","revision":2,"enabled":true,"controller_user_id":"@controller:example.org","controller_device_id":"CLOUD","allowed_requester_ids":["@me:example.org"],"allowed_agent_names":["assistant"],"allowed_app_ids":["com.example.Editor"]},
@@ -55,7 +50,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
                 "request_id": "shell-7", "requester_id": "@me:example.org", "agent_name": "assistant",
                 "command": "ls -la", "cwd": "/Users/test", "expires_at_ms": 1_900_000_000_000,
             ],
-            "auto_approve_remaining_seconds": 0.0,
+            "auto_approve_remaining_seconds": 251,
             "auto_approve_until_revoked": false,
             "active_request_id": NSNull(),
             "handles": [[
@@ -77,6 +72,8 @@ final class DesktopBridgeProtocolTests: XCTestCase {
             commandPreview: "sleep 100", elapsedSeconds: 12.5, state: "running"
         )])
         XCTAssertNil(status.shell.activeRequestID)
+        let remaining: Int = status.shell.autoApproveRemainingSeconds
+        XCTAssertEqual(remaining, 251, "The bridge already rounds the lease up to whole seconds")
         let reencoded = try JSONDecoder().decode(DesktopStatus.self, from: JSONEncoder().encode(status))
         XCTAssertEqual(reencoded, status)
     }

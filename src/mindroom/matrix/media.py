@@ -11,8 +11,10 @@ from urllib.parse import urlsplit
 import nio
 from aiohttp import ClientResponse
 from nio import crypto
+from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
 
+from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
 
@@ -35,7 +37,6 @@ _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
 _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
-_matrix_media_max_bytes = 64 * 1024 * 1024
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
@@ -189,7 +190,7 @@ async def fetch_matrix_thumbnail(
 
 def media_size_exceeds_limit(size_bytes: int) -> bool:
     """Return whether a media size exceeds the runtime ingestion cap."""
-    return size_bytes > _matrix_media_max_bytes
+    return size_bytes > RETAINED_MEDIA_MAX_BYTES
 
 
 def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
@@ -201,23 +202,32 @@ def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
 class _PreparedMediaUpload:
     """Upload bytes and metadata after the caller has resolved room encryption."""
 
+    media_bytes: bytes
+    mimetype: str
     data: bytes
     content_type: str
     filename: str
-    info: dict[str, Any]
     encryption_keys: dict[str, Any] | None
 
-    def encrypted_file_content(self) -> dict[str, Any] | None:
-        """Build encrypted metadata separately so callers retain their error boundaries."""
+    def info(self) -> dict[str, Any]:
+        """Build Matrix event info, decoding image dimensions only for callers that send it."""
+        return {
+            "size": len(self.media_bytes),
+            "mimetype": self.mimetype,
+            **_image_dimensions(self.media_bytes, self.mimetype),
+        }
+
+    def encrypted_file_content(self, *, url: str) -> dict[str, Any] | None:
+        """Build the Matrix encrypted-file object with the given MXC ``url``, or None for unencrypted uploads."""
         if self.encryption_keys is None:
             return None
         return encrypted_file_content(
-            url="",
+            url=url,
             key=self.encryption_keys["key"],
             iv=self.encryption_keys["iv"],
             hashes=self.encryption_keys["hashes"],
-            mime_type=self.info["mimetype"],
-            size=self.info["size"],
+            mime_type=self.mimetype,
+            size=len(self.media_bytes),
         )
 
 
@@ -231,6 +241,9 @@ def _image_dimensions(media_bytes: bytes, mimetype: str) -> dict[str, int]:
     try:
         with Image.open(io.BytesIO(media_bytes)) as image:
             width, height = image.size
+            # A PNG whose eXIf chunk follows its image data decodes the whole raster to read EXIF.
+            if image.format == "PNG" and "exif" not in image.info:
+                return {"w": width, "h": height}
             orientation = image.getexif().get(_EXIF_ORIENTATION_TAG)
     except (OSError, ValueError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
         return {}
@@ -251,10 +264,11 @@ def prepare_media_upload(
         crypto.attachments.encrypt_attachment(media_bytes) if encrypt else (media_bytes, None)
     )
     return _PreparedMediaUpload(
+        media_bytes=media_bytes,
+        mimetype=mimetype,
         data=upload_bytes,
         content_type="application/octet-stream" if encrypt else mimetype,
         filename=f"{filename}.enc" if encrypt else filename,
-        info={"size": len(media_bytes), "mimetype": mimetype, **_image_dimensions(media_bytes, mimetype)},
         encryption_keys=encryption_keys,
     )
 
@@ -355,6 +369,16 @@ def extract_media_caption(
     return default
 
 
+def decrypt_media_bytes(encrypted_bytes: bytes, *, key: str, sha256: str, iv: str) -> bytes:
+    """Verify the ciphertext SHA-256, then decrypt with the given key and IV.
+
+    Raises nio's ``EncryptionError`` on a digest mismatch or an undecodable key or IV,
+    and ``binascii.Error`` when the SHA-256 is not valid base64.
+    A well-formed wrong key or IV yields garbage, so callers must validate the plaintext.
+    """
+    return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+
+
 def _decrypt_encrypted_media_bytes(
     event: nio.RoomEncryptedMedia,
     encrypted_bytes: bytes,
@@ -369,59 +393,36 @@ def _decrypt_encrypted_media_bytes(
         return None
 
     try:
-        return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+        return decrypt_media_bytes(encrypted_bytes, key=key, sha256=sha256, iv=iv)
     except Exception:
         logger.exception("Media decryption failed", event_id=_event_id_for_log(event))
         return None
 
 
-def _media_payload_exceeds_limit_for_event(
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-    media_bytes: bytes,
+async def download_mxc_bytes(
+    client: nio.AsyncClient,
+    mxc_url: str,
     *,
-    stage: str,
-) -> bool:
-    if not media_payload_exceeds_limit(media_bytes):
-        return False
-    logger.warning(
-        "Matrix media payload exceeds byte limit",
-        event_id=_event_id_for_log(event),
-        stage=stage,
-        size_bytes=len(media_bytes),
-        limit_bytes=_matrix_media_max_bytes,
-    )
-    return True
-
-
-def _validated_download_body(
-    response: object,
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
+    max_bytes: int,
+    request_timeout: float | None = None,
 ) -> bytes | None:
-    if isinstance(response, nio.DownloadError):
-        logger.error("Media download failed", event_id=_event_id_for_log(event), error=str(response))
-        return None
-    if not isinstance(response, nio.DownloadResponse):
-        logger.error("Media download returned invalid response", event_id=_event_id_for_log(event), error=str(response))
-        return None
-    body = response.body
-    if not isinstance(body, bytes):
-        logger.error("Media download returned non-bytes payload", event_id=_event_id_for_log(event))
-        return None
-    if _media_payload_exceeds_limit_for_event(event, body, stage="download"):
-        return None
-    return body
+    """Download one MXC payload, abandoning it as soon as it passes ``max_bytes``.
 
-
-def _decrypt_validated_media_bytes(
-    event: nio.RoomEncryptedMedia,
-    encrypted_bytes: bytes,
-) -> bytes | None:
-    decrypted_bytes = _decrypt_encrypted_media_bytes(event, encrypted_bytes)
-    if decrypted_bytes is None:
+    nio's ``download`` holds the whole body before a caller can measure it, so this streams it instead.
+    ``request_timeout`` overrides the client's total request timeout; ``0`` disables it.
+    """
+    server_name, separator, media_id = mxc_url.removeprefix("mxc://").partition("/")
+    if not mxc_url.startswith("mxc://") or not server_name or not separator or not media_id:
+        logger.error("invalid_mxc_url", mxc_url=mxc_url)
         return None
-    if _media_payload_exceeds_limit_for_event(event, decrypted_bytes, stage="decrypt"):
-        return None
-    return decrypted_bytes
+    method, path = nio.Api.download(server_name, media_id)
+    try:
+        return await Transport(client, max_bytes).request(method, path, request_timeout=request_timeout)
+    except HttpError as error:
+        logger.warning("mxc_download_failed", mxc_url=mxc_url, status=error.status, errcode=error.errcode)
+    except ResponseTooLarge:
+        logger.warning("mxc_payload_exceeds_byte_limit", mxc_url=mxc_url, limit_bytes=max_bytes)
+    return None
 
 
 async def download_media_bytes(
@@ -430,15 +431,19 @@ async def download_media_bytes(
 ) -> bytes | None:
     """Download and decrypt Matrix media payload bytes."""
     try:
-        response = await client.download(event.url)
+        # Like nio's own download, a large file on a slow link may take longer than the client's request timeout.
+        downloaded_bytes = await download_mxc_bytes(
+            client,
+            event.url,
+            max_bytes=RETAINED_MEDIA_MAX_BYTES,
+            request_timeout=0,
+        )
     except Exception:
         logger.exception("Error downloading media")
         return None
-
-    downloaded_bytes = _validated_download_body(response, event)
     if downloaded_bytes is None:
         return None
 
     if isinstance(event, nio.RoomEncryptedMedia):
-        return _decrypt_validated_media_bytes(event, downloaded_bytes)
+        return _decrypt_encrypted_media_bytes(event, downloaded_bytes)
     return downloaded_bytes

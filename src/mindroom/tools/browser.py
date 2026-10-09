@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     description=(
         "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. "
         "With worker routing, this controls the agent's worker browser. "
-        "To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). "
+        "If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel; "
+        "use chat_ui.open_panel(panel='computer') only to show it again. "
         "The user's local browser requires the separately configured desktop target."
     ),
     category=ToolCategory.RESEARCH,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.FILE_ACCESS,
+        ToolManagedInitArg.AGENT_STATE_ROOT,
     ),
     config_fields=[
         ConfigField(
@@ -48,7 +50,8 @@ if TYPE_CHECKING:
             required=False,
             description=(
                 "Optional host target directory for browser screenshots, PDFs, and downloads. "
-                "Defaults to the active storage path's browser/ directory. "
+                "Defaults to the browser/ directory in the agent's state root, which is requester-scoped for "
+                "private agents. "
                 "The desktop target instead uses its local storage path's desktop-browser/ directory."
             ),
         ),

@@ -168,6 +168,7 @@ from main import app  # noqa: E402
 app.state.limiter = _mock_limiter
 
 # Add pytest fixture to reset limiter between tests
+import backend.auth_monitor  # noqa: E402
 import pytest  # noqa: E402
 
 
@@ -177,6 +178,13 @@ def reset_limiter():
     _mock_limiter.reset()
     yield
     _mock_limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_auth_lockout():
+    """Forget failed authentications, which every test client shares one address for, before each test."""
+    backend.auth_monitor.failed_attempts.clear()
+    backend.auth_monitor.blocked_ips.clear()
 
 
 @pytest.fixture

@@ -8,7 +8,6 @@ team a requested model name maps to.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
@@ -176,18 +175,18 @@ def convert_messages(
 def derive_session_id(
     model: str,
     request: Request,
+    key_namespace: str,
 ) -> str:
     """Derive a session ID from request headers or content.
 
+    ``key_namespace`` identifies the authenticated API key, so two keys never
+    share a session.
+
     Priority cascade:
-    1. X-Session-Id header (namespaced with API key to prevent cross-key collision)
+    1. X-Session-Id header
     2. X-LibreChat-Conversation-Id header + model
     3. Random UUID fallback (collision-safe default when no conversation ID is provided)
     """
-    # Namespace prefix from API key to prevent session hijack across keys
-    auth = request.headers.get("authorization", "")
-    key_namespace = hashlib.sha256(auth.encode()).hexdigest()[:8] if auth else "noauth"
-
     # 1. Explicit session ID (namespaced to prevent cross-key collision)
     session_id = request.headers.get("x-session-id")
     if session_id:

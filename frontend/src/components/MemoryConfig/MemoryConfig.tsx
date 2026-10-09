@@ -76,6 +76,7 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   file: {
     path: "",
     max_entrypoint_lines: 200,
+    max_entrypoint_tokens: 50000,
   },
   search: {
     mode: "keyword",
@@ -599,6 +600,32 @@ export function MemoryConfig() {
                       file: {
                         ...localConfig.file,
                         max_entrypoint_lines: parseInteger(e.target.value, 200),
+                      },
+                    })
+                  }
+                  className="transition-colors hover:border-ring focus:border-ring"
+                />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Entrypoint Max Tokens"
+                helperText="Maximum estimated tokens (characters / 4) of whole lines preloaded from the entrypoint file."
+                htmlFor="entrypoint-max-tokens"
+              >
+                <Input
+                  id="entrypoint-max-tokens"
+                  type="number"
+                  min={1}
+                  value={localConfig.file?.max_entrypoint_tokens ?? 50000}
+                  onChange={(e) =>
+                    applyMemoryConfig({
+                      ...localConfig,
+                      file: {
+                        ...localConfig.file,
+                        max_entrypoint_tokens: parseInteger(
+                          e.target.value,
+                          50000,
+                        ),
                       },
                     })
                   }

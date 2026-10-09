@@ -1,7 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller onedir bundle for the fixed-identity desktop helper."""
 
-import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
@@ -10,7 +9,7 @@ root = Path(SPECPATH).parent
 hiddenimports = collect_submodules("mindroom.desktop") + collect_submodules("mindroom.matrix")
 datas = copy_metadata("mindroom")
 binaries = []
-for package in ("mcp", "nio", "olm", "pyautogui", "PIL"):
+for package in ("mcp", "httpx2", "httpcore2", "nio", "olm", "pyautogui", "PIL"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -37,7 +36,7 @@ executable = EXE(
     strip=False,
     upx=False,
     console=True,
-    target_arch=os.environ.get("MINDROOM_HELPER_TARGET_ARCH") or None,
+    target_arch="arm64",
 )
 collected = COLLECT(
     executable,

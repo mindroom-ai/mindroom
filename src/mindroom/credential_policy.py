@@ -10,6 +10,7 @@ _WorkerScope = Literal["shared", "user", "user_agent"]
 RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY = "_oauth_client_runtime_bootstrap"
 OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE = "oauth_dynamic_client_registration"
 OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY = "_oauth_dynamic_client_registered_redirect_uri"
+OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY = "_oauth_dynamic_client_registered_token_url"  # noqa: S105
 
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
@@ -47,6 +48,7 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
         "google_drive",
         "google_gmail",
         "google_sheets",
+        "google_tasks",
         "gmail",
         "homeassistant",
     },
@@ -71,6 +73,7 @@ class _CredentialServicePolicy:
 
     service: str
     worker_scope: _WorkerScope | None
+    primary_built_tool: bool
     uses_local_shared_credentials: bool
     uses_primary_runtime_global_credentials: bool
     uses_primary_runtime_scoped_credentials: bool
@@ -78,18 +81,30 @@ class _CredentialServicePolicy:
     worker_grantable_supported: bool
 
 
-def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -> _CredentialServicePolicy:
-    """Return credential placement policy for one service in one worker scope."""
+def credential_service_policy(
+    service: str,
+    worker_scope: _WorkerScope | None,
+    *,
+    primary_built_tool: bool = False,
+) -> _CredentialServicePolicy:
+    """Return credential placement policy for one service in one worker scope.
+
+    ``primary_built_tool`` marks the settings of a tool the primary process builds for this agent.
+    Worker code can write the worker store, so those settings never come from it.
+    """
     oauth_token_service = is_oauth_token_service(service)
-    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service
     is_primary_runtime_global = is_oauth_client_config_service(service)
-    # OAuth tokens carry one external account identity, so a shared-scope agent's
-    # connection must stay bound to that agent instead of the deployment-wide store
-    # every other agent reads.
-    uses_agent_scoped = worker_scope == "shared" and oauth_token_service
+    local_only_service = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service
+    # Local-only and OAuth services keep their own placement outside worker stores.
+    primary_built_tool_config = primary_built_tool and not local_only_service and not is_primary_runtime_global
+    is_local_only = local_only_service or primary_built_tool_config
+    # Scoped OAuth tokens and primary-built tool settings stay bound to their
+    # agent even when its worker scope is shared.
+    uses_agent_scoped = worker_scope == "shared" and (oauth_token_service or primary_built_tool_config)
     return _CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
+        primary_built_tool=primary_built_tool_config,
         uses_local_shared_credentials=worker_scope == "shared" and is_local_only and not uses_agent_scoped,
         uses_primary_runtime_global_credentials=is_primary_runtime_global,
         uses_primary_runtime_scoped_credentials=(

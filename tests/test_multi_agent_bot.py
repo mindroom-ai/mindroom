@@ -1014,7 +1014,7 @@ class TestAgentBot(AgentBotTestBase):
         close_order: list[str] = []
         bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
         bot._journal_dispatcher = AsyncMock()
-        bot._journal_dispatcher.stop.side_effect = lambda: close_order.append("dispatcher")
+        bot._journal_dispatcher.stop.side_effect = lambda **_kwargs: close_order.append("dispatcher")
         bot._ingestion_session = AsyncMock()
         bot._ingestion_session.close.side_effect = lambda: close_order.append("ingestion")
         bot.client = _make_matrix_client_mock()
@@ -1059,7 +1059,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
         ):
-            bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
+            await bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
             await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)
 
         assert change_membership.await_count == expected_join_calls

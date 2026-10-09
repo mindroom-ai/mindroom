@@ -10,6 +10,7 @@ import pytest
 
 import mindroom.matrix.media as media_module
 from mindroom.matrix.room_history_reads import parse_room_message_event
+from tests.conftest import serve_media_from_download
 
 _SYNTHETIC_FILE_KEY = "SYNTHETIC_FILE_JWK_KEY_DO_NOT_USE"
 _SYNTHETIC_FILE_IV = "SYNTHETIC_FILE_IV_DO_NOT_USE"
@@ -103,6 +104,7 @@ async def test_parsed_encrypted_media_still_downloads_and_decrypts() -> None:
     parsed_event = media_module.parse_matrix_media_event_source(_encrypted_media_source())
     assert isinstance(parsed_event, nio.RoomEncryptedImage)
     client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(client)
     client.download.return_value = nio.DownloadResponse(
         body=b"synthetic-ciphertext",
         content_type="application/octet-stream",
@@ -116,7 +118,7 @@ async def test_parsed_encrypted_media_still_downloads_and_decrypts() -> None:
         media_bytes = await media_module.download_media_bytes(client, parsed_event)
 
     assert media_bytes == b"synthetic-plaintext"
-    client.download.assert_awaited_once_with(_SYNTHETIC_FILE_MXC)
+    client.download.assert_awaited_once_with(mxc=_SYNTHETIC_FILE_MXC)
     decrypt_attachment.assert_called_once_with(
         b"synthetic-ciphertext",
         _SYNTHETIC_FILE_KEY,

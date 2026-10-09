@@ -75,7 +75,6 @@ def test_run_device_pairing_polls_until_connected() -> None:
         provisioning_url="https://provisioning.example/",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=announced.append,
         post_request=post,
         sleep=sleeps.append,
@@ -112,7 +111,6 @@ def test_run_device_pairing_starts_a_new_code_after_expiry() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=announced.append,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -132,7 +130,6 @@ def test_run_device_pairing_reports_service_errors() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=sleeps.append,
@@ -166,7 +163,6 @@ def test_run_device_pairing_retries_transient_start_failures_when_renewing() -> 
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=_post,
         sleep=sleeps.append,
@@ -189,7 +185,6 @@ def test_run_device_pairing_does_not_retry_permanent_start_failures() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -208,7 +203,6 @@ def test_run_device_pairing_fails_fast_on_unreachable_service_without_renewal() 
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=_post,
             sleep=lambda _seconds: None,
@@ -234,7 +228,6 @@ def test_run_device_pairing_stops_when_another_process_paired() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -261,7 +254,6 @@ def test_run_device_pairing_does_not_announce_a_new_code_after_another_process_p
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=announced.append,
         post_request=_post,
         sleep=lambda _seconds: None,
@@ -282,7 +274,6 @@ def test_run_device_pairing_stops_retrying_start_after_another_process_paired() 
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=sleeps.append,
@@ -305,14 +296,134 @@ def test_run_device_pairing_flags_malformed_owner_user_id() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=lambda _seconds: None,
     )
 
     assert result.owner_user_id is None
-    assert result.owner_user_id_invalid is True
+    assert result.rejected_owner_user_id == "alice"
+
+
+def _pair_once(responses: list[httpx.Response]) -> cli_connect.PairCompleteResult | None:
+    return cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        announce=lambda _session: None,
+        post_request=_fake_transport(responses, []),
+        sleep=lambda _seconds: None,
+        renew_expired=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "owner_user_id",
+    [
+        '@alice:mindroom.chat","@mallory:evil.example',
+        '@al"ice:mindroom.chat',
+        "@alice\\:mindroom.chat",
+        "@alice:mindroom.chat\\",
+        "@alice:mindroom.chat#",
+        "@Alice:mindroom.chat",
+    ],
+)
+def test_owner_user_id_outside_the_matrix_grammar_never_reaches_config(tmp_path: Path, owner_user_id: str) -> None:
+    """A service-supplied owner that is not a Matrix user ID is flagged and never spliced into YAML."""
+    result = _pair_once(
+        [httpx.Response(200, json=_START), httpx.Response(200, json={**_CONNECTED, "owner_user_id": owner_user_id})],
+    )
+    assert result is not None
+    assert result.owner_user_id is None
+    assert result.rejected_owner_user_id == owner_user_id
+
+    config_path = tmp_path / "config.yaml"
+    original = f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+    config_path.write_text(original, encoding="utf-8")
+    assert (
+        cli_connect.replace_owner_placeholders_in_config(config_path=config_path, owner_user_id=owner_user_id) is False
+    )
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("client_id", "client-123\nMINDROOM_STORAGE_PATH=/tmp/attacker"),
+        ("client_secret", 'secret\nMINDROOM_STORAGE_PATH="/tmp/x\nExecStartPre=/bin/sh -c id\n#"'),
+        ("client_secret", "secret\rMATRIX_HOMESERVER=https://attacker.example"),
+        ("client_secret", "secret\u2028MATRIX_HOMESERVER=https://attacker.example"),
+        ("client_secret", "secret $HOME"),
+        ("client_secret", "secret#comment"),
+        ("client_secret", "s" * 513),
+    ],
+)
+def test_pairing_credentials_outside_the_token_grammar_are_refused(field: str, value: str) -> None:
+    """Issued credentials land in .env and service units, so anything but a plain token fails the pairing."""
+    with pytest.raises(ValueError, match=f"Provisioning response has invalid {field}"):
+        _pair_once([httpx.Response(200, json=_START), httpx.Response(200, json={**_CONNECTED, field: value})])
+
+
+def test_pairing_accepts_token_shaped_credentials() -> None:
+    """URL-safe and standard base64 tokens, as provisioning services issue them, still pair."""
+    result = _pair_once(
+        [
+            httpx.Response(200, json=_START),
+            httpx.Response(200, json={**_CONNECTED, "client_id": "Ab3_-.~x", "client_secret": "q+/Z9w=="}),
+        ],
+    )
+
+    assert result is not None
+    assert (result.client_id, result.client_secret) == ("Ab3_-.~x", "q+/Z9w==")
+
+
+@pytest.mark.parametrize(
+    "approve_url",
+    [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "smb://attacker.example/share",
+        "x-mindroom-helper://run",
+        "https:///connect",
+        "http://evil.example\\@127.0.0.1/connect",
+        "https://user@chat.example/connect",
+        "https://:secret@chat.example/connect",
+        "https://chat.example/connect?code=ABCD EFGH",
+        "https://chat.example/connect\n?code=ABCD-EFGH",
+    ],
+)
+def test_pairing_refuses_approve_urls_a_browser_should_not_open(approve_url: str) -> None:
+    """The service's approval link may be opened automatically, so it must be a plain http(s) URL."""
+    with pytest.raises(ValueError, match="Pairing response has invalid approve_url"):
+        _pair_once([httpx.Response(200, json={**_START, "approve_url": approve_url})])
+
+
+@pytest.mark.parametrize(
+    "approve_url",
+    [
+        "https://chat.example/connect?code=ABCD-EFGH",
+        "http://localhost:8080/connect?code=ABCD-EFGH",
+        "http://[::1]:8080/connect?code=ABCD-EFGH",
+        "http://10.0.0.5:8776/connect?code=ABCD-EFGH",
+        "http://provisioning.tailnet.example/connect?code=ABCD-EFGH",
+    ],
+)
+def test_pairing_accepts_http_and_https_approve_urls(approve_url: str) -> None:
+    """Hosted approval pages and self-hosted provisioning services on a LAN, tailnet, or loopback keep working."""
+    announced: list[cli_connect.DevicePairSession] = []
+    cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        announce=announced.append,
+        post_request=_fake_transport(
+            [httpx.Response(200, json={**_START, "approve_url": approve_url}), httpx.Response(200, json=_CONNECTED)],
+            [],
+        ),
+        sleep=lambda _seconds: None,
+    )
+
+    assert [session.approve_url for session in announced] == [approve_url]
 
 
 def test_render_qr_draws_the_link_with_block_characters() -> None:
@@ -434,7 +545,6 @@ def test_run_device_pairing_renews_after_404_from_poll() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=announced.append,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -460,7 +570,6 @@ def test_run_device_pairing_retries_transient_poll_failures() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=sleeps.append,
@@ -487,7 +596,6 @@ def test_run_device_pairing_retries_network_errors_during_polling() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=_post,
         sleep=sleeps.append,
@@ -512,7 +620,6 @@ def test_run_device_pairing_fails_on_non_transient_poll_errors() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -531,7 +638,6 @@ def test_run_device_pairing_validates_poll_interval() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -552,7 +658,6 @@ def test_run_device_pairing_requires_a_valid_expires_at(expires_at: str | None, 
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -574,7 +679,6 @@ def test_run_device_pairing_fails_on_unknown_poll_status() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -596,7 +700,6 @@ def test_run_device_pairing_fails_on_missing_poll_status() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -615,7 +718,6 @@ def test_run_device_pairing_rejects_invalid_json() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -634,7 +736,6 @@ def test_run_device_pairing_rejects_non_object_json() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -654,7 +755,6 @@ def test_run_device_pairing_uses_empty_namespace_when_missing() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -677,7 +777,6 @@ def test_run_device_pairing_uses_empty_namespace_when_non_string(namespace: obje
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -753,7 +852,6 @@ def test_run_device_pairing_raises_on_expired_when_no_renew() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -776,7 +874,6 @@ def test_run_device_pairing_raises_on_404_when_no_renew() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -801,7 +898,6 @@ def test_run_device_pairing_renews_when_allowed() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=announced.append,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -922,6 +1018,86 @@ def test_pair_local_install_warns_when_owner_placeholders_cannot_be_updated(tmp_
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
 
 
+def test_pair_local_install_notes_a_repaired_owner_missing_from_administrators(tmp_path: Path) -> None:
+    """Re-pairing with another account finds no placeholder, so the config is left alone and a note names the settings."""
+    config_path = tmp_path / "config.yaml"
+    original = 'administrators: ["@bob:mindroom.chat"]\nroom_defaults:\n  admins: ["@bob:mindroom.chat"]\n'
+    config_path.write_text(original)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=400),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    assert (
+        f"Note: @alice:mindroom.chat is not listed in administrators in {config_path}. "
+        "If this account should manage MindRoom, add it to administrators, "
+        "room_defaults.invite_users, and room_defaults.admins."
+    ) in out.getvalue()
+    assert config_path.read_text() == original
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        'administrators: ["@bob:mindroom.chat", "@alice:mindroom.chat"]\n',
+    ],
+    ids=["first-pairing", "already-administrator"],
+)
+def test_pair_local_install_does_not_note_an_owner_who_is_administrator(tmp_path: Path, config_text: str) -> None:
+    """The first pairing fills the placeholder, and an owner already listed needs no note."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_text)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=400),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    assert "is not listed in administrators" not in out.getvalue()
+    assert "@alice:mindroom.chat" in config_path.read_text()
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    ["- administrators\n", "administrators: 5\n", "administrators: false\n", "administrators: {}\n"],
+    ids=["top-level-list", "scalar-administrators", "false-administrators", "mapping-administrators"],
+)
+def test_pair_local_install_does_not_note_for_a_malformed_config(tmp_path: Path, config_text: str) -> None:
+    """A config of the wrong shape leaves the administrator check unknown, so pairing completes without a note."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_text)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=400),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result is not None
+    assert "is not listed in administrators" not in out.getvalue()
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
+    assert config_path.read_text() == config_text
+
+
 def _approval_install(tmp_path: Path) -> tuple[RuntimePaths, Path]:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
@@ -950,6 +1126,55 @@ def test_pair_local_install_discards_credentials_when_the_approver_is_not_this_u
     assert "Approved by @alice:mindroom.chat." in out.getvalue()
     assert "secret-123" not in out.getvalue()
     assert not (tmp_path / ".env").exists()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("owner_user_id", "shown"),
+    [("@Alice:selfhosted.example", "'@Alice:selfhosted.example'"), (42, "'42'")],
+)
+def test_pair_local_install_still_asks_about_an_approver_it_cannot_save(
+    tmp_path: Path,
+    owner_user_id: object,
+    shown: str,
+) -> None:
+    """A named approver outside the Matrix grammar is shown and confirmed like any other, never treated as unnamed."""
+    runtime_paths, config_path = _approval_install(tmp_path)
+    out = io.StringIO()
+    connected = {**_CONNECTED, "owner_user_id": owner_user_id}
+    asked: list[bool] = []
+
+    def _decline() -> bool:
+        asked.append(True)
+        return False
+
+    with pytest.raises(ValueError, match=rf"approved by {shown} is unusable"):
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=Console(file=out, width=200),
+            provisioning_url="https://provisioning.example",
+            post_request=_fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=connected)], []),
+            sleep=lambda _seconds: None,
+            confirm_approver=_decline,
+        )
+
+    assert asked == [True]
+    assert f"Approved by {shown}, which is not a valid Matrix user ID." in out.getvalue()
+    assert not (tmp_path / ".env").exists()
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=io.StringIO(), width=200),
+        provisioning_url="https://provisioning.example",
+        post_request=_fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=connected)], []),
+        sleep=lambda _seconds: None,
+        confirm_approver=lambda: True,
+    )
+
+    assert result is not None
+    env_content = (tmp_path / ".env").read_text()
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
+    assert OWNER_MATRIX_USER_ID_ENV not in env_content
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
 
 
@@ -1022,7 +1247,6 @@ def test_run_device_pairing_starts_over_when_the_approval_was_lost() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=announced.append,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -1046,7 +1270,6 @@ def test_run_device_pairing_explains_a_lost_approval_without_renewal() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,
@@ -1077,7 +1300,6 @@ def test_run_device_pairing_backs_off_while_rate_limited() -> None:
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint="sha256:test",
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=sleeps.append,
@@ -1108,7 +1330,6 @@ def test_run_device_pairing_times_out_at_expiry_while_the_service_is_unreachable
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=_post,
             sleep=_sleep,
@@ -1159,7 +1380,6 @@ def test_run_device_pairing_treats_other_410s_as_permanent_errors() -> None:
             provisioning_url="https://provisioning.example",
             client_name="devbox",
             client_fingerprint="sha256:test",
-            matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
             sleep=lambda _seconds: None,

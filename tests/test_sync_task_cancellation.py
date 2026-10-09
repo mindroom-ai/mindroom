@@ -2343,6 +2343,36 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restart_stop_reports_failed_release_over_reply_drain_timeout() -> None:
+    """A store that failed to close must not hide behind a reply that outlived the drain."""
+    store_failure = RuntimeError("journal store close failed")
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:localhost",
+        display_name="Test Agent",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=None)
+    bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+    bot._own_journal = MagicMock(close=AsyncMock(side_effect=store_failure))
+    bot._ingestion_session = None
+    bot.logger = MagicMock()
+    bot.prepare_for_sync_shutdown = AsyncMock(side_effect=ResponseShutdownTimeoutError("reply outlived the drain"))
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
+    bot._response_runner = MagicMock(pending_inbox_response_count=1)
+    bot._response_runner.wait_for_source_owned_inbox_responses = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="journal store close failed") as raised:
+        await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    assert raised.value is store_failure
+    bot._journal_dispatcher.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+
+@pytest.mark.asyncio
 async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: pytest.MonkeyPatch) -> None:
     """stop_entities must finish promptly when cancelling a real supervisor task."""
     bot = _FakeBot()
@@ -2566,6 +2596,36 @@ async def test_stop_entities_cleans_up_before_reporting_source_quiesce_failure()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "restart_entities", "replaced"),
+    [
+        (ResponseShutdownTimeoutError("reply outlived the drain"), {"agent1"}, True),
+        (RuntimeError("journal store close failed"), {"agent1"}, False),
+        (ResponseShutdownTimeoutError("reply outlived the drain"), set(), False),
+    ],
+)
+async def test_stop_entities_tolerates_only_restart_drain_timeouts(
+    failure: Exception,
+    restart_entities: set[str],
+    replaced: bool,
+) -> None:
+    """Only a restarting bot's reply drain timeout lets the batch be replaced."""
+    bot = _shutdown_bot_mock()
+    bot.stop = AsyncMock(side_effect=failure)
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": asyncio.create_task(asyncio.sleep(60))}
+
+    if replaced:
+        await stop_entities({"agent1"}, agent_bots, sync_tasks, restart_entities=restart_entities)
+        assert agent_bots == {}
+    else:
+        with pytest.raises(type(failure)) as raised:
+            await stop_entities({"agent1"}, agent_bots, sync_tasks, restart_entities=restart_entities)
+        assert raised.value is failure
+        assert agent_bots == {"agent1": bot}
+
+
+@pytest.mark.asyncio
 async def test_stop_entities_prioritizes_quiesce_failure_after_cleanup_failures() -> None:
     """Every cleanup stage runs while the source-barrier error stays primary."""
     quiesce_failure = RuntimeError("source quiesce failed")
@@ -2751,10 +2811,10 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic_dispatch(  # noqa: PLR0915
+async def test_start_runtime_publishes_after_router_sync_without_waiting_for_room_setup(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
-    """Owned joins need ingestion while semantic work waits for published grants."""
+    """Semantic work waits for the router's grant refresh, not for startup room setup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config, source_fingerprint=None)
@@ -2834,21 +2894,20 @@ async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic
             assert orchestrator._response_admission_gate.closed
             assert not orchestrator._response_admission_gate.close_if_idle()
 
-            # An early frame completion cannot release semantic callbacks while
-            # setup still owns the initial membership publication.
-            await orchestrator.handle_bot_ready(router_bot)
+            # Another responder's first frame cannot publish semantic callbacks
+            # before the router's first frame has rebuilt reply grants.
             await orchestrator.handle_bot_ready(general_bot)
-            await asyncio.sleep(0)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(runtime_ready.wait(), timeout=0.05)
             router_bot.release_pending_turn_journal_replay.assert_not_called()
             general_bot.release_pending_turn_journal_replay.assert_not_called()
+            assert orchestrator._response_admission_gate.closed
 
-            setup_can_finish.set()
+            await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
             await asyncio.sleep(0)
 
-            setup_finished = call_order.index("setup_finished")
-            assert call_order.index("sync_started:router") < setup_finished
-            assert call_order.index("sync_started:general") < setup_finished
+            assert "setup_finished" not in call_order
             router_bot.release_pending_turn_journal_replay.assert_called()
             general_bot.release_pending_turn_journal_replay.assert_called()
             assert not orchestrator._response_admission_gate.closed
@@ -3044,6 +3103,77 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             old_maintenance_task.cancel()
         with suppress(asyncio.CancelledError):
             await old_maintenance_task
+
+
+@pytest.mark.asyncio
+async def test_config_reload_during_post_readiness_room_setup_replays_it_with_live_bots(tmp_path: Path) -> None:
+    """Room setup still running after readiness restarts with the bots a reload left running."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities=set(),
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+    router_bot = MagicMock(spec=AgentBot, running=True)
+    old_bot = MagicMock(spec=AgentBot, running=True)
+    new_bot = MagicMock(spec=AgentBot, running=True)
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": old_bot}
+    orchestrator.config = current_config
+    orchestrator.running = True
+    orchestrator._runtime_ready_event.set()
+    old_setup_started = asyncio.Event()
+    setup_calls: list[list[object]] = []
+
+    async def setup_rooms(bots: list[object]) -> None:
+        setup_calls.append(list(bots))
+        if old_bot in bots:
+            old_setup_started.set()
+            await asyncio.Event().wait()
+
+    async def replace_general_bot(_plan: ConfigUpdatePlan) -> None:
+        # Stands in for any apply step that replaces a bot the first setup pass holds.
+        old_bot.running = False
+        orchestrator.agent_bots["general"] = new_bot
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator, "_update_unchanged_bots", side_effect=replace_general_bot),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as recover,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        patch.object(orchestrator._computer_runtime, "bind_if_ready"),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
+    ):
+        orchestrator._startup_maintenance.start([router_bot, old_bot], current_config, startup_cutoff_ms=123456)
+        first_maintenance_task = orchestrator._startup_maintenance.task
+        assert first_maintenance_task is not None
+        try:
+            await asyncio.wait_for(old_setup_started.wait(), timeout=1.0)
+            await orchestrator.config_reload._update_config()
+            replayed_task = orchestrator._startup_maintenance.task
+            assert replayed_task is not None
+            assert replayed_task is not first_maintenance_task
+            await asyncio.wait_for(replayed_task, timeout=1.0)
+        finally:
+            await orchestrator._startup_maintenance.cancel()
+
+    assert first_maintenance_task.cancelled()
+    assert setup_calls == [[router_bot, old_bot], [router_bot, new_bot]]
+    assert recover.await_args.args[:2] == ([router_bot, new_bot], new_config)
 
 
 def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -> None:
@@ -3275,6 +3405,89 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 
         # Also verify only one sync task is tracked for coach
         assert "coach" in orchestrator._sync_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_drain(tmp_path: Path) -> None:
+    """A reply that outlives one bot's bounded restart drain must not strand the batch."""
+
+    def agent_config(role: str) -> dict[str, object]:
+        return {"display_name": role, "role": role, "model": "default", "rooms": ["lobby"]}
+
+    models = {"default": {"provider": "test", "id": "test-model"}}
+    old_config = Config(agents={"general": agent_config("Old"), "coach": agent_config("Old")}, models=models)
+    new_config = Config(agents={"general": agent_config("New"), "coach": agent_config("New")}, models=models)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = old_config
+    write_config_yaml(new_config, orchestrator.config_path)
+
+    old_bots: dict[str, AsyncMock] = {}
+    for entity_name in ("general", "coach", ROUTER_AGENT_NAME):
+        bot = _shutdown_bot_mock()
+        bot.config = old_config
+        bot.matrix_id = MatrixID.parse(f"@mindroom_{entity_name}:localhost")
+        bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+        bot.schedule_reply_authorized_call_revocation = MagicMock()
+        old_bots[entity_name] = bot
+    drain_timeout = ResponseShutdownTimeoutError("1 response tasks did not stop within bounded cleanup")
+    old_bots["general"].prepare_for_sync_shutdown.side_effect = drain_timeout
+    old_bots["general"].stop.side_effect = drain_timeout
+    orchestrator.agent_bots = dict(old_bots)
+    orchestrator._sync_tasks = {name: asyncio.create_task(asyncio.sleep(60)) for name in old_bots}
+    old_router_task = orchestrator._sync_tasks[ROUTER_AGENT_NAME]
+    created_configs: dict[str, Config] = {}
+
+    def make_bot(
+        entity_name: str,
+        agent_user: AgentMatrixUser,
+        config: Config,
+        *_args: object,
+        **_kwargs: object,
+    ) -> AsyncMock:
+        bot = _shutdown_bot_mock()
+        bot.matrix_id = agent_user.matrix_id
+        bot.try_start = AsyncMock(return_value=True)
+        created_configs[entity_name] = config
+        return bot
+
+    accounts = {
+        name: AgentMatrixUser(
+            agent_name=name,
+            user_id=f"@mindroom_{name}:localhost",
+            display_name=name,
+            password=TEST_PASSWORD,
+        )
+        for name in ("general", "coach")
+    }
+    try:
+        with (
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                return_value={"general", "coach"},
+            ),
+            patch("mindroom.orchestrator.create_bot_for_entity", side_effect=make_bot),
+            patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+            patch.object(_MultiAgentOrchestrator, "_prepare_entity_accounts", new=AsyncMock(return_value=accounts)),
+            patch.object(_MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+        ):
+            await orchestrator.config_reload._apply_queued_config_reload()
+    finally:
+        tasks = list(orchestrator._sync_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert orchestrator.config_reload.status.status == "applied"
+    old_bots["general"].stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    old_bots["coach"].stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    assert created_configs == {"general": orchestrator.config, "coach": orchestrator.config}
+    assert orchestrator.config.agents["general"].role == "New"
+    for entity_name in ("general", "coach"):
+        assert orchestrator.agent_bots[entity_name] is not old_bots[entity_name]
+        assert entity_name in orchestrator._sync_tasks
+    assert orchestrator.agent_bots[ROUTER_AGENT_NAME] is old_bots[ROUTER_AGENT_NAME]
+    assert orchestrator._sync_tasks[ROUTER_AGENT_NAME] is old_router_task
 
 
 @pytest.mark.asyncio
@@ -3573,8 +3786,8 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
     )
     gates = {phase: (asyncio.Event(), asyncio.Event()) for phase in phases}
 
-    def gated_call(phase: str) -> Callable[[], Awaitable[None]]:
-        async def gated() -> None:
+    def gated_call(phase: str) -> Callable[..., Awaitable[None]]:
+        async def gated(**_kwargs: object) -> None:
             started, release = gates[phase]
             started.set()
             await release.wait()
@@ -3649,7 +3862,7 @@ async def test_ordinary_agent_stop_exposes_real_resource_release_phase() -> None
     dispatcher_started = asyncio.Event()
     release_dispatcher = asyncio.Event()
 
-    async def stop_dispatcher() -> None:
+    async def stop_dispatcher(**_kwargs: object) -> None:
         dispatcher_started.set()
         await release_dispatcher.wait()
 

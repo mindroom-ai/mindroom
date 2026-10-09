@@ -106,6 +106,17 @@ extension DesktopShellStatus {
     }
 }
 
+extension DesktopShellHandle {
+    /// A handle stopped by `kill_shell` or the local Kill button reports `killed`; any other finish is `completed`.
+    var stateLabel: String {
+        switch state {
+        case "running": "Running"
+        case "killed": "Killed"
+        default: "Finished"
+        }
+    }
+}
+
 extension DesktopShellRequest {
     var displayCommand: String { desktopSafePreview(command) }
     var displayCwd: String { desktopSafePreview(cwd) }
@@ -114,14 +125,37 @@ extension DesktopShellRequest {
     var hasEscapedCharacters: Bool {
         [command, cwd, requesterID, agentName].contains(where: desktopPreviewEscapes)
     }
+    /// Look-alike letters and punctuation, such as Cyrillic U+0430 or U+2024, read as an ASCII host or path.
+    var hasNonASCIICharacters: Bool { !asciiEscapedFields.isEmpty }
+    /// One labeled line per field that contains non-ASCII characters, with every one of them escaped.
+    var asciiEscapedFields: String {
+        [("Command", command), ("Working folder", cwd), ("Agent", agentName), ("Requester", requesterID)]
+            .filter { !$0.1.unicodeScalars.allSatisfy(\.isASCII) }
+            .map { "\($0.0): \(desktopSafePreview($0.1, escapingNonASCII: true))" }
+            .joined(separator: "\n")
+    }
+    var escapeWarning: String? {
+        let clauses = [
+            hasEscapedCharacters ? "control, text-direction, invisible, or non-ASCII space characters, shown as \\u{…}" : nil,
+            hasNonASCIICharacters ? "non-ASCII characters that can look like ASCII; the fields with them escaped follow" : nil,
+        ].compactMap { $0 }
+        return clauses.isEmpty ? nil : "This request contains \(clauses.joined(separator: ", and "))."
+    }
+
+    /// Counted like the helper and the terminal prompt: Unicode scalars, and lines split at newlines.
+    var commandSizeLabel: String {
+        let characters = command.unicodeScalars.count
+        let lines = command.unicodeScalars.filter { $0 == "\n" }.count + 1
+        return "\(characters) \(characters == 1 ? "character" : "characters") on \(lines) \(lines == 1 ? "line" : "lines")"
+    }
 }
 
-/// Escapes control, invisible-format, and text-direction characters so remote text cannot hide what runs.
-/// Ordinary newlines stay readable; everything escaped appears as `\u{…}`.
-func desktopSafePreview(_ text: String) -> String {
+/// Escapes control, format, text-direction, invisible, and non-ASCII space characters so remote text cannot hide what runs.
+/// Ordinary newlines and ASCII spaces stay readable; everything escaped appears as `\u{…}`.
+func desktopSafePreview(_ text: String, escapingNonASCII: Bool = false) -> String {
     var preview = ""
     for scalar in text.unicodeScalars {
-        if isHiddenPreviewScalar(scalar) {
+        if isHiddenPreviewScalar(scalar) || (escapingNonASCII && !scalar.isASCII) {
             preview += "\\u{\(String(scalar.value, radix: 16, uppercase: true))}"
         } else {
             preview.unicodeScalars.append(scalar)
@@ -134,11 +168,18 @@ func desktopPreviewEscapes(_ text: String) -> Bool {
     text.unicodeScalars.contains(where: isHiddenPreviewScalar)
 }
 
+/// Symbols that render as empty space without being default-ignorable; the helper refuses long runs of them too.
+private let desktopBlankSymbols: Set<Unicode.Scalar> = ["\u{2800}", "\u{1D159}"]
+
 private func isHiddenPreviewScalar(_ scalar: Unicode.Scalar) -> Bool {
+    // Default-ignorable letters and marks, such as Hangul fillers and variation selectors, render as nothing.
+    if scalar.properties.isDefaultIgnorableCodePoint || desktopBlankSymbols.contains(scalar) { return true }
     switch scalar.properties.generalCategory {
-    case .control: scalar != "\n"
-    case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: true
-    default: false
+    case .control: return scalar != "\n"
+    // Look-alike and wide spaces could disguise a command or pad it out of view.
+    case .spaceSeparator: return scalar != " "
+    case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: return true
+    default: return false
     }
 }
 
@@ -204,7 +245,7 @@ extension DesktopStatus {
         guard isBridgeOnline, shell.enabled else { return .off }
         if let pending = shell.pending { return .pending(pending) }
         if shell.autoApproveUntilRevoked { return .untilRevoked }
-        let remaining = Int(shell.autoApproveRemainingSeconds.rounded(.up))
+        let remaining = shell.autoApproveRemainingSeconds
         return remaining > 0 ? .autoApprove(seconds: remaining) : .askEachTime
     }
 

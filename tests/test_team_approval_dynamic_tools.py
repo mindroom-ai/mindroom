@@ -26,7 +26,7 @@ from openai import AsyncOpenAI
 
 from mindroom.approval_tools import approval_denial_context, toolkit_owners_for_agents
 from mindroom.config.main import Config
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal.approval_continuations import ApprovalDecision
 from mindroom.history.session_context import (
     close_team_runtime_state_dbs,
@@ -468,6 +468,7 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
                 invoking_agent="alpha",
                 toolkit_name=pause.toolkit_owners[("alpha", "add")],
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(tool.tool_args),
             )
             for tool in pause.tools
         )

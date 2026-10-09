@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 import ssl  # noqa: TC003 - Required for runtime get_type_hints on public transport constructors.
 from collections.abc import Awaitable, Callable, Iterable  # noqa: TC003
-from typing import NoReturn
+from typing import NoReturn, TypeVar
 from urllib.parse import SplitResult, urljoin, urlsplit
 
 import httpcore
@@ -32,15 +33,29 @@ _METADATA_HOSTNAME_SUFFIXES = (
     ".metadata.google.internal",
     ".metadata.goog",
 )
+# Cloud metadata, host agent, and workload credential endpoints stay blocked even when private networks are allowed.
 _METADATA_IP_ADDRESSES = frozenset(
     {
+        # AWS, Azure, GCP, and most other clouds: instance metadata.
         ipaddress.ip_address("169.254.169.254"),
+        # AWS ECS task metadata and credentials.
         ipaddress.ip_address("169.254.170.2"),
+        # Alibaba Cloud instance metadata.
         ipaddress.ip_address("100.100.100.200"),
+        # Azure WireServer host agent, which is on public address space.
+        ipaddress.ip_address("168.63.129.16"),
+        # AWS instance metadata over IPv6.
         ipaddress.ip_address("fd00:ec2::254"),
+        # AWS EKS Pod Identity Agent credentials over IPv6.
+        ipaddress.ip_address("fd00:ec2::23"),
+        # GCP instance metadata over IPv6.
+        ipaddress.ip_address("fd20:ce::254"),
+        # Oracle Cloud Infrastructure instance metadata over IPv6.
+        ipaddress.ip_address("fd00:c1::a9fe:a9fe"),
     },
 )
 _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+_AsyncNetworkStreamT = TypeVar("_AsyncNetworkStreamT")
 
 
 class ServerFetchUrlError(ValueError):
@@ -266,12 +281,16 @@ def validate_server_fetch_url(
     *,
     allow_private_networks: bool = False,
     allow_loopback: bool = False,
+    resolve_hostnames: bool = True,
 ) -> str:
-    """Validate that a URL is safe for a server-side HTTP(S) request."""
+    """Validate that a URL is safe for a server-side HTTP(S) request.
+
+    Callers that validate the dialed address at connect time may skip hostname resolution here.
+    """
     return _validate_server_fetch_url(
         url,
         allow_private_networks=allow_private_networks,
-        resolve_hostnames=True,
+        resolve_hostnames=resolve_hostnames,
         allow_loopback=allow_loopback,
     )
 
@@ -359,8 +378,15 @@ class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        return await _connect_validated_async(
-            validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+        # The lookup blocks, so it runs in a thread to keep the event loop serving other work.
+        addresses = await asyncio.to_thread(
+            validated_connect_addresses,
+            host,
+            port=port,
+            allow_private_networks=self._allow_private_networks,
+        )
+        return await connect_validated_async(
+            addresses,
             lambda address: self._backend.connect_tcp(
                 address.compressed,
                 port,
@@ -397,15 +423,18 @@ def _connect_validated_sync(
     _deny("dns_resolution_failed")
 
 
-async def _connect_validated_async(
+async def connect_validated_async(
     addresses: list[_IPAddress],
-    connect: Callable[[_IPAddress], Awaitable[httpcore.AsyncNetworkStream]],
-) -> httpcore.AsyncNetworkStream:
-    last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
+    connect: Callable[[_IPAddress], Awaitable[_AsyncNetworkStreamT]],
+    *,
+    connect_errors: tuple[type[Exception], ...] = (httpcore.ConnectError, httpcore.ConnectTimeout),
+) -> _AsyncNetworkStreamT:
+    """Dial the first reachable address from `validated_connect_addresses`, never the hostname itself."""
+    last_error: Exception | None = None
     for address in addresses:
         try:
             return await connect(address)
-        except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
+        except connect_errors as e:
             last_error = e
     if last_error is not None:
         raise last_error

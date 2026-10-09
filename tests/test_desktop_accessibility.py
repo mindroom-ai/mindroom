@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from mindroom.desktop.accessibility import (
     PRIMARY_SCREEN_APP_ID,
     AccessibilityActionOutcomeUnknownError,
+    AccessibilityCapture,
     AccessibilityElement,
     AccessibilityError,
     AccessibilityState,
@@ -581,7 +582,8 @@ def test_mac_retains_interleaved_observations(operation: str) -> None:
     elif operation == "capture":
         assert backend.prepare_capture(first.app_id, first.state_id).process_id == 42
     else:
-        assert backend.prepare_fallback(first.app_id, first.state_id).state_id == first.state_id
+        fallback = backend.prepare_fallback(first.app_id, first.state_id)
+        assert (fallback.state.state_id, fallback.process_id) == (first.state_id, 42)
 
 
 @pytest.mark.parametrize("operation", ["click", "capture", "fallback"])
@@ -635,7 +637,7 @@ def test_mac_passive_updates_allow_observation_and_fallback(monkeypatch: pytest.
     state = backend.get_app_state("com.example.Editor")
 
     assert state.to_result()["stability"] == "stable"
-    assert backend.prepare_fallback(state.app_id, state.state_id).state_id == state.state_id
+    assert backend.prepare_fallback(state.app_id, state.state_id).state.state_id == state.state_id
 
 
 def test_mac_unstable_observation_rejects_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -695,7 +697,8 @@ def test_mac_semantic_target_survives_unrelated_insertion(operation: str, during
         backend.set_value(state.app_id, state.state_id, 1, "published")
         assert services.attributes["button"]["value"] == "published"
     else:
-        assert backend.element_for_action(state.app_id, state.state_id, 1).name == "Save"
+        element, process_id = backend.element_for_action(state.app_id, state.state_id, 1)
+        assert (element.name, process_id) == ("Save", 42)
 
 
 @pytest.mark.parametrize("change", ["title", "value", "geometry", "parent"])
@@ -772,7 +775,7 @@ def test_fallback_state_id_expires_when_replaced() -> None:
 
     with pytest.raises(AccessibilityError, match="stale"):
         backend.prepare_fallback(PRIMARY_SCREEN_APP_ID, old.state_id)
-    assert backend.prepare_fallback(PRIMARY_SCREEN_APP_ID, current.state_id) == current
+    assert backend.prepare_fallback(PRIMARY_SCREEN_APP_ID, current.state_id) == AccessibilityCapture(current, None)
 
 
 def test_fallback_state_expires_when_screen_geometry_changes() -> None:
@@ -876,3 +879,35 @@ def test_fallback_rejects_hidden_actionable_identity_changes(change: str, during
         change_identity()
     with pytest.raises(AccessibilityError, match="state changed"):
         backend.prepare_fallback(state.app_id, state.state_id)
+
+
+def test_untargeted_keyboard_guard_requires_the_validated_app_to_stay_frontmost() -> None:
+    """Keys without an exact element still go only to the allowlisted app that was focused and checked."""
+    backend, _, workspace = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    guard = backend.prepare_keyboard(state.app_id, state.state_id)
+    assert workspace.applications[0].activation_options == [0]
+    guard()
+    workspace.applications[0].active = False
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
+        guard()
+
+
+def test_untargeted_keyboard_guard_reports_nothing_typed_when_focus_is_lost_before_any_input() -> None:
+    """The first check runs before any key is posted, so its failure is a definite refusal, not an unknown outcome."""
+    backend, _, workspace = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    guard = backend.prepare_keyboard(state.app_id, state.state_id)
+    workspace.applications[0].active = False
+    with pytest.raises(AccessibilityError, match="nothing was typed") as refused:
+        guard()
+    assert type(refused.value) is AccessibilityError
+
+
+def test_primary_screen_keyboard_input_needs_no_app_focus_guard() -> None:
+    """The primary-screen target already covers whichever app has keyboard focus."""
+    backend = ScreenshotOnlyAccessibilityBackend(frozenset({PRIMARY_SCREEN_APP_ID}), lambda: (1920, 1080))
+    state = backend.get_app_state(PRIMARY_SCREEN_APP_ID)
+    backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, state.state_id)()
+    with pytest.raises(AccessibilityError, match="stale"):
+        backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, "old-state")

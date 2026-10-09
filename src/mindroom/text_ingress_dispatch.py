@@ -17,7 +17,12 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
+from mindroom.dispatch_source import (
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+    is_voice_event,
+)
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
@@ -231,7 +236,12 @@ def _parsed_command_for_event(
 ) -> Command | None:
     if media_events:
         return None
-    if ingress_metadata is not None and ingress_metadata.source_kind == VOICE_SOURCE_KIND:
+    # Scheduled fires carry their creator as requester, but an agent can write their text.
+    if ingress_metadata is not None and ingress_metadata.source_kind in {
+        VOICE_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
+    }:
         return None
     if is_audio_message_event(event) or is_voice_event(
         event,
@@ -271,12 +281,13 @@ async def _blocked_before_plan(
     may_be_superseded = (
         prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
         and prepared.handled_turn.replay_sources_all_from_requester(requester_user_id)
-        # While another requester's follow-ups still wait in the backlog, a
-        # newer message from this requester may only be answered after them,
-        # so letting it absorb this turn would answer out of receipt order.
+        # While another run still waits in the backlog, whether another
+        # requester's follow-ups or an entity's reply written for this
+        # requester, a newer message from this requester may only be answered
+        # after it, so letting it absorb this turn would answer out of receipt order.
         and not (
             coalescing_key is not None
-            and controller.deps.coalescing_gate.follow_up_backlog_queues_other_requester(
+            and controller.deps.coalescing_gate.follow_up_backlog_queues_other_run(
                 coalescing_key,
                 requester_user_id,
             )
@@ -424,10 +435,6 @@ async def _apply_turn_plan(  # noqa: C901
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
     async def response_recovery_ready() -> bool:
-        if prepared.dispatch.target.resolved_thread_id is not None and controller.deps.interrupted_turn_rooms.contains(
-            prepared.event.event_id,
-        ):
-            return True
         return await controller.deps.response_recovery_ready(handled_turn)
 
     response_task = controller.deps.response_runner.track_inbox_response(

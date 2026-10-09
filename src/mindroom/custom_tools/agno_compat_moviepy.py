@@ -1,22 +1,45 @@
-"""Agno MoviePy caption rendering with explicit per-call styling."""
+"""Agno MoviePy caption rendering with explicit per-call styling and media paths that follow ``file_access``."""
 
 from __future__ import annotations
 
-from contextlib import suppress
+import shutil
+import subprocess
+import tempfile
+from contextlib import closing, suppress
+from functools import partial
 from math import ceil
 from pathlib import Path
-from typing import Any, cast, override
+from typing import TYPE_CHECKING, Any, cast, override
 
 from agno.tools import moviepy_video as agno_moviepy
-from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
+from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoClip, VideoFileClip
+from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
+
+from mindroom.file_access import resolve_agent_file
+from mindroom.tools.path_safety import write_agent_file
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import BinaryIO
+
+    from mindroom.config.models import FileAccess
+
+_STAGING_PREFIX = "mindroom-moviepy-"
+# Worker code can write the workspace, including sparse files whose logical size far exceeds the disk they use.
+# Parsing builds a few hundred bytes of objects per caption word, so captions get a much smaller cap;
+# rendering keeps only the active line's rasters, whatever the caption length.
+_MAX_STAGED_VIDEO_BYTES = 1 << 30
+_MAX_STAGED_CAPTION_BYTES = 1 << 20
+# FFmpeg demuxers that read only the file they open; playlists and manifests such as HLS and DASH open other files and URLs.
+_PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,flv,asf,gif,ogg,wav,mp3,flac,aac"
 
 # AGNO_COMPAT: MoviePyVideoTools drops caption styles and derives font size unconditionally.
 # Reason: Agno's embed_captions accepts four style arguments but never forwards
 # them; create_caption_clips has no explicit font-size parameter.
 # Upstream issue: Tracking gap; no matching issue identified for caption style forwarding.
 # Upstream PR: None identified. The two copied methods retain the pinned SDK's
-# parsing, media settings, and temporary output publication.
+# parsing and media settings; outputs render in private staging and publish through write_agent_file.
 # Remove when: The pinned SDK applies all four embed_captions style arguments to
 # normal and highlighted clips, preserving layout and safe output publication.
 # Coverage: tests/test_moviepy_video_tools.py::test_embed_captions_applies_styles_to_text_clips.
@@ -50,9 +73,213 @@ from PIL import ImageFont
 # Remove when: MoviePy cleans temporary audio on every encoding exit.
 # Coverage: tests/test_moviepy_caption_output.py.
 
+# AGNO_COMPAT: MoviePy embed_captions rasterizes every caption line before encoding starts.
+# Reason: Agno builds each line's word clips, full-width background, and composite up front and keeps all of
+# them until encoding ends, so memory grows by megabytes per line at 1080p and long captions exhaust the primary.
+# Each line composite also starts at time zero, so every frame composites every line that has not yet ended.
+# Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.
+# Upstream PR: None identified.
+# Remove when: The SDK renders caption lines on demand with memory independent of the caption length.
+# Coverage: tests/test_moviepy_caption_layout.py::test_embed_captions_keeps_one_caption_line_in_memory.
+
+# AGNO_COMPAT: MoviePy embed_captions names its default output from the last dot anywhere in the path.
+# Reason: Agno splits video_path at its last dot, so an extensionless video below a dotted or ./ directory
+# gets an output named after that directory and written outside it.
+# Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.
+# Upstream PR: None identified.
+# Remove when: The SDK names the default output after the video's file name, beside the video.
+# Coverage: tests/test_moviepy_video_tools.py::test_default_caption_output_lands_next_to_the_input.
+
+# AGNO_COMPAT: MoviePyVideoTools reads and writes model-chosen media paths by name.
+# Reason: Agno 3.0.9 hands video, caption, and output paths to open(), os.replace, and FFmpeg
+# in whichever process runs the toolkit, so a prompt could replace MindRoom's config.yaml with
+# create_srt, read any file, or point FFmpeg at a URL, whatever the agent's file_access.
+# FFmpeg also follows the paths and URLs inside an HLS playlist or DASH manifest, which it
+# detects by content, so a staged input must be refused unless it is a plain media file.
+# Upstream issue: Tracking gap; upstream tracking has not been verified.
+# Upstream PR: None identified.
+# Remove when: the toolkit accepts caller-supplied input readers and output writers;
+# retain resolution under file_access, private FFmpeg staging capped against worker-written sparse files,
+# the plain-media check, and streamed no-follow publication.
+# Coverage: tests/test_moviepy_video_tools.py::test_media_paths_follow_file_access,
+# tests/test_moviepy_video_tools.py::test_oversized_inputs_fail_before_staging_past_the_limit,
+# tests/test_moviepy_video_tools.py::test_video_inputs_refuse_playlists_and_manifests,
+# tests/test_moviepy_video_tools.py::test_outputs_publish_without_buffering_the_rendered_file, and
+# tests/test_file_access_contract.py::test_outside_files_follow_file_access.
+
+
+def _caption_layers(
+    subtitle_lines: list[dict[str, Any]],
+    render_line: Callable[[dict[str, Any]], CompositeVideoClip],
+    active_line: dict[int, CompositeVideoClip],
+) -> list[VideoClip]:
+    """Return one bottom-centered clip per subtitle line that draws the line from ``active_line``.
+
+    ``active_line`` holds at most one rendered line, replaced when another line is drawn, so memory does not
+    grow with the caption length. Each line is rendered once here to size its clip, so a line that cannot fit
+    fails before encoding starts.
+    """
+
+    def canvas(index: int) -> CompositeVideoClip:
+        if index not in active_line:
+            for previous in active_line.values():
+                previous.close()
+            active_line.clear()
+            active_line[index] = render_line(subtitle_lines[index])
+        return active_line[index]
+
+    layers = []
+    for index, line in enumerate(subtitle_lines):
+        start, duration = line["start"], line["end"] - line["start"]
+        # A clip draws its first frame when constructed, which renders the line once here.
+        # The rendered line keeps absolute video times, while a layer's frames count from the line start.
+        layer = VideoClip(lambda t, index=index, start=start: canvas(index).get_frame(start + t), duration=duration)
+        mask = VideoClip(
+            lambda t, index=index, start=start: cast("VideoClip", canvas(index).mask).get_frame(start + t),
+            is_mask=True,
+            duration=duration,
+        )
+        layers.append(layer.with_mask(mask).with_start(start).with_position(("center", "bottom")))
+    return layers
+
+
+def _require_plain_media(staged: str) -> None:
+    """Refuse a staged input unless FFmpeg opens it as a plain media file that references no other file or URL.
+
+    FFmpeg picks the format from the private copy's fixed content and name, so MoviePy later opens the same format.
+    """
+    probe = subprocess.run(
+        [
+            FFMPEG_BINARY,
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-format_whitelist",
+            _PLAIN_MEDIA_FORMATS,
+            "-i",
+            staged,
+            "-t",
+            "0",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        msg = "Video input must be a supported plain media file; playlists and manifests are refused."
+        raise ValueError(msg)
+
 
 class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
-    """Apply advertised caption styles without shared rendering state."""
+    """Apply advertised caption styles without shared rendering state, with media paths that follow ``file_access``.
+
+    Inputs are copied through no-follow descriptors into a private staging directory, video inputs must be
+    plain media files rather than playlists or manifests, MoviePy and FFmpeg read and write only there,
+    and outputs below the workspace are streamed into place by atomic replacement.
+    """
+
+    def __init__(
+        self,
+        enable_process_video: bool = True,
+        enable_generate_captions: bool = True,
+        enable_embed_captions: bool = True,
+        all: bool = False,  # noqa: A002 - upstream option name
+        *,
+        tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        self._workspace_root = tool_output_workspace_root
+        self._file_access = file_access
+        super().__init__(
+            enable_process_video=enable_process_video,
+            enable_generate_captions=enable_generate_captions,
+            enable_embed_captions=enable_embed_captions,
+            all=all,
+            **kwargs,
+        )
+
+    def _stage_input(self, raw_path: str, field_name: str, staging: Path, max_bytes: int) -> str:
+        """Copy one authorized input into the staging directory, keeping its suffix for format detection.
+
+        The copy fails before it writes more than ``max_bytes``.
+        """
+        authorized = resolve_agent_file(
+            raw_path,
+            workspace_root=self._workspace_root,
+            file_access=self._file_access,
+            field_name=field_name,
+        )
+        staged = staging / f"{field_name}{Path(authorized.name).suffix}"
+        with authorized.open() as source, staged.open("xb") as target:
+            while chunk := source.read(1 << 16):
+                if target.tell() + len(chunk) > max_bytes:
+                    msg = f"{field_name} '{raw_path}' exceeds the {max_bytes >> 20} MiB input limit."
+                    raise ValueError(msg)
+                target.write(chunk)
+        return str(staged)
+
+    def _stage_video(self, raw_path: str, staging: Path) -> str:
+        """Stage one video input that FFmpeg reads as a plain media file, never as a playlist or manifest."""
+        staged = self._stage_input(raw_path, "video_path", staging, _MAX_STAGED_VIDEO_BYTES)
+        _require_plain_media(staged)
+        return staged
+
+    def _publish(self, raw_path: str, payload: bytes | BinaryIO) -> None:
+        """Write one output where the agent's file_access allows; below the workspace by atomic no-follow replacement."""
+        write_agent_file(raw_path, payload, workspace_root=self._workspace_root, file_access=self._file_access)
+
+    @override
+    def extract_audio(self, video_path: str, output_path: str) -> str:
+        """Converts video to audio using MoviePy.
+
+        Args:
+            video_path: Path to the video file; with ``file_access: workspace`` it must be inside the agent workspace
+            output_path: Path where the audio will be saved; with ``file_access: workspace`` it must be inside the agent workspace
+
+        Returns:
+            str: Path to the extracted audio file
+
+        """
+        try:
+            with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX) as staging_dir:
+                staging = Path(staging_dir)
+                staged_output = staging / f"output{Path(output_path).suffix}"
+                with closing(VideoFileClip(self._stage_video(video_path, staging))) as video:
+                    if video.audio is None:
+                        message = "Video has no audio track."
+                        raise ValueError(message)  # noqa: TRY301 - preserve SDK error results and cleanup.
+                    video.audio.write_audiofile(str(staged_output))
+                with staged_output.open("rb") as rendered:
+                    self._publish(output_path, rendered)
+        except Exception as exc:
+            agno_moviepy.logger.exception("Failed to extract audio")
+            return f"Failed to extract audio: {exc}"
+        return output_path
+
+    @override
+    def create_srt(self, transcription: str, output_path: str) -> str:
+        """Save transcription text to SRT formatted file.
+
+        Args:
+            transcription: Text transcription in SRT format
+            output_path: Path where the SRT file will be saved; with ``file_access: workspace`` it must be inside the agent workspace
+
+        Returns:
+            str: Path to the created SRT file, or error message if failed
+
+        """
+        try:
+            self._publish(output_path, transcription.encode("utf-8"))
+        except Exception as exc:
+            agno_moviepy.logger.exception("Failed to create SRT file")
+            return f"Failed to create SRT file: {exc}"
+        return output_path
 
     @override
     def create_caption_clips(
@@ -198,6 +425,44 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
 
         return word_clips
 
+    def _render_caption_line(
+        self,
+        line: dict[str, Any],
+        frame_size: tuple[int, int],
+        *,
+        font_size: int,
+        font_color: str,
+        stroke_color: str,
+        stroke_width: int,
+    ) -> CompositeVideoClip:
+        """Render one subtitle line's word clips over its translucent full-width background."""
+        word_clips = self.create_caption_clips(
+            line,
+            frame_size,
+            color=font_color,
+            stroke_color=stroke_color,
+            stroke_width=stroke_width,
+            font_size=font_size,
+        )
+        width, height = frame_size
+        bg_height = ceil(max(clip.pos(0)[1] + clip.h for clip in word_clips))
+        if bg_height > height:
+            message = "Caption block exceeds video height; use a smaller font_size."
+            raise ValueError(message)
+
+        # Children keep absolute video times and local canvas positions.
+        # Only the line's layer is positioned against the video.
+        bg_clip = (
+            ColorClip(
+                size=(width, bg_height),
+                color=(0, 0, 0),
+                duration=line["end"] - line["start"],
+            )
+            .with_opacity(0.6)
+            .with_start(line["start"])
+        )
+        return CompositeVideoClip([bg_clip, *word_clips], size=(width, bg_height))
+
     @override
     def embed_captions(
         self,
@@ -212,9 +477,9 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         """Create a new video with embedded captions and word-level highlighting.
 
         Args:
-            video_path: Path to the input video file
-            srt_path: Path to the SRT caption file
-            output_path: Path for the output video (optional)
+            video_path: Path to the input video file; with ``file_access: workspace`` it must be inside the agent workspace
+            srt_path: Path to the SRT caption file; with ``file_access: workspace`` it must be inside the agent workspace
+            output_path: Path for the output video (optional); with ``file_access: workspace`` it must be inside the agent workspace
             font_size: Size of caption text
             font_color: Color of caption text
             stroke_color: Color of text outline
@@ -226,19 +491,21 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         """
         video = None
         final_video = None
-        all_caption_clips = []
-        temp_output_path: str | None = None
-        temp_audio_path: str | None = None
+        active_line: dict[int, CompositeVideoClip] = {}
+        staging = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX))
         try:
-            # If no output path provided, create one based on input video
+            # If no output path provided, write one next to the input video, named after its file name
             if output_path is None:
-                output_path = video_path.rsplit(".", 1)[0] + "_captioned.mp4"
+                source = Path(video_path)
+                output_path = str(source.with_name(f"{source.stem}_captioned.mp4"))
 
             # Load video
-            video = VideoFileClip(video_path)
+            video = VideoFileClip(self._stage_video(video_path, staging))
 
             # Read caption file and parse SRT
-            srt_content = Path(srt_path).read_text(encoding="utf-8")
+            srt_content = Path(self._stage_input(srt_path, "srt_path", staging, _MAX_STAGED_CAPTION_BYTES)).read_text(
+                encoding="utf-8",
+            )
 
             # Parse SRT and get word timing
             words = self.parse_srt(srt_content)
@@ -246,67 +513,43 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             # Split into lines
             subtitle_lines = self.split_text_into_lines(words)
 
-            # Create caption clips for each line
-            for line in subtitle_lines:
-                word_clips = self.create_caption_clips(
-                    line,
-                    (video.w, video.h),
-                    color=font_color,
-                    stroke_color=stroke_color,
-                    stroke_width=stroke_width,
-                    font_size=font_size,
-                )
-                bg_height = ceil(max(clip.pos(0)[1] + clip.h for clip in word_clips))
-                if bg_height > video.h:
-                    message = "Caption block exceeds video height; use a smaller font_size."
-                    raise ValueError(message)  # noqa: TRY301 - preserve SDK error results and cleanup.
-
-                # Children keep absolute video times and local canvas positions.
-                # Only the outer composite is positioned against the video.
-                bg_clip = (
-                    ColorClip(
-                        size=(video.w, bg_height),
-                        color=(0, 0, 0),
-                        duration=line["end"] - line["start"],
-                    )
-                    .with_opacity(0.6)
-                    .with_start(line["start"])
-                )
-                caption_composite = CompositeVideoClip(
-                    [bg_clip, *word_clips],
-                    size=(video.w, bg_height),
-                ).with_position(("center", "bottom"))
-
-                all_caption_clips.append(caption_composite)
+            render_line = partial(
+                self._render_caption_line,
+                frame_size=(video.w, video.h),
+                font_size=font_size,
+                font_color=font_color,
+                stroke_color=stroke_color,
+                stroke_width=stroke_width,
+            )
 
             # Combine video with all captions
-            final_video = CompositeVideoClip([video, *all_caption_clips], size=video.size)
+            final_video = CompositeVideoClip(
+                [video, *_caption_layers(subtitle_lines, render_line, active_line)],
+                size=video.size,
+            )
 
-            # Write output with optimized settings
-            temp_output_path = agno_moviepy._make_temp_output_path(output_path)
-            if final_video.audio is not None:
-                temp_audio_path = agno_moviepy._make_temp_output_path(str(Path(output_path).with_suffix(".m4a")))
+            # Write output with optimized settings inside the staging directory, then publish it complete
+            staged_output = staging / f"output{Path(output_path).suffix}"
             final_video.write_videofile(
-                temp_output_path,
+                str(staged_output),
                 codec="libx264",
                 audio_codec="aac",
-                temp_audiofile=temp_audio_path,
+                temp_audiofile=str(staging / "audio.m4a") if final_video.audio is not None else None,
                 fps=video.fps,
                 preset="medium",
                 threads=4,
                 # Disable default progress bar
             )
-            Path(temp_output_path).replace(output_path)
-            temp_output_path = None
+            with staged_output.open("rb") as rendered:
+                self._publish(output_path, rendered)
 
         except Exception as exc:
-            agno_moviepy._remove_file_if_exists(temp_output_path)
             agno_moviepy.logger.exception("Failed to embed captions")
             return f"Failed to embed captions: {exc}"
         else:
             return output_path
         finally:
-            for clip in all_caption_clips:
+            for clip in active_line.values():
                 with suppress(Exception):
                     clip.close()
             if final_video is not None:
@@ -315,4 +558,4 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             if video is not None:
                 with suppress(Exception):
                     video.close()
-            agno_moviepy._remove_file_if_exists(temp_audio_path)
+            shutil.rmtree(staging, ignore_errors=True)

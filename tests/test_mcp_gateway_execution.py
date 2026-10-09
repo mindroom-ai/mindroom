@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import httpx
@@ -14,15 +15,22 @@ from starlette.routing import Route
 from structlog.testing import capture_logs
 
 from mindroom import agents
+from mindroom.credentials import CredentialsManager
+from mindroom.custom_tools import google_scholar
+from mindroom.custom_tools.google_drive import GoogleDriveTools
+from mindroom.custom_tools.google_scholar import GoogleScholarTools
 from mindroom.mcp_gateway import server
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, get_worker_runtime_context
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.test_mcp_gateway_server import _HEADERS, _authenticate, _call, _cancel, _client
 from tests.test_mcp_gateway_tools import context  # noqa: F401
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from starlette.requests import Request
 
     from mindroom.api.connection_agents import AgentToolContext
@@ -54,12 +62,14 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
     phase: str,
     interruption: str,
 ) -> None:
-    """A cancelled call keeps its slot, identity, and close owner until native work exits."""
+    """A cancelled call keeps its slot, identity, and close owner until native work exits on the gateway pool."""
     started, release = threading.Event(), threading.Event()
     close_started, close_release, closed = threading.Event(), threading.Event(), threading.Event()
     bodies: list[str] = []
+    on_gateway_pool: dict[str, bool] = {}
 
     def block(stage: str) -> None:
+        on_gateway_pool[stage] = threading.current_thread().name.startswith("mindroom-mcp-gateway-tool")
         assert get_tool_runtime_context() is None
         assert get_tool_execution_identity() == context.execution_identity
         worker = get_worker_runtime_context()
@@ -125,11 +135,51 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             # The original typed request ID becomes reusable only after its owner exits.
             response = await client.post("/mcp", json=_call(12))
             assert response.json()["result"]["structuredContent"] == {"result": "done"}
+            assert on_gateway_pool == dict.fromkeys(("body", "build", "close", "connect"), True)
         finally:
             release.set()
             close_release.set()
             await asyncio.gather(first, return_exceptions=True)
             await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_blocking_tool_bodies_leave_the_default_executor_free(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow synchronous gateway tools cannot hold the threads that other offloaded work needs."""
+    release = threading.Event()
+    bodies: list[str] = []
+
+    def work() -> str:
+        bodies.append(threading.current_thread().name)
+        assert release.wait(5)
+        return "done"
+
+    monkeypatch.setattr(
+        agents,
+        "build_agent_toolkit",
+        lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
+    )
+    loop = asyncio.get_running_loop()
+    default_executor, replacement_executor = ThreadPoolExecutor(max_workers=2), ThreadPoolExecutor()
+    loop.set_default_executor(default_executor)
+    calls = [
+        asyncio.create_task(gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={}))
+        for _ in range(2)
+    ]
+    try:
+        async with asyncio.timeout(5):
+            while len(bodies) < len(calls):  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 2) == "free"
+    finally:
+        release.set()
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        loop.set_default_executor(replacement_executor)
+        default_executor.shutdown(wait=True)
+        replacement_executor.shutdown(wait=True)
+    assert results == [{"result": "done"}, {"result": "done"}]
 
 
 @pytest.mark.parametrize("phase", ["metadata", "entry", "plugins"])
@@ -188,6 +238,165 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
             release.set()
             await asyncio.gather(first, return_exceptions=True)
             await _wait(finished)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+@pytest.mark.parametrize("async_body", [True, False], ids=["async-body", "sync-body"])
+async def test_cancelled_worker_proxy_call_keeps_capacity_until_proxy_thread_exits(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    async_body: bool,
+) -> None:
+    """A worker-routed body, async or sync, keeps its slot on the gateway pool until its proxy request returns."""
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    threads: list[str] = []
+
+    def proxy(**_kwargs: object) -> str:
+        threads.append(threading.current_thread().name)
+        started.set()
+        try:
+            assert release.wait(5)
+            return "done"
+        finally:
+            finished.set()
+
+    async def async_work() -> str:
+        return "local"
+
+    def sync_work() -> str:
+        return "local"
+
+    work = async_work if async_body else sync_work
+    work.__name__ = "work"
+
+    def build(*_args: object, **_kwargs: object) -> Toolkit:
+        toolkit = Toolkit(name="calculator", tools=[work])
+        # Like maybe_wrap_toolkit_for_sandbox_proxy, every worker-routed function gets the async proxy.
+        toolkit.async_functions = {
+            name: sandbox_proxy._wrap_async_proxy(
+                function,
+                "calculator",
+                name,
+                runtime_paths=context.runtime_paths,
+                credentials_manager=None,
+            )
+            for name, function in {**toolkit.functions, **toolkit.async_functions}.items()
+        }
+        return toolkit
+
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
+    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
+
+    async with _client(dispatch, max_active_calls=1) as client:
+        first = asyncio.create_task(client.post("/mcp", json=_call(1)))
+        try:
+            await _wait(started)
+            await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
+            assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+            assert [name.startswith("mindroom-mcp-gateway-tool") for name in threads] == [True]
+            release.set()
+            await _wait(finished)
+            async with asyncio.timeout(2):
+                while _code(response := await client.post("/mcp", json=_call(1))) == "duplicate_request":  # noqa: ASYNC110
+                    await asyncio.sleep(0)
+            assert response.json()["result"]["structuredContent"] == {"result": "done"}
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_cancelled_google_scholar_search_keeps_capacity_until_the_scrape_returns(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking Google Scholar scrape runs on the gateway pool and keeps its slot after the call is cancelled."""
+    started, release = threading.Event(), threading.Event()
+    threads: list[str] = []
+
+    def search(_query: str, _limit: int) -> list[dict[str, object]]:
+        threads.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(5)
+        return []
+
+    monkeypatch.setattr(google_scholar, "_search_publications", search)
+    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: GoogleScholarTools())
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(
+            context,
+            toolkit="calculator",
+            function="search_google_scholar",
+            arguments={"query": "attention"},
+        )
+
+    async with _client(dispatch, max_active_calls=1) as client:
+        first = asyncio.create_task(client.post("/mcp", json=_call(1)))
+        try:
+            await _wait(started)
+            await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
+            assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+            assert [name.startswith("mindroom-mcp-gateway-tool") for name in threads] == [True]
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_cancelled_google_drive_call_keeps_capacity_until_its_body_returns(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A blocking Google Drive call runs on the gateway pool and keeps its slot after the call is cancelled."""
+    started, release = threading.Event(), threading.Event()
+    threads: list[str] = []
+
+    def blocking_scope_check() -> str:
+        threads.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(5)
+        return '{"error": "unused"}'
+
+    tool = GoogleDriveTools(
+        runtime_paths=context.runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+    )
+    monkeypatch.setattr(tool, "_write_scope_upgrade_result", blocking_scope_check)
+    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: tool)
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(
+            context,
+            toolkit="calculator",
+            function="google_drive_create_folder",
+            arguments={"name": "Plans"},
+        )
+
+    async with _client(dispatch, max_active_calls=1) as client:
+        first = asyncio.create_task(client.post("/mcp", json=_call(1)))
+        try:
+            await _wait(started)
+            await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
+            assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+            assert [name.startswith("mindroom-mcp-gateway-tool") for name in threads] == [True]
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
             await gateway_toolkits.drain_gateway_tool_cleanup()
 
 

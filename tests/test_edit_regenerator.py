@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from itertools import cycle
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -19,7 +20,13 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
-from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps, _Edit, _Mailbox
+from mindroom.edit_regenerator import (
+    _MAX_CONSECUTIVE_EDIT_REBUILDS,
+    EditRegenerator,
+    EditRegeneratorDeps,
+    _Edit,
+    _Mailbox,
+)
 from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
@@ -40,9 +47,9 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
 from mindroom.response_runner import ResponseRequest
-from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
+from mindroom.turn_record import EditPreparation
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import make_relation_lookup, make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
@@ -84,7 +91,6 @@ class _Harness:
     ingress_hook_runner: MagicMock
     generate_response: AsyncMock
     wait_for_turn_settled: AsyncMock
-    interrupted_turn_rooms: InterruptedTurnRooms
     config: Config
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
@@ -253,7 +259,7 @@ def _harness(
         async with response_lock:
             assert isinstance(request, ResponseRequest)
             event_id = await generate_response(request)
-            if event_id is not None and not interrupted_turn_rooms.contains(request.correlation_id or ""):
+            if event_id is not None:
                 await _acknowledge_test_edit(
                     tmp_path,
                     request,
@@ -264,7 +270,6 @@ def _harness(
             return event_id
 
     wait_for_turn_settled = AsyncMock()
-    interrupted_turn_rooms = InterruptedTurnRooms()
     regenerator = EditRegenerator(
         EditRegeneratorDeps(
             runtime=_RuntimeStub(client=AsyncMock(spec=nio.AsyncClient), config=config),
@@ -276,7 +281,6 @@ def _harness(
             generate_response=run_locked_response,
             wait_for_turn_settled=wait_for_turn_settled,
             receipt_order=AsyncMock(return_value=receipt_order),
-            interrupted_turn_rooms=interrupted_turn_rooms,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
         ),
     )
@@ -287,7 +291,6 @@ def _harness(
         ingress_hook_runner=ingress_hook_runner,
         generate_response=generate_response,
         wait_for_turn_settled=wait_for_turn_settled,
-        interrupted_turn_rooms=interrupted_turn_rooms,
         config=config,
         runtime_paths=runtime_paths,
         room=nio.MatrixRoom(room_id=ROOM_ID, own_user_id=f"@{AGENT_NAME}:example.org"),
@@ -357,6 +360,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert request.member_display_names == {USER_ID: "Banana Man"}
     assert request.existing_event_id == RESPONSE_EVENT_ID
     assert request.existing_event_is_placeholder is False
+    # A regeneration cut short by a restart starts over: a newer edit may have replaced its prompt.
+    assert request.existing_event_is_recovered is False
     assert request.user_id == USER_ID
     assert request.correlation_id == EDIT_EVENT_ID
     assert request.matrix_run_metadata == RUN_METADATA
@@ -883,6 +888,49 @@ async def test_cancelled_drain_is_retried_by_waiting_newer_edit(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_rebuild_that_never_changes_is_capped(tmp_path: Path) -> None:
+    """A snapshot check that keeps asking to rebuild cannot hold the room's lane forever."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(new_body="edited body")
+    harness.turn_store.prepare_edit_snapshot.side_effect = AsyncMock(return_value=EditPreparation.REBUILD)
+
+    async def generate(request: ResponseRequest) -> str | None:
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is EditPreparation.REBUILD
+        return None
+
+    harness.generate_response.side_effect = generate
+
+    await asyncio.wait_for(_handle_edit(harness, event, event_info), timeout=5)
+
+    assert harness.generate_response.await_count == _MAX_CONSECUTIVE_EDIT_REBUILDS + 1
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_rebuild_cap_counts_attempts_when_the_check_runs_twice_per_attempt(tmp_path: Path) -> None:
+    """A snapshot check that passes before history refresh and rebuilds after it is still capped."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(new_body="edited body")
+    verdicts = cycle([False, EditPreparation.REBUILD])
+    harness.turn_store.prepare_edit_snapshot.side_effect = lambda **_kwargs: next(verdicts)
+
+    async def generate(request: ResponseRequest) -> str | None:
+        # The response runner checks once at admission and again after refreshing history.
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is False
+        assert await request.prepare_source_turn(request.thread_history) is EditPreparation.REBUILD
+        return None
+
+    harness.generate_response.side_effect = generate
+
+    await asyncio.wait_for(_handle_edit(harness, event, event_info), timeout=5)
+
+    assert harness.generate_response.await_count == _MAX_CONSECUTIVE_EDIT_REBUILDS + 1
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
 async def test_failed_generation_cleans_mailbox_and_allows_retry(tmp_path: Path) -> None:
     """A failed drain leaves durable revision state unchanged and a later retry succeeds."""
     harness = _harness(tmp_path, turn_record=_turn_record())
@@ -1068,6 +1116,7 @@ async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
@@ -1161,6 +1210,7 @@ async def test_edit_aborts_when_physical_record_loses_discovery_alias(
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
@@ -1761,8 +1811,8 @@ async def test_generate_response_failure_propagates_without_recording(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp_path: Path) -> None:
-    """A replacement interruption must leave its revision for room-scoped recovery."""
+async def test_unsettled_cancellation_leaves_interrupted_edit_uncommitted(tmp_path: Path) -> None:
+    """A cancellation the runner never settled must leave its revision for journal replay."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
     attempts = 0
@@ -1772,10 +1822,6 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
         attempts += 1
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
-        assert request.on_interrupted_response_recoverable is not None
-        assert request.on_deferred_outcome_handled is not None
-        request.on_interrupted_response_recoverable()
-        await request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.generate_response.side_effect = interrupt
@@ -1785,8 +1831,8 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
         await _handle_edit(harness, event, event_info)
 
     assert attempts == 1
-    assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
     harness.turn_store.record_turn.assert_not_called()
+    harness.turn_store.record_responded_turn.assert_not_called()
     assert harness.regenerator._mailboxes == {}
     expected_record = replace(
         record,
@@ -1899,32 +1945,8 @@ async def test_restart_replays_durably_committed_interrupted_edit(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_swallowed_sync_restart_leaves_edit_uncommitted(tmp_path: Path) -> None:
-    """A runner-returned interruption marker must not consume the queued edit."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
-    attempts = 0
-
-    async def interrupt(request: ResponseRequest) -> str:
-        nonlocal attempts
-        attempts += 1
-        assert request.on_interrupted_response_recoverable is not None
-        request.on_interrupted_response_recoverable()
-        return "$interrupted:example.org"
-
-    harness.generate_response.side_effect = interrupt
-    event, event_info = _edit_event(new_body="latest after restart")
-
-    await _handle_edit(harness, event, event_info)
-
-    assert attempts == 1
-    assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
-    harness.turn_store.record_turn.assert_not_called()
-    assert harness.regenerator._mailboxes == {}
-
-
-@pytest.mark.asyncio
-async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tmp_path: Path) -> None:
-    """Restart cancellation must leave every source in the mailbox for recovery."""
+async def test_unsettled_cancellation_leaves_every_waiting_coalesced_source_uncommitted(tmp_path: Path) -> None:
+    """An unsettled cancellation must leave every source in the mailbox for journal replay."""
     first_event_id = "$m1:example.org"
     second_event_id = "$m2:example.org"
     harness = _harness(
@@ -1952,15 +1974,11 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
             sibling_hook_finished.set()
         return False
 
-    async def interrupt(request: ResponseRequest) -> str:
+    async def interrupt(_request: ResponseRequest) -> str:
         nonlocal attempts
         attempts += 1
         generation_started.set()
         await cancel_generation.wait()
-        assert request.on_interrupted_response_recoverable is not None
-        assert request.on_deferred_outcome_handled is not None
-        request.on_interrupted_response_recoverable()
-        await request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.ingress_hook_runner.emit_message_received_hooks.side_effect = hook
@@ -1991,10 +2009,10 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
 
     assert attempts == 1
     assert hook_calls == 2
-    assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
-    # Neither the driving edit nor its waiting sibling may commit, so replacement
-    # recovery re-drives the whole coalesced turn.
+    # Neither the driving edit nor its waiting sibling may commit, so journal
+    # replay re-drives the whole coalesced turn.
     harness.turn_store.record_turn.assert_not_called()
+    harness.turn_store.record_responded_turn.assert_not_called()
     assert harness.regenerator._mailboxes == {}
 
 
@@ -2173,6 +2191,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=principal.redacted_event_ids,
+            relations=principal,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2181,7 +2200,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
     )
     await store.warm()
     await store.record_responded_turn(record)
-    await store.mark_source_redacted("$deleted-edit")
+    await store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
     original = nio.RoomMessageText.from_dict(
         {
             "type": "m.room.message",
@@ -2246,7 +2265,6 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
     async def generate(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
-        assert not store.get_turn_record(first).pending_redaction_cleanup_event_ids
         prompts.append(request.prompt)
         await _acknowledge_test_edit(tmp_path, request, RESPONSE_EVENT_ID, store, journal_store=journal_store)
         return RESPONSE_EVENT_ID
@@ -2257,7 +2275,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
         if event.event_id == edit.event_id:
             await _handle_edit(harness, edit, info)
         elif event.room_id == ROOM_ID:
-            await store.mark_source_redacted(redaction.redacts)
+            await store.mark_source_redacted(redaction.redacts, room_id=ROOM_ID)
         return True
 
     worker = PendingEventWorker(store=principal, handle=handle)
@@ -2315,6 +2333,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2341,7 +2360,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
         nonlocal changed_during_preparation
         if not changed_during_preparation:
             changed_during_preparation = True
-            await real_store.mark_source_redacted("$deleted-edit")
+            await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
         return await original_prepare(**kwargs)
 
     if deletion_phase == "preparation":
@@ -2350,7 +2369,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
     async def generate(request: ResponseRequest) -> str | None:
         attempts.append(request)
         if deletion_phase == "locked" and len(attempts) == 1:
-            await real_store.mark_source_redacted("$deleted-edit")
+            await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
         assert request.prepare_source_turn is not None
         if await request.prepare_source_turn(request.thread_history):
             return None
@@ -2366,7 +2385,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
 
     harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=real_store, generate_response=generate)
     if deletion_phase == "before":
-        await real_store.mark_source_redacted("$deleted-edit")
+        await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
     event, info = _edit_event(original_event_id=second, new_body="LIVE_SIBLING_EDIT")
     await _handle_edit(harness, event, info)
     assert len(attempts) == (1 if deletion_phase == "before" else 2)
@@ -2382,7 +2401,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
     assert owner.source_event_revisions[second] == (event.server_timestamp, event.event_id)
     assert owner.revision_watermark(first) == (10, "$deleted-edit")
     assert owner.revision_replay["$deleted-edit"].response_event_id == RESPONSE_EVENT_ID
-    assert not owner.revision_replay["$deleted-edit"].cleanup_pending
+    assert owner.revision_replay["$deleted-edit"].redacted
     assert harness.regenerator._mailboxes == {}
 
 
@@ -2416,6 +2435,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2440,7 +2460,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         nonlocal changed_during_preparation
         if not changed_during_preparation:
             changed_during_preparation = True
-            await store.mark_source_redacted("$driving-edit")
+            await store.mark_source_redacted("$driving-edit", room_id=ROOM_ID)
         return await original_prepare(**kwargs)
 
     if late_preparation:
@@ -2450,7 +2470,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         nonlocal attempts
         attempts += 1
         if attempts == 1 and not late_preparation:
-            await store.mark_source_redacted("$driving-edit")
+            await store.mark_source_redacted("$driving-edit", room_id=ROOM_ID)
         assert request.prepare_source_turn is not None
         if await request.prepare_source_turn(request.thread_history):
             return None

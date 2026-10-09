@@ -1,10 +1,14 @@
+# `pre-commit install` also installs the commit-msg hook; hooks without explicit stages still run only before commits.
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-        exclude: ^skills/mindroom-docs/references/
+        # Next.js uses a metadata image's .alt.txt file verbatim as its alt text, so it must not end in a newline.
+        exclude: ^skills/mindroom-docs/references/|\.alt\.txt$
       - id: check-docstring-first
       - id: check-yaml
         exclude: (cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$|cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$)
@@ -83,6 +87,12 @@ repos:
         entry: bash -c 'env -u VIRTUAL_ENV uv run privata --methods .'
         language: system
         pass_filenames: false
+
+      - id: check-commit-attribution
+        name: Reject AI agent attribution in commit messages
+        entry: .venv/bin/python .github/scripts/check_commit_attribution.py
+        language: system
+        stages: [commit-msg]
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.26.0"

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from mindroom.automations.registry import iter_module_automations
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
+    from mindroom.automations.registry import CheckFn
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
@@ -66,6 +68,7 @@ class _Plugin:
     hooks_module_path: Path | None
     skill_dirs: list[Path]
     discovered_hooks: tuple[HookCallback, ...]
+    discovered_automations: tuple[CheckFn, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +141,7 @@ def load_plugins(
             return []
         plugins: list[_Plugin] = []
         skill_roots: list[Path] = []
+        cached_files = (dict(plugin_imports._PLUGIN_CACHE), dict(plugin_imports._MODULE_IMPORT_CACHE))
         plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
             plugin_entries,
             runtime_paths,
@@ -163,8 +167,9 @@ def load_plugins(
                 plugins.append(plugin)
                 skill_roots.extend(plugin.skill_dirs)
 
-            if plugins:
-                logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+            # Agent builds and runner requests load plugins every time, so log only loads that read a changed file.
+            if cached_files != (plugin_imports._PLUGIN_CACHE, plugin_imports._MODULE_IMPORT_CACHE):
+                _log_loaded_plugins(plugins)
 
             _sync_loaded_plugin_tools(plugins)
 
@@ -175,6 +180,19 @@ def load_plugins(
             raise
 
         return plugins
+
+
+def _log_loaded_plugins(plugins: list[_Plugin]) -> None:
+    if not plugins:
+        return
+    logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+    for plugin in plugins:
+        if plugin.discovered_hooks:
+            logger.info(
+                "Discovered plugin hooks",
+                plugin_name=plugin.name,
+                hook_names=[_hook_display_name(hook) for hook in plugin.discovered_hooks],
+            )
 
 
 @contextmanager
@@ -397,12 +415,7 @@ def _materialize_plugin(
     if hooks_module is None and plugin.hooks_module_path is None:
         hooks_module = tools_module
     discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
-    if discovered_hooks:
-        logger.info(
-            "Discovered plugin hooks",
-            plugin_name=plugin.name,
-            hook_names=[_hook_display_name(hook) for hook in discovered_hooks],
-        )
+    discovered_automations = tuple(iter_module_automations(hooks_module)) if hooks_module is not None else ()
     return _Plugin(
         name=plugin.name,
         root=plugin.root,
@@ -413,6 +426,7 @@ def _materialize_plugin(
         hooks_module_path=plugin.hooks_module_path,
         skill_dirs=plugin.skill_dirs,
         discovered_hooks=discovered_hooks,
+        discovered_automations=discovered_automations,
     )
 
 

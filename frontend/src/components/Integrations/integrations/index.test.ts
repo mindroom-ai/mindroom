@@ -26,6 +26,47 @@ describe("Generic OAuth integration provider", () => {
     });
   });
 
+  it("registers Google Tasks as a first-class OAuth integration", () => {
+    const config = integrationProviders.google_tasks.getConfig();
+
+    expect(config.integration).toMatchObject({
+      id: "google_tasks",
+      name: "Google Tasks",
+      setup_type: "oauth",
+    });
+  });
+
+  it("registers one Google Cloud card for the shared Google Cloud connection", async () => {
+    const provider = integrationProviders.google_cloud;
+    const config = provider.getConfig();
+
+    expect(config.integration).toMatchObject({
+      id: "google_cloud",
+      name: "Google Cloud",
+      setup_type: "oauth",
+    });
+    expect(integrationProviders).not.toHaveProperty("google_bigquery");
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        connected: true,
+        has_client_config: true,
+        has_custom_client_config: false,
+        has_service_account_config: false,
+        client_config_service: "google_cloud_oauth_client",
+      }),
+    });
+
+    const status = await provider.loadStatus!();
+
+    expect(global.fetch).toHaveBeenCalledWith("/api/oauth/google_cloud/status");
+    expect(status).toMatchObject({
+      status: "connected",
+      oauth_client_config_service: "google_cloud_oauth_client",
+    });
+  });
+
   it("resolves connect once and releases observers after popup completion", async () => {
     vi.useFakeTimers();
     const removeListener = vi.spyOn(window, "removeEventListener");

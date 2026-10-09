@@ -71,7 +71,7 @@ async def test_topic_generation_rechecks_remote_state_before_writing(
             "Lobby",
             config,
             runtime_paths_for(config),
-            snapshot=RoomStateSnapshot(room_id, {}) if use_snapshot else None,
+            snapshot=RoomStateSnapshot(room_id, {}, frozenset()) if use_snapshot else None,
         )
     assert result is (final_state != "forbidden")
     if final_state in {"human_topic", "forbidden"}:

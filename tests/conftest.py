@@ -29,7 +29,8 @@ from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import nio
@@ -43,6 +44,7 @@ from aioresponses import aioresponses
 from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
+import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
@@ -50,6 +52,7 @@ import mindroom.handled_turns as handled_turns_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
+import mindroom.scheduling as scheduling_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
@@ -154,6 +157,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.response_sources import ResponseAttempt
+    from mindroom.streaming import StreamingResponse
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -166,7 +170,7 @@ _POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
 # breaks against a glibc server. The journal's server is therefore glibc.
 _POSTGRES_JOURNAL_RUN_ID_STASH_KEY = pytest.StashKey[str]()
 _POSTGRES_JOURNAL_CONTAINER_PREFIX = "mindroom-postgres-journal-test-"
-_POSTGRES_JOURNAL_IMAGE = "postgres:16"
+_POSTGRES_JOURNAL_IMAGE = "mirror.gcr.io/library/postgres:16"
 _POSTGRES_JOURNAL_LOCALE = "en_US.utf8"
 
 # `postgres:16` declares `VOLUME /var/lib/postgresql/data`, so every container
@@ -416,6 +420,7 @@ __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "FakeMediaResponse",
     "activate_interactive_prompt",
     "agent_response_should_respond",
     "aioresponse",
@@ -456,6 +461,8 @@ __all__ = [
     "request_envelope",
     "requires_linux",
     "runtime_paths_for",
+    "serve_media_download",
+    "serve_media_from_download",
     "sync_bot_runtime_state",
     "test_runtime_paths",
     "unwrap_extracted_collaborator",
@@ -1157,6 +1164,61 @@ class _AutoRoomCache(MutableMapping[str, nio.MatrixRoom]):
         return len(self._rooms)
 
 
+@dataclass
+class FakeMediaResponse:
+    """The part of an aiohttp response that a streamed Matrix media download reads."""
+
+    body: bytes
+    status: int = 200
+    headers: dict[str, str] = field(default_factory=dict)
+    streamed_bytes: int = 0
+    released: bool = False
+
+    @property
+    def content(self) -> "FakeMediaResponse":
+        """Stand in for the response's payload stream."""
+        return self
+
+    async def iter_chunked(self, size: int) -> AsyncIterator[bytes]:
+        """Yield the body in chunks, counting what the reader actually took."""
+        for start in range(0, len(self.body), size):
+            chunk = self.body[start : start + size]
+            self.streamed_bytes += len(chunk)
+            yield chunk
+
+    def release(self) -> None:
+        """Record that the reader gave the connection back."""
+        self.released = True
+
+
+async def serve_media_download(download: Callable[..., Awaitable[object]], path: str) -> FakeMediaResponse:
+    """Answer one streamed media download request from a test's ``download(mxc=...)`` fake."""
+    server_name, media_id = urlsplit(path).path.split("/")[-2:]
+    response = await download(mxc=f"mxc://{unquote(server_name)}/{unquote(media_id)}")
+    if isinstance(response, nio.DownloadResponse):
+        return FakeMediaResponse(response.body)
+    return FakeMediaResponse(b'{"errcode": "M_NOT_FOUND"}', status=404)
+
+
+def serve_media_from_download(client: AsyncMock) -> None:
+    """Answer streamed media requests on ``client.send`` from ``client.download`` as it is when each is sent."""
+
+    async def send(_method: str, path: str, *_args: object, **_kwargs: object) -> object:
+        if "/media/download/" not in path:
+            return DEFAULT
+        return await serve_media_download(client.download, path)
+
+    client.access_token = TEST_ACCESS_TOKEN
+    client.send = AsyncMock(side_effect=send)
+
+
+async def push_stream_chunk(streaming: "StreamingResponse", chunk: str, client: object) -> None:
+    """Apply one visible chunk to a stream and let its throttle decide whether to deliver it."""
+    prior_delta_at = streaming.last_delta_at
+    streaming._update(chunk)
+    await streaming._throttled_send(client, prior_delta_at=prior_delta_at)
+
+
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
@@ -1182,6 +1244,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
+    serve_media_from_download(client)
 
     return client
 
@@ -2082,6 +2145,17 @@ class FakeCredentialsManager:
         """Return the shared credential layer for this fake manager."""
         return self
 
+    def for_primary_runtime_agent_scope(self, agent_name: str) -> "FakeCredentialsManager":
+        """Return an empty primary agent-scoped store."""
+        return FakeCredentialsManager({}, storage_root=self.storage_root / "primary" / agent_name)
+
+    def for_primary_runtime_scope(self, requester_id: str, agent_name: str | None) -> "FakeCredentialsManager":
+        """Return an empty primary requester-scoped store."""
+        return FakeCredentialsManager(
+            {},
+            storage_root=self.storage_root / "primary" / requester_id / (agent_name or ""),
+        )
+
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Skip tests marked with requires_matrix unless MATRIX_SERVER_URL is set."""
@@ -2837,6 +2911,12 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a router registered as the scheduled-task runner owner from leaking into later tests."""
+    monkeypatch.setattr(scheduling_module, "_runner_owner", None)
+
+
+@pytest.fixture(autouse=True)
 def _never_build_the_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep `mindroom run` from shelling out to a real frontend build.
 
@@ -2868,6 +2948,20 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
         raise httpx.ConnectError(message, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
+
+
+@pytest.fixture(scope="session")
+def _worker_tmpdir_link_root() -> Generator[Path, None, None]:
+    """Hold this session's worker TMPDIR links in one short directory removed at the end."""
+    path = Path(tempfile.mkdtemp(prefix="mr-links-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_worker_tmpdir_links(monkeypatch: pytest.MonkeyPatch, _worker_tmpdir_link_root: Path) -> None:
+    """Keep the worker TMPDIR links that tool subprocess envs create out of the machine's shared /tmp."""
+    monkeypatch.setattr(sandbox_exec_module, "_TMPDIR_LINK_ROOT", _worker_tmpdir_link_root)
 
 
 @pytest.fixture(autouse=True)

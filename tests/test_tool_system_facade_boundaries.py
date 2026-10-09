@@ -361,6 +361,7 @@ def test_private_registry_state_import_is_whitelisted_outside_tool_system() -> N
     """Only explicitly allowed imports may reach registry state outside tool_system."""
     assert _private_registry_state_importers_outside_tool_system() == {
         ("mindroom.api.sandbox_runner", "BUILTIN_TOOL_METADATA"),
+        ("mindroom.mcp.registry", "MCP_TOOL_FACTORY_MARKER"),
         ("mindroom.mcp.registry", "TOOL_REGISTRY"),
         ("mindroom.mcp.registry", "reconcile_dynamic_tool_state"),
     }

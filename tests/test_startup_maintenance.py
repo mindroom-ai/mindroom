@@ -16,7 +16,7 @@ async def _wait_for_controller(controller: StartupMaintenanceController) -> None
 
 @pytest.mark.asyncio
 async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() -> None:
-    """Maintenance should overlap setup with recovery and then scan newly joined rooms."""
+    """Maintenance should overlap setup with recovery and then recover again once setup joined its rooms."""
     call_order: list[str] = []
     bots = [MagicMock()]
     config = MagicMock()
@@ -29,14 +29,11 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
         started_bots: list[object],
         recovery_config: object,
         startup_cutoff_ms: int,
-        scanned_room_ids: set[str],
     ) -> None:
         assert started_bots == bots
         assert recovery_config is config
         assert startup_cutoff_ms == 123456
-        newly_joined_room_ids = joined_room_ids - scanned_room_ids
-        scanned_room_ids.update(newly_joined_room_ids)
-        recovery_waves.append(newly_joined_room_ids)
+        recovery_waves.append(set(joined_room_ids))
         call_order.append(f"recover-{len(recovery_waves)}")
         if len(recovery_waves) == 1:
             initial_rooms_discovered.set()
@@ -68,7 +65,7 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
 
     assert recovery_waves == [
         {"!initial:example.com"},
-        {"!joined-during-setup:example.com"},
+        {"!initial:example.com", "!joined-during-setup:example.com"},
     ]
     assert call_order == ["recover-1", "setup", "recover-2", "support", "approval_ready"]
 
@@ -78,7 +75,7 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
     """Later phases still run after stale recovery and room setup fail."""
     call_order: list[str] = []
 
-    async def recover_stale(_: list[object], __: object, ___: int, ____: set[str]) -> None:
+    async def recover_stale(_: list[object], __: object, ___: int) -> None:
         call_order.append("recover")
         msg = "recovery failed"
         raise RuntimeError(msg)
@@ -138,7 +135,7 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
 
     replay_config = MagicMock()
     with patch.object(controller, "start") as start:
-        controller.restart_after_config_reload(
+        controller.restart_after_runtime_replacement(
             config=replay_config,
             running_bots=running_bots,
         )
@@ -165,7 +162,7 @@ async def test_startup_maintenance_cancel_completed_task_returns_false() -> None
     assert should_replay is False
     with patch.object(controller, "start") as start:
         if should_replay:
-            controller.restart_after_config_reload(config=MagicMock(), running_bots=lambda: [MagicMock()])
+            controller.restart_after_runtime_replacement(config=MagicMock(), running_bots=lambda: [MagicMock()])
     start.assert_not_called()
 
 

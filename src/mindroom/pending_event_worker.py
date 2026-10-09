@@ -149,7 +149,7 @@ class PendingEventWorker:
 
     def begin_shutdown(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
         """Close admission and mark cancellations before teardown can yield."""
-        process_shutdown = shutdown_intent.stop_reason == "shutdown"
+        process_shutdown = shutdown_intent.hands_off_unfinished_work
         if self._stopped and (not process_shutdown or self._process_shutdown):
             return
         if not self._stopped:
@@ -188,9 +188,9 @@ class PendingEventWorker:
         self._scan_cursor = None
         return True
 
-    async def stop(self) -> None:
+    async def stop(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
         """Stop owners without settling their unfinished journal work."""
-        self.begin_shutdown()
+        self.begin_shutdown(shutdown_intent=shutdown_intent)
         await self.wait_stopped(timeout_seconds=None)
 
     def _queue_room(self, room_id: str, *, rewind_before: int | None = None) -> None:

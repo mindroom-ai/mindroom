@@ -55,12 +55,12 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     # Bootstrap the optional tool registry only for this materialization test.
     import mindroom.tools  # noqa: PLC0415, F401 - normal registry bootstrap
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
+    from mindroom.credentials import get_runtime_credentials_manager  # noqa: PLC0415
     from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
     from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
         ToolExecutionIdentity,
         build_agent_toolkit_worker_target,
         tool_execution_identity,
-        worker_root_path,
     )
 
     paths = resolve_primary_runtime_paths(
@@ -109,15 +109,15 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     assert {
         str(path.relative_to(tmp_path)): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
     } == before
-    # Generic primary materialization initializes credential directories for every
+    # Generic primary materialization initializes the primary-owned credential directories for every
     # toolkit; it must not create a browser profile, output directory or workspace.
-    worker_root = worker_root_path(paths.storage_root, target.worker_key)
+    requester_store = (
+        get_runtime_credentials_manager(paths).for_primary_runtime_scope("@viewer:fixture", "writer").base_path
+    )
     allowed = {
         paths.storage_root / "credentials",
-        worker_root.parent,
-        worker_root,
-        worker_root / "credentials",
-        worker_root / ".shared_credentials",
+        *(parent for parent in requester_store.parents if paths.storage_root in parent.parents),
+        requester_store,
     }
     assert {str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_dir()} == (
         before_directories | {str(path.relative_to(tmp_path)) for path in allowed}

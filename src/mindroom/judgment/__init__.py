@@ -1,1 +1,1 @@
-"""Bounded boolean judgments via LLM or System One, and System One choice judgments."""
+"""Bounded boolean judgments via LLM, System One, or OpenAI Decisions, and probability-backend choice judgments."""

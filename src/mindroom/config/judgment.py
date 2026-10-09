@@ -1,4 +1,4 @@
-"""Backend settings for boolean judgments and System One choices."""
+"""Backend settings for boolean and choice judgments."""
 
 from typing import Annotated, Literal
 
@@ -27,18 +27,17 @@ class LLMJudgmentConfig(BaseModel):
     )
 
 
-class TypeSafeJudgmentConfig(BaseModel):
-    """Use System One probabilities with a task-specific acceptance threshold."""
+class _ProbabilityBackendConfig(BaseModel):
+    """Accept a decision API's answer only at a task-specific probability."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    provider: Literal["typesafe"] = Field(description="Judge with System One; requires TYPESAFE_API_KEY")
     threshold: float = Field(
         default=0.8,
         ge=0.0,
         le=1.0,
         allow_inf_nan=False,
-        description="Minimum System One probability required to accept an answer",
+        description="Minimum probability required to accept an answer",
     )
     timeout_seconds: float = Field(
         default=1.5,
@@ -49,4 +48,25 @@ class TypeSafeJudgmentConfig(BaseModel):
     )
 
 
-type JudgmentConfig = Annotated[LLMJudgmentConfig | TypeSafeJudgmentConfig, Field(discriminator="provider")]
+class TypeSafeJudgmentConfig(_ProbabilityBackendConfig):
+    """Use System One probabilities."""
+
+    provider: Literal["typesafe"] = Field(description="Judge with System One; requires TYPESAFE_API_KEY")
+
+
+class OpenAIDecisionsJudgmentConfig(_ProbabilityBackendConfig):
+    """Use OpenAI Decisions API probabilities."""
+
+    provider: Literal["openai_decisions"] = Field(
+        description="Judge with the OpenAI Decisions API; uses the OpenAI API key",
+    )
+
+
+type ProbabilityJudgmentConfig = Annotated[
+    TypeSafeJudgmentConfig | OpenAIDecisionsJudgmentConfig,
+    Field(discriminator="provider"),
+]
+type JudgmentConfig = Annotated[
+    LLMJudgmentConfig | TypeSafeJudgmentConfig | OpenAIDecisionsJudgmentConfig,
+    Field(discriminator="provider"),
+]

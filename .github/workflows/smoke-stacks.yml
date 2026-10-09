@@ -27,22 +27,33 @@ permissions:
   contents: read
   packages: read
 
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # Pull Synapse from mirror.gcr.io; anonymous Docker Hub pulls fail on shared runners.
+      SYNAPSE_IMAGE: mirror.gcr.io/matrixdotorg/synapse:latest
+      INSTANCE_SYNAPSE_IMAGE: mirror.gcr.io/matrixdotorg/synapse:latest
 
     steps:
       - name: Checkout mindroom
         uses: actions/checkout@v5
         with:
           lfs: true
+          persist-credentials: false
 
       - name: Checkout mindroom-stack
         uses: actions/checkout@v5
         with:
           repository: mindroom-ai/mindroom-stack
           path: mindroom-stack
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

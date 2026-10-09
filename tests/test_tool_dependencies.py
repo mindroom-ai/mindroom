@@ -19,6 +19,7 @@ from mindroom.tool_system.dependencies import (
     _auto_install_optional_extra,
     _install_optional_extras,
     _install_via_uv_sync,
+    _install_via_uv_tool,
     _pip_name_to_import,
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
@@ -408,6 +409,56 @@ def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.Monke
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["VIRTUAL_ENV"] == sys.prefix
+
+
+def test_install_via_uv_tool_extends_running_environment_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Uv tool installs must reuse the running interpreter so a failed build cannot delete the environment."""
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], *, check: bool, **_kwargs: object) -> SimpleNamespace:
+        captured["cmd"] = cmd
+        captured["check"] = check
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies.subprocess.run", fake_run)
+    monkeypatch.setattr(sys, "_base_executable", "/managed/cpython-3.13-macos-aarch64-none/bin/python3.13")
+
+    assert _install_via_uv_tool(["browser", "duckduckgo"], quiet=True)
+    # `--force` or a bare `--python 3.13` (which may pick another patch or arch) makes uv delete and
+    # recreate the environment before building, so a build failure leaves the running install gone.
+    assert captured["cmd"] == [
+        "uv",
+        "tool",
+        "install",
+        "mindroom[browser,duckduckgo]",
+        "--python",
+        "/managed/cpython-3.13-macos-aarch64-none/bin/python3.13",
+        "-q",
+    ]
+    assert captured["check"] is False
+
+
+def test_install_optional_extras_keeps_receipt_extras_for_uv_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Uv syncs the tool environment exactly to the request, so installed extras must be requested again."""
+    (tmp_path / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "mindroom", extras = ["website", "Duck_Duck_Go"] }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    requested: list[list[str]] = []
+
+    def fake_install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
+        assert quiet is True
+        requested.append(extras)
+        return True
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_via_uv_tool", fake_install_via_uv_tool)
+
+    assert _install_optional_extras(["browser", "duck-duck-go"], quiet=True)
+    assert requested == [["browser", "duck-duck-go", "website"]]
 
 
 def test_install_command_for_current_python_uses_uv_system_outside_virtualenv(

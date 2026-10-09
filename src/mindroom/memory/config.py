@@ -166,7 +166,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
         elif key != "host":  # Skip host for other fields
             llm_provider_config[key] = value
 
-    if llm_provider in {"openai", "anthropic", "openrouter"}:
+    if llm_provider in {"openai", "anthropic", "openrouter"} and not llm_provider_config.get("api_key"):
         api_key = get_api_key_for_provider(llm_provider, runtime_paths=runtime_paths)
         if api_key:
             llm_provider_config["api_key"] = api_key

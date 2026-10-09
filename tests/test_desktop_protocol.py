@@ -37,7 +37,17 @@ def test_native_setup_descriptor_preserves_exact_pairing_scope() -> None:
     )
     content = descriptor.to_content()
     assert DesktopSetupDescriptor.from_content(content) == descriptor
-    for change in ({"v": True}, {"kind": "another_setup"}, {"unknown": "value"}, {"cloudflare_access": "false"}):
+    local = {**content, "homeserver": "http://localhost:8008"}
+    assert DesktopSetupDescriptor.from_content(local).homeserver == "http://localhost:8008"
+    for change in (
+        {"v": True},
+        {"kind": "another_setup"},
+        {"unknown": "value"},
+        {"cloudflare_access": "false"},
+        {"homeserver": "https://matrix.example.org@evil.example"},
+        {"homeserver": "https://m\u0430trix.example.org"},  # Cyrillic a
+        {"homeserver": "http://matrix.example.org"},
+    ):
         with pytest.raises(DesktopProtocolError):
             DesktopSetupDescriptor.from_content({**content, **change})
 
@@ -209,6 +219,26 @@ def test_encrypted_media_requires_matrix_uri_and_expected_key_algorithm() -> Non
 
     with pytest.raises(DesktopProtocolError, match="A256CTR"):
         EncryptedDesktopMedia.from_content(content)
+
+
+@pytest.mark.parametrize(("key_field", "value"), [("kty", "RSA"), ("ext", False)])
+def test_encrypted_media_rejects_keys_the_serializer_never_emits(key_field: str, value: object) -> None:
+    """Receivers accept only the octet, extractable key description the shared serializer writes."""
+    content = _media().to_content()
+    assert isinstance(content["key"], dict)
+    content["key"][key_field] = value
+
+    with pytest.raises(
+        DesktopProtocolError,
+        match=r"^screenshot\.key must describe an extractable A256CTR octet key\.$",
+    ):
+        EncryptedDesktopMedia.from_content(content)
+
+
+def test_encrypted_media_rejects_envelope_versions_the_serializer_never_emits() -> None:
+    """Receivers accept only the encrypted-file version the shared serializer writes."""
+    with pytest.raises(DesktopProtocolError, match=r"^screenshot\.v must be v2\.$"):
+        EncryptedDesktopMedia.from_content({**_media().to_content(), "v": "v1"})
 
 
 @pytest.mark.parametrize(

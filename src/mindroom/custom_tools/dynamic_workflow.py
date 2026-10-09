@@ -47,7 +47,16 @@ if TYPE_CHECKING:
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
 # a durable agent runtime; they can never be granted to workflow participants.
 _WORKFLOW_RESTRICTED_TOOLS = frozenset(
-    {"compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "invite_router", "memory", "self_config"},
+    {
+        "compact_context",
+        "delegate",
+        "dynamic_tools",
+        "dynamic_workflow",
+        "invite_router",
+        "memory",
+        "self_config",
+        "skill_manage",
+    },
 )
 
 _MINIMAL_SPEC_EXAMPLE = (
@@ -826,6 +835,16 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
     persisted = load_scoped_credentials("dynamic_workflow", credentials_manager=credentials_manager, worker_target=None)
     if persisted:
         values.update(persisted)
+    if context.agent_name in context.config.agents:
+        # A dashboard save with this agent selected lands in its scoped store and overrides the global value.
+        scoped = load_scoped_credentials(
+            "dynamic_workflow",
+            credentials_manager=credentials_manager,
+            worker_target=context.resolve_worker_target(),
+            primary_built_tool=True,
+        )
+        if scoped:
+            values.update(scoped)
     for entry in context.config.resolve_entity(context.agent_name).tool_configs:
         if entry.name == "dynamic_workflow":
             values.update(entry.tool_config_overrides)

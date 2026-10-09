@@ -25,6 +25,7 @@ import hashlib
 import json
 import math
 import os
+import select
 import shutil
 import signal
 import socket
@@ -190,8 +191,12 @@ class _SandboxForkserver:
         request_cwd: str | None,
         envelope: str,
         timeout_seconds: float,
+        bind_stop: Callable[[Callable[[], None]], None],
     ) -> subprocess.CompletedProcess[str]:
-        """Execute one prepared envelope in a fresh fork of the warm template."""
+        """Execute one prepared envelope in a fresh fork of the warm template.
+
+        ``bind_stop`` receives a function that stops the request by hanging up on its forked child.
+        """
         deadline = time.monotonic() + timeout_seconds
         key = python_executable or sys.executable
         fingerprint = _template_fingerprint(key, template_env)
@@ -216,6 +221,7 @@ class _SandboxForkserver:
             request_cwd=request_cwd,
             envelope=envelope,
             deadline=deadline,
+            bind_stop=bind_stop,
         )
 
     def shutdown(self) -> None:
@@ -343,6 +349,37 @@ class _SandboxForkserver:
                 )
                 return
 
+    def _send_request(
+        self,
+        conn: socket.socket,
+        key: str,
+        template: _Template,
+        request_payload: bytes,
+        bind_stop: Callable[[Callable[[], None]], None],
+    ) -> None:
+        stopped = threading.Event()
+
+        def stop() -> None:
+            # The template reaps children as they exit, so stopping never signals a PID
+            # another process may reuse: it hangs up, and the forked child exits.
+            stopped.set()
+            _hang_up(conn)
+
+        try:
+            conn.connect(template.socket_path)
+            # Armed before the envelope leaves: a stop accepted while the template warmed
+            # up hangs up at once, so sending fails and the request never starts.
+            bind_stop(stop)
+            conn.sendall(request_payload)
+        except TimeoutError as exc:
+            raise ForkserverTimeoutError from exc
+        except OSError as exc:
+            if stopped.is_set():
+                raise ForkserverError(_STOPPED_BEFORE_DISPATCH) from exc
+            self._discard(key, template)
+            msg = f"Failed to reach the sandbox forkserver template: {exc}"
+            raise ForkserverError(msg) from exc
+
     def _request(
         self,
         key: str,
@@ -352,6 +389,7 @@ class _SandboxForkserver:
         request_cwd: str | None,
         envelope: str,
         deadline: float,
+        bind_stop: Callable[[Callable[[], None]], None],
     ) -> subprocess.CompletedProcess[str]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -364,23 +402,15 @@ class _SandboxForkserver:
             ).encode("utf-8")
             + b"\n"
         )
-        child_pid: int | None = None
         try:
             conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         except OSError as exc:
             msg = f"Failed to open a sandbox forkserver connection: {exc}"
             raise ForkserverError(msg) from exc
+        child_pid: int | None = None
         try:
             conn.settimeout(remaining)
-            try:
-                conn.connect(template.socket_path)
-                conn.sendall(request_payload)
-            except TimeoutError as exc:
-                raise ForkserverTimeoutError from exc
-            except OSError as exc:
-                self._discard(key, template)
-                msg = f"Failed to reach the sandbox forkserver template: {exc}"
-                raise ForkserverError(msg) from exc
+            self._send_request(conn, key, template, request_payload, bind_stop)
             reader = _SocketLineReader(conn, deadline)
             try:
                 child_pid = int(json.loads(reader.read_line())["pid"])
@@ -389,6 +419,8 @@ class _SandboxForkserver:
                 stdout_text = str(response["stdout"])
                 stderr_text = str(response["stderr"])
             except TimeoutError as exc:
+                # At its deadline the child is still running, maybe holding the GIL in a
+                # long C call that a hang-up cannot interrupt, so kill it as before.
                 self._kill_child(child_pid)
                 raise ForkserverTimeoutError from exc
             except (_ConnectionClosedError, OSError, ValueError, KeyError, TypeError) as exc:
@@ -413,6 +445,15 @@ class _SandboxForkserver:
             return
         with suppress(OSError):
             os.kill(child_pid, signal.SIGKILL)
+
+
+_STOPPED_BEFORE_DISPATCH = "Sandbox forkserver request was stopped before it was sent."
+
+
+def _hang_up(conn: socket.socket) -> None:
+    """Stop one request; after the request ended its socket is closed and this does nothing."""
+    with suppress(OSError):
+        conn.shutdown(socket.SHUT_RDWR)
 
 
 _forkserver: _SandboxForkserver | None = None
@@ -528,10 +569,20 @@ def _run_child_request(
         os.environ.update(request.env)
     if request.cwd is not None:
         os.chdir(request.cwd)
+    if select.select([conn], [], [], 0)[0]:
+        # The runner hung up while handing this request over; never start it.
+        return 1
+    threading.Thread(target=_exit_when_runner_hangs_up, args=(conn,), daemon=True).start()
     returncode, stdout_text, stderr_text = run_payload(request.envelope)
     conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
     _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})
     return 0
+
+
+def _exit_when_runner_hangs_up(conn: socket.socket) -> None:
+    """Exit when the runner stops this request; it sends nothing after the request line, so readable means hung up."""
+    select.select([conn], [], [])
+    os._exit(1)
 
 
 def _send_json(conn: socket.socket, payload: dict[str, object]) -> None:

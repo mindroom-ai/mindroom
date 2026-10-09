@@ -448,16 +448,13 @@ export function HomeAssistantIntegration({
                   <strong>Prerequisites:</strong>
                   <ol className="mt-2 ml-4 list-decimal space-y-1 text-sm">
                     <li>
-                      Create an OAuth application in Home Assistant:
-                      <br />
-                      Go to Profile → Security → Long-Lived Access Tokens → Add
-                      OAuth Application
+                      Home Assistant needs no OAuth application registration.
                     </li>
                     <li>
-                      Set the redirect URI to:{" "}
+                      Enter this dashboard&apos;s URL as the Client ID; it must
+                      use the same host and port as the redirect URI:{" "}
                       <code className="text-xs">{callbackUrl}</code>
                     </li>
-                    <li>Copy the Client ID from the created application</li>
                   </ol>
                 </AlertDescription>
               </Alert>
@@ -506,7 +503,8 @@ export function HomeAssistantIntegration({
                   onChange={(e) => setClientId(e.target.value)}
                 />
                 <p className="text-xs text-gray-500">
-                  The Client ID from your Home Assistant OAuth application
+                  This dashboard&apos;s URL, such as
+                  https://mindroom.example.com
                 </p>
               </div>
 

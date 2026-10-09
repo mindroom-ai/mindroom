@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,6 +23,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -30,6 +40,14 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: just@1.58.0
+
+      # Content-bundle init scripts must also run with BusyBox applets; those tests fail in CI without it.
+      - name: Install BusyBox for content-bundle script tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends busybox
+
+      # The root-squash cases run the init in an unprivileged user namespace, which Ubuntu's AppArmor blocks by default.
+      - name: Allow unprivileged user namespaces for content-bundle script tests
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Run tests with pytest
         run: |

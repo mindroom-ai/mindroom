@@ -14,6 +14,7 @@ from agno.run.base import RunStatus
 from agno.run.team import ModelRequestCompletedEvent as TeamModelRequestCompletedEvent
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
+from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.history.turn_recorder import TurnRecorder
@@ -316,9 +317,8 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
 async def test_team_response_stream_publishes_usage_when_stream_errors() -> None:
     """An errored team stream still publishes the usage it observed.
 
-    The error arm ends the turn with a handled attempt (the driver never sees
-    a resolution to publish from), so the attempt must fill the collector
-    itself — otherwise billed tokens vanish from the run metadata.
+    The error arm hands that usage to the driver on its handled attempt, which
+    publishes it; otherwise billed tokens vanish from the run metadata.
     """
     orchestrator, config = _make_orchestrator()
 
@@ -358,6 +358,48 @@ async def test_team_response_stream_publishes_usage_when_stream_errors() -> None
     assert payload["status"] == "error"
     assert payload["usage"]["input_tokens"] == 500
     assert payload["usage"]["output_tokens"] == 80
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_publishes_usage_when_paused_without_requirements() -> None:
+    """A team pause with nothing to confirm still publishes the usage it observed."""
+    orchestrator, config = _make_orchestrator()
+
+    async def stream() -> AsyncIterator[object]:
+        yield TeamModelRequestCompletedEvent(
+            model="test-model",
+            model_provider="openai",
+            input_tokens=300,
+            output_tokens=40,
+            total_tokens=340,
+        )
+        yield TeamRunPausedEvent(run_id="run-paused", session_id="session-1", content="Waiting.")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=stream())
+    collector: dict[str, object] = {}
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        _chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=TurnRecorder(user_message="Analyze this."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1"),
+                run_metadata_collector=collector,
+            )
+        ]
+
+    payload = collector["io.mindroom.ai_run"]
+    assert payload["status"] == "paused"
+    assert payload["run_id"] == "run-paused"
+    assert payload["usage"]["input_tokens"] == 300
+    assert payload["usage"]["output_tokens"] == 40
 
 
 @pytest.mark.asyncio

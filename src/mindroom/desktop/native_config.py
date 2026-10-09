@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
+from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.device_identity import PinnedMatrixDevice
@@ -32,6 +33,13 @@ _TOP_LEVEL_KEYS = frozenset(
 _EXTENDED_KEYS = _TOP_LEVEL_KEYS | {"files", "shell"}
 _MAX_ROOTS = 32
 _MAX_ROOT_LENGTH = 4_096
+# Folder reads confine through POSIX descriptors; shell commands need process groups and the login account.
+_LOCAL_ACCESS_SUPPORTED = os.name == "posix"
+_POSIX_ONLY_ACCESS = (
+    "Read-only folders and shell commands need macOS or Linux; on Windows, MindRoom Desktop supports only "
+    "screenshot observation of the `primary-screen` app. Turn them off with "
+    "`mindroom desktop access --clear-folders --no-shell`."
+)
 
 
 class NativeConfigError(ValueError):
@@ -155,7 +163,7 @@ class NativeDesktopConfig:
             controller=controller,
             allowed_requester_ids=_text_tuple(payload.get("allowed_requester_ids"), "allowed requester"),
             allowed_agent_names=_text_tuple(payload.get("allowed_agent_names"), "allowed agent"),
-            allowed_app_ids=_text_tuple(payload.get("allowed_app_ids"), "allowed application", allow_empty=True),
+            allowed_app_ids=_allowed_app_ids(payload.get("allowed_app_ids")),
             capture=capture,
             browser=browser,
             files=files,
@@ -164,7 +172,7 @@ class NativeDesktopConfig:
 
     def with_allowed_apps(self, raw: object) -> NativeDesktopConfig:
         """Validate an app-only edit without revalidating unrelated browser paths."""
-        return replace(self, allowed_app_ids=_text_tuple(raw, "allowed application", allow_empty=True))
+        return replace(self, allowed_app_ids=_allowed_app_ids(raw))
 
     def with_local_access(self, files_raw: object, shell_raw: object) -> NativeDesktopConfig:
         """Validate a folder and shell edit without revalidating unrelated settings."""
@@ -226,6 +234,12 @@ def native_config_path(storage_root: Path) -> Path:
     return storage_root / "desktop_bridge" / "native_config.json"
 
 
+def require_supported_local_access(config: NativeDesktopConfig) -> None:
+    """Refuse read-only folders or shell access on a computer without the POSIX support they need."""
+    if not _LOCAL_ACCESS_SUPPORTED and (config.files.roots or config.shell.enabled):
+        raise NativeConfigError("invalid_request", _POSIX_ONLY_ACCESS)
+
+
 def load_native_config(path: Path) -> NativeDesktopConfig:
     """Load private native configuration."""
     try:
@@ -250,6 +264,15 @@ def load_native_config(path: Path) -> NativeDesktopConfig:
         ) from exc
     except OSError as exc:
         raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
+    # LEGACY_COMPAT: Saved desktop setups that allow MindRoom's own app or desktop helper.
+    # Legacy format: `allowed_app_ids` naming `chat.mindroom.menubar` or `chat.mindroom.desktophelper`, which the macOS app offered and app edits and `mindroom desktop` commands saved.
+    # Last legacy release: v2026.9.378; replacement: v2026.9.379 refuses both IDs in every edit and run override.
+    # Handling: loading drops both IDs, so the rest of the setup stays usable and editable and the next save writes it without them; edits still refuse them.
+    # Coverage: tests/test_desktop_native_config.py::test_saved_config_that_allows_mindroom_itself_loads_and_saves_without_it.
+    if isinstance(payload, dict) and isinstance(app_ids := payload.get("allowed_app_ids"), list):
+        payload["allowed_app_ids"] = [
+            app_id for app_id in app_ids if not isinstance(app_id, str) or app_id not in MINDROOM_APP_IDS
+        ]
     # Persisted paths may disappear; they must not prevent unrelated settings from being loaded or edited.
     config = NativeDesktopConfig.from_payload(payload, validate_browser_paths=False)
     if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) & 0o077:
@@ -332,6 +355,17 @@ def _text_tuple(raw: object, label: str, *, allow_empty: bool = False) -> tuple[
     return values
 
 
+def _allowed_app_ids(raw: object) -> tuple[str, ...]:
+    app_ids = _text_tuple(raw, "allowed application", allow_empty=True)
+    if reserved := sorted(set(app_ids) & MINDROOM_APP_IDS):
+        raise NativeConfigError(
+            "invalid_request",
+            f"MindRoom cannot allow agents to control MindRoom itself ({', '.join(reserved)}); "
+            "remove it from the allowed applications.",
+        )
+    return app_ids
+
+
 def _integer(raw: object, label: str, *, minimum: int, maximum: int | None = None) -> int:
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < minimum or (maximum is not None and raw > maximum):
         bounds = f"{minimum} through {maximum}" if maximum is not None else f"at least {minimum}"
@@ -386,5 +420,6 @@ __all__ = [
     "NativeShellConfig",
     "load_native_config",
     "native_config_path",
+    "require_supported_local_access",
     "save_native_config",
 ]

@@ -8,6 +8,7 @@ rather than something it is trusted not to do.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from itertools import batched
 from typing import TYPE_CHECKING, Literal
@@ -31,6 +32,7 @@ from . import (
     outbox,
     reads,
     response_attempts,
+    scheduled_approvals,
     turn_records,
 )
 from .approval_card_state import (  # noqa: TC001 - part of this module's runtime return types
@@ -65,6 +67,14 @@ from .projection import (
     is_tombstoned,
     project,
     tombstoned_event_ids,
+)
+from .scheduled_approvals import (  # noqa: TC001
+    ScheduledApprovalArmState,
+    ScheduledCall,
+    ScheduledCallBinding,
+    ScheduledCallClaim,
+    ScheduledCallOutcome,
+    ScheduledCallRefusal,
 )
 
 if TYPE_CHECKING:
@@ -665,16 +675,26 @@ class PrincipalStore:
         recovery: RoomHistoryRecovery,
         *,
         exhausted_server: bool,
+        unreadable: bool,
         attempted_policy_rank: int,
         expected_membership_epoch: int,
     ) -> HistoryRecoveryOutcome:
-        """Publish an installed recovery and settle its exact obligation once."""
+        """Publish an installed recovery and settle its exact obligation once.
+
+        ``exhausted_server`` alone decides the obligation, because a walk that
+        reached the start of the room fetched everything the gap skipped.
+        ``unreadable`` says some of it could not be read, which no marker in
+        the room can vouch for, so a repaired settlement records the room
+        conversation as incomplete and revokes every thread's marker for that
+        thread's own walk to settle again.
+        """
         return await self._backend.write(
             lambda transaction: _settle_history_recovery(
                 transaction,
                 self._principal_id,
                 recovery,
                 exhausted_server=exhausted_server,
+                unreadable=unreadable,
                 attempted_policy_rank=attempted_policy_rank,
                 expected_membership_epoch=expected_membership_epoch,
             ),
@@ -689,8 +709,8 @@ class PrincipalStore:
         revision_sender: str,
         revision_transaction_id: str | None = None,
         content: Mapping[str, object],
-    ) -> bool:
-        """Install a point-refetched revision if its refresh token still holds."""
+    ) -> int | None:
+        """Install a point-refetched revision if its refresh token still holds, returning its stored size."""
         return await self._backend.write(
             lambda transaction: install_refetched_revision(
                 transaction,
@@ -1121,7 +1141,7 @@ class PrincipalStore:
     ) -> bool:
         """Atomically reserve one exact background-call approval card."""
         return await self._backend.write(
-            lambda transaction: background_approvals.reserve_delivery(
+            lambda transaction: background_approvals.reserve_script_delivery(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
@@ -1195,6 +1215,88 @@ class PrincipalStore:
             ),
         )
 
+    async def reserve_scheduled_call_approval(
+        self,
+        *,
+        binding: ScheduledCallBinding,
+        card: ApprovalCardReservation,
+    ) -> bool:
+        """Atomically reserve one scheduling-time card and its exact-call binding."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.reserve(
+                transaction,
+                self._principal_id,
+                binding=binding,
+                card=card,
+            ),
+        )
+
+    async def arm_scheduled_call_approval(
+        self,
+        *,
+        task_id: str,
+        workflow_digest: str,
+        any_arguments_allowed: bool,
+    ) -> ScheduledApprovalArmState:
+        """Arm one approved scheduled call for its unchanged task firing on time."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.arm(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                workflow_digest=workflow_digest,
+                any_arguments_allowed=any_arguments_allowed,
+                now_ns=time.time_ns(),
+            ),
+        )
+
+    async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision:
+        """Withdraw one cancelled task's approval and deny its card if still pending."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.withdraw(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                reason=reason,
+            ),
+        )
+
+    async def scheduled_call(self, *, task_id: str) -> ScheduledCall | None:
+        """Read the call one scheduled task stored."""
+        return await self._backend.read(
+            lambda transaction: scheduled_approvals.stored_call(transaction, self._principal_id, task_id=task_id),
+        )
+
+    async def claim_scheduled_call(
+        self,
+        *,
+        call: ScheduledCall,
+        arguments_json: str,
+        receipt: ApprovalCardReservation,
+    ) -> ScheduledCallClaim | ScheduledCallRefusal:
+        """Spend one armed scheduled approval and reserve its receipt in one commit."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.claim(
+                transaction,
+                self._principal_id,
+                call=call,
+                arguments_json=arguments_json,
+                receipt=receipt,
+                now_ns=time.time_ns(),
+            ),
+        )
+
+    async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None:
+        """Record how one claimed scheduled call ended."""
+        await self._backend.write(
+            lambda transaction: scheduled_approvals.record_outcome(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                outcome=outcome,
+            ),
+        )
+
     async def resolve_continuation_approval_card(
         self,
         *,
@@ -1252,11 +1354,18 @@ class PrincipalStore:
             ),
         )
 
-    async def maintain_approval_grants(self, *, grant_id: str | None = None) -> tuple[str, ...]:
-        """Retire spent payloads and enqueue revocations after their approval edits."""
-        return await self._backend.write(
-            lambda transaction: approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id),
-        )
+    async def maintain_automatic_approvals(self, *, grant_id: str | None = None) -> tuple[str, ...]:
+        """Retire settled automatic receipts, enqueue grant revocations after their approval edits, and prune old scheduled calls."""
+
+        def maintain(transaction: Transaction) -> tuple[str, ...]:
+            if grant_id is None:
+                approvals.retire_automatic_receipts(transaction, self._principal_id)
+            deliveries = approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id)
+            if grant_id is None:
+                scheduled_approvals.prune(transaction, self._principal_id, time.time_ns())
+            return deliveries
+
+        return await self._backend.write(maintain)
 
     async def revoke_approval_grant(
         self,
@@ -1518,21 +1627,14 @@ class PrincipalStore:
             ),
         )
 
-    async def approval_interruption_is_recoverable(
-        self,
-        delivery_id: str,
-        *,
-        visible_text: str,
-        failure_reason: str | None = None,
-    ) -> bool:
-        """Prove an acknowledged interruption still belongs to this response attempt."""
-        return await self._backend.read(
-            lambda transaction: approval_continuations.interruption_is_recoverable(
+    async def release_approval_continuation(self, approval_id: str, *, expected_generation: int) -> bool:
+        """Hand an interrupted continuation's still-pending sources back to ordinary replay."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.release(
                 transaction,
                 self._principal_id,
-                delivery_id,
-                visible_text=visible_text,
-                failure_reason=failure_reason,
+                approval_id=approval_id,
+                expected_generation=expected_generation,
             ),
         )
 
@@ -1751,6 +1853,7 @@ def _settle_history_recovery(
     recovery: RoomHistoryRecovery,
     *,
     exhausted_server: bool,
+    unreadable: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> HistoryRecoveryOutcome:
@@ -1764,12 +1867,18 @@ def _settle_history_recovery(
         return HistoryRecoveryOutcome.SUPERSEDED
     if not journal.claim_room_history_recovery(transaction, principal_id, recovery):
         return HistoryRecoveryOutcome.SUPERSEDED
+    if exhausted_server and unreadable:
+        # Repairing unmasks every marker the gap retracted, and one from before
+        # the gap cannot vouch for an event this walk could not read: it may be
+        # a reply in that very thread. A truncated obligation already withholds
+        # their completeness.
+        reads.revoke_room_hydration(transaction, principal_id, room_id=recovery.room_id)
     reads.publish_conversation_hydration(
         transaction,
         principal_id,
         room_id=recovery.room_id,
         thread_id=None,
-        complete=exhausted_server,
+        complete=exhausted_server and not unreadable,
         attempted_policy_rank=attempted_policy_rank,
         membership_epoch=expected_membership_epoch,
     )

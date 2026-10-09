@@ -7,7 +7,7 @@ import XCTest
 final class SettingsMenuTests: XCTestCase {
     func testDashboardMenuRequiresRunningService() async throws {
         for (output, enabled) in [("Service: running", true), ("Service installed but not running", false)] {
-            let runner = MindRoomCommandRunner(processRunner: { _ in CommandResult(exitCode: 0, output: output) })
+            let runner = MindRoomCommandRunner(processRunner: { _, _ in CommandResult(exitCode: 0, output: output) })
             let refreshed = expectation(description: "Status refreshed")
             let subscription = runner.$serviceStatus.dropFirst().prefix(1).sink { _ in refreshed.fulfill() }
             runner.refreshStatus()
@@ -24,7 +24,7 @@ final class SettingsMenuTests: XCTestCase {
             ("No such file", false), ("Service is not installed", false),
             ("Service: running", true), ("Service installed but not running", true),
         ] {
-            let runner = MindRoomCommandRunner(processRunner: { _ in CommandResult(exitCode: 0, output: output) })
+            let runner = MindRoomCommandRunner(processRunner: { _, _ in CommandResult(exitCode: 0, output: output) })
             let refreshed = expectation(description: "Service status refreshed")
             let subscription = runner.$serviceStatus.dropFirst().prefix(1).sink { _ in refreshed.fulfill() }
             runner.refreshStatus()
@@ -109,7 +109,7 @@ final class SettingsMenuTests: XCTestCase {
     }
 
     private func idleRunner() -> MindRoomCommandRunner {
-        MindRoomCommandRunner(processRunner: { _ in CommandResult(exitCode: 0, output: "") })
+        MindRoomCommandRunner(processRunner: { _, _ in CommandResult(exitCode: 0, output: "") })
     }
 
     private func publish(

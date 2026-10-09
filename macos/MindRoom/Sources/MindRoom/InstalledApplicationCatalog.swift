@@ -28,6 +28,9 @@ struct InstalledDesktopApplication: Identifiable, Hashable {
 
 @MainActor
 enum InstalledApplicationCatalog {
+    /// MindRoom's own app and helper are never offered: their windows grant shell auto-approval and control leases.
+    static let mindRoomIdentifiers: Set<String> = ["chat.mindroom.menubar", "chat.mindroom.desktophelper"]
+
     static func applications() -> [InstalledDesktopApplication] {
         let runningIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         let roots = [
@@ -62,7 +65,8 @@ enum InstalledApplicationCatalog {
     }
 
     static func application(at url: URL, runningIDs: Set<String>? = nil) -> InstalledDesktopApplication? {
-        guard url.pathExtension == "app", let bundle = Bundle(url: url), let identifier = bundle.bundleIdentifier else {
+        guard url.pathExtension == "app", let bundle = Bundle(url: url), let identifier = bundle.bundleIdentifier,
+              !mindRoomIdentifiers.contains(identifier) else {
             return nil
         }
         let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)

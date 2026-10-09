@@ -38,8 +38,20 @@ variable "packages_to_install" {
 locals {
   needed_packages = join(" ", concat(["restorecond policycoreutils policycoreutils-python-utils setools-console audit bind-utils wireguard-tools fuse open-iscsi nfs-client xfsprogs cryptsetup lvm2 git cifs-utils bash-completion mtr tcpdump udica qemu-guest-agent"], var.packages_to_install))
 
+  # The image comes from a mirror, so it is written to disk only after it matches the checksum openSUSE signed.
+  opensuse_signing_key_fingerprint = "AD485664E901B867051AB15F35A2F86E29B700A4"
+
   # Add local variables for inline shell commands
-  download_image = "wget --timeout=5 --waitretry=5 --tries=5 --retry-connrefused --inet4-only "
+  download_image = <<-EOT
+    set -eu
+    IMAGE=$(basename "$IMAGE_URL")
+    wget --timeout=5 --waitretry=5 --tries=5 --retry-connrefused --inet4-only "$IMAGE_URL" "$IMAGE_URL.sha256" "$IMAGE_URL.sha256.asc"
+    wget --timeout=5 --waitretry=5 --tries=5 --retry-connrefused --inet4-only -O opensuse-signing-key.asc https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml.key
+    export GNUPGHOME=$(mktemp -d)
+    gpg --batch --import opensuse-signing-key.asc
+    gpg --batch --status-fd 1 --verify "$IMAGE.sha256.asc" "$IMAGE.sha256" | grep -q "^\[GNUPG:\] VALIDSIG ${local.opensuse_signing_key_fingerprint} "
+    sha256sum -c "$IMAGE.sha256"
+  EOT
 
   write_image = <<-EOT
     set -ex
@@ -111,7 +123,8 @@ build {
 
   # Download the MicroOS x86 image
   provisioner "shell" {
-    inline = ["${local.download_image}${var.opensuse_microos_x86_mirror_link}"]
+    environment_vars = ["IMAGE_URL=${var.opensuse_microos_x86_mirror_link}"]
+    inline           = [local.download_image]
   }
 
   # Write the MicroOS x86 image to disk
@@ -140,7 +153,8 @@ build {
 
   # Download the MicroOS ARM image
   provisioner "shell" {
-    inline = ["${local.download_image}${var.opensuse_microos_arm_mirror_link}"]
+    environment_vars = ["IMAGE_URL=${var.opensuse_microos_arm_mirror_link}"]
+    inline           = [local.download_image]
   }
 
   # Write the MicroOS ARM image to disk

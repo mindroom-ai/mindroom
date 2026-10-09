@@ -25,6 +25,7 @@ BUILTIN_TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _PLUGIN_TOOL_METADATA_BY_MODULE: dict[str, dict[str, ToolMetadata]] = {}
 BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {}
 PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
+MCP_TOOL_FACTORY_MARKER = "__mindroom_mcp_tool_factory__"
 _TOOL_REGISTRY_STATE_LOCK = threading.RLock()
 PLUGIN_REGISTRATION_SCOPE = threading.local()
 
@@ -170,6 +171,13 @@ def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
         active_plugins,
         _PLUGIN_TOOL_METADATA_BY_MODULE,
     )
+    # The MCP registry reconciles its own entries. Keep them here so plugin sync
+    # never leaves lookups in other threads without MCP tools.
+    for tool_name, factory in TOOL_REGISTRY.copy().items():
+        if getattr(factory, MCP_TOOL_FACTORY_MARKER, False) and tool_name not in desired_metadata:
+            desired_registry[tool_name] = factory
+            if (metadata := TOOL_METADATA.get(tool_name)) is not None:
+                desired_metadata[tool_name] = metadata
     reconcile_dynamic_tool_state(
         TOOL_REGISTRY,
         TOOL_METADATA,

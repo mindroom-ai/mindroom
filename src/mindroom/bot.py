@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from contextvars import Context
 from dataclasses import replace
@@ -143,14 +144,16 @@ from .response_runner import (
 )
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .scheduling import (
+    ScheduledTaskRunnerOwner,
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
+    clear_scheduled_task_runner_owner,
     drain_deferred_overdue_tasks,
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
+    set_scheduled_task_runner_owner,
 )
 from .startup_errors import PermanentStartupError
-from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -203,6 +206,9 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 _SYNC_TIMEOUT_MS = 5_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
+# Startup recovery prunes the handled-turn ledger once. A running bot repeats
+# that pass this often so its in-memory records stay near the retention bound.
+_HANDLED_TURN_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
 
 _SYNC_FILTER: dict[str, object] = {
@@ -306,8 +312,6 @@ def create_bot_for_entity(
             runtime_paths=runtime_paths,
             rooms=rooms,
             config_path=config_path,
-            team_mode=team_config.mode,
-            team_model=team_config.model,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
@@ -359,6 +363,7 @@ class AgentBot:
     _delivery_recovery_wake: asyncio.Event
     _delivery_projection_progress: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
+    _next_handled_turn_cleanup_at: float
     _ingestion_session: DurableSync | None
 
     # Shared runtime state and extracted collaborators
@@ -429,7 +434,6 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
-        self._interrupted_turn_rooms = InterruptedTurnRooms()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -441,7 +445,6 @@ class AgentBot:
         # every claim; before login there is no answer, and `None` says so.
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
-        self._entity_removed = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
@@ -449,6 +452,10 @@ class AgentBot:
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_projection_progress = asyncio.Event()
         self._delivery_recovery_task = None
+        # Jitter the first pass so bots started together do not all prune at once.
+        self._next_handled_turn_cleanup_at = time.monotonic() + _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS * (
+            1.0 + random.random()  # noqa: S311
+        )
         self._ingestion_session = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_join_lock = asyncio.Lock()
@@ -684,6 +691,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
                 redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
+                relations=self._journal_store.principal(self._journal_principal_id),
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
@@ -757,7 +765,7 @@ class AgentBot:
                 approval_store=self._journal_store.principal(self._journal_principal_id),
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
-                register_approval_interruption=self._register_approval_interruption,
+                redacted_history_events=self._turn_store.redacted_history_events,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -771,7 +779,6 @@ class AgentBot:
                 generate_response=lambda request: self._run_regenerated_response(request),
                 wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
                 receipt_order=self._journal_dispatcher.receipt_order,
-                interrupted_turn_rooms=self._interrupted_turn_rooms,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
                     timezone=self.config.timezone,
@@ -863,7 +870,6 @@ class AgentBot:
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
-                interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
@@ -1050,33 +1056,6 @@ class AgentBot:
     def admission_gate(self, value: ResponseAdmissionGate) -> None:
         """Bind the orchestrator-owned response-admission gate."""
         self._runtime_view.response_admission_gate = value
-
-    @property
-    def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
-        """Return rooms with interrupted turns awaiting replacement recovery."""
-        return self._interrupted_turn_rooms.pending_room_ids
-
-    def _register_approval_interruption(self, source_event_id: str, room_id: str) -> None:
-        """Wake fleet recovery after the settled approval's owner releases its claims."""
-        if self._entity_removed or not self._interrupted_turn_rooms.register(source_event_id, room_id=room_id):
-            return
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return
-
-        def notify(_done: asyncio.Task | None = None) -> None:
-            if not self._entity_removed:
-                orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id)
-
-        try:
-            task = asyncio.current_task()
-        except RuntimeError:
-            # Synchronous registration stays available to later fleet capture.
-            return
-        if task is None:
-            notify()
-        else:
-            task.add_done_callback(notify)
 
     @property
     def approval_room_ids(self) -> frozenset[str]:
@@ -1396,6 +1375,12 @@ class AgentBot:
         """Expose fail-closed router membership invalidation to the sync supervisor."""
         self._invalidate_agent_reply_memberships(reason=reason)
 
+    @property
+    def active_call_requesters(self) -> tuple[str, ...]:
+        """Return the requester of each voice call this bot has joined or is joining."""
+        call_manager = self._call_manager
+        return () if call_manager is None else call_manager.active_call_requesters
+
     async def reconcile_reply_authorized_calls(self) -> None:
         """Recheck this bot's active calls against the shared reply policy."""
         call_manager = self._call_manager
@@ -1604,6 +1589,7 @@ class AgentBot:
         """Run side effects that do not own raw sync checkpoint safety."""
         await self._refresh_agent_reply_memberships_if_needed()
         self._schedule_delivery_recovery()
+        self._schedule_handled_turn_cleanup()
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
         self._personal_room_lifecycle.schedule_reconciliation()
@@ -1684,7 +1670,7 @@ class AgentBot:
             if joined:
                 self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
-            self._room_lifecycle.forget_invited_room(room_id)
+            await self._room_lifecycle.forget_invited_room(room_id)
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -1901,6 +1887,8 @@ class AgentBot:
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+            if self.agent_name == ROUTER_AGENT_NAME:
+                set_scheduled_task_runner_owner(ScheduledTaskRunnerOwner(client, self._conversation_reader))
         except BaseException:
             await self._close_owned_matrix_after_start_failure()
             raise
@@ -1949,8 +1937,26 @@ class AgentBot:
         """Drain fleet-dependent turn replay after the responder startup pass."""
         self.release_pending_turn_journal_replay()
         await self._journal_dispatcher.drain_once()
+        await self._cleanup_handled_turns()
+
+    async def _cleanup_handled_turns(self) -> None:
+        """Apply handled-turn retention to every source dispatch no longer owns."""
         await self._turn_store.cleanup(
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
+        )
+
+    def _schedule_handled_turn_cleanup(self) -> None:
+        """Start one retention pass per interval so records do not wait for a restart."""
+        now = time.monotonic()
+        if self._sync_shutting_down or now < self._next_handled_turn_cleanup_at:
+            return
+        self._next_handled_turn_cleanup_at = now + _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS
+        create_background_task(
+            self._cleanup_handled_turns(),
+            name=f"handled_turn_cleanup_{self.agent_name}",
+            owner=self._runtime_view,
+            # The pass covers every room's records, so it must not inherit the sync frame's context.
+            context=Context(),
         )
 
     def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
@@ -2174,7 +2180,12 @@ class AgentBot:
             # returns, so raising keeps this bot registered and stops the reload
             # before it creates a replacement on a store that never closed.
             # Swallowing is what would certify a partial stop as a clean one.
-            raise failures[0]
+            # A restart still replaces a bot whose only failure is a reply that
+            # outlived the drain, so a failed release must win over that timeout.
+            raise next(
+                (failure for failure in failures if not isinstance(failure, ResponseShutdownTimeoutError)),
+                failures[0],
+            )
         self._deferred_stop_required = False
         self.logger.info("Stopped agent bot")
 
@@ -2222,6 +2233,7 @@ class AgentBot:
         try:
             if self.agent_name == ROUTER_AGENT_NAME:
                 self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
+                clear_scheduled_task_runner_owner()
                 cleared_queued_tasks = clear_deferred_overdue_tasks()
                 if cleared_queued_tasks > 0:
                     self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
@@ -2236,7 +2248,11 @@ class AgentBot:
             # generation -- leaving it registered, half-stopped, while its
             # replacement opened the same database under the same principal.
             self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_DISPATCHER)
-            await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
+            await self._release(
+                "journal dispatcher",
+                self._journal_dispatcher.stop(shutdown_intent=shutdown_intent),
+                failures,
+            )
             if shutdown_intent.stop_reason == "restart":
                 await self._response_runner.wait_for_source_owned_inbox_responses()
             if self._ingestion_session is not None:
@@ -2351,8 +2367,6 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
-        if shutdown_intent.stop_reason == "entity_removed":
-            self._entity_removed = True
         if not self._sync_shutting_down:
             self.logger.info(
                 "matrix_agent_response_runtime_shutdown",
@@ -2518,7 +2532,7 @@ class AgentBot:
             or event.membership != "invite"
         ):
             return
-        self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+        await self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(room, event.sender),
             owner=self._runtime_view,
@@ -2630,7 +2644,7 @@ class AgentBot:
             if early_reservation_owner is not None:
                 await early_reservation_owner.release()
 
-    async def _on_redaction(self, _room: nio.MatrixRoom, event: nio.Event) -> None:
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Tombstone the redacted source so no replay reruns the turn it started.
 
         The projection learns about the redaction through journal admission, so
@@ -2638,7 +2652,7 @@ class AgentBot:
         unaccepted and the source available for sync to redeliver.
         """
         assert isinstance(event, nio.RedactionEvent)
-        await self._turn_store.mark_source_redacted(event.redacts)
+        await self._turn_store.mark_source_redacted(event.redacts, room_id=room.room_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -2767,6 +2781,7 @@ class AgentBot:
             auto_approve_seconds=payload.auto_approve_seconds,
             action=payload.action,
             grant_id=payload.grant_id,
+            scheduled_scope=payload.scheduled_scope,
             membership_index=self._runtime_view.agent_reply_memberships,
         )
 
@@ -2851,42 +2866,6 @@ class AgentBot:
 class TeamBot(AgentBot):
     """A bot that represents a team of agents working together."""
 
-    # Team configuration
-    team_mode: str
-    team_model: str | None
-
-    def __init__(
-        self,
-        agent_user: AgentMatrixUser,
-        storage_path: Path,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        rooms: list[str] | None = None,
-        config_path: Path | None = None,
-        *,
-        team_mode: str = "coordinate",
-        team_model: str | None = None,
-        enable_streaming: bool = True,
-        journal_store: EventJournalStore | None = None,
-        agent_reply_memberships: AgentReplyMembershipIndex,
-        room_activity_observer: Callable[[str], None] | None = None,
-    ) -> None:
-        """Initialize the team bot and its shared agent runtime."""
-        super().__init__(
-            agent_user=agent_user,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=runtime_paths,
-            rooms=rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            room_activity_observer=room_activity_observer,
-        )
-        self.team_mode = team_mode
-        self.team_model = team_model
-
     @cached_property
     def agent(self) -> Agent | None:
         """Teams don't have individual agents, return None."""
@@ -2917,7 +2896,8 @@ class TeamBot(AgentBot):
             )
         )
 
-        configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
+        team_config = self.config.teams[self.agent_name]
+        configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
         availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
             self.agent_name,

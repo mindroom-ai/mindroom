@@ -190,6 +190,11 @@ def _special_tool_names(
     if allow_self_config:
         tool_names.append("self_config")
 
+    if agent_config.skill_learning.enabled:
+        # Like Hermes, an agent that learns skills can also save them in chat, and its skill review can only call
+        # tools the agent's own request offered.
+        tool_names.append("skill_manage")
+
     if enable_dynamic_tools_manager and has_deferred_tools(config, agent_name):
         tool_names.append("dynamic_tools")
 

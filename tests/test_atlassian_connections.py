@@ -35,6 +35,7 @@ from tests.atlassian_test_support import (
     site,
     worker_target,
 )
+from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -206,8 +207,8 @@ async def test_connections_share_one_app_but_use_their_own_callbacks(tmp_path: P
 
     with isolated_plugin_runtime(config, paths):
         providers = load_oauth_providers(config, paths)
-        default_url = await providers["atlassian"].authorization_uri_async(paths, state="a")
-        partner_url = await providers["partner_atlassian"].authorization_uri_async(paths, state="b")
+        default_url = await oauth_authorization_url(providers["atlassian"], paths, state="a")
+        partner_url = await oauth_authorization_url(providers["partner_atlassian"], paths, state="b")
 
     default_query = parse_qs(urlparse(default_url).query)
     partner_query = parse_qs(urlparse(partner_url).query)

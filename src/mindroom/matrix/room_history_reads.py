@@ -41,14 +41,8 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import (
     VisibleRoomMessage,
     extract_and_resolve_message,
-    resolve_event_source_content,
 )
-from mindroom.matrix.thread_membership import (
-    ThreadResolutionState,
-    ThreadRoomScanRootNotFoundError,
-    map_backed_thread_membership_access,
-    resolve_event_thread_membership,
-)
+from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
@@ -67,14 +61,26 @@ _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 _MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
+# Reading a thread from source walks room history back to its root, and anyone
+# who can post in the room decides how old that root is. Every message event in
+# the room counts, including each streaming edit of every other reply, so the
+# bound leaves room for a busy room's ordinary long-running threads.
+_MAX_THREAD_ROOM_SCAN_PAGES = 1000
+# The walk keeps every non-edit message and one edit per original and sender until it ends,
+# so the kept count gets its own bound to cap the walk's memory.
+_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES = 10_000
 
 
-class OpaqueEncryptedThreadHistoryError(RuntimeError):
-    """Raised when a thread reconstruction depends on still-undecryptable encrypted events."""
+class _ThreadRoomScanBoundError(RuntimeError):
+    """Raised when a thread room scan reaches its page or kept-event bound before seeing every requested root.
+
+    Unlike ``ThreadRoomScanRootNotFoundError`` this proves nothing about the
+    root, so callers treat it as an unavailable read and fail closed.
+    """
 
 
-class UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
-    """Raised when opaque room history cannot be assigned to a specific thread."""
+class _UnresolvedOpaqueRoomHistoryError(RuntimeError):
+    """Raised when undecryptable events from a delivery's sender could hide the exact delivery a scan must prove."""
 
 
 def _finish_exact_delivery_scan_at_bound(
@@ -167,8 +173,8 @@ def _record_scanned_room_message_source(
     """Record one scanned room-message source and return the recorded event ID."""
     event_source = event.source if isinstance(event.source, dict) else {}
     if _is_opaque_thread_affecting_event_source(event_source):
-        # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
-        # thread membership through its exposed relation and poisons only that reconstruction.
+        # Undecryptable ciphertext still exposes its relation, so it is placed in a thread exactly
+        # like the readable message it would decrypt to.
         scanned_message_sources[event.event_id] = _event_source_for_cache(event)
         return event.event_id
     if not is_room_message_event(event):
@@ -205,16 +211,6 @@ async def fetch_thread_event_sources_via_room_messages(
             scanned_event_count=scan_result.scanned_event_count,
         )
         raise ThreadRoomScanRootNotFoundError(msg)
-    if scan_result.unresolved_opaque_event_ids:
-        logger.warning(
-            "Thread room scan contains opaque encrypted relations with unresolved impact",
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=client.user_id,
-            unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
-        )
-        msg = f"thread history scan for {thread_id} contains undecryptable events with unresolved thread impact"
-        raise UnresolvedOpaqueRoomHistoryError(msg)
     return _ThreadEventSourceScanResult(
         event_sources=scan_result.thread_event_sources[thread_id],
         page_count=scan_result.page_count,
@@ -311,7 +307,7 @@ def _refuse_opaque_exact_delivery_candidate(
         return
     if is_opaque_encrypted_event_source(event_source):
         msg = f"exact delivery room scan for {room_id} contains undecryptable events from its sender"
-        raise UnresolvedOpaqueRoomHistoryError(msg)
+        raise _UnresolvedOpaqueRoomHistoryError(msg)
 
 
 async def find_outbox_delivery_event_id_via_room_messages(
@@ -460,36 +456,9 @@ class _BulkThreadScanResult:
 
     thread_event_sources: dict[str, list[dict[str, Any]]]
     missing_root_ids: frozenset[str]
-    unresolved_opaque_event_ids: frozenset[str]
     page_count: int
     scanned_event_count: int
     homeserver_scan_parse_cpu_ms: float = 0.0
-
-
-async def _unresolved_opaque_relation_event_ids(
-    room_id: str,
-    *,
-    event_infos: dict[str, EventInfo],
-    scanned_message_sources: dict[str, dict[str, Any]],
-    resolved_thread_ids: dict[str, str],
-) -> frozenset[str]:
-    """Return scanned opaque relation-bearing events whose thread impact stays unknown."""
-    access = map_backed_thread_membership_access(
-        event_infos=event_infos,
-        resolved_thread_ids=resolved_thread_ids,
-    )
-    unresolved_event_ids: set[str] = set()
-    for event_id, event_source in scanned_message_sources.items():
-        if event_id in resolved_thread_ids or not is_opaque_encrypted_event_source(event_source):
-            continue
-        resolution = await resolve_event_thread_membership(
-            room_id,
-            event_infos[event_id],
-            access=access,
-        )
-        if resolution.state is ThreadResolutionState.INDETERMINATE:
-            unresolved_event_ids.add(event_id)
-    return frozenset(unresolved_event_ids)
 
 
 def _scanned_event_sender(event_source: dict[str, Any] | None) -> str | None:
@@ -506,15 +475,15 @@ async def _group_scanned_sources_by_thread(
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
     edit_candidates: ThreadEditCandidates,
-) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
-    """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
+) -> dict[str, list[dict[str, Any]]]:
+    """Bucket room-scan sources per requested thread."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
         root_id: {root_id: scanned_message_sources[root_id]}
         for root_id in thread_root_ids
         if root_id in scanned_message_sources
     }
     if not grouped:
-        return {}, frozenset()
+        return {}
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
@@ -532,13 +501,6 @@ async def _group_scanned_sources_by_thread(
         if bucket is None or event_id in bucket:
             continue
         bucket[event_id] = scanned_message_sources[event_id]
-
-    unresolved_opaque_event_ids = await _unresolved_opaque_relation_event_ids(
-        room_id,
-        event_infos=event_infos,
-        scanned_message_sources=scanned_message_sources,
-        resolved_thread_ids=resolved_thread_ids,
-    )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id in edit_candidates.original_event_ids():
@@ -558,14 +520,13 @@ async def _group_scanned_sources_by_thread(
         for root_id in target_roots:
             edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
 
-    grouped_sources = {
+    return {
         root_id: sort_thread_event_sources_root_first(
             [*bucket.values(), *edits_by_root.get(root_id, [])],
             thread_id=root_id,
         )
         for root_id, bucket in grouped.items()
     }
-    return grouped_sources, unresolved_opaque_event_ids
 
 
 async def bulk_scan_thread_event_sources(
@@ -584,6 +545,22 @@ async def bulk_scan_thread_event_sources(
     homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
+        if (
+            page_count >= _MAX_THREAD_ROOM_SCAN_PAGES
+            or len(scanned_message_sources) + len(edit_candidates) >= _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES
+        ):
+            msg = (
+                f"thread room scan in {room_id} reached its bound of {_MAX_THREAD_ROOM_SCAN_PAGES} pages "
+                f"or {_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES} kept events with history left, "
+                "so the requested roots are unproven"
+            )
+            logger.warning(
+                "Thread room scan reached its bound before finding every root",
+                room_id=room_id,
+                user_id=client.user_id,
+                missing_root_ids=sorted(remaining_root_ids),
+            )
+            raise _ThreadRoomScanBoundError(msg)
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -620,7 +597,7 @@ async def bulk_scan_thread_event_sources(
             break
         from_token = response.end
 
-    thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(
+    thread_event_sources = await _group_scanned_sources_by_thread(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
         scanned_message_sources=scanned_message_sources,
@@ -629,7 +606,6 @@ async def bulk_scan_thread_event_sources(
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,
         missing_root_ids=frozenset(remaining_root_ids),
-        unresolved_opaque_event_ids=unresolved_opaque_event_ids,
         page_count=page_count,
         scanned_event_count=scanned_event_count,
         homeserver_scan_parse_cpu_ms=homeserver_scan_parse_cpu_ms,
@@ -838,10 +814,12 @@ async def fetch_thread_messages_from_source(
     yet -- and "has it reached anyone else" is the only question worth paying a
     homeserver round trip for.
 
-    No local store is consulted or written, deliberately. Sidecar bodies are
-    fetched from their media URL rather than from a text cache: the caller is
-    already paying for a room scan, and a cache read here would reintroduce the
-    staleness the scan exists to avoid.
+    No local store is consulted or written, deliberately.
+
+    Long-text sidecars are left as their previews. Both callers read only
+    senders, relations, and MindRoom metadata, which a preview carries itself,
+    and resolving every message would let anyone who can post make each read
+    download and hold one file per message in the thread.
     """
     scan_result = await fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
     parsed_events = [
@@ -870,11 +848,10 @@ async def fetch_thread_messages_from_source(
             continue
         messages_by_event_id[event.event_id] = await _resolve_message_from_source(
             event,
-            client,
             trusted_sender_ids=trusted_sender_ids,
         )
     await apply_latest_edits_to_messages(
-        client,
+        None,
         messages_by_event_id=messages_by_event_id,
         edit_candidates=edit_candidates,
         synthesize_unseen_originals=False,
@@ -887,29 +864,25 @@ async def fetch_thread_messages_from_source(
 
 async def _resolve_message_from_source(
     event: nio.Event,
-    client: nio.AsyncClient,
     *,
     trusted_sender_ids: Collection[str],
 ) -> ResolvedVisibleMessage:
-    """Resolve one scanned event into the normalized thread-history shape."""
+    """Normalize one scanned event into the thread-history shape, leaving sidecars unresolved."""
     if is_visible_room_message(event):
-        message_data = await extract_and_resolve_message(event, client, trusted_sender_ids=trusted_sender_ids)
+        message_data = await extract_and_resolve_message(event, None, trusted_sender_ids=trusted_sender_ids)
         return ResolvedVisibleMessage.from_message_data(
             message_data,
             thread_id=EventInfo.from_event(event.source).thread_id,
             latest_event_id=event.event_id,
         )
 
-    resolved_event_source = await resolve_event_source_content(
-        event.source if isinstance(event.source, dict) else {},
-        client,
-    )
-    content = resolved_event_source.get("content", {})
-    event_info = EventInfo.from_event(resolved_event_source)
+    event_source = event.source if isinstance(event.source, dict) else {}
+    content = event_source.get("content", {})
+    event_info = EventInfo.from_event(event_source)
     message = ResolvedVisibleMessage.synthetic(
         sender=event.sender,
         body=visible_body_from_event_source(
-            resolved_event_source,
+            event_source,
             room_message_fallback_body(event),
             trusted_sender_ids=trusted_sender_ids,
         ),

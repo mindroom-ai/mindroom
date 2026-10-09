@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from contextlib import suppress
 from dataclasses import dataclass
@@ -14,14 +15,14 @@ from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints
 import httpx
 import pytest
 from agno.run.base import RunContext
-from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ProcessError, ResultMessage, TextBlock
 
 import mindroom.tools  # noqa: F401
 from mindroom.custom_tools import claude_agent as claude_agent_module
 from mindroom.tool_system.metadata import TOOL_METADATA
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterator
+    from collections.abc import AsyncGenerator, Callable, Iterator
 
 
 @dataclass
@@ -147,6 +148,86 @@ class _BlockingPromptFakeClaudeSDKClient(_FakeClaudeSDKClient):
                 type(self).blocked_query_started.set()
             if type(self).release_blocked_query is not None:
                 await type(self).release_blocked_query.wait()
+
+
+@dataclass
+class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client that, like the SDK, starts a reader task on connect and stops it on disconnect."""
+
+    instances: ClassVar[list[_ReaderTaskFakeClaudeSDKClient]] = []
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.reader: asyncio.Task[None] | None = None
+        self.connect_task: asyncio.Task[Any] | None = None
+        self.disconnect_task: asyncio.Task[Any] | None = None
+        _ReaderTaskFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        await super().connect()
+        self.connect_task = asyncio.current_task()
+        self.reader = asyncio.create_task(asyncio.Event().wait())
+
+    async def disconnect(self) -> None:
+        self.disconnect_task = asyncio.current_task()
+        assert self.reader is not None
+        self.reader.cancel()
+        await super().disconnect()
+
+
+@dataclass
+class _SlowCleanupFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose connect blocks and, like the SDK, disconnects slowly when that connect is interrupted."""
+
+    instances: ClassVar[list[_SlowCleanupFakeClaudeSDKClient]] = []
+    connect_started: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.disconnect_started = asyncio.Event()
+        self.disconnected = False
+        _SlowCleanupFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        assert type(self).connect_started is not None
+        type(self).connect_started.set()
+        try:
+            await asyncio.Event().wait()
+        except BaseException:
+            await self.disconnect()
+            raise
+
+    async def disconnect(self) -> None:
+        self.disconnect_started.set()
+        await asyncio.sleep(0.05)
+        self.disconnected = True
+
+
+@dataclass
+class _CancelledStartFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose first start is cancelled as its connect succeeds, and whose cleanup then fails or sticks."""
+
+    instances: ClassVar[list[_CancelledStartFakeClaudeSDKClient]] = []
+    on_connected: ClassVar[list[Callable[[], object]]] = []
+    stuck_cleanup: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _CancelledStartFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        await super().connect()
+        if self is type(self).instances[0]:
+            for callback in type(self).on_connected:
+                callback()
+
+    async def disconnect(self) -> None:
+        if self is type(self).instances[0]:
+            if type(self).stuck_cleanup is None:
+                msg = "disconnect failed"
+                raise RuntimeError(msg)
+            await type(self).stuck_cleanup.wait()
+        await super().disconnect()
 
 
 @dataclass
@@ -628,6 +709,117 @@ async def test_session_status_interrupt_and_end(fake_manager: claude_agent_modul
     assert "Closed Claude session" in end
 
 
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_claude_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session outlives its turn, whose contextvars hold the turn's Agent and tools."""
+    _ReaderTaskFakeClaudeSDKClient.instances = []
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ReaderTaskFakeClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    token = _TURN_OWNER.set(object())
+    try:
+        await tools.claude_start_session(run_context=run_context, agent=agent)
+    finally:
+        _TURN_OWNER.reset(token)
+
+    client = _ReaderTaskFakeClaudeSDKClient.instances[0]
+    assert client.reader is not None
+    assert _TURN_OWNER not in client.reader.get_context()
+
+    # A later turn ends the session; the task that connected the client still disconnects it.
+    await asyncio.create_task(tools.claude_end_session(run_context=run_context, agent=agent))
+    assert client.disconnect_task is client.connect_task
+    assert client.reader.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_session_start_waits_for_the_sdk_cleanup(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled start-up returns only after the SDK disconnects, even when cancelled again meanwhile."""
+    _SlowCleanupFakeClaudeSDKClient.instances = []
+    _SlowCleanupFakeClaudeSDKClient.connect_started = asyncio.Event()
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _SlowCleanupFakeClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    start = asyncio.create_task(
+        tools.claude_start_session(run_context=RunContext(run_id="run-1", session_id="session-1"), agent=None),
+    )
+    await _SlowCleanupFakeClaudeSDKClient.connect_started.wait()
+    client = _SlowCleanupFakeClaudeSDKClient.instances[0]
+
+    start.cancel()
+    await client.disconnect_started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    assert client.disconnected is True
+
+
+@pytest.fixture
+def cancelled_start_client(monkeypatch: pytest.MonkeyPatch) -> type[_CancelledStartFakeClaudeSDKClient]:
+    """Install the cancelled-start fake with fresh class state."""
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "instances", [])
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "on_connected", [])
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "stuck_cleanup", None)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _CancelledStartFakeClaudeSDKClient)
+    return _CancelledStartFakeClaudeSDKClient
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_stays_cancelled_when_its_cleanup_fails(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    cancelled_start_client: type[_CancelledStartFakeClaudeSDKClient],
+) -> None:
+    """A disconnect that raises while draining a cancelled start must not replace the cancellation."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    start = asyncio.create_task(
+        tools.claude_start_session(run_context=RunContext(run_id="run-1", session_id="session-1"), agent=None),
+    )
+    cancelled_start_client.on_connected.append(start.cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+
+@pytest.mark.asyncio
+async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    cancelled_start_client: type[_CancelledStartFakeClaudeSDKClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disconnect that never finishes holds a cancelled start, and the manager lock, only until the deadline."""
+    monkeypatch.setattr(claude_agent_module, "_START_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    stuck_cleanup = asyncio.Event()
+    cancelled_start_client.stuck_cleanup = stuck_cleanup
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    start = asyncio.create_task(tools.claude_start_session(session_label="first", run_context=run_context, agent=None))
+    cancelled_start_client.on_connected.append(start.cancel)
+
+    try:
+        done, _pending = await asyncio.wait({start}, timeout=1)
+        assert start in done
+        assert start.cancelled()
+        second = await asyncio.wait_for(
+            tools.claude_start_session(session_label="second", run_context=run_context, agent=None),
+            timeout=1,
+        )
+        assert second.startswith("Started")
+    finally:
+        stuck_cleanup.set()
+        await asyncio.gather(start, return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_expired_session_is_cleaned_and_recreated(
     fake_manager: claude_agent_module._ClaudeSessionManager,
@@ -787,6 +979,31 @@ async def test_claude_send_error_does_not_deadlock(
     assert "Session context:" in result
     assert "- continue_conversation: False" in result
     assert "- resume: (none)" in result
+    assert not fake_manager._sessions
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_exit_while_reading_response_closes_session(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI that exits mid-turn raises a typed SDK error from the response stream, which closes the session."""
+
+    class _ExitingClaudeSDKClient(_FakeClaudeSDKClient):
+        async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
+            yield AssistantMessage(content=[TextBlock(text="partial")], model="claude-sonnet")
+            message = "Command failed"
+            raise ProcessError(message, exit_code=-9)
+
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ExitingClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    result = await asyncio.wait_for(tools.claude_send("hello", run_context=run_context, agent=agent), timeout=1)
+
+    assert "Claude session error: Command failed (exit code: -9)" in result
+    assert "Session context:" in result
     assert not fake_manager._sessions
 
 

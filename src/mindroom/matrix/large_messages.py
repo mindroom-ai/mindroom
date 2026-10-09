@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
@@ -44,11 +45,12 @@ logger = get_logger(__name__)
 
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
-_EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+EDIT_MESSAGE_SIZE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
 _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation and preview metadata.
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
+        ACTING_REQUESTER_KEY,
         HOOK_SOURCE_KEY,
         SKIP_MENTIONS_KEY,
         SOURCE_KIND_KEY,
@@ -311,7 +313,7 @@ def should_send_oversized_nonterminal_streaming_edit(
         return True
 
     event_size = calculate_event_size(edit_content)
-    if event_size <= _EDIT_MESSAGE_LIMIT:
+    if event_size <= EDIT_MESSAGE_SIZE_LIMIT:
         return True
 
     key = (room_id, original_event_id)
@@ -609,7 +611,7 @@ async def _upload_text_as_mxc(
 
     try:
         prepared = prepare_media_upload(text_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
-        file_info = prepared.encrypted_file_content() or prepared.info
+        file_info = prepared.encrypted_file_content(url="") or prepared.info()
     except Exception:
         logger.exception("Failed to encrypt attachment")
         return None, None
@@ -866,7 +868,7 @@ async def prepare_large_message(
     """
     content = without_inline_final_result(content)
     is_edit = is_edit_message(content)
-    size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
+    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
     encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery

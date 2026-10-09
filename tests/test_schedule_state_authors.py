@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -33,6 +34,7 @@ TASK_ID = "task1"
 HUMAN_ID = "@mallory:server"
 RETIRED_AGENT_ID = "@mindroom_retired:server"
 TASK_STATE_PATH = "/_matrix/client/v3/rooms/%21test%3Aserver/state/com.mindroom.scheduled.task/task1?format=event"
+CREATE_STATE_PATH = "/_matrix/client/v3/rooms/%21test%3Aserver/state/m.room.create"
 
 
 @pytest.fixture(autouse=True)
@@ -202,22 +204,32 @@ async def test_task_written_by_removed_agent_stays_listable_and_cancellable(tmp_
 
 @pytest.mark.asyncio
 async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_path: Path) -> None:
-    """Each poll costs one full-event task read, as before the author check, not a room-state fetch."""
+    """Each poll reads one task state event and checks the homeserver on the create event.
+
+    No poll fetches the task event again by its ID or reads full room state.
+    """
     runtime_paths = schedule_runtime_paths(tmp_path)
     client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
 
-    for _ in range(3):
-        task = await scheduling._reconcile_runnable_task_retrying(
-            client,
-            ROOM_ID,
-            TASK_ID,
-            config=Config(),
-            runtime_paths=runtime_paths,
-        )
-        assert task is not None
+    # A failed read retries forever, so make it fail fast instead of hanging until the timeout.
+    with patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock(side_effect=AssertionError("task read failed"))):
+        for _ in range(3):
+            task = await scheduling._reconcile_runnable_task_retrying(
+                client,
+                ROOM_ID,
+                TASK_ID,
+                config=Config(),
+                runtime_paths=runtime_paths,
+            )
+            assert task is not None
 
     client.room_get_state.assert_not_awaited()
-    assert [call.args[2] for call in client._send.await_args_list] == [TASK_STATE_PATH] * 3
+    assert [call.args[2] for call in client._send.await_args_list] == [
+        TASK_STATE_PATH,
+        f"{CREATE_STATE_PATH}?format=event",
+        CREATE_STATE_PATH,
+    ] * 3
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -240,3 +252,56 @@ async def test_non_event_task_state_response_is_a_read_error(
 
     with pytest.raises(RuntimeError, match=rf"was not returned as a full state event \({detail}\)"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_superseded_bot_task_named_by_state_content_never_fires(tmp_path: Path) -> None:
+    """On a homeserver that ignores format=event, state content naming an older bot-written version is refused.
+
+    The writer copies a superseded, genuinely bot-authored version's sender, event ID, and content into current state.
+    """
+    runtime_paths = schedule_runtime_paths(tmp_path)
+    workflow = _workflow(created_by="@victim:server")
+    superseded = scheduled_task_state_event(TASK_ID, _pending_content(workflow), room_id=ROOM_ID)
+    superseded["event_id"] = "$superseded"
+    current_content = {"sender": superseded["sender"], "event_id": "$superseded", "content": superseded["content"]}
+    create_content = {"room_version": "11"}
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
+    client.homeserver = "https://matrix.example"
+
+    async def ignore_format_event(_response_class: type, _method: str, path: str, **_kwargs: object) -> object:
+        if path.startswith(CREATE_STATE_PATH):
+            return nio.RoomGetStateEventResponse(dict(create_content), "m.room.create", "", ROOM_ID)
+        return nio.RoomGetStateEventResponse(dict(current_content), "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
+
+    client._send.side_effect = ignore_format_event
+    client.room_get_state_event.side_effect = None
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        {"membership": "join"},
+        "m.room.member",
+        "@victim:server",
+        ROOM_ID,
+    )
+
+    with pytest.raises(RuntimeError, match="ignores format=event"):
+        await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
+    # The runner keeps retrying the refused read; stop it at its first retry wait.
+    with (
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
+        ) as execute,
+        patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await scheduling._run_once_task(
+            client,
+            TASK_ID,
+            workflow,
+            Config(),
+            runtime_paths,
+            make_conversation_reader_mock(),
+        )
+
+    execute.assert_not_awaited()
+    client.room_put_state.assert_not_awaited()

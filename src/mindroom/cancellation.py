@@ -76,7 +76,11 @@ def request_task_cancel(
 
 
 def current_task_is_process_shutdown() -> bool:
-    """Return whether orderly process shutdown cancelled the current task."""
+    """Return whether a shutdown that hands this task's work to a successor runtime cancelled it.
+
+    That is an orderly process shutdown or an entity replacement; either way
+    the task leaves its turn pending for the successor to replay.
+    """
     return task_is_process_shutdown(asyncio.current_task())
 
 

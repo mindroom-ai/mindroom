@@ -55,7 +55,7 @@ struct DesktopControlView: View {
             Button("Sign In and Replace Session", role: .destructive) { store.login(replace: true, usePassword: replaceUsingPassword) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This replaces the saved login with a new device on \(store.homeserver). You will need to connect the new device again.")
+            Text(store.replaceSessionMessage)
         }
     }
 
@@ -217,6 +217,9 @@ struct DesktopControlView: View {
                 LabeledContent("Requester", value: store.requesterIDs)
                 LabeledContent("Controller", value: "\(store.controllerUserID) · \(store.controllerDeviceID)")
                 Text("Fingerprint: \(store.controllerFingerprint)").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                Toggle(store.identityConfirmationLabel, isOn: Binding(
+                    get: { store.identityConfirmed }, set: { store.identityConfirmed = $0 }
+                ))
                 if store.savedSessionMatchesSetup {
                     Label("Signed in as \(store.status.pairing.userID ?? "")", systemImage: "checkmark.circle")
                         .foregroundStyle(.secondary)
@@ -224,9 +227,6 @@ struct DesktopControlView: View {
                 } else {
                     signInFields
                 }
-                Toggle("These identities and the fingerprint match my agent chat", isOn: Binding(
-                    get: { store.identityConfirmed }, set: { store.identityConfirmed = $0 }
-                ))
                 HStack {
                     Button("Save and Connect") { store.saveAndConnect() }
                         .buttonStyle(.borderedProminent)
@@ -275,19 +275,20 @@ struct DesktopControlView: View {
             Text("Sign in to \(store.homeserver) as \(store.matrixUserID). Browser sign-in opens your organization’s login page.")
                 .font(.callout)
             if store.status.pairing.sessionState == .missing {
-                Button("Sign In with Browser") { store.login() }
+                Button("Sign In with Browser") { store.login() }.disabled(!store.identityConfirmed)
             } else {
                 if !store.savedSessionMatchesSetup {
                     Text("The saved login cannot be used for this setup. Sign in with the account shown above.").foregroundStyle(.orange)
                 }
                 Button("Replace Saved Login…") { replaceUsingPassword = false; isReplaceSessionConfirmationPresented = true }
+                    .disabled(!store.identityConfirmed)
             }
             DisclosureGroup("Use a password instead") {
                 SecureField("Password", text: $store.matrixPassword)
                 Button("Sign In with Password") {
                     if store.status.pairing.sessionState == .missing { store.login(usePassword: true) }
                     else { replaceUsingPassword = true; isReplaceSessionConfirmationPresented = true }
-                }.disabled(store.matrixPassword.isEmpty)
+                }.disabled(store.matrixPassword.isEmpty || !store.identityConfirmed)
             }
         }
     }

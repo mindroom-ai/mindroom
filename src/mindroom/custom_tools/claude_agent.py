@@ -6,6 +6,7 @@ import asyncio
 import collections
 import typing
 from contextlib import suppress
+from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, ClassVar, Literal, Protocol, cast, runtime_checkable
@@ -21,6 +22,8 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
+from mindroom.logging_config import get_logger
+
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
     "default",
@@ -33,6 +36,9 @@ _DEFAULT_SESSION_TTL_MINUTES = 60
 _DEFAULT_MAX_SESSIONS = 200
 _DEFAULT_LIMITS = (_DEFAULT_SESSION_TTL_MINUTES * 60, _DEFAULT_MAX_SESSIONS)
 _MAX_STDERR_LINES = 12
+_START_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+logger = get_logger(__name__)
 
 
 @runtime_checkable
@@ -103,6 +109,8 @@ class _ClaudeSessionState:
     key: str
     namespace: str
     client: ClaudeSDKClient
+    owner: asyncio.Task[None]
+    close_requested: asyncio.Event
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: float = field(default_factory=monotonic)
     last_used_at: float = field(default_factory=monotonic)
@@ -153,11 +161,14 @@ class _ClaudeSessionManager:
                 stale.extend(self._evict_if_needed_locked(namespace))
 
                 client = ClaudeSDKClient(options=options)
-                await client.connect()
+                close_requested = asyncio.Event()
+                owner = await self._open(client, close_requested)
                 session = _ClaudeSessionState(
                     key=session_key,
                     namespace=namespace,
                     client=client,
+                    owner=owner,
+                    close_requested=close_requested,
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
                 )
                 self._sessions[session_key] = session
@@ -218,14 +229,68 @@ class _ClaudeSessionManager:
     def _namespace_max_sessions(self, namespace: str) -> int:
         return self._namespace_limits.get(namespace, _DEFAULT_LIMITS)[1]
 
+    @staticmethod
+    async def _open(client: ClaudeSDKClient, close_requested: asyncio.Event) -> asyncio.Task[None]:
+        """Connect on a task that owns the client until ``close_requested`` is set.
+
+        The SDK's reader tasks and subprocess copy the connecting context and live as long as the session,
+        which outlives the tool call and turn that open it; that turn's contextvars hold its Agent and tools.
+        """
+        connected = asyncio.get_running_loop().create_future()
+
+        async def own() -> None:
+            try:
+                await client.connect()
+            except Exception as exc:
+                # The SDK has already disconnected; the caller raises the failure.
+                connected.set_exception(exc)
+                return
+            except BaseException:
+                connected.cancel()
+                raise
+            connected.set_result(None)
+            try:
+                await close_requested.wait()
+            finally:
+                await client.disconnect()
+
+        owner = asyncio.create_task(own(), name="claude_session", context=Context())
+        try:
+            await asyncio.shield(connected)
+        except BaseException:
+            owner.cancel()
+            await _drain_failed_start(owner)
+            if connected.done() and not connected.cancelled():
+                connected.exception()
+            raise
+        return owner
+
     async def _disconnect(self, session: _ClaudeSessionState) -> None:
         async with session.lock:
+            session.close_requested.set()
             with suppress(Exception):
-                await session.client.disconnect()
+                await session.owner
 
     async def _disconnect_many(self, sessions: list[_ClaudeSessionState]) -> None:
         for session in sessions:
             await self._disconnect(session)
+
+
+async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
+    """Give the SDK a bounded chance to disconnect a start that nothing tracks yet, even when cancelled again.
+
+    The caller holds the session manager's lock and re-raises what interrupted the start, so a failing or stuck
+    disconnect is only logged.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _START_CLEANUP_TIMEOUT_SECONDS
+    while not owner.done() and (remaining := deadline - loop.time()) > 0:
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait({owner}, timeout=remaining)
+    if not owner.done():
+        logger.warning("Claude session cleanup timed out", timeout_seconds=_START_CLEANUP_TIMEOUT_SECONDS)
+    elif not owner.cancelled() and (error := owner.exception()) is not None:
+        logger.warning("Claude session cleanup failed", error=str(error))
 
 
 class ClaudeAgentTools(Toolkit):

@@ -1,6 +1,6 @@
 """Hidden control outcomes stop real Bash without inventing provider calls."""
 
-# ruff: noqa: ANN001, ANN003, ANN202, ARG001, ARG002, D103, PLR0915
+# ruff: noqa: ANN001, ANN003, ANN202, ARG001, D103, PLR0915
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +23,8 @@ from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls
 from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
-from mindroom.agent_cli.session import CliTurnOwner
+from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner
+from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
@@ -60,6 +61,7 @@ from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import shell_tools
 from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths
+from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
 from tests.test_compact_context import _make_config
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
@@ -86,7 +88,21 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         return "done"
 
     async def run_shell_command(args: str) -> str:
-        pytest.fail("ordinary shell")
+        effects.append(args)
+        if control:
+            for function in ("switch_thread_model", "mutate"):
+                receipts.append(  # noqa: PERF401 - preserve sequential admission in this race
+                    await owner.operation(
+                        window=cli_window(),
+                        operation=ToolCallOperation(
+                            operation="tools.call",
+                            call_id=uuid4(),
+                            toolkit="control",
+                            function=function,
+                        ),
+                    ),
+                )
+        return payload
 
     switch = Function.from_callable(switch_thread_model)
     switch.stop_after_tool_call = True
@@ -101,29 +117,12 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
     async def authorize(key, arguments):
         return None
 
-    class Worker:
-        async def invoke_shell(self, name, arguments):
-            effects.append(arguments["args"])
-            if control:
-                for function in ("switch_thread_model", "mutate"):
-                    receipts.append(  # noqa: PERF401 - preserve sequential admission in this race
-                        await owner.operation(
-                            ToolCallOperation(
-                                operation="tools.call",
-                                call_id=uuid4(),
-                                toolkit="control",
-                                function=function,
-                            ),
-                        ),
-                    )
-            return payload
-
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=Worker(),
         authorize=authorize,
     )
+    owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
 
     async def bash(command: str, fc: FunctionCall) -> str:
         return await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": command}, fc)
@@ -253,9 +252,8 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(identity, "turn", "run", "worker"),
+        CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
         run_child=child_response,
         delegation_depth=depth,
@@ -263,7 +261,8 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
     call_id = uuid4()
     async with owner._window("bash-parent"):
         await owner.operation(
-            ToolCallOperation(
+            window="bash-parent",
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=call_id,
                 toolkit="delegate",
@@ -286,7 +285,8 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         followup_id = uuid4()
         async with owner._window("bash-followup"):
             await owner.operation(
-                ToolCallOperation(
+                window="bash-followup",
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=followup_id,
                     toolkit="delegate",
@@ -309,6 +309,105 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
             assert children[1].parent_tool_call_id == str(followup_id)
     else:
         assert "Cannot delegate" in receipt["outcome"]
+    await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False])
+async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_id(
+    tmp_path,
+    monkeypatch,
+    approved,
+) -> None:
+    """The CLI caller chooses call IDs, so an approval saved under one in the run never admits a new call."""
+    config = with_responder_access(
+        Config(
+            agents={
+                "helper": AgentConfig(display_name="Helper", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            tool_approval={"default": "require_approval"},
+        ),
+        "code",
+        users=["@alice:example.org"],
+    )
+    paths = _runtime_paths(tmp_path)
+
+    async def run_subagent(agent_name: str, task: str) -> str:
+        pytest.fail("external raw body")
+
+    function = Function.from_callable(run_subagent)
+    function.owning_toolkit = "delegate"
+    function.external_execution = True
+    catalog = await _catalog(tmp_path, [function])
+    asked = []
+
+    async def decide(paused):
+        asked.extend(str(tool.tool_call_id) for tool in paused.tools)
+        return tuple(
+            apply_exact_approval_decisions(
+                paused.requirements,
+                decisions=dict.fromkeys(asked, approved),
+                denial_reasons=dict.fromkeys(asked, "denied"),
+            ),
+        )
+
+    runtime = _delegate_runtime_context(config, paths)
+    runtime = replace(
+        runtime,
+        agent_name="helper",
+        target=replace(runtime.target, session_id="session"),
+        cli_approval_handler=decide,
+    )
+    catalog.runtime_context = runtime
+    catalog._bindings.clear()
+    await catalog.prepare([function])
+    identity = build_execution_identity_from_runtime_context(runtime)
+    catalog.agent.db = create_session_storage("helper", config, paths, identity)
+    catalog.agent.db.upsert_session(catalog.session)
+    catalog.run_response.agent_id = "helper"
+    catalog.run_response.user_id = identity.requester_id
+    call_id = uuid4()
+    # A recovered follow-up turn inherits the run metadata that approved an earlier call under this ID.
+    catalog.run_response.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): True}).to_dict()}
+    children = []
+
+    async def child_response(child, **kwargs):
+        children.append(child)
+        return "child done"
+
+    async def authorize(key, arguments):
+        return None
+
+    owner = LiveTurnTools(
+        CliTurnOwner(identity, "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        run_child=child_response,
+    )
+
+    async def checkpoint(parent):
+        assert parent == "bash-parent"
+
+    monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
+    async with owner._window("bash-parent"):
+        await owner.operation(
+            window="bash-parent",
+            operation=ToolCallOperation(
+                operation="tools.call",
+                call_id=call_id,
+                toolkit="delegate",
+                function="run_subagent",
+                arguments={"agent_name": "code", "task": "a task nobody approved"},
+            ),
+        )
+    receipt = await owner.get_call(str(call_id))
+
+    assert asked == [str(call_id)]
+    assert [child.task for child in children] == (["a task nobody approved"] if approved else [])
+    assert receipt["status"] == "completed", receipt
     await owner.close()
 
 
@@ -416,7 +515,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         approval_ids.extend(str(tool.tool_call_id) for tool in paused.tools)
         if mode == "control":
             switched = await owner.operation(
-                ToolCallOperation(
+                window="bash-parent",
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="control",
@@ -442,9 +542,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(identity, "turn", "run", "worker"),
+        CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
         run_child=child_response,
     )
@@ -548,7 +647,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         async def run_window():
             async with owner._window("bash-parent"):
                 await owner.operation(
-                    ToolCallOperation(
+                    window="bash-parent",
+                    operation=ToolCallOperation(
                         operation="tools.call",
                         call_id=call_id,
                         toolkit="delegate",
@@ -657,15 +757,15 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path, flag) ->
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
     with pytest.raises(ExceptionGroup) as error:
         async with owner._window("bash-parent"):
             await owner.operation(
-                ToolCallOperation(
+                window="bash-parent",
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="tools",
@@ -692,7 +792,7 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     assert "Use the original session." in events[-1].execution.result
     script = tmp_path / "server.py"
     script.write_text(
-        'from mcp.server.fastmcp import FastMCP\nserver = FastMCP("echo")\n@server.tool()\ndef echo(text: str) -> str:\n    return "echo:" + text\nserver.run()\n',
+        'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n    return "echo:" + text\nserver.run()\n',
     )
     paths = catalog.runtime_context.runtime_paths
     config = Config.validate_with_runtime(
@@ -734,13 +834,15 @@ async def test_interactive_context_renders_native_question_and_keeps_session(tmp
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
         context={"interactive": INTERACTIVE_QUESTION_PROMPT},
     )
-    guidance = await owner.operation(ContextReadOperation(operation="context.read", name="interactive"))
+    guidance = await owner.operation(
+        window=None,
+        operation=ContextReadOperation(operation="context.read", name="interactive"),
+    )
     question = "```interactive" + guidance["text"].split("```interactive", 1)[1].split("```", 1)[0] + "```"
     model = DelegationModel(
         id="test",
@@ -794,14 +896,14 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
     async with owner._window("bash-parent"):
-        await owner.operation(
-            ToolCallOperation(
+        switch_call = await owner.operation(
+            window="bash-parent",
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=uuid4(),
                 toolkit="control",
@@ -810,13 +912,25 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         )
         await entered.wait()
         describe = asyncio.create_task(
-            owner.operation(ToolDescribeOperation(operation="tools.describe", toolkit="late", function="late")),
+            owner.operation(
+                window="bash-parent",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="late", function="late"),
+            ),
         )
         await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="late", function="late"),
+            window="bash-parent",
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="late", function="late"),
         )
         await asyncio.sleep(0)
         release.set()
+        while (await owner.get_call(switch_call["call_id"]))["status"] in {"queued", "running"}:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+        # The fence rejects calls from every window, even one whose command is still running.
+        with pytest.raises(CliBashWindowRequiredError, match="continuation requires a rebuilt tool catalog"):
+            await owner.operation(
+                window="bash-parent",
+                operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="late", function="late"),
+            )
     with pytest.raises(ValueError, match="continuation"):
         await describe
     assert materialized == []

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     icon="Webhook",
     icon_color="text-emerald-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/external-triggers/",
     function_names=(
         "create_trigger",
         "list_triggers",

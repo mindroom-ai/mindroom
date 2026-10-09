@@ -107,7 +107,15 @@ class UserStopReconciler:
         stop_receipt_order: int,
         on_current_stop_finalized: Callable[[], Awaitable[None]],
     ) -> bool:
-        """Make one user-stop intent terminal independently of runtime recovery order."""
+        """Make one user-stop intent terminal independently of runtime recovery order.
+
+        Returns False, before writing anything, when the event's owning turn has
+        no conversation target: a visible voice echo is such an owner, and
+        there is no response to stop.
+        """
+        owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
+        if owner is not None and owner.conversation_target is None:
+            return False
         async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
             stopped_turn = await self._record(response_event_id, stop_receipt_order, deleted_turn_id=deleted_turn_id)
         target = stopped_turn.conversation_target

@@ -405,20 +405,6 @@
         "title": "AdminListResponse",
         "type": "object"
       },
-      "AdminLogoutResponse": {
-        "description": "Admin logout response model.",
-        "properties": {
-          "success": {
-            "title": "Success",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success"
-        ],
-        "title": "AdminLogoutResponse",
-        "type": "object"
-      },
       "AdminStatsOut": {
         "description": "Admin statistics output model.",
         "properties": {
@@ -819,14 +805,6 @@
             },
             "title": "Third Party Processors",
             "type": "array"
-          },
-          "usage_metrics": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Usage Metrics",
-            "type": "array"
           }
         },
         "required": [
@@ -835,7 +813,6 @@
           "personal_data",
           "subscriptions",
           "instances",
-          "usage_metrics",
           "activity_history",
           "payments",
           "data_processing_purposes",
@@ -1276,104 +1253,6 @@
         "title": "LifecycleInstanceOut",
         "type": "object"
       },
-      "PlanLimits": {
-        "description": "Plan limits and capabilities.",
-        "properties": {
-          "analytics": {
-            "title": "Analytics",
-            "type": "string"
-          },
-          "custom_development": {
-            "title": "Custom Development",
-            "type": "boolean"
-          },
-          "dedicated_infrastructure": {
-            "title": "Dedicated Infrastructure",
-            "type": "boolean"
-          },
-          "integrations": {
-            "title": "Integrations",
-            "type": "string"
-          },
-          "max_agents": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "const": "unlimited",
-                "type": "string"
-              }
-            ],
-            "title": "Max Agents"
-          },
-          "max_messages_per_day": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "const": "unlimited",
-                "type": "string"
-              }
-            ],
-            "title": "Max Messages Per Day"
-          },
-          "on_premise": {
-            "title": "On Premise",
-            "type": "boolean"
-          },
-          "sla": {
-            "title": "Sla",
-            "type": "boolean"
-          },
-          "sso": {
-            "title": "Sso",
-            "type": "boolean"
-          },
-          "storage_gb": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "const": "unlimited",
-                "type": "string"
-              }
-            ],
-            "title": "Storage Gb"
-          },
-          "support": {
-            "title": "Support",
-            "type": "string"
-          },
-          "training": {
-            "title": "Training",
-            "type": "boolean"
-          },
-          "workflows": {
-            "title": "Workflows",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "max_agents",
-          "max_messages_per_day",
-          "storage_gb",
-          "support",
-          "integrations",
-          "workflows",
-          "analytics",
-          "sla",
-          "training",
-          "sso",
-          "custom_development",
-          "on_premise",
-          "dedicated_infrastructure"
-        ],
-        "title": "PlanLimits",
-        "type": "object"
-      },
       "PricingConfigResponse": {
         "description": "Public pricing configuration response model.",
         "properties": {
@@ -1522,9 +1401,6 @@
             "title": "Included Ai Budget Usd",
             "type": "integer"
           },
-          "limits": {
-            "$ref": "#/components/schemas/PlanLimits"
-          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -1582,7 +1458,6 @@
           "price_yearly",
           "description",
           "features",
-          "limits",
           "recommended",
           "included_ai_budget_usd",
           "requires_customer_provider_keys",
@@ -1740,18 +1615,6 @@
             "title": "Id",
             "type": "string"
           },
-          "max_agents": {
-            "title": "Max Agents",
-            "type": "integer"
-          },
-          "max_messages_per_day": {
-            "title": "Max Messages Per Day",
-            "type": "integer"
-          },
-          "max_storage_gb": {
-            "title": "Max Storage Gb",
-            "type": "integer"
-          },
           "status": {
             "enum": [
               "active",
@@ -1776,6 +1639,10 @@
               }
             ],
             "title": "Stripe Customer Id"
+          },
+          "stripe_subscription_ended": {
+            "title": "Stripe Subscription Ended",
+            "type": "boolean"
           },
           "stripe_subscription_id": {
             "anyOf": [
@@ -1838,42 +1705,10 @@
           "account_id",
           "tier",
           "status",
-          "max_agents",
-          "max_messages_per_day",
-          "max_storage_gb",
-          "can_run_instances"
+          "can_run_instances",
+          "stripe_subscription_ended"
         ],
         "title": "SubscriptionOut",
-        "type": "object"
-      },
-      "SubscriptionReactivateResponse": {
-        "description": "Subscription reactivation response model.",
-        "properties": {
-          "message": {
-            "title": "Message",
-            "type": "string"
-          },
-          "subscription_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Subscription Id"
-          },
-          "success": {
-            "title": "Success",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success",
-          "message"
-        ],
-        "title": "SubscriptionReactivateResponse",
         "type": "object"
       },
       "SyncResult": {
@@ -2032,121 +1867,6 @@
           "url"
         ],
         "title": "UrlResponse",
-        "type": "object"
-      },
-      "UsageAggregateOut": {
-        "description": "Aggregated usage statistics model.",
-        "properties": {
-          "totalAgents": {
-            "title": "Totalagents",
-            "type": "integer"
-          },
-          "totalMessages": {
-            "title": "Totalmessages",
-            "type": "integer"
-          },
-          "totalStorage": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "integer"
-              }
-            ],
-            "title": "Totalstorage"
-          }
-        },
-        "required": [
-          "totalMessages",
-          "totalAgents",
-          "totalStorage"
-        ],
-        "title": "UsageAggregateOut",
-        "type": "object"
-      },
-      "UsageMetricOut": {
-        "description": "Usage metric output model.",
-        "properties": {
-          "agents_used": {
-            "title": "Agents Used",
-            "type": "integer"
-          },
-          "created_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created At"
-          },
-          "id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Id"
-          },
-          "messages_sent": {
-            "title": "Messages Sent",
-            "type": "integer"
-          },
-          "metric_date": {
-            "title": "Metric Date",
-            "type": "string"
-          },
-          "storage_used_gb": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "integer"
-              }
-            ],
-            "title": "Storage Used Gb"
-          },
-          "subscription_id": {
-            "title": "Subscription Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "subscription_id",
-          "metric_date",
-          "messages_sent",
-          "agents_used",
-          "storage_used_gb"
-        ],
-        "title": "UsageMetricOut",
-        "type": "object"
-      },
-      "UsageResponse": {
-        "description": "Response model for usage metrics.",
-        "properties": {
-          "aggregated": {
-            "$ref": "#/components/schemas/UsageAggregateOut"
-          },
-          "usage": {
-            "items": {
-              "$ref": "#/components/schemas/UsageMetricOut"
-            },
-            "title": "Usage",
-            "type": "array"
-          }
-        },
-        "required": [
-          "usage",
-          "aggregated"
-        ],
-        "title": "UsageResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -2391,25 +2111,6 @@
           }
         },
         "summary": "Update Account Status"
-      }
-    },
-    "/admin/auth/logout": {
-      "post": {
-        "description": "Admin logout placeholder.",
-        "operationId": "admin_logout_admin_auth_logout_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminLogoutResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Admin Logout"
       }
     },
     "/admin/instance-lifecycle": {
@@ -3544,7 +3245,7 @@
     },
     "/my/account/setup": {
       "post": {
-        "description": "Setup free tier account for new user.",
+        "description": "Set up an account without a plan for a new user.",
         "operationId": "setup_account_my_account_setup_post",
         "parameters": [
           {
@@ -4139,99 +3840,9 @@
         "summary": "Cancel Subscription"
       }
     },
-    "/my/subscription/reactivate": {
-      "post": {
-        "description": "Reactivate a cancelled subscription (if still in billing period).",
-        "operationId": "reactivate_subscription_my_subscription_reactivate_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SubscriptionReactivateResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Reactivate Subscription"
-      }
-    },
-    "/my/usage": {
-      "get": {
-        "description": "Get usage metrics for current user.",
-        "operationId": "get_user_usage_my_usage_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "days",
-            "required": false,
-            "schema": {
-              "default": 30,
-              "title": "Days",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UsageResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get User Usage"
-      }
-    },
     "/pricing/config": {
       "get": {
-        "description": "Get the current pricing configuration.\n\nThis returns the pricing plans, features, and limits.\nStripe price IDs are only included if they are configured.",
+        "description": "Get the current pricing configuration.\n\nThis returns the pricing plans and their features.\nStripe price IDs are only included if they are configured.",
         "operationId": "get_pricing_config_pricing_config_get",
         "responses": {
           "200": {

@@ -213,9 +213,25 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 }
 
 
-def _get_custom_base_url(config: Config, provider: str) -> str | None:
+def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
+    """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
+    # model_loading pulls in the Agno runtime, which doctor only needs once a provider is checked.
+    from mindroom.model_loading import model_uses_own_credential  # noqa: PLC0415
+
+    try:
+        return [
+            model
+            for name, model in config.models.items()
+            if env_key_for_provider(model.provider) == env_key
+            and not model_uses_own_credential(name, model, runtime_paths)
+        ]
+    except (OSError, ValueError):
+        return None
+
+
+def _get_custom_base_url(models: list[ModelConfig], provider: str) -> str | None:
     """Get custom base_url for a provider from model extra_kwargs, if any."""
-    for model in config.models.values():
+    for model in models:
         if model.provider == provider and model.extra_kwargs:
             base_url = model.extra_kwargs.get("base_url")
             if base_url:
@@ -520,12 +536,17 @@ def _check_single_provider(
         return 0, 0, 0
     validated_keys.add(env_key)
 
+    # Models with their own credential never read the shared key. When the credential store is
+    # unreadable that is unknown, so the key counts as needed and only the default endpoint is probed.
+    shared_key_models = _models_using_shared_key(config, env_key, runtime_paths)
     api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths)
     if not api_key:
-        console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, 1
+        needs_shared_key = shared_key_models is None or bool(shared_key_models)
+        if needs_shared_key:
+            console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
+        return 0, 0, int(needs_shared_key)
 
-    base_url = _get_custom_base_url(config, provider)
+    base_url = _get_custom_base_url(shared_key_models or [], provider)
     valid, detail = _validate_provider_key(provider, api_key, base_url)
     return _print_validation(
         valid,
@@ -586,13 +607,9 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         return 0, 0, 1
 
     llm_provider = config.memory.llm.provider
-    llm_host = (
-        config.memory.llm.config.get("host")
-        or config.memory.llm.config.get("openai_base_url")
-        or config.memory.llm.config.get("base_url")
-    )
+    llm_base_url = config.memory.llm.config.get("openai_base_url") or config.memory.llm.config.get("base_url")
     if llm_provider == "ollama":
-        host = llm_host or _get_ollama_host(config, runtime_paths=runtime_paths)
+        host = config.memory.llm.config.get("host") or llm_base_url or _get_ollama_host(config, runtime_paths)
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,
@@ -604,14 +621,17 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+    # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
+    api_key = config.memory.llm.config.get("api_key") or (
+        get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+    )
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    base_url = llm_host
-    valid, detail = _validate_provider_key(llm_provider, api_key or "", base_url)
+    # The runtime drops host for memory LLMs other than Ollama.
+    valid, detail = _validate_provider_key(llm_provider, api_key or "", llm_base_url)
     return _print_validation(
         valid,
         detail,

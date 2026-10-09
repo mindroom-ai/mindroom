@@ -170,7 +170,6 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     install_direct_response_admission(bot)
@@ -234,7 +233,6 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
@@ -322,7 +320,6 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     install_direct_response_admission(bot)
@@ -392,7 +389,6 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
@@ -463,7 +459,6 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()

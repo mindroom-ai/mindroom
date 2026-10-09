@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.spotify import SpotifyTools
+    from mindroom.custom_tools.spotify import SpotifyTools
 
 
 @register_tool_with_metadata(
@@ -21,6 +28,13 @@ if TYPE_CHECKING:
     setup_type=SetupType.API_KEY,
     icon="SiSpotify",
     icon_color="text-green-500",
+    # Token renewal needs SPOTIFY_CLIENT_SECRET, which only the primary process holds.
+    requires_primary_runtime=True,
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
     config_fields=[
         ConfigField(
             name="access_token",
@@ -28,7 +42,11 @@ if TYPE_CHECKING:
             type="password",
             required=True,
             placeholder="Spotify OAuth access token",
-            description="OAuth access token with required scopes (user-read-private, playlist-modify-public, playlist-modify-private)",
+            description=(
+                "OAuth access token with the scopes the toolkit uses (user-read-private, user-top-read, "
+                "user-read-currently-playing, playlist-read-private, playlist-modify-public, "
+                "playlist-modify-private, user-modify-playback-state)"
+            ),
         ),
         ConfigField(
             name="default_market",
@@ -72,6 +90,6 @@ if TYPE_CHECKING:
 )
 def spotify_tools() -> type[SpotifyTools]:
     """Return Spotify tools for music search and playlist management."""
-    from agno.tools.spotify import SpotifyTools
+    from mindroom.custom_tools.spotify import SpotifyTools
 
     return SpotifyTools

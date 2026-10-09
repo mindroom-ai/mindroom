@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -12,7 +13,7 @@ from agno.models.response import ToolExecution
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -839,6 +840,13 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
             ),
         )
     return restored
+
+
+def tool_trace_from_content(content: Mapping[str, object]) -> list[ToolTraceEntry]:
+    """Read back the tool calls one message shows."""
+    payload = content.get(_TOOL_TRACE_KEY)
+    events = cast("Mapping[str, object]", payload).get("events") if isinstance(payload, Mapping) else None
+    return deserialize_tool_trace(cast("list[Mapping[str, object]]", events) if isinstance(events, list) else [])
 
 
 def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:

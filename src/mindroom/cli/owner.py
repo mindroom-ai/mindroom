@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import re
-
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.matrix.identity import parse_current_matrix_user_id
 
 _LEGACY_OWNER_MATRIX_USER_ID_PLACEHOLDER = "__PLACEHOLDER__"
-_OWNER_MATRIX_USER_ID_RE = re.compile(r"^@[^:\s]+:[^\s]+$")
 
 # LEGACY_COMPAT: Generic owner placeholder in authored configuration.
 # Legacy format: Unversioned authored config may contain the generic __PLACEHOLDER__ owner token.
@@ -17,13 +15,13 @@ _OWNER_MATRIX_USER_ID_RE = re.compile(r"^@[^:\s]+:[^\s]+$")
 
 
 def parse_owner_matrix_user_id(raw_value: object) -> str | None:
-    """Parse an optional owner Matrix user ID."""
+    """Parse an optional owner Matrix user ID in the current user ID grammar."""
     if not isinstance(raw_value, str):
         return None
-    candidate_owner_user_id = raw_value.strip()
-    if _OWNER_MATRIX_USER_ID_RE.fullmatch(candidate_owner_user_id):
-        return candidate_owner_user_id
-    return None
+    try:
+        return parse_current_matrix_user_id(raw_value.strip())
+    except ValueError:
+        return None
 
 
 def replace_owner_placeholders_in_text(content: str, owner_user_id: str) -> str:
@@ -31,7 +29,8 @@ def replace_owner_placeholders_in_text(content: str, owner_user_id: str) -> str:
     if parse_owner_matrix_user_id(owner_user_id) is None:
         return content
     # Quote the Matrix user ID so the leading '@' doesn't break YAML parsing
-    # (@ starts a YAML tag/anchor when unquoted).
+    # (@ starts a YAML tag/anchor when unquoted). The current grammar admits no
+    # quote, backslash, or whitespace, so the ID cannot end the scalar early.
     quoted = f'"{owner_user_id}"'
     return content.replace(OWNER_MATRIX_USER_ID_PLACEHOLDER, quoted).replace(
         _LEGACY_OWNER_MATRIX_USER_ID_PLACEHOLDER,

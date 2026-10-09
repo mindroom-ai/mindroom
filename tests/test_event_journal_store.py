@@ -22,6 +22,7 @@ import sqlite3
 import sys
 import threading
 import time
+import tracemalloc
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -57,9 +58,11 @@ from mindroom.event_journal import (
     SemanticConsumer,
     TerminalTurnWrite,
     UnreadableApprovalCard,
+    approval_arguments_digest,
     delivery_transaction_id,
     reads,
     replacement_target,
+    sqlite_backend,
 )
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -76,6 +79,7 @@ from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.conftest import postgres_journal_schema_url
+from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -138,6 +142,33 @@ _WRITES_OUTNUMBERING_THE_OLD_QUEUE_BOUND = 1_100
 # inference.
 _HYDRATION_TRANSACTION_EVENT_LIMIT = 256
 _EVENTS_SPANNING_TWO_HYDRATION_CHUNKS = _HYDRATION_TRANSACTION_EVENT_LIMIT + 1
+# What one conversation page may take in memory at worst. Every agent in a room
+# reads the thread at once, inside one process with a 2 GiB limit.
+_MOST_ONE_PAGE_MAY_DECODE_TO = 100 * 1024 * 1024
+# SQLite's OPFLAG_BYTELENARG: a column read only for its byte length, which the
+# record header already holds, so the value itself is never loaded.
+_SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ = 0xC0
+
+
+def _nested_empty_containers(depth: int) -> object:
+    """Return an empty object wrapped in ``depth`` single-item lists."""
+    nested: object = {}
+    for _depth in range(depth):
+        nested = [nested]
+    return nested
+
+
+# Message padding that decodes to many times its stored size, each about the
+# size of one Matrix event, the most a message can carry inline.
+_PADDING_COSTLIEST_TO_DECODE = {
+    "nested-empty-containers": [_nested_empty_containers(32)] * 900,
+    "short-strings": ["ab"] * 12_000,
+    "three-digit-ints": [999] * 15_000,
+    "one-key-objects": [{"a": 1}] * 7_500,
+    # Just past a hash table resize, a dict holds about twice the slots it needs.
+    "unique-keys-past-a-resize": {chr(0x100 + index): "\u0100" for index in range(5_462)},
+    "one-character-non-ascii-strings": ["\u0100"] * 6_500,
+}
 
 # `PRAGMA synchronous` reports the mode it is set to as an integer.
 _SQLITE_SYNCHRONOUS_NORMAL = 1
@@ -1356,7 +1387,7 @@ class TestRedaction:
             content=text("first edit"),
         )
 
-        assert not installed
+        assert installed is None
         assert "first edit" not in await bodies(alice)
 
     async def test_a_newer_edit_beats_an_in_flight_refetch(self, alice: PrincipalStore) -> None:
@@ -1376,7 +1407,7 @@ class TestRedaction:
             content=text("first"),
         )
 
-        assert not installed
+        assert installed is None
         assert await bodies(alice) == ["newest"]
 
     async def test_a_stale_zero_token_cannot_drop_a_newer_outbox_projection(
@@ -1632,6 +1663,150 @@ class TestBoundedReads:
             cursor = page.next_cursor
 
         assert seen == [f"$m{index:03d}" for index in range(25)]
+
+    async def test_a_page_stops_at_its_content_budget_and_pages_on(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A row limit does not bound a read whose rows anyone can make megabytes long.
+
+        The page keeps its newest messages that fit the budget and hands back a
+        cursor, so a reader sees history behind it instead of a whole thread.
+        """
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        for index in range(5):
+            await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
+
+        pages: list[list[str]] = []
+        cursor = None
+        while True:
+            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50, before=cursor)
+            pages.insert(0, [m.logical_event_id for m in page.messages])
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+
+        assert pages == [["$m0"], ["$m1", "$m2"], ["$m3", "$m4"]]
+
+    async def test_a_page_of_containers_stops_at_its_decoded_budget_and_pages_on(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rows that fit the byte budget still stop where their containers would decode too large."""
+        monkeypatch.setattr(reads, "_PAGE_DECODED_BUDGET_BYTES", 40_000)
+        for index in range(4):
+            await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x") | {"pad": [[]] * 100})
+
+        pages: list[list[str]] = []
+        cursor = None
+        while True:
+            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50, before=cursor)
+            pages.insert(0, [m.logical_event_id for m in page.messages])
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+
+        assert pages == [["$m0", "$m1"], ["$m2", "$m3"]]
+
+    async def test_a_sqlite_library_without_octet_length_still_sizes_pages(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Libraries before SQLite 3.43 have no ``octet_length``, so the backend supplies one."""
+        measured: list[object] = []
+        supplied = sqlite_backend._octet_length
+
+        def measuring(value: str | bytes | None) -> int | None:
+            measured.append(value)
+            return supplied(value)
+
+        monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 42, 0))
+        monkeypatch.setattr(sqlite_backend, "_octet_length", measuring)
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        store = EventJournalStore.open_sqlite(tmp_path / "older-library.db")
+        try:
+            principal = store.principal("agent@alice")
+            for index in range(3):
+                await admit(principal, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
+
+            page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        finally:
+            await store.close()
+
+        assert [m.logical_event_id for m in page.messages] == ["$m1", "$m2"]
+        assert page.next_cursor is not None
+        assert measured
+
+    @pytest.mark.parametrize("padding", _PADDING_COSTLIEST_TO_DECODE.values(), ids=_PADDING_COSTLIEST_TO_DECODE)
+    async def test_a_page_of_the_costliest_json_to_decode_stays_small_in_memory(
+        self,
+        alice: PrincipalStore,
+        padding: list[object],
+    ) -> None:
+        """The budget bounds what a page decodes to, not only what it stores.
+
+        Every decoded JSON value is a Python object, so a list of short strings
+        or numbers decodes to about 10 times its stored size, one of one-key
+        objects to about 24 and nested empty containers to about 45. A budget
+        sized for text let anyone who can post make one page hold hundreds of
+        megabytes, once for every agent reading the thread.
+        """
+        content = text("x") | {"pad": padding}
+        stored_bytes = len(json.dumps(content, separators=(",", ":")))
+        for index in range(reads.PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
+            await admit(alice, f"$m{index:04d}", ts=1_000 + index, content=content)
+
+        tracemalloc.start()
+        try:
+            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=2_000)
+            _held, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert page.next_cursor is not None
+        assert peak <= _MOST_ONE_PAGE_MAY_DECODE_TO
+        assert peak >= reads._PAGE_DECODED_BUDGET_BYTES // 2
+
+    @pytest.mark.parametrize("json_results", [False, True], ids=["text-results", "json-results"])
+    async def test_a_page_of_ordinary_replies_fills_its_content_budget(
+        self,
+        alice: PrincipalStore,
+        json_results: bool,
+    ) -> None:
+        """Prose, code and tool traces decode to about their stored size, so the decoded cap does not cut them short.
+
+        Tool results are often JSON text, whose separators sit inside strings and cost nothing extra to decode.
+        """
+        sentence = "The agent read the file and reported back: 12 tests passed, none failed. "
+        if json_results:
+            sentence = json.dumps({"passed": 12, "failed": 0, "files": ["a.py", "b.py", "c.py"], "ok": True}) + " "
+        code = "```python\ndef handle(event: dict[str, object], *, limit: int = 10) -> list[str]:\n    ...\n```\n"
+        trace = [
+            {
+                "type": "tool_call_completed",
+                "tool_name": "read_file",
+                "args_preview": f"path=src/mindroom/module_{index}.py, limit=200",
+                "result_preview": sentence * 5,
+                "truncated": False,
+            }
+            for index in range(20)
+        ]
+        content = text(sentence * 250 + code * 20) | {
+            "format": "org.matrix.custom.html",
+            "formatted_body": f"<p>{sentence * 250}</p>",
+            "io.mindroom.tool_trace": {"version": 2, "events": trace},
+        }
+        stored_bytes = len(json.dumps(content, separators=(",", ":")))
+        for index in range(reads.PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
+            await admit(alice, f"$m{index:04d}", ts=1_000 + index, content=content)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=2_000)
+
+        assert page.next_cursor is not None
+        assert len(page.messages) == reads.PAGE_CONTENT_BUDGET_BYTES // stored_bytes
 
     async def test_a_page_is_chronological(self, alice: PrincipalStore) -> None:
         """A page is chronological."""
@@ -3042,7 +3217,7 @@ class TestProjectedInteractivePrompts:
             content=text("Old membership"),
         )
 
-        assert installed
+        assert installed == 0
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         assert page.messages == ()
         assert page.refresh_pending == ()
@@ -3085,7 +3260,7 @@ class TestProjectedInteractivePrompts:
             content=replacement,
         )
 
-        assert installed
+        assert installed == 0
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         assert page.messages == ()
         assert page.refresh_pending == ()
@@ -4505,6 +4680,7 @@ class TestBoundedHydrationInstallation:
         outcome = await recovering.settle_room_history_recovery(
             recovery,
             exhausted_server=True,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=epoch,
         )
@@ -4561,6 +4737,7 @@ class TestBoundedHydrationInstallation:
         outcome = await alice.settle_room_history_recovery(
             recovery,
             exhausted_server=True,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=epoch,
         )
@@ -4584,6 +4761,7 @@ class TestBoundedHydrationInstallation:
         outcome = await recovering.settle_room_history_recovery(
             recovery,
             exhausted_server=False,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=await recovering.membership_epoch(ROOM),
         )
@@ -4709,6 +4887,7 @@ class TestBoundedHydrationInstallation:
         outcome = await recovering.settle_room_history_recovery(
             old_recovery,
             exhausted_server=True,
+            unreadable=False,
             attempted_policy_rank=2,
             expected_membership_epoch=stale_epoch,
         )
@@ -5132,6 +5311,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
             recovering.settle_room_history_recovery(
                 old_recovery,
                 exhausted_server=True,
+                unreadable=False,
                 attempted_policy_rank=2,
                 expected_membership_epoch=await reader.membership_epoch(ROOM),
             ),
@@ -5474,7 +5654,8 @@ class TestOutbox:
         # Registration and deletion share the echo writer's real ledger and
         # reservations, while the outbox retains its earlier immutable input.
         await store.register_edit_revision(source, (30, later))
-        await store.mark_source_redacted(later)
+        await admit_room_event(principal, ROOM, later)
+        await store.mark_source_redacted(later, room_id=ROOM)
         durable = {
             index: TurnRecordCodec._from_ledger_record(index, json.loads(raw))
             for index, _, raw in await store.deps.turn_records.load_all()
@@ -5546,7 +5727,6 @@ class TestOutbox:
         assert persisted.revision_replay[driving].response_event_id == "$answer"
         assert persisted.revision_replay[later].redacted
         assert persisted.revision_replay[later].response_event_id is None
-        assert persisted.revision_replay[later].cleanup_pending == current.revision_replay[later].cleanup_pending
         assert tombstone.redacted_source_event_ids == (later,)
         delivered = await principal.load_matrix_delivery(delivery_id=driving, stage=DeliveryStage.FINAL)
         assert delivered is not None
@@ -6377,6 +6557,7 @@ class TestApprovalContinuations:
                     expires_at_ns=time.time_ns() + 60_000_000_000,
                     decision=ApprovalDecision.APPROVED if state == "ready" else None,
                     human_approval_required=True,
+                    arguments_digest=approval_arguments_digest({"command": "run it"}),
                 ),
             ),
             request_body="run it",
@@ -7908,6 +8089,68 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
+
+    async def test_release_hands_interrupted_sources_back_to_replay(self, alice: PrincipalStore) -> None:
+        """A run a restart cut short gives its still-pending sources back to ordinary replay as a fresh attempt."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+
+        # Only a fenced continuation can be released; a live claim may still be running.
+        assert await alice.release_approval_continuation("approval-1", expected_generation=claimed.generation) is False
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "interrupted",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+        assert failing is not None
+
+        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is True
+
+        assert await alice.approval_continuation("approval-1") is None
+        assert await alice.approval_continuation_for_source("$source-1") is None
+        # Both sources are ordinary pending work again, even for the runtime that claimed them.
+        replayable = await alice.pending(runtime_generation="runtime-a")
+        assert [event.event_id for event in replayable] == ["$source-1", "$source-2"]
+
+        def attempt_count(transaction: Transaction) -> int:
+            row = transaction.fetchone(
+                "SELECT COUNT(*) AS count FROM response_attempts WHERE driving_event_id = ?",
+                ("$source-1",),
+            )
+            assert row is not None
+            return int(row["count"])
+
+        assert await alice._backend.read(attempt_count) == 0
+
+    async def test_release_refuses_once_a_final_exists(self, alice: PrincipalStore) -> None:
+        """A FINAL already owes the reply its terminal text, so the continuation settles instead."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "interrupted",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+        assert failing is not None
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("interrupted"),
+            edits_event_id="$waiting",
+        )
+
+        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is False
+        assert await alice.approval_continuation("approval-1") is not None
 
     async def test_finish_serializes_with_responder_departure(
         self,
@@ -9487,6 +9730,44 @@ class TestHotQueriesAreIndexCovered:
 
         assert "created_ts" in plan, plan
 
+    @pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 43), reason="octet_length arrived in SQLite 3.43")
+    async def test_a_page_is_sized_without_loading_its_content(self, tmp_path: Path) -> None:
+        """Sizing a page reads each row's byte length from its record header.
+
+        ``length`` counts the characters of a text value, so SQLite loads every
+        value in the window to size it, which is the cost sizing exists to
+        avoid. ``octet_length`` marks its column read as length-only.
+        """
+        database = sqlite3.connect(tmp_path / "size-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        sql = (
+            f"SELECT {reads._PAGE_SIZE_COLUMNS} FROM visible_messages "  # noqa: S608 - the production columns, not input
+            "WHERE principal_id=? AND room_id=? AND thread_id=? "
+            "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        )
+
+        column_reads = {row[6] for row in database.execute("EXPLAIN " + sql, ("x", "x", "x")) if row[1] == "Column"}
+
+        assert _SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ in column_reads, column_reads
+
+    async def test_a_redaction_seeks_the_held_edit_it_names(self, tmp_path: Path) -> None:
+        """A redaction finds the held edit it blanks by ID instead of walking every held edit in the room.
+
+        Any room member can leave edits waiting on targets that never arrive,
+        and every later redaction in that room runs this update on the journal
+        writer every bot shares. Entered on the primary key's room prefix alone,
+        the plan still says SEARCH, so it has to name `edit_event_id`.
+        """
+        database = sqlite3.connect(tmp_path / "redaction-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        sql = "UPDATE unresolved_edits SET content_json = '{}' WHERE principal_id=? AND room_id=? AND edit_event_id=?"
+
+        plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x", "x", "x")))
+
+        assert "edit_event_id=?" in plan, plan
+
     async def test_every_ordered_index_column_carries_the_byte_order_pin_on_postgres(self) -> None:
         """Every ordered index column carries the byte-order pin on PostgreSQL.
 
@@ -9824,7 +10105,7 @@ async def test_resume_response_ownership_requires_current_attempted_delivery(
     journal_store: EventJournalStore,
     ended_by: str,
 ) -> None:
-    """History cannot create resume authority, and old memberships cannot retain it."""
+    """History cannot create response ownership, and old memberships cannot retain it."""
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.enqueue_matrix_delivery(
         delivery_id="$turn",
@@ -9835,7 +10116,7 @@ async def test_resume_response_ownership_requires_current_attempted_delivery(
     )
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.INITIAL)
-    # An unknown send result stays with outbox recovery, not a fresh resume relay.
+    # An unknown send result stays with outbox recovery until the send is acknowledged.
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.acknowledge_matrix_delivery(
         delivery_id="$turn",

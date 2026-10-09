@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
-from uuid import UUID
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
@@ -69,8 +71,7 @@ _API_ROUTES = {
     "script-run": "scripts/run",
     "script-status": "scripts",
     "script-cancel": "scripts",
-    "agent-cli-install": "agent-cli/install",
-    "agent-cli-shell": "agent-cli/shell",
+    "execute-cancel": "execute/cancel",
 }
 
 
@@ -86,8 +87,7 @@ def worker_api_endpoint(
         "script-run",
         "script-status",
         "script-cancel",
-        "agent-cli-install",
-        "agent-cli-shell",
+        "execute-cancel",
     ],
 ) -> str:
     """Return the API endpoint for one worker operation."""
@@ -100,31 +100,10 @@ def worker_api_endpoint(
     return f"{api_root}/{_API_ROUTES.get(operation, operation)}"
 
 
-# Requester encoding percent-escapes "!" and other key parts are normalized
-# without it, so no requester ID can impersonate the privileged CLI segment.
-_PROCESS_SEGMENT_PREFIXES = {"script": "script-", "agent-turn": "!agent-turn-"}
-
-
-def process_worker_key(base_worker_key: str, *, purpose: Literal["script", "agent-turn"], process_id: UUID) -> str:
-    """Pin a physical process to a user-agent key without changing its final agent."""
+def process_worker_key(base_worker_key: str, *, process_id: UUID) -> str:
+    """Pin a background script process to a user-agent key without changing its final agent."""
     parts = base_worker_key.split(":")
     if len(parts) < 5 or parts[0] != "v1" or parts[2] != "user_agent" or not parts[-1]:
         msg = "Isolated processes require a resolved user-agent worker key."
         raise ValueError(msg)
-    return ":".join((*parts[:-1], f"{_PROCESS_SEGMENT_PREFIXES[purpose]}{process_id.hex}", parts[-1]))
-
-
-def is_cli_worker_key(worker_key: str) -> bool:
-    """Recognize the reserved physical CLI process-key namespace."""
-    parts = worker_key.split(":")
-    prefix = _PROCESS_SEGMENT_PREFIXES["agent-turn"]
-    if len(parts) < 6 or not parts[-2].startswith(prefix):
-        return False
-    try:
-        process_id = UUID(hex=parts[-2].removeprefix(prefix))
-        return (
-            process_worker_key(":".join((*parts[:-2], parts[-1])), purpose="agent-turn", process_id=process_id)
-            == worker_key
-        )
-    except ValueError:
-        return False
+    return ":".join((*parts[:-1], f"script-{process_id.hex}", parts[-1]))

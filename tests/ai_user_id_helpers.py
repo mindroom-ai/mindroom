@@ -253,6 +253,7 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
         discovered_hooks=tuple(callbacks),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
         plugin_order=0,
     )
@@ -532,7 +533,7 @@ def _build_response_runner(
             approval_store=approval_store,
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
             approval_runtime_generation="test-runtime",
-            register_approval_interruption=lambda _source_event_id, _room_id: None,
+            redacted_history_events=AsyncMock(return_value={}),
         ),
     )
 
@@ -574,8 +575,8 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
     """Post-response support whose per-response deps carry no side effects.
 
     The real ``apply_post_response_effects`` still runs; every effect it guards
-    on (interactive registration, memory persistence, run-metadata linkage,
-    thread summaries) is absent from the built deps, so tests exercise the
+    on (interactive registration, memory persistence, skill review, automations, run-metadata
+    linkage, thread summaries) is absent from the built deps, so tests exercise the
     lifecycle without patching the module function.
     """
 
@@ -585,9 +586,12 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
+        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
+        notify_response_finished: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
-        del room_id, membership_turn_id, queue_memory_persistence, persist_response_event_id
+        del room_id, membership_turn_id, queue_memory_persistence, queue_skill_review, notify_response_finished
+        del persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)
 
 

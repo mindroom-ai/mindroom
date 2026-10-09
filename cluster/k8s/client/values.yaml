@@ -65,7 +65,7 @@ matrix:
   allowCustomHomeservers: false
 
 # Optional MatrixRTC discovery and same-origin proxy routes for voice and video calls.
-# LiveKit and the MatrixRTC authorization service must already exist.
+# LiveKit and the MatrixRTC authorization service run separately, for example through the mindroom-matrixrtc chart in cluster/k8s/matrixrtc.
 matrixRTC:
   enabled: false
   # Public MatrixRTC authorization service URL advertised through
@@ -74,10 +74,16 @@ matrixRTC:
   proxy:
     # Proxy the conventional /livekit/jwt and /livekit/sfu paths through nginx.
     enabled: false
-    # Internal MatrixRTC authorization service URL, for example http://matrixrtc-auth:8080.
+    # Internal MatrixRTC authorization service URL, for example http://matrixrtc-mindroom-matrixrtc-auth:8080.
     jwtServiceUpstream: ""
-    # Internal LiveKit SFU URL, for example http://livekit:7880.
+    # Internal LiveKit SFU URL, for example http://matrixrtc-mindroom-matrixrtc-livekit:7880.
     sfuUpstream: ""
+
+# One-click bug reports from the client's message menu go to a private room shared with these administrators.
+bugReports:
+  # Matrix user IDs published in /.well-known/matrix/client as io.mindroom.bug_reports.
+  # Empty keeps the menu item as Download bug report, which saves the report as a file.
+  admins: []
 
 serviceWorker:
   # Register the client service worker, scoped to basePath.
@@ -117,6 +123,9 @@ config:
   # Leave empty to render the chart default client config from the matrix values.
   # Set this when you want full control over config.json.
   data: ""
+  # Structured config.json settings deep-merged over the chart default config; use instead of data.
+  # Maps merge key by key across values files, lists replace, and string values are rendered with tpl.
+  values: {}
 
 # Chart-managed nginx server configuration.
 nginx:

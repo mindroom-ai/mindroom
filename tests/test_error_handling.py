@@ -285,3 +285,15 @@ def test_rejected_provider_key_is_still_an_authentication_failure() -> None:
 
     assert "Authentication failed" in message
     assert "Connect your AI provider" not in message
+
+
+def test_minimal_subagent_failure_suggests_a_standard_subagent() -> None:
+    """A minimal child's runtime failure points the caller at a new standard subagent, not the mode command."""
+    agent = MinimalAgent(id="helper", name="Helper")
+    agent.delegation_depth = 1
+    with pytest.raises(MinimalModeUnavailableError) as raised:
+        agent._raise_failure(RuntimeError("Minimal Bash requires an active managed response owner"))
+
+    assert str(raised.value) == (
+        "Minimal Bash requires an active managed response owner. Start a new subagent without minimal."
+    )

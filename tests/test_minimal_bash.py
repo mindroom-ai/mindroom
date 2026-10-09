@@ -78,7 +78,7 @@ async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -
         pytest.fail("disabled source reached worker")
 
     facade = MinimalBashTools(execute=execute)
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(ValueError, match=r"^No toolkit 'shell'$"):
         await facade.bash(command="echo no", fc=FunctionCall(function=Function(name="bash")))
 
 

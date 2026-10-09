@@ -26,7 +26,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="db_url",
             label="Db URL",
-            type="url",
+            type="password",
             required=False,
             default=None,
         ),

@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import nio
 import pytest
@@ -116,6 +116,24 @@ def command(body: str = "!personal") -> nio.RoomMessageText:
             "content": {"msgtype": "m.text", "body": body},
         },
     )
+
+
+def lobby_rejoin() -> nio.RoomMemberEvent:
+    """Build a lobby leave-to-join event, which asks to re-invite a departed owner."""
+    return nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": "$rejoin",
+            "sender": "@alice:localhost",
+            "state_key": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+
+
+LOBBY = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
 
 
 @pytest.mark.asyncio
@@ -352,26 +370,141 @@ async def test_live_triggers_ignore_reconciliation_backoff(coordination: Coordin
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [RuntimeError("membership mismatch"), None, None, None]
     await lifecycle._reconcile()
-    room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
-    assert await lifecycle.handle_command(room, command())
-    rejoin = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": "$rejoin",
-            "sender": "@alice:localhost",
-            "state_key": "@alice:localhost",
-            "origin_server_ts": 1,
-            "content": {"membership": "join"},
-            "unsigned": {"prev_content": {"membership": "leave"}},
-        },
-    )
-    await lifecycle.member_event(room, rejoin)
-    join = RoomMemberJoin(room.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
+    assert await lifecycle.handle_command(LOBBY, command())
+    await lifecycle.member_event(LOBBY, lobby_rejoin())
+    join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
     await lifecycle.baseline_join(join)
     assert coordination.owner.ensure.await_count == 4
     clock.now += 1
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_failed_live_trigger_is_retried_by_reconciliation_with_its_reinvite_request(
+    coordination: Coordination,
+) -> None:
+    """A lobby rejoin that fails settles, and the next pass retries it even after that requester was reconciled."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    await lifecycle._reconcile()
+    assert lifecycle._reconciled
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room invite failed"), None]
+
+    await lifecycle.member_event(LOBBY, lobby_rejoin())
+    await lifecycle._reconcile()
+
+    retry = call("@alice:localhost", LOBBY.room_id, lifecycle.runtime.client, reinvite_departed_owner=True)
+    assert coordination.owner.ensure.await_args_list[-2:] == [retry, retry]
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_failed_live_trigger_without_recorded_intent_is_retried(coordination: Coordination) -> None:
+    """A command that fails before its owner records any intent is still retried by the next pass."""
+    lifecycle = coordination.lifecycle
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room onboarding membership unavailable"), None]
+    assert await lifecycle.handle_command(LOBBY, command())
+
+    await lifecycle._reconcile()
+
+    assert coordination.owner.ensure.await_count == 2
+    coordination.owner.ensure.assert_awaited_with(
+        "@alice:localhost",
+        LOBBY.room_id,
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_live_trigger_failing_during_a_pass_keeps_reconciliation_pending(coordination: Coordination) -> None:
+    """A pass that started before a live trigger failed cannot mark that trigger's retry as done."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "bob")
+    attempts = []
+
+    async def ensure(user_id: str, *_args: object, **_kwargs: object) -> None:
+        attempts.append(user_id)
+        if len(attempts) == 1:
+            assert await lifecycle.handle_command(LOBBY, command())
+        elif len(attempts) == 2:
+            msg = "Personal-room invite failed"
+            raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    assert not lifecycle._reconciled
+    await lifecycle._reconcile()
+
+    assert attempts == ["@bob:localhost", "@alice:localhost", "@alice:localhost"]
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("second_trigger", "retried_reinvite"), [("rejoin", False), ("command", True)])
+async def test_successful_live_trigger_retires_only_the_retry_it_covers(
+    coordination: Coordination,
+    second_trigger: str,
+    retried_reinvite: bool,
+) -> None:
+    """A later rejoin that succeeds satisfies a failed rejoin, so an owner who leaves again is not re-invited.
+
+    A command carries no re-invite request, so its success leaves the failed rejoin's request pending.
+    """
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room invite failed"), None, None]
+    await lifecycle.member_event(LOBBY, lobby_rejoin())
+    if second_trigger == "rejoin":
+        await lifecycle.member_event(LOBBY, lobby_rejoin())
+    else:
+        assert await lifecycle.handle_command(LOBBY, command())
+
+    await lifecycle._reconcile()
+
+    assert coordination.owner.ensure.await_args == call(
+        "@alice:localhost",
+        LOBBY.room_id,
+        lifecycle.runtime.client,
+        reinvite_departed_owner=retried_reinvite,
+    )
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_rejoin_failing_during_its_owners_reconciliation_keeps_the_reinvite_pending(
+    coordination: Coordination,
+) -> None:
+    """An attempt that started without a re-invite request cannot settle one a rejoin added while it ran."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    reinvites = []
+
+    async def ensure(*_args: object, reinvite_departed_owner: bool) -> None:
+        reinvites.append(reinvite_departed_owner)
+        if len(reinvites) == 1:
+            await lifecycle.member_event(LOBBY, lobby_rejoin())
+        elif len(reinvites) == 2:
+            msg = "Personal-room invite failed"
+            raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    assert not lifecycle._reconciled
+    await lifecycle._reconcile()
+
+    assert reinvites == [False, True, True]
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_live_trigger_preserves_cancellation(coordination: Coordination) -> None:
+    """Shutdown cancellation still stops an onboarding-room trigger instead of settling it."""
+    coordination.owner.ensure.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await coordination.lifecycle.handle_command(LOBBY, command())
 
 
 @pytest.mark.asyncio

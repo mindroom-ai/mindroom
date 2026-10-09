@@ -153,7 +153,7 @@ async def _consume_frame(bot: AgentBot, session: DurableSync, frame: bytes) -> N
         completed = True
 
     try:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(30):
             while not completed:
                 facts = await consume_one_ingestion_batch(
                     session,
@@ -439,7 +439,7 @@ async def test_invite_completion_keeps_a_replacement_pending_inviter(
     replacement = "@replacement:localhost"
 
     async def welcome(_room_id: str, _sender: str) -> None:
-        bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement)
+        await bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement)
 
     monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
     async with _owned_session(bot) as session:

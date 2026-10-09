@@ -12,7 +12,7 @@ installation, not an invented one.
 The independent handled-turn importer still preserves response identities from
 the old ledger. Initial-sync history suppression belongs to Nio and is covered
 by the durable-ingestion runtime tests; old continuity records now require
-the explicit cutover described in docs/deployment/nio-upgrade.md.
+the explicit cutover described in docs/deployment/upgrades.md.
 """
 
 from __future__ import annotations

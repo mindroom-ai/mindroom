@@ -14,7 +14,13 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_session_storage
-from mindroom.delegation.lifecycle import note_child_run_id, settle_child_response, start_child_turn
+from mindroom.delegation.lifecycle import (
+    finish_child_turn,
+    note_child_run_id,
+    settle_child_response,
+    start_child_turn,
+)
+from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import _cancel_delegations, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
@@ -163,3 +169,39 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
     original_run = await read_child_run(original, config, paths)
     assert original_run is not None
     assert original_run.status == RunStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_plants_a_directory_over_its_record_export_is_still_settled(tmp_path: Path) -> None:
+    """The approval decision commits, and cancelling from a stale parent snapshot of a failed child returns."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    child.storage_bindings = freeze_delegation_storage(config, ("leader", "child"))
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    handle = await DelegationRecordOwner(config, paths).reopen(DelegationRecordLocator.from_dict(child.record_locator))
+    (handle.child_workspace / handle.scoped_path / "run.json").unlink()
+    (handle.child_workspace / handle.scoped_path / "run.json").mkdir()
+    paused = RunOutput(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        status=RunStatus.paused,
+        tools=[ToolExecution(tool_call_id="gated", tool_name="shell", requires_confirmation=True)],
+    )
+
+    await settle_child_response(child, paused, config=config, runtime_paths=paths, decisions={"gated": True})
+    # The parent's stored snapshot still holds the paused child after the child's failure settled its record.
+    parent = RunOutput(metadata={DELEGATION_STATE_KEY: DelegationState(children=[replace(child)]).to_dict()})
+    await finish_child_turn(child, config=config, runtime_paths=paths, status="failed", reason="Child failed")
+    await _cancel_delegations(parent, config=config, runtime_paths=paths, reason="Stopped")
+
+    assert DelegationState.from_metadata(parent.metadata).children[0].status == "cancelled"
+    events = [json.loads(line) for line in (handle.state_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert "approval_decision" in [event["kind"] for event in events]
+    assert (events[-1]["kind"], events[-1]["data"]["status"]) == ("delegation_finished", "failed")

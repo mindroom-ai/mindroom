@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileA
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.calculator import CalculatorTools
+    from mindroom.custom_tools.calculator import CalculatorTools
 
 
 @register_tool_with_metadata(
@@ -28,6 +28,6 @@ if TYPE_CHECKING:
 )
 def calculator_tools() -> type[CalculatorTools]:
     """Return calculator tools for mathematical operations."""
-    from agno.tools.calculator import CalculatorTools
+    from mindroom.custom_tools.calculator import CalculatorTools
 
     return CalculatorTools

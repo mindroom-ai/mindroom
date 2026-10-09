@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextvars import Context
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -924,6 +925,41 @@ class TestUserIdPassthrough:
 
         assert mock_prepare_execution.await_args is not None
         assert mock_prepare_execution.await_args.kwargs["current_sender_id"] == expected_sender
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_labels_an_agent_reply_with_its_author(self, tmp_path: Path) -> None:
+        """A reply an agent wrote for a human stays that agent's words while the human is the requester."""
+        mock_agent = MagicMock()
+        prepared_execution = _PreparedExecutionContext(
+            messages=(Message(role="user", content="prepared prompt"),),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+        )
+
+        with (
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(),
+            ),
+            patch("mindroom.ai.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.ai.prepare_agent_execution_context",
+                new=AsyncMock(return_value=prepared_execution),
+            ) as mock_prepare_execution,
+        ):
+            await _prepare_agent_and_prompt(
+                replace(
+                    make_turn_context("general", requester_id="@alice:example.com"),
+                    current_sender_id="@mindroom_research:example.com",
+                ),
+                prompt="test",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+
+        assert mock_prepare_execution.await_args is not None
+        assert mock_prepare_execution.await_args.kwargs["current_sender_id"] == "@mindroom_research:example.com"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -1958,6 +1994,51 @@ class TestUserIdPassthrough:
         assert chunks == ["friendly-error"]
         friendly_error = mock_friendly_error.call_args.args[0]
         assert str(friendly_error) == "Agent run failed (type=APITimeoutError, id=timeout-1)"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_errored_run_keeps_request_usage(self, tmp_path: Path) -> None:
+        """A run that fails after model requests still reports their tokens in the run metadata."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=500,
+                output_tokens=60,
+                total_tokens=560,
+            )
+            yield RunErrorEvent(content="provider failed")
+
+        mock_agent.arun = MagicMock(return_value=failing_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error"),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_metadata_collector=run_metadata,
+                )
+            ]
+
+        assert chunks == ["friendly-error"]
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["status"] == "error"
+        assert payload["usage"]["input_tokens"] == 500
+        assert payload["usage"]["output_tokens"] == 60
 
     @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:

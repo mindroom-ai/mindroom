@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
-from PIL import Image
+from PIL import Image, JpegImagePlugin, PngImagePlugin
 
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
@@ -112,6 +112,38 @@ class TestUploadFileAsMxc:
 
         assert payload is not None
         assert (payload["info"]["w"], payload["info"]["h"]) == (300, 400)
+
+    @pytest.mark.asyncio
+    async def test_image_dimensions_are_read_without_decoding_the_raster(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A PNG without early EXIF and a rotated JPEG report their header dimensions without a pixel decode."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = _upload_response()
+        png = tmp_path / "chart.png"
+        Image.new("1", (1600, 900)).save(png)
+        jpeg = tmp_path / "huge.jpg"
+        exif = Image.Exif()
+        exif[274] = 6
+        Image.new("L", (8000, 6000)).save(jpeg, exif=exif)
+        loads: list[object] = []
+
+        def record_load(image: object) -> None:
+            loads.append(image)
+
+        for image_class in (PngImagePlugin.PngImageFile, JpegImagePlugin.JpegImageFile):
+            monkeypatch.setattr(image_class, "load", record_load)
+
+        _mxc_uri, png_payload = await _upload_file_as_mxc(client, "!room:localhost", png, mimetype="image/png")
+        _mxc_uri, jpeg_payload = await _upload_file_as_mxc(client, "!room:localhost", jpeg, mimetype="image/jpeg")
+
+        assert png_payload is not None
+        assert png_payload["info"] == {"size": png.stat().st_size, "mimetype": "image/png", "w": 1600, "h": 900}
+        assert jpeg_payload is not None
+        assert (jpeg_payload["info"]["w"], jpeg_payload["info"]["h"]) == (6000, 8000)
+        assert loads == []
 
     @pytest.mark.asyncio
     async def test_undecodable_image_upload_omits_dimensions(self, tmp_path: Path) -> None:
@@ -636,38 +668,6 @@ class TestSendFileMessage:
         client.upload.assert_awaited_once()
         assert client.room_send.await_count == 2
 
-    @pytest.mark.asyncio
-    async def test_caption_overrides_body(self, tmp_path: Path) -> None:
-        """When caption is set, body should use it instead of filename."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/c1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
-        file = tmp_path / "report.pdf"
-        file.write_bytes(b"%PDF")
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-                caption="Q4 Report",
-            )
-
-        assert sent_content is not None
-        assert sent_content["body"] == "Q4 Report"
-        assert sent_content["filename"] == "report.pdf"
-
 
 class TestSendAudioMessage:
     """Tests for direct Matrix audio voice sends."""
@@ -782,7 +782,7 @@ class TestSendAudioMessage:
 
         with (
             patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
-            patch("mindroom.matrix.client_delivery._upload_media_bytes_as_mxc", new_callable=AsyncMock) as mock_upload,
+            patch("mindroom.matrix.client_delivery.upload_media_bytes_as_mxc", new_callable=AsyncMock) as mock_upload,
         ):
             result = await send_audio_message(
                 client,

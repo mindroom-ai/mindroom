@@ -18,7 +18,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _request_status(runtime_paths: RuntimePaths, url: str | None, timeout: float) -> ConfigReloadStatus:
+def request_reload_status(runtime_paths: RuntimePaths, url: str | None, timeout: float) -> ConfigReloadStatus:
+    """Read the latest runtime reload result, rejecting malformed or conflicting responses."""
     from mindroom.config_reload import ConfigReloadStatus  # noqa: PLC0415
 
     response = get_api_response(runtime_paths, url, "/api/config/reload-status", timeout, require_key=True)
@@ -36,13 +37,14 @@ def _request_status(runtime_paths: RuntimePaths, url: str | None, timeout: float
     return status
 
 
-def _wait_for_applied(
+def wait_for_applied(
     runtime_paths: RuntimePaths,
     url: str | None,
     expected: str,
     wait: float,
     timeout: float,
 ) -> ConfigReloadStatus:
+    """Poll until the runtime settles the expected fingerprint; other fingerprints read as pending."""
     from mindroom.config_reload import ConfigReloadStatus  # noqa: PLC0415
 
     for name, value in (("wait", wait), ("timeout", timeout)):
@@ -55,7 +57,7 @@ def _wait_for_applied(
     while True:
         request_timeout = min(timeout, max(0.001, deadline - time.monotonic())) if wait else timeout
         try:
-            status = _request_status(runtime_paths, url, request_timeout)
+            status = request_reload_status(runtime_paths, url, request_timeout)
         except TimeoutError:
             if status is not None and wait and time.monotonic() >= deadline:
                 return status
@@ -117,7 +119,7 @@ def config_check_applied(
     try:
         runtime_paths = activate_cli_runtime(path)
         expected = fingerprint if fingerprint is not None else _fingerprint(runtime_paths.config_path)
-        status = _wait_for_applied(runtime_paths, url, expected, wait, timeout)
+        status = wait_for_applied(runtime_paths, url, expected, wait, timeout)
     except (ValueError, OSError) as exc:
         if json_output:
             typer.echo(json.dumps({"status": "unavailable", "detail": str(exc)}))

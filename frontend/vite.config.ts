@@ -63,16 +63,18 @@ export default defineConfig({
       "Content-Security-Policy": "frame-ancestors 'none'",
     },
     proxy: {
+      // Requests keep the browser's Host, so a backend without a credential can
+      // refuse DNS-rebinding names; only requests the proxy authenticates name the backend.
       "/api": {
         target: `http://localhost:${mindroomPort}`,
-        changeOrigin: true,
         configure(proxy) {
           if (apiKey) {
             proxy.on("proxyReq", (proxyReq, req) => {
               if (!req.headers.authorization && isOperatorRequest(req)) {
                 proxyReq.setHeader("Authorization", `Bearer ${apiKey}`);
-                // The proxy is now the API client, so drop the browser's origin
-                // metadata instead of forwarding the dev server's origin upstream.
+                // The proxy is now the API client, so address the backend directly
+                // and drop the browser's origin metadata instead of forwarding it.
+                proxyReq.setHeader("Host", `localhost:${mindroomPort}`);
                 proxyReq.removeHeader("Origin");
                 proxyReq.removeHeader("Sec-Fetch-Site");
               }

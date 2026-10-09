@@ -369,7 +369,7 @@ async def test_launch_persists_recovery_contract_only_for_kubernetes(tmp_path: P
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend_name", ["kubernetes", "docker"])
 async def test_launch_sends_live_config_only_to_seeded_workers(tmp_path: Path, backend_name: str) -> None:
-    """Kubernetes script workers mount only a seed config, so the launch carries the primary's redacted live config."""
+    """Kubernetes script workers mount no config, so the launch carries the allowlisted live config fields."""
     manager, backend, client = _manager(tmp_path, backend=backend_name, isolated_script_gateway=True)
     backend.backend_name = backend_name
     context = _context(tmp_path, backend=backend_name, isolated_script_gateway=True)

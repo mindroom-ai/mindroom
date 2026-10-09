@@ -434,6 +434,45 @@ def test_access_rejects_conflicting_or_missing_folders_without_saving(
     assert load_native_config(path) == saved
 
 
+@pytest.mark.parametrize(("folder", "shell"), [(True, False), (False, True)])
+def test_access_without_posix_never_saves_folders_or_shell(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    folder: bool,
+    shell: bool,
+) -> None:
+    """Windows cannot run folders or shell, so access refuses them instead of saving a setup the run rejects."""
+    path = native_config_path(shared_setup.storage_root)
+    saved = save_native_config(path, _config(), expected_revision=0)
+    monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
+    arguments = ["--allow-folder", str(_folder(shared_setup))] if folder else []
+
+    result = CliRunner().invoke(desktop_cli.desktop_app, ["access", *arguments, *(["--shell"] if shell else [])])
+
+    assert result.exit_code == 1
+    assert "need macOS or Linux" in _shown(result.output)
+    assert "`mindroom desktop access --clear-folders --no-shell`" in _shown(result.output)
+    assert "full access" not in _shown(result.output)
+    assert load_native_config(path) == saved
+
+
+def test_access_without_posix_still_turns_folders_and_shell_off(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command the refusal names clears setup saved elsewhere."""
+    path = native_config_path(shared_setup.storage_root)
+    local_access = _with_local_access(_config(), _folder(shared_setup), shell_enabled=True)
+    save_native_config(path, local_access, expected_revision=0)
+    monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
+
+    result = CliRunner().invoke(desktop_cli.desktop_app, ["access", "--clear-folders", "--no-shell"])
+
+    assert result.exit_code == 0, result.output
+    cleared = load_native_config(path)
+    assert (cleared.files.roots, cleared.shell.enabled) == ((), False)
+
+
 @pytest.mark.parametrize("state", ["missing", "disabled"])
 def test_access_requires_saved_enabled_setup(shared_setup: SimpleNamespace, state: str) -> None:
     """Local access is attached to an existing pairing and never creates a configuration."""

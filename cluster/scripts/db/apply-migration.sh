@@ -4,7 +4,8 @@
 # Usage: SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<ref> cluster/scripts/db/apply-migration.sh <file.sql>
 #
 # Operators have no database password, so this uses a Supabase personal access token instead.
-# Migrations 002-004 in saas-platform/supabase/migrations are written to be re-runnable; 000 is for fresh installs only.
+# Every migration from 002 on in saas-platform/supabase/migrations is written to be re-runnable; apply them in numeric
+# order. 000 is for fresh installs only. 007 fails without changing anything while a subscription has several instances.
 # Prints the API response and exits non-zero when the query fails.
 
 set -euo pipefail

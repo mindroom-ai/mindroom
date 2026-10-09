@@ -6,7 +6,7 @@ Use this prompt when delegating the next runtime-architecture follow-up PR after
 You are doing a follow-up architecture refactor, not a bug fix.
 
 Read first:
-- CLAUDE.md
+- AGENTS.md
 - docs/dev/runtime-path-architecture-refactor-prompt.md
 
 Goal:

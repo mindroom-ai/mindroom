@@ -48,6 +48,8 @@ __all__ = [
 
 _API_PATH = "/v1/local-mindroom/pair/device"
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
+# Issued client credentials are written unquoted to .env and sent as headers, so only plain token characters pass.
+_CLIENT_CREDENTIAL_RE = re.compile(r"[A-Za-z0-9._~+/-]{1,512}={0,2}")
 _DEFAULT_POLL_INTERVAL_SECONDS = 3
 _MAX_BACKOFF_SECONDS = 30
 # An approval near expiry may still be handed out, so outages get this grace before timing out locally.
@@ -72,7 +74,8 @@ class PairCompleteResult:
     namespace: str
     owner_user_id: str | None = None
     namespace_invalid: bool = False
-    owner_user_id_invalid: bool = False
+    # The owner the service named when it is not a current-grammar Matrix user ID; it is shown, never saved.
+    rejected_owner_user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,25 +107,24 @@ class _ServiceError(ValueError):
         return self.status_code in {0, 429} or self.status_code >= 500
 
 
-def _httpx_post(url: str, *, json: Mapping[str, object], timeout: float, verify: bool) -> httpx.Response:
+def _httpx_post(url: str, *, json: Mapping[str, object], timeout: float) -> httpx.Response:
     """Call httpx.post without importing httpx during CLI help rendering."""
     import httpx  # noqa: PLC0415
 
-    return httpx.post(url, json=json, timeout=timeout, verify=verify)
+    # The service names this install's owner, so TLS is verified whatever MATRIX_SSL_VERIFY says.
+    return httpx.post(url, json=json, timeout=timeout)
 
 
 def _post_json(
     post_request: Callable[..., httpx.Response],
     url: str,
     payload: Mapping[str, object],
-    *,
-    verify: bool,
 ) -> dict[str, object]:
     """POST to the provisioning service and return its JSON object, raising _ServiceError for failed requests."""
     import httpx  # noqa: PLC0415
 
     try:
-        response = post_request(url, json=payload, timeout=10, verify=verify)
+        response = post_request(url, json=payload, timeout=10)
     except httpx.HTTPError as exc:
         raise _ServiceError(0, str(exc)) from exc
     if not response.is_success:
@@ -142,10 +144,11 @@ def _parse_pair_complete(data: dict[str, object]) -> PairCompleteResult:
     """Read credentials from a connected poll response."""
     raw_owner_user_id = data.get("owner_user_id")
     parsed_owner_user_id = parse_owner_matrix_user_id(raw_owner_user_id)
-    owner_user_id_invalid = (
-        isinstance(raw_owner_user_id, str) and bool(raw_owner_user_id.strip()) and parsed_owner_user_id is None
-    )
-    client_id = _required_non_empty_string(data, "client_id")
+    rejected_owner_user_id = None
+    if parsed_owner_user_id is None and raw_owner_user_id is not None:
+        named_owner = raw_owner_user_id.strip() if isinstance(raw_owner_user_id, str) else str(raw_owner_user_id)
+        rejected_owner_user_id = named_owner or None
+    client_id = _required_client_credential(data, "client_id")
     raw_namespace = data.get("namespace")
     parsed_namespace = _parse_namespace(raw_namespace)
     namespace_invalid = isinstance(raw_namespace, str) and bool(raw_namespace.strip()) and parsed_namespace is None
@@ -154,11 +157,11 @@ def _parse_pair_complete(data: dict[str, object]) -> PairCompleteResult:
 
     return PairCompleteResult(
         client_id=client_id,
-        client_secret=_required_non_empty_string(data, "client_secret"),
+        client_secret=_required_client_credential(data, "client_secret"),
         namespace=parsed_namespace,
         owner_user_id=parsed_owner_user_id,
         namespace_invalid=namespace_invalid,
-        owner_user_id_invalid=owner_user_id_invalid,
+        rejected_owner_user_id=rejected_owner_user_id,
     )
 
 
@@ -190,19 +193,17 @@ def _start_session(
     *,
     client_name: str,
     client_fingerprint: str,
-    verify: bool,
 ) -> DevicePairSession:
     """Start a device pairing session with the provisioning service."""
     started = _post_json(
         post_request,
         f"{base_url}/start",
         {"client_name": client_name.strip(), "client_pubkey_or_fingerprint": client_fingerprint},
-        verify=verify,
     )
     return DevicePairSession(
         pair_code=_required_non_empty_string(started, "pair_code"),
         device_secret=_required_non_empty_string(started, "device_secret"),
-        approve_url=_required_non_empty_string(started, "approve_url"),
+        approve_url=_parse_approve_url(_required_non_empty_string(started, "approve_url")),
         poll_interval_seconds=_validate_poll_interval(started.get("poll_interval_seconds")),
         expires_at=_parse_expires_at(_required_non_empty_string(started, "expires_at")),
     )
@@ -214,7 +215,6 @@ def _start_session_with_retry(
     *,
     client_name: str,
     client_fingerprint: str,
-    verify: bool,
     sleep: Callable[[float], None],
     warn: Callable[[str], None] | None,
     stopped: Callable[[], bool],
@@ -231,7 +231,6 @@ def _start_session_with_retry(
                 base_url,
                 client_name=client_name,
                 client_fingerprint=client_fingerprint,
-                verify=verify,
             )
         except _ServiceError as exc:
             if not exc.transient:
@@ -249,7 +248,6 @@ def _wait_for_approval(
     base_url: str,
     session: DevicePairSession,
     *,
-    verify: bool,
     sleep: Callable[[float], None],
     stopped: Callable[[], bool],
     now: Callable[[], datetime],
@@ -269,7 +267,6 @@ def _wait_for_approval(
                 post_request,
                 f"{base_url}/poll",
                 {"device_secret": session.device_secret},
-                verify=verify,
             )
         except _ServiceError as exc:
             # The service prunes expired sessions, so an unknown device secret means expired.
@@ -336,7 +333,6 @@ def run_device_pairing(
     provisioning_url: str,
     client_name: str,
     client_fingerprint: str,
-    matrix_ssl_verify: bool,
     announce: Callable[[DevicePairSession], None],
     post_request: Callable[..., httpx.Response] | None = None,
     sleep: Callable[[float], None] | None = None,
@@ -350,6 +346,7 @@ def run_device_pairing(
     When renew_expired is True, expired sessions and approvals whose credentials never arrived start a new code and announce it again, and transient failures to start a session are retried with backoff.
     When False, these outcomes and start failures raise ValueError (prevents indefinite waiting in interactive flows).
     Returns None when stop_waiting, checked before each session start, start retry, and poll, reports that pairing is no longer needed.
+    The callback may instead raise to abort its caller, as the CLI does for local cancellation.
     """
     post = post_request or _httpx_post
     sleep = sleep or time.sleep
@@ -367,7 +364,6 @@ def run_device_pairing(
                 base_url,
                 client_name=client_name,
                 client_fingerprint=client_fingerprint,
-                verify=matrix_ssl_verify,
                 sleep=sleep,
                 warn=warn,
                 stopped=stopped,
@@ -380,14 +376,12 @@ def run_device_pairing(
                 base_url,
                 client_name=client_name,
                 client_fingerprint=client_fingerprint,
-                verify=matrix_ssl_verify,
             )
         announce(session)
         outcome = _wait_for_approval(
             post,
             base_url,
             session,
-            verify=matrix_ssl_verify,
             sleep=sleep,
             stopped=stopped,
             now=now,
@@ -491,7 +485,6 @@ def pair_local_install(
         provisioning_url=resolved_url,
         client_name=name,
         client_fingerprint=local_client_fingerprint(config_path=runtime_paths.config_path),
-        matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
         announce=announce,
         post_request=post_request,
         sleep=sleep,
@@ -502,7 +495,7 @@ def pair_local_install(
     if result is None:
         console.print("This machine was paired by another MindRoom process; continuing.")
         return None
-    if result.owner_user_id_invalid:
+    if result.rejected_owner_user_id is not None:
         console.print(
             "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
         )
@@ -548,10 +541,15 @@ def _confirm_approver_or_raise(
 
     A pair code or link can be approved by whoever sees it, so the approving account is the one agents will trust.
     """
-    approver = result.owner_user_id or "an account the provisioning service did not identify"
-    console.print(f"\n[bold]Approved by {escape(approver)}.[/bold]")
+    approver = result.owner_user_id
+    description = approver or "an account the provisioning service did not identify"
+    if result.rejected_owner_user_id is not None:
+        # A named account stays named even when it cannot be saved; repr keeps control characters visible.
+        approver = repr(result.rejected_owner_user_id)
+        description = f"{approver}, which is not a valid Matrix user ID"
+    console.print(f"\n[bold]Approved by {escape(description)}.[/bold]")
     # Nobody can recognize an unnamed account, so it gets the same revoke hint as an unattended run.
-    if confirm_approver is None or result.owner_user_id is None:
+    if confirm_approver is None or approver is None:
         console.print(f"If this is not your account, revoke this connection in {_LOCAL_MINDROOM_SETTINGS}.")
         return
     if not confirm_approver():
@@ -574,6 +572,32 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
         return
     if replaced:
         console.print(f"  Updated owner placeholder(s) in: {config_path}")
+    elif _should_note_missing_administrator(config_path, owner_user_id):
+        # A re-pair with another account finds no placeholder left, so the earlier account stays in charge.
+        console.print(
+            f"  Note: {owner_user_id} is not listed in administrators in {config_path}. "
+            "If this account should manage MindRoom, add it to administrators, "
+            "room_defaults.invite_users, and room_defaults.admins.",
+            markup=False,
+        )
+
+
+def _should_note_missing_administrator(config_path: Path, owner_user_id: str) -> bool:
+    """Return True when the config's administrators list omits the user.
+
+    Return False when the config cannot be read, does not load as a mapping, or has a non-list administrators value.
+    A missing or null administrators value counts as an empty list.
+    """
+    try:
+        data, _ = load_yaml_config_source(config_path)
+    except (OSError, yaml.YAMLError, UnicodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    administrators = data.get("administrators")
+    if administrators is None:
+        return True
+    return isinstance(administrators, list) and owner_user_id not in administrators
 
 
 def _is_hosted_homeserver(homeserver: str) -> bool:
@@ -655,6 +679,29 @@ def _required_non_empty_string(data: dict[str, object], key: str) -> str:
             return value
     msg = f"Provisioning response missing {key}."
     raise ValueError(msg)
+
+
+def _required_client_credential(data: dict[str, object], key: str) -> str:
+    """Read an issued client credential, refusing anything but a plain token."""
+    value = _required_non_empty_string(data, key)
+    if _CLIENT_CREDENTIAL_RE.fullmatch(value) is None:
+        msg = f"Provisioning response has invalid {key}."
+        raise ValueError(msg)
+    return value
+
+
+def _parse_approve_url(raw_value: str) -> str:
+    """Return an approval link a browser may open: a plain http(s) URL that every URL parser reads alike."""
+    msg = "Pairing response has invalid approve_url."
+    if not raw_value.isprintable() or " " in raw_value or "\\" in raw_value:
+        raise ValueError(msg)
+    try:
+        parsed = urlparse(raw_value)
+    except ValueError:
+        raise ValueError(msg) from None
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None:
+        raise ValueError(msg)
+    return raw_value
 
 
 def _parse_namespace(raw_value: object) -> str | None:

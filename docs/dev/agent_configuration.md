@@ -44,7 +44,7 @@ models:
 
   anthropic:
     provider: "anthropic"
-    id: "claude-haiku-4-5"
+    id: "claude-haiku-5-5"
 
   ollama:
     provider: "ollama"
@@ -54,7 +54,7 @@ models:
 
   openrouter:
     provider: "openrouter"
-    id: "anthropic/claude-sonnet-5"
+    id: "anthropic/claude-sonnet-5.5"
 ```
 
 Each model entry supports these fields:
@@ -63,6 +63,7 @@ Each model entry supports these fields:
 - **host** - Optional host URL for Ollama.
 - **extra_kwargs** - Additional provider-specific parameters; set `extra_kwargs.base_url` for an OpenAI-compatible server.
 - **context_window** - Actual provider context window size in tokens; when set, MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction config sets a smaller `replay_window_tokens`, and applies a final replay-fit step that may reduce or disable persisted replay for that run; on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window
+- **stream_idle_timeout_seconds** - Seconds a streamed request may go without a provider event before MindRoom treats it as stalled and retries once if nothing was streamed yet; unset means 300 for hosted providers on their built-in endpoint and no limit for `ollama`, `llama_cpp`, or a configured endpoint; `0` disables the limit
 
 ### Supported Providers
 
@@ -101,6 +102,7 @@ memory:
   llm: null  # Optional LLM for memory operations (provider + config dict)
   file:
     max_entrypoint_lines: 200  # Max lines preloaded from MEMORY.md
+    max_entrypoint_tokens: 50000  # Max estimated tokens (characters / 4) preloaded from MEMORY.md
   auto_flush:
     enabled: false  # Background file-memory auto-flush (see memory consolidation plan)
     flush_interval_seconds: 1800
@@ -165,7 +167,7 @@ agents:
 - **agent_name**: The configured identifier used for agent config and aliases; provisioning may propose a `mindroom_<agent_name>` username when an account is missing, but runtime identity always comes from persisted Matrix account state.
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
-- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides, including `script` controls such as `allowed_tools`, concurrency, call-rate, and runtime limits (see Available Tools below, [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration), and [Background Python Scripts](../tools/background-scripts.md))
+- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides, including `script` controls such as `allowed_tools`, concurrency, call-rate, and runtime limits (see Available Tools below, [Per-Agent Tool Configuration](../tools/index.md#per-agent-tool-configuration), and [Background Python Scripts](../tools/background-scripts.md))
 - **include_default_tools**: Whether to merge `defaults.tools` into this agent's `tools` (default: true)
 - **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior
@@ -388,7 +390,7 @@ defaults:
 ```
 
 Automatic thread summaries use `defaults.thread_summary_temperature` when the selected provider supports runtime temperature overrides.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.
+MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.
 When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
 The next scheduled automatic summary refresh also returns one to three tags when the thread has no existing tags, whether the prior summary was automatic or manual.
 Initial tags therefore use the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
@@ -489,6 +491,7 @@ Below is a representative selection:
 - **google_docs** - Google Docs creation, reading, and text editing (requires Google OAuth)
 - **google_drive** - Google Drive file reading and management (requires Google OAuth)
 - **google_sheets** - Spreadsheet operations (requires Google OAuth)
+- **google_tasks** - Google Tasks listing, creation, updates, and completion (requires Google OAuth)
 - **homeassistant** - Home Assistant device control (requires OAuth or long-lived access token)
 - **spotify** - Spotify playback and library (requires OAuth)
 - **todoist** - Task management (requires API key)
@@ -600,7 +603,7 @@ Some tools need additional setup:
 
 ### Tools requiring OAuth or credentials:
 - **github** - GitHub App user OAuth, with an explicit access token or `GITHUB_ACCESS_TOKEN` as a higher-precedence alternative
-- **gmail**, **google_calendar**, **google_docs**, **google_drive**, **google_sheets** - Google OAuth
+- **gmail**, **google_calendar**, **google_docs**, **google_drive**, **google_sheets**, **google_tasks** - Google OAuth
 - **homeassistant** - Home Assistant OAuth or long-lived access token
 - **spotify** - Manually supplied Spotify OAuth access token
 
@@ -639,7 +642,7 @@ models:
 
   smart:
     provider: "anthropic"
-    id: "claude-sonnet-5"
+    id: "claude-sonnet-5-5"
 
 # Agent configurations
 agents:

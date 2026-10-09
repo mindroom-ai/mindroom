@@ -59,7 +59,7 @@ from mindroom.response_runner import ResponseRequest, ResponseRunner, _DeliveryP
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.room_thread_modes import set_room_thread_mode_override
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -1378,7 +1378,7 @@ class TestAgentBot(AgentBotTestBase):
                 await asyncio.sleep(0)
 
                 assert not stop_task.done()
-                dispatcher_stop.assert_awaited_once_with()
+                dispatcher_stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
                 finish_cleanup.set()
                 await asyncio.wait_for(stop_task, timeout=1.0)
@@ -1735,7 +1735,8 @@ class TestAgentBot(AgentBotTestBase):
             response_started.set()
             await finish_response.wait()
 
-        async def stop_dispatcher() -> None:
+        async def stop_dispatcher(*, shutdown_intent: RuntimeShutdownIntent) -> None:
+            assert shutdown_intent == SYNC_RESTART_SHUTDOWN
             response_tasks.append(
                 bot._response_runner.track_inbox_response(
                     response_owner(),

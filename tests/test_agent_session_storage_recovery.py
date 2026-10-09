@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import sqlite3
 import stat
@@ -20,6 +21,7 @@ from agno.session.team import TeamSession
 from sqlalchemy import text
 
 from mindroom.agent_storage import create_state_storage
+from mindroom.session_storage_preflight import session_storage_preflight
 from tests.conftest import create_agno_2_sessions_db
 
 if TYPE_CHECKING:
@@ -195,6 +197,53 @@ def test_concurrent_constructors_recover_once_and_share_current_store(tmp_path: 
         assert second.upsert_session(AgentSession(session_id="second", agent_id="general", created_at=1))
         assert first.get_session("second", SessionType.AGENT) is not None
     _assert_old_row(_archived_database(tmp_path))
+
+
+@pytest.mark.parametrize("plant", ["held", "fifo", "link"])
+def test_worker_planted_recovery_lock_fails_promptly(tmp_path: Path, plant: str) -> None:
+    """Sandbox runners write state roots, so a held, FIFO, or linked recovery lock fails instead of stalling or redirecting."""
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    lock = state_root / ".sessions-recovery.lock"
+    elsewhere = tmp_path / "elsewhere.lock"
+    holder = lock.open("a") if plant == "held" else None
+    if holder is not None:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    elif plant == "fifo":
+        os.mkfifo(lock)
+    else:
+        lock.symlink_to(elsewhere)
+    errors: list[Exception] = []
+
+    def preflight() -> None:
+        try:
+            with session_storage_preflight(
+                state_root,
+                storage_name="general",
+                session_table="general_sessions",
+                timeout_seconds=0.2,
+            ):
+                pass
+        except (OSError, ValueError) as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=preflight, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    stalled = thread.is_alive()
+    # Release whatever still blocks the preflight so it does not outlive the test.
+    if holder is not None:
+        holder.close()
+    if stalled and plant == "fifo":
+        os.close(os.open(lock, os.O_RDONLY | os.O_NONBLOCK))
+    thread.join(timeout=5)
+
+    assert not stalled
+    assert len(errors) == 1
+    assert not elsewhere.exists()
+    if plant == "held":
+        assert isinstance(errors[0], TimeoutError)
+        assert "Session recovery lock" in str(errors[0])
 
 
 @pytest.mark.parametrize("subdir", ["learning", "custom"])

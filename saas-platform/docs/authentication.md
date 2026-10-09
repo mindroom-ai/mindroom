@@ -47,7 +47,7 @@ The runtime evaluates these modes in order:
    Without the key, standalone mode does not require authentication.
 
 Cookie-authenticated mutations also require the expected browser origin.
-See [Kubernetes Deployment](../../docs/deployment/kubernetes.md) for deployment and trusted upstream settings.
+See [Kubernetes Deployment](../../docs/deployment/saas-platform.md) for deployment and trusted upstream settings.
 
 ## Matrix Login
 

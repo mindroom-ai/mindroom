@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
 from mindroom.desktop.filesystem import DesktopFilesystem
-from mindroom.desktop.login_environment import capture_login_environment
+from mindroom.desktop.native_config import require_supported_local_access
 from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 from mindroom.desktop.provider import PyAutoGuiDesktopProvider
 from mindroom.desktop.shell import DesktopShell
@@ -40,7 +40,9 @@ async def build_desktop_bridge(
 
     Only selected apps construct the GUI provider, so folder, shell, and browser runs need no GUI
     runtime. A control lease expiry grants app input from the start; without one the bridge is observe-only.
+    Folder and shell access are refused before anything is built on a computer without POSIX.
     """
+    require_supported_local_access(config)
     browser = None
     filesystem = None
     shell = None
@@ -64,6 +66,9 @@ async def build_desktop_bridge(
         )
         filesystem = DesktopFilesystem(config.files.roots) if config.files.roots else None
         if config.shell.enabled:
+            # Login-shell capture needs pwd, so only runs that passed the POSIX check import it.
+            from mindroom.desktop.login_environment import capture_login_environment  # noqa: PLC0415
+
             shell = DesktopShell(environment=await capture_login_environment())
         bridge = DesktopBridge(
             client=client,

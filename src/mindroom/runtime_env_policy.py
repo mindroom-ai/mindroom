@@ -7,8 +7,6 @@ from collections.abc import Mapping  # noqa: TC003 - public annotations support 
 from types import MappingProxyType
 from typing import cast
 
-from mindroom.sensitivity import secret_name_suffixes
-
 __all__ = [
     "AGENT_VAULT_ACCESS_ENV_BY_KEY",
     "AWS_BEDROCK_CLAUDE_ENV_BY_KEY",
@@ -32,9 +30,7 @@ __all__ = [
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
     "WORKER_COMPUTER_ENABLED_ENV",
     "WORKER_EGRESS_PROXY_ENV_BY_KEY",
-    "credentials_encryption_key_from_env",
     "credentials_encryption_key_value",
-    "execution_tool_runtime_env",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
     "is_runtime_control_env_name",
@@ -157,15 +153,13 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "namespace": "MINDROOM_KUBERNETES_WORKER_NAMESPACE",
         "image": "MINDROOM_KUBERNETES_WORKER_IMAGE",
         "image_pull_policy": "MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY",
+        "image_pull_secrets_json": "MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_SECRETS_JSON",
         "port": "MINDROOM_KUBERNETES_WORKER_PORT",
         "service_account": "MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME",
         "runtime_class_name": "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME",
         "storage_pvc": "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME",
         "storage_mount_path": "MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH",
         "storage_subpath_prefix": "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
-        "config_map_name": "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME",
-        "config_key": "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY",
-        "config_path": "MINDROOM_KUBERNETES_WORKER_CONFIG_PATH",
         "idle_timeout": "MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS",
         "ready_timeout": "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS",
         "name_prefix": "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX",
@@ -182,6 +176,8 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "memory_limit": "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
         "cpu_request": "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST",
         "cpu_limit": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
+        "tmp_size_limit": "MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT",
+        "user_resources_json": "MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON",
         "script_resource_profiles_json": "MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON",
         "default_script_resource_profile": "MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE",
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
@@ -329,8 +325,7 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
-# Shared secret stems (api_key/password/secret/token) plus the env-only `_API_KEYS`.
-_RUNTIME_STARTUP_SECRET_SUFFIXES = (*secret_name_suffixes(upper=True), "_API_KEYS")
+_RUNTIME_STARTUP_SECRET_SUFFIXES = ("_API_KEY", "_API_KEYS", "_PASSWORD", "_SECRET", "_TOKEN")
 _RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
 _RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
@@ -441,7 +436,7 @@ def is_public_worker_startup_env_name(name: str) -> bool:
 
 def is_isolated_worker_runtime_env_name(name: str) -> bool:
     """Return whether inherited env may remain visible inside isolated workers."""
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES and name != CREDENTIALS_ENCRYPTION_KEY_ENV:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
@@ -499,15 +494,6 @@ def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
 
 
-def execution_tool_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
-    """Return env safe for sandboxed tool execution snapshots."""
-    return {
-        key: value
-        for key, value in env.items()
-        if is_isolated_worker_runtime_env_name(key) and key != CREDENTIALS_ENCRYPTION_KEY_ENV
-    }
-
-
 def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return ambient process env safe for non-dedicated sandbox runner startup rehydration."""
     return {
@@ -548,11 +534,6 @@ def credentials_encryption_key_value(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
-
-
-def credentials_encryption_key_from_env(env: Mapping[str, str]) -> str | None:
-    """Return the credential encryption key from an env mapping."""
-    return credentials_encryption_key_value(env.get(CREDENTIALS_ENCRYPTION_KEY_ENV))
 
 
 def sandbox_shell_system_env(env: Mapping[str, str]) -> Mapping[str, str]:

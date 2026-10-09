@@ -61,6 +61,10 @@ class _SharedWith:
     membership_ts: int
 
 
+def _share(member: CallMember) -> _SharedWith:
+    return _SharedWith(user_id=member.user_id, device_id=member.device_id, membership_ts=member.created_ts)
+
+
 @dataclass
 class FrameKeyManager:
     """Tracks the outbound key lifecycle and validates inbound keys."""
@@ -71,8 +75,9 @@ class FrameKeyManager:
     _key_index: int = field(default=0, init=False)
     _key_created_ms: int = field(default=0, init=False)
     _key_activation_ms: int = field(default=0, init=False)
-    _shared_with: list[_SharedWith] = field(default_factory=list, init=False)
-    _exposed_to: list[_SharedWith] = field(default_factory=list, init=False)
+    # Sets keep each distribution linear in the roster, which a caller can inflate with planted devices.
+    _shared_with: set[_SharedWith] = field(default_factory=set, init=False)
+    _exposed_to: set[_SharedWith] = field(default_factory=set, init=False)
     _newest_inbound_ts: dict[tuple[str, str, int], int] = field(default_factory=dict, init=False)
 
     def update_memberships(self, members: list[CallMember], now_ms: int) -> _KeyDistribution | None:
@@ -81,15 +86,8 @@ class FrameKeyManager:
         Returns the distribution to perform, or ``None`` when nothing changed.
         Callers must report a completed send via :meth:`mark_distributed`.
         """
-        remote = [
-            _SharedWith(user_id=m.user_id, device_id=m.device_id, membership_ts=m.created_ts)
-            for m in members
-            if not (m.user_id == self.own_user_id and m.device_id == self.own_device_id)
-        ]
-        members_by_identity = {
-            (m.user_id, m.device_id, m.created_ts): m
-            for m in members
-            if not (m.user_id == self.own_user_id and m.device_id == self.own_device_id)
+        members_by_share = {
+            _share(m): m for m in members if not (m.user_id == self.own_user_id and m.device_id == self.own_device_id)
         }
 
         if self._key is None:
@@ -101,47 +99,39 @@ class FrameKeyManager:
             return _KeyDistribution(
                 key=self._key,
                 key_index=self._key_index,
-                targets=tuple(members_by_identity.values()),
+                targets=tuple(members_by_share.values()),
                 apply_after_ms=0,
             )
 
         # A member that rejoined with a new membership event needs the key again.
-        still_exposed = [share for share in self._exposed_to if share in remote]
-        any_left = len(still_exposed) < len(self._exposed_to)
-        still_valid_shares = [share for share in self._shared_with if share in remote]
-        joined = [identity for identity in remote if identity not in still_valid_shares]
+        any_left = any(share not in members_by_share for share in self._exposed_to)
+        joined = [member for share, member in members_by_share.items() if share not in self._shared_with]
 
         if any_left:
-            return self._rotate(members_by_identity, remote, now_ms)
+            return self._rotate(members_by_share, now_ms)
         if joined:
             if now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
-                targets = tuple(members_by_identity[(s.user_id, s.device_id, s.membership_ts)] for s in joined)
                 return _KeyDistribution(
                     key=self._key,
                     key_index=self._key_index,
-                    targets=targets,
+                    targets=tuple(joined),
                     apply_after_ms=max(0, self._key_activation_ms - now_ms),
                 )
-            return self._rotate(members_by_identity, remote, now_ms)
+            return self._rotate(members_by_share, now_ms)
         return None
 
-    def _rotate(
-        self,
-        members_by_identity: dict[tuple[str, str, int], CallMember],
-        remote: list[_SharedWith],
-        now_ms: int,
-    ) -> _KeyDistribution:
+    def _rotate(self, members_by_share: dict[_SharedWith, CallMember], now_ms: int) -> _KeyDistribution:
         self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
         self._key_index = (self._key_index + 1) % _KEY_INDEX_MODULUS
         self._key_created_ms = now_ms
         self._key_activation_ms = now_ms + _USE_KEY_DELAY_MS
-        self._shared_with = []
-        self._exposed_to = []
-        del remote  # rotation always re-shares with every current member
+        self._shared_with = set()
+        self._exposed_to = set()
+        # Rotation always re-shares with every current member.
         return _KeyDistribution(
             key=self._key,
             key_index=self._key_index,
-            targets=tuple(members_by_identity.values()),
+            targets=tuple(members_by_share.values()),
             apply_after_ms=_USE_KEY_DELAY_MS,
         )
 
@@ -156,17 +146,13 @@ class FrameKeyManager:
     ) -> None:
         """Record successful sends so unavailable targets are retried later."""
         self.mark_exposed(distribution)
-        for member in distribution.targets if delivered is None else delivered:
-            share = _SharedWith(user_id=member.user_id, device_id=member.device_id, membership_ts=member.created_ts)
-            if share not in self._shared_with:
-                self._shared_with.append(share)
+        self._shared_with.update(
+            _share(member) for member in (distribution.targets if delivered is None else delivered)
+        )
 
     def mark_exposed(self, distribution: _KeyDistribution) -> None:
         """Record every device that may have received this key before transport returns."""
-        for member in distribution.targets:
-            share = _SharedWith(user_id=member.user_id, device_id=member.device_id, membership_ts=member.created_ts)
-            if share not in self._exposed_to:
-                self._exposed_to.append(share)
+        self._exposed_to.update(_share(member) for member in distribution.targets)
 
     def receive(
         self,

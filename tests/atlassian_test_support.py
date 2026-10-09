@@ -89,6 +89,7 @@ def grant(token: str, provider: OAuthProvider, **overrides: object) -> dict[str,
     return {
         "token": token,
         "refresh_token": f"{token}-refresh",
+        "token_uri": provider.token_url,
         "client_id": "atlassian-client",
         "scopes": list(provider.scopes),
         "expires_at": 4_102_444_800.0,

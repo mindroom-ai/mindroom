@@ -147,7 +147,10 @@ async def platform_cookie_user(request: Request) -> dict[str, Any] | None:
         return None
     try:
         return await verify_user(authorization=f"Bearer {token}", request=request)
-    except HTTPException:
+    except HTTPException as exc:
+        # An inactive account is signed in; sending it back through login would only loop.
+        if exc.status_code == 403:
+            raise
         return None
 
 

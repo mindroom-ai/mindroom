@@ -1,0 +1,47 @@
+{{- if not .Values.keys.existingSecret -}}
+{{- fail "keys.existingSecret is required" -}}
+{{- end -}}
+{{- if or (not .Values.keys.apiKeyKey) (not .Values.keys.apiSecretKey) -}}
+{{- fail "keys.apiKeyKey and keys.apiSecretKey are required" -}}
+{{- end -}}
+{{- /* Settings the Services, probes, policies, and room access rules depend on stay chart-owned. */ -}}
+{{- $chartOwned := dict
+  "port" "set livekit.port instead"
+  "keys" "API keys come from keys.existingSecret"
+  "key_file" "API keys come from keys.existingSecret"
+  "rtc.node_ip" "set livekit.media.loadBalancerIP instead"
+  "rtc.use_external_ip" "LiveKit advertises livekit.media.loadBalancerIP"
+  "rtc.tcp_port" "set livekit.media.ports.tcp instead"
+  "rtc.udp_port" "set livekit.media.ports.udp instead"
+  "rtc.port_range_start" "UDP media is multiplexed on livekit.media.ports.udp"
+  "rtc.port_range_end" "UDP media is multiplexed on livekit.media.ports.udp"
+  "room.auto_create" "rooms are only created through the authorization service"
+-}}
+{{- range $path, $reason := $chartOwned -}}
+{{- $parts := splitList "." $path -}}
+{{- $section := $.Values.livekit.extraConfig -}}
+{{- if eq (len $parts) 2 -}}
+{{- $section = get $.Values.livekit.extraConfig (first $parts) -}}
+{{- if and (hasKey $.Values.livekit.extraConfig (first $parts)) (not (kindIs "map" $section)) -}}
+{{- fail (printf "livekit.extraConfig.%s must be a map" (first $parts)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (kindIs "map" $section) (hasKey $section (last $parts)) -}}
+{{- fail (printf "livekit.extraConfig must not set %s; %s" $path $reason) -}}
+{{- end -}}
+{{- end -}}
+{{- if not .Values.livekit.media.loadBalancerIP -}}
+{{- fail "livekit.media.loadBalancerIP is required; reserve a static public IP for WebRTC media" -}}
+{{- end -}}
+{{- if not .Values.auth.livekitUrl -}}
+{{- fail "auth.livekitUrl is required, for example wss://matrix.example.com/livekit/sfu" -}}
+{{- end -}}
+{{- if not (or (hasPrefix "wss://" .Values.auth.livekitUrl) (hasPrefix "ws://" .Values.auth.livekitUrl)) -}}
+{{- fail "auth.livekitUrl must be a ws:// or wss:// URL" -}}
+{{- end -}}
+{{- if not .Values.auth.fullAccessHomeservers -}}
+{{- fail "auth.fullAccessHomeservers must list at least one Matrix server name" -}}
+{{- end -}}
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.clientPodSelector) (not .Values.networkPolicy.extraFrom) -}}
+{{- fail "networkPolicy.enabled requires networkPolicy.clientPodSelector or networkPolicy.extraFrom" -}}
+{{- end -}}

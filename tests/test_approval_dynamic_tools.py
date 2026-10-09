@@ -22,7 +22,7 @@ from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
@@ -592,6 +592,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
                     invoking_agent="general",
                     expires_at_ns=2**62,
                     human_approval_required=True,
+                    arguments_digest=approval_arguments_digest(arguments),
                 ),
             ),
         )

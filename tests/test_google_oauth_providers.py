@@ -24,10 +24,16 @@ from mindroom.oauth.google import (
     _google_token_parser,
 )
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
+from mindroom.oauth.google_cloud import (
+    _GOOGLE_CLOUD_OAUTH_SCOPES,
+    _GOOGLE_CLOUD_READ_ONLY_SCOPE,
+    google_cloud_oauth_provider,
+)
 from mindroom.oauth.google_docs import _GOOGLE_DOCS_OAUTH_SCOPES, google_docs_oauth_provider
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive_oauth_provider
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
+from mindroom.oauth.google_tasks import _GOOGLE_TASKS_OAUTH_SCOPES, google_tasks_oauth_provider
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClientConfig,
@@ -37,6 +43,7 @@ from mindroom.oauth.providers import (
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
+from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -93,6 +100,18 @@ def test_terminal_oauth_refresh_error_classification(value: object, expected: bo
             },
         ),
         (
+            google_cloud_oauth_provider(),
+            {
+                "id": "google_cloud",
+                "display_name": "Google Cloud",
+                "scopes": _GOOGLE_CLOUD_OAUTH_SCOPES,
+                "credential_service": "google_cloud_oauth",
+                "tool_config_service": None,
+                "client_config_services": ("google_cloud_oauth_client",),
+                "status_capabilities": ("Read-only Google Cloud API access",),
+            },
+        ),
+        (
             google_docs_oauth_provider(),
             {
                 "id": "google_docs",
@@ -140,6 +159,18 @@ def test_terminal_oauth_refresh_error_classification(value: object, expected: bo
                 "status_capabilities": ("Sheets read/write",),
             },
         ),
+        (
+            google_tasks_oauth_provider(),
+            {
+                "id": "google_tasks",
+                "display_name": "Google Tasks",
+                "scopes": _GOOGLE_TASKS_OAUTH_SCOPES,
+                "credential_service": "google_tasks_oauth",
+                "tool_config_service": "google_tasks",
+                "client_config_services": ("google_tasks_oauth_client",),
+                "status_capabilities": ("Tasks read/write",),
+            },
+        ),
     ],
 )
 def test_public_google_oauth_providers_preserve_service_specific_fields(
@@ -173,6 +204,26 @@ def test_google_providers_request_minimum_functionality_preserving_scopes() -> N
         *GOOGLE_IDENTITY_SCOPES,
         "https://www.googleapis.com/auth/documents",
     )
+    assert google_tasks_oauth_provider().scopes == (
+        *GOOGLE_IDENTITY_SCOPES,
+        "https://www.googleapis.com/auth/tasks",
+    )
+
+
+def test_google_cloud_provider_requests_only_read_only_cloud_and_identity_scopes() -> None:
+    """Google Cloud asks only for identity plus the read-only cloud-platform scope."""
+    provider = google_cloud_oauth_provider()
+
+    assert provider.id == "google_cloud"
+    assert provider.display_name == "Google Cloud"
+    assert provider.scopes == (*GOOGLE_IDENTITY_SCOPES, _GOOGLE_CLOUD_READ_ONLY_SCOPE)
+    assert provider.scopes == _GOOGLE_CLOUD_OAUTH_SCOPES
+    assert _GOOGLE_CLOUD_READ_ONLY_SCOPE == "https://www.googleapis.com/auth/cloud-platform.read-only"
+    assert provider.credential_service == "google_cloud_oauth"
+    assert provider.tool_config_service is None
+    assert provider.client_config_services == ("google_cloud_oauth_client",)
+    assert provider.shared_client_config_services == ("google_oauth_client",)
+    assert provider.extra_auth_params == GOOGLE_NARROW_EXTRA_AUTH_PARAMS
 
 
 @pytest.mark.parametrize("scope_field", ["scopes", "scope"])
@@ -228,12 +279,13 @@ def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
     def client_factory(**kwargs: object) -> AsyncOAuth2Client:
         return AsyncOAuth2Client(transport=httpx.MockTransport(handler), **kwargs)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", client_factory)
     refreshed = asyncio.run(
         provider.refresh_token_data(
             {
                 "token": "old-access-token",
                 "refresh_token": "refresh-token",
+                "token_uri": GOOGLE_TOKEN_URL,
                 "client_id": "client-id",
                 "expires_at": 1.0,
                 scope_field: granted_scopes if scope_field == "scopes" else " ".join(granted_scopes),
@@ -285,13 +337,20 @@ def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
             **kwargs,
         )
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", client_factory)
     monkeypatch.setattr(
-        "mindroom.oauth.google.google_id_token.verify_oauth2_token",
+        "google.oauth2.id_token.verify_oauth2_token",
         lambda *_args: {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
     )
 
-    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, code_verifier="pkce-verifier"))
+    result = asyncio.run(
+        provider.exchange_code(
+            "auth-code",
+            runtime_paths,
+            token_url=provider.token_url,
+            code_verifier="pkce-verifier",
+        ),
+    )
 
     assert result.token_data["scopes"] == list(provider.scopes)
 
@@ -300,10 +359,12 @@ def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
     "provider",
     [
         google_calendar_oauth_provider(),
+        google_cloud_oauth_provider(),
         google_docs_oauth_provider(),
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),
         google_sheets_oauth_provider(),
+        google_tasks_oauth_provider(),
     ],
 )
 def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provider: OAuthProvider) -> None:
@@ -321,7 +382,11 @@ def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provi
         f"{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
         f"MINDROOM_OAUTH_{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
     )
-    expected_auth_params = GOOGLE_NARROW_EXTRA_AUTH_PARAMS if provider.id == "google_docs" else GOOGLE_EXTRA_AUTH_PARAMS
+    expected_auth_params = (
+        GOOGLE_NARROW_EXTRA_AUTH_PARAMS
+        if provider.id in {"google_cloud", "google_docs", "google_tasks"}
+        else GOOGLE_EXTRA_AUTH_PARAMS
+    )
     assert provider.extra_auth_params == expected_auth_params
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
@@ -391,8 +456,8 @@ def test_google_token_parser_bounds_identity_certificate_fetch(
         request("https://www.googleapis.com/oauth2/v1/certs", method="GET")
         return {"sub": "subject-1", "email": "alice@example.com", "email_verified": True}
 
-    monkeypatch.setattr("mindroom.oauth.google.GoogleRequest", _Request)
-    monkeypatch.setattr("mindroom.oauth.google.google_id_token.verify_oauth2_token", verify_token)
+    monkeypatch.setattr("google.auth.transport.requests.Request", _Request)
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", verify_token)
     provider = google_drive_oauth_provider()
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
@@ -724,7 +789,8 @@ def test_google_oauth_provider_bootstrapped_client_authorization_uses_pkce(
     assert code_verifier is not None
 
     auth_url = asyncio.run(
-        provider.authorization_uri_async(
+        oauth_authorization_url(
+            provider,
             runtime_paths,
             state="test-state",
             code_verifier=code_verifier,

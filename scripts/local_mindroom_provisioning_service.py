@@ -2,10 +2,14 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "fastapi>=0.116.1",
-#   "httpx>=0.27",
-#   "uvicorn>=0.35",
+#   "fastapi==0.136.3",
+#   "httpx==0.28.1",
+#   "uvicorn==0.40.0",
 # ]
+#
+# [tool.uv]
+# # Resolve transitive packages only from releases published before this date.
+# exclude-newer = "2026-10-01T00:00:00Z"
 # ///
 """Standalone local MindRoom provisioning service.
 
@@ -44,34 +48,56 @@ short enough for the per-secret limit to throttle clients that follow it.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
-report expired or already claimed, and are then pruned. Connections are never
-pruned.
+report expired or already claimed, and are then pruned. Each account keeps at
+most 20 paired installs, revoked ones included; pairing another at the limit
+removes one, preferring a revoked install and otherwise the one seen least
+recently.
 
 Last seen: paired installs authenticate with their client credentials. Agent
 registration, Google OAuth client fetches, and
 ``/v1/local-mindroom/heartbeat`` all refresh the connection's ``last_seen_at``,
 which the chat client shows for each install. Running installs send a heartbeat
-at startup and every few hours; the service records heartbeats at most once per
-connection every ten minutes so it does not rewrite the state file on every call.
+at startup and every few hours; the service records ``last_seen_at`` at most
+once per connection every ten minutes so it does not write the state database
+on every call.
+
+State: pair sessions and connections live in a SQLite database at
+``MINDROOM_PROVISIONING_STATE_PATH`` (default
+``/var/lib/mindroom-local-provisioning/state.sqlite3``), one row per record, so
+a change writes only the records it touches. The service loads every row at
+startup and serves from memory. On the first start with a new database it
+imports the ``.json`` file of the same name beside it (``state.json`` for the
+default path), where earlier versions kept the whole state; later starts never
+read that file again, so it can be deleted after that start. A state path that
+still names the ``.json`` file opens the ``.sqlite3`` database beside it, which
+imports that file the same way.
+
+Agent passwords: register-agent creates each agent account with a random
+one-time password and returns it once, only when the account was created. The
+client logs in with it and immediately changes it to a password of its own, so
+the service never learns the password the client keeps. Older clients that
+still send their own password get it registered unchanged and receive no
+password back.
 
 Namespace exemption: pairing always assigns each new connection a random
 namespace, and register-agent only accepts usernames shaped like
 ``mindroom_<entity>_<namespace>``. The operator's own installs are the
 deliberate exception: they keep the plain ``mindroom_<entity>`` names. To mark
 such a trusted connection namespace-exempt, the operator stops the service,
-sets ``"namespace": ""`` on that connection in the persisted state file
-(``MINDROOM_PROVISIONING_STATE_PATH``, default
-``/var/lib/mindroom-local-provisioning/state.json``), and starts the service
-again. The paired install must also unset ``MINDROOM_NAMESPACE`` in its local
-``.env`` (``mindroom connect`` writes one during pairing) so the client builds
-plain usernames, and the exemption is per-connection, so re-pairing requires
-editing the state file again. The value must be exactly ``""``: ``null``, a removed key, or a
-whitespace-only string fails closed to a derived namespace that will not match
-the connection's original pairing namespace. An exempt connection skips only
-the namespace suffix check — usernames must still be valid Matrix localparts
-starting with ``mindroom_``. Exemption trusts that connection with the entire
-``mindroom_*`` username space, including usernames shaped like other
-connections' namespaced agents, so exempt only installs you fully control.
+sets that connection's namespace to an empty string in the state database, for
+example ``sqlite3 /var/lib/mindroom-local-provisioning/state.sqlite3
+"UPDATE connections SET namespace = '' WHERE id = '<client id>'"``, and starts
+the service again. The paired install must also unset ``MINDROOM_NAMESPACE`` in
+its local ``.env`` (``mindroom connect`` writes one during pairing) so the
+client builds plain usernames, and the exemption is per-connection, so
+re-pairing requires editing the state database again. The value must be exactly
+``''``: ``NULL`` or a whitespace-only string fails closed to a derived namespace
+that will not match the connection's original pairing namespace. An exempt
+connection skips only the namespace suffix check — usernames must still be
+valid Matrix localparts starting with ``mindroom_``. Exemption trusts that
+connection with the entire ``mindroom_*`` username space, including usernames
+shaped like other connections' namespaced agents, so exempt only installs you
+fully control.
 """
 
 from __future__ import annotations
@@ -84,12 +110,13 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -106,7 +133,7 @@ PAIR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 DEFAULT_PAIR_CODE_TTL_SECONDS = 10 * 60
 DEFAULT_PAIR_POLL_INTERVAL_SECONDS = 3
 APPROVED_CLAIM_GRACE_SECONDS = 60
-DEFAULT_STATE_PATH = "/var/lib/mindroom-local-provisioning/state.json"
+DEFAULT_STATE_PATH = "/var/lib/mindroom-local-provisioning/state.sqlite3"
 DEFAULT_CORS_ORIGINS = "https://chat.mindroom.chat"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8776
@@ -124,7 +151,8 @@ CONNECTION_REVOKED_DETAIL = "Connection revoked"
 NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
 # `mindroom connect` and `run` (src/mindroom/cli/connect.py) recognize a lost approval by this exact 410 detail.
 PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
-HEARTBEAT_LAST_SEEN_RESOLUTION = timedelta(minutes=10)
+LAST_SEEN_RESOLUTION = timedelta(minutes=10)
+MAX_CONNECTIONS_PER_USER = 20
 # Browser tokens are resolved by the homeserver, so this per-address limit runs before that lookup.
 # It leaves room for several users behind one NAT to reach their per-user limits of 60 per minute.
 HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 300
@@ -134,6 +162,39 @@ DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE = 30
 # The rate-limit window includes both ends, so a client polling exactly every 60 / limit seconds sends one poll
 # too many per window; the advertised interval must be strictly longer to stay within the per-device limit.
 MIN_PAIR_POLL_INTERVAL_SECONDS = 60 // DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE + 1
+# One row per record, so each change writes only the rows it touches.
+STATE_SCHEMA = (
+    """
+    CREATE TABLE pair_sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        pair_code_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT,
+        connection_id TEXT,
+        device_secret_hash TEXT,
+        client_name TEXT,
+        fingerprint TEXT,
+        approved_at TEXT,
+        client_ip TEXT
+    )
+    """,
+    """
+    CREATE TABLE connections (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        client_name TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        namespace TEXT,
+        client_secret_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        revoked_at TEXT
+    )
+    """,
+)
 
 
 @dataclass(slots=True)
@@ -191,8 +252,9 @@ class LocalConnection:
 
 @dataclass(slots=True)
 class ProvisioningState:
-    """In-memory mutable runtime state for one app instance."""
+    """In-memory mutable runtime state for one app instance, with its pair sessions and connections mirrored in ``db``."""
 
+    db: sqlite3.Connection
     lock: asyncio.Lock
     pair_sessions: dict[str, PairSession]
     pair_session_by_hash: dict[str, str]
@@ -232,7 +294,12 @@ class RegisterAgentRequest(BaseModel):
 
     homeserver: str = Field(min_length=1, max_length=512)
     username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=1024)
+    # LEGACY_COMPAT: register-agent requests carrying the agent's own password
+    # Legacy format: released MindRoom clients send the agent's chosen `password`, which the service registers unchanged.
+    # Last legacy release: the release before the first one containing #2428 (at least v2026.9.364); replacement: the first release containing #2428, which omits password and replaces the returned one-time password.
+    # Handling: a supplied password is registered as before and never returned; remove this field once no paired installs run a release older than the first release containing #2428.
+    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_register_agent_with_client_password_registers_it_unchanged.
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
     display_name: str = Field(min_length=1, max_length=255)
 
 
@@ -241,6 +308,8 @@ class RegisterAgentResponse(BaseModel):
 
     status: Literal["created", "user_in_use"]
     user_id: str
+    # One-time password generated for a created account; the client replaces it immediately.
+    password: str | None = None
 
 
 class HeartbeatResponse(BaseModel):
@@ -307,8 +376,9 @@ class DevicePairPollResponse(BaseModel):
     connection: LocalConnectionOut | None = None
 
 
-def _new_runtime_state() -> ProvisioningState:
+def _new_runtime_state(db: sqlite3.Connection) -> ProvisioningState:
     return ProvisioningState(
+        db=db,
         lock=asyncio.Lock(),
         pair_sessions={},
         pair_session_by_hash={},
@@ -467,8 +537,22 @@ def _serialize_connection(connection: LocalConnection) -> LocalConnectionOut:
     )
 
 
-def _pair_sessions_payload(state: ProvisioningState) -> list[dict[str, str | None]]:
-    return [
+def _upsert_row(
+    db: sqlite3.Connection,
+    table: Literal["pair_sessions", "connections"],
+    row: dict[str, str | None],
+) -> None:
+    """Insert or replace one record's row; the caller commits."""
+    columns = ", ".join(row)
+    placeholders = ", ".join(f":{column}" for column in row)
+    # The table and column names are this module's constants, never request data.
+    db.execute(f"INSERT OR REPLACE INTO {table} ({columns}) VALUES ({placeholders})", row)  # noqa: S608
+
+
+def _save_pair_session(db: sqlite3.Connection, session: PairSession) -> None:
+    _upsert_row(
+        db,
+        "pair_sessions",
         {
             "id": session.id,
             "user_id": session.user_id,
@@ -483,13 +567,14 @@ def _pair_sessions_payload(state: ProvisioningState) -> list[dict[str, str | Non
             "fingerprint": session.fingerprint,
             "approved_at": _as_utc_iso(session.approved_at),
             "client_ip": session.client_ip,
-        }
-        for session in state.pair_sessions.values()
-    ]
+        },
+    )
 
 
-def _connections_payload(state: ProvisioningState) -> list[dict[str, str | None]]:
-    return [
+def _save_connection(db: sqlite3.Connection, connection: LocalConnection) -> None:
+    _upsert_row(
+        db,
+        "connections",
         {
             "id": connection.id,
             "user_id": connection.user_id,
@@ -500,94 +585,130 @@ def _connections_payload(state: ProvisioningState) -> list[dict[str, str | None]
             "created_at": _as_utc_iso(connection.created_at),
             "last_seen_at": _as_utc_iso(connection.last_seen_at),
             "revoked_at": _as_utc_iso(connection.revoked_at),
-        }
-        for connection in state.connections.values()
-    ]
+        },
+    )
 
 
-def _persist_state_unlocked(state: ProvisioningState, state_path: Path) -> None:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "pair_sessions": _pair_sessions_payload(state),
-        "connections": _connections_payload(state),
-    }
-    tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(state_path)
+def _pair_session_from_row(item: dict[str, Any]) -> PairSession:
+    return PairSession(
+        id=item["id"],
+        user_id=item["user_id"],
+        pair_code_hash=item["pair_code_hash"],
+        status=item["status"],
+        created_at=_from_utc_iso(item["created_at"]) or _now_utc(),
+        expires_at=_from_utc_iso(item["expires_at"]) or _now_utc(),
+        device_secret_hash=item["device_secret_hash"],
+        client_name=item["client_name"],
+        fingerprint=item["fingerprint"],
+        completed_at=_from_utc_iso(item.get("completed_at")),
+        connection_id=item.get("connection_id"),
+        approved_at=_from_utc_iso(item.get("approved_at")),
+        # LEGACY_COMPAT: pair sessions persisted before requester addresses were recorded lack client_ip
+        # Legacy format: state written by the provisioning service before this change; client_ip is missing.
+        # Last legacy release: unversioned service state; replaced by this change.
+        # Handling: a missing client_ip loads as None, which the approval page shows as an unknown address.
+        # Coverage: tests/test_local_mindroom_provisioning_service.py::test_legacy_state_loads_device_sessions_without_client_ip.
+        client_ip=item.get("client_ip"),
+    )
 
 
-def _clear_state_unlocked(state: ProvisioningState) -> None:
-    state.pair_sessions.clear()
-    state.pair_session_by_hash.clear()
-    state.pair_session_by_device_secret_hash.clear()
-    state.connections.clear()
-    state.rate_limit_buckets.clear()
+def _connection_from_row(item: dict[str, Any]) -> LocalConnection:
+    connection_id = item["id"]
+    raw_namespace = item.get("namespace")
+    # Only a literal "" (the operator-set exemption sentinel, see module
+    # docstring) may stay empty. Whitespace-only, null, and missing values
+    # fail closed to a derived namespace so a connection can never become
+    # namespace-exempt by accident.
+    if raw_namespace == "":
+        namespace = ""
+    elif isinstance(raw_namespace, str) and raw_namespace.strip():
+        namespace = raw_namespace.strip().lower()
+    else:
+        namespace = _derive_namespace(connection_id)
+    return LocalConnection(
+        id=connection_id,
+        user_id=item["user_id"],
+        client_name=item["client_name"],
+        fingerprint=item["fingerprint"],
+        namespace=namespace,
+        client_secret_hash=item["client_secret_hash"],
+        created_at=_from_utc_iso(item["created_at"]) or _now_utc(),
+        last_seen_at=_from_utc_iso(item["last_seen_at"]) or _now_utc(),
+        revoked_at=_from_utc_iso(item.get("revoked_at")),
+    )
 
 
-def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -> None:
-    _clear_state_unlocked(state)
-    if not state_path.exists():
-        return
+def _delete_excess_connections_unlocked(state: ProvisioningState, owned: list[LocalConnection], *, keep: int) -> None:
+    """Delete one user's connections beyond ``keep``, revoked first, then least recently seen; the caller commits."""
+    eviction_order = sorted(owned, key=lambda connection: (connection.revoked_at is None, connection.last_seen_at))
+    excess = eviction_order[: max(0, len(owned) - keep)]
+    for connection in excess:
+        del state.connections[connection.id]
+    state.db.executemany("DELETE FROM connections WHERE id = ?", [(connection.id,) for connection in excess])
 
-    payload = json.loads(state_path.read_text(encoding="utf-8"))
 
-    for item in payload.get("pair_sessions", []):
-        # LEGACY_COMPAT: pair sessions from the removed browser-initiated flow have no device fields
-        # Legacy format: a persisted pair session whose `device_secret_hash` is missing or null, written by the removed `POST /v1/local-mindroom/pair/start` endpoint; sessions written before device pairing also lack `client_name`, `fingerprint`, and `approved_at`.
-        # Last legacy release: <fill at merge: last tag before merge> still wrote such sessions from `pair/start` (v2026.9.351 is the latest tag checked); <fill at merge: first tag containing this change> writes only device sessions, which v2026.9.330 first introduced.
-        # Handling: such sessions are dropped on load and disappear from the file on the next write, because no remaining endpoint can use them; connections, including ones paired through that flow, load unchanged.
-        # Coverage: tests/test_local_mindroom_provisioning_service.py::test_state_drops_browser_initiated_sessions_and_keeps_connections.
-        if item.get("device_secret_hash") is None:
-            continue
-        session = PairSession(
-            id=item["id"],
-            user_id=item["user_id"],
-            pair_code_hash=item["pair_code_hash"],
-            status=item["status"],
-            created_at=_from_utc_iso(item["created_at"]) or _now_utc(),
-            expires_at=_from_utc_iso(item["expires_at"]) or _now_utc(),
-            device_secret_hash=item["device_secret_hash"],
-            client_name=item["client_name"],
-            fingerprint=item["fingerprint"],
-            completed_at=_from_utc_iso(item.get("completed_at")),
-            connection_id=item.get("connection_id"),
-            approved_at=_from_utc_iso(item.get("approved_at")),
-            # LEGACY_COMPAT: pair sessions persisted before requester addresses were recorded lack client_ip
-            # Legacy format: state written by the provisioning service before this change; client_ip is missing.
-            # Last legacy release: unversioned service state; replaced by this change.
-            # Handling: a missing client_ip loads as None, which the approval page shows as an unknown address.
-            # Coverage: tests/test_local_mindroom_provisioning_service.py::test_legacy_state_loads_device_sessions_without_client_ip.
-            client_ip=item.get("client_ip"),
-        )
+def _open_state_database(state_path: Path) -> sqlite3.Connection:
+    """Open the state database in WAL mode, so each commit appends only the rows it changed."""
+    # A path still naming the legacy .json file opens the .sqlite3 database beside it, which imports that file.
+    database_path = state_path.with_suffix(".sqlite3") if state_path.suffix == ".json" else state_path
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(database_path)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    # Like the earlier unsynced state file, a power loss can lose the latest commits, but it never corrupts the database.
+    db.execute("PRAGMA synchronous=NORMAL")
+    return db
+
+
+def _create_state_tables(db: sqlite3.Connection, state_path: Path) -> None:
+    """Create the tables in a new database; the import below commits with them, so an interrupted start imports again."""
+    db.execute("BEGIN IMMEDIATE")
+    for statement in STATE_SCHEMA:
+        db.execute(statement)
+    # LEGACY_COMPAT: provisioning state kept as one JSON file rewritten on every change
+    # Legacy format: a JSON object with `pair_sessions` and `connections` lists at the configured state path, by default /var/lib/mindroom-local-provisioning/state.json; selected on the first start with a new database when the `.json` file of the same name exists beside it, or when the configured state path still names that file.
+    # Last legacy release: unversioned service state; the service runs from a repository checkout, every revision before this change wrote that file, and this change replaces it with one SQLite row per record.
+    # Handling: every record is imported through the current row readers in the transaction that creates the tables, and the file is never read again; a state path ending in .json opens the .sqlite3 database beside it, so deployments still configured with the old path import the same way and never overwrite the file.
+    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_first_start_imports_the_legacy_state_file_once, tests/test_local_mindroom_provisioning_service.py::test_legacy_json_state_path_opens_the_database_beside_it.
+    legacy_state_path = state_path.with_suffix(".json")
+    if legacy_state_path.exists():
+        payload = json.loads(legacy_state_path.read_text(encoding="utf-8"))
+        for item in payload.get("pair_sessions", []):
+            # Sessions without a device secret come from the removed browser-initiated flow; see _load_state_unlocked.
+            if item.get("device_secret_hash") is not None:
+                _save_pair_session(db, _pair_session_from_row(item))
+        for item in payload.get("connections", []):
+            _save_connection(db, _connection_from_row(item))
+    db.execute("PRAGMA user_version = 1")
+    db.commit()
+
+
+def _load_state_unlocked(state: ProvisioningState, state_path: Path) -> None:
+    db = state.db
+    if db.execute("PRAGMA user_version").fetchone()[0] == 0:
+        _create_state_tables(db, state_path)
+
+    # LEGACY_COMPAT: pair sessions from the removed browser-initiated flow have no device fields
+    # Legacy format: a persisted pair session whose `device_secret_hash` is missing or null, written by the removed `POST /v1/local-mindroom/pair/start` endpoint, either as a state database row or as an entry in the legacy `state.json` that the first start imports; sessions written before device pairing also lack `client_name`, `fingerprint`, and `approved_at`.
+    # Last legacy release: <fill at merge: last tag before merge> still wrote such sessions from `pair/start` (v2026.10.221 is the latest tag checked); <fill at merge: first tag containing this change> writes only device sessions, which v2026.9.330 first introduced.
+    # Handling: the state file import skips such sessions and startup deletes such rows, because no remaining endpoint can use them; connections, including ones paired through that flow, load unchanged.
+    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_state_drops_browser_initiated_sessions_and_keeps_connections.
+    db.execute("DELETE FROM pair_sessions WHERE device_secret_hash IS NULL")
+    for row in db.execute("SELECT * FROM pair_sessions"):
+        session = _pair_session_from_row(dict(row))
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
         state.pair_session_by_device_secret_hash[session.device_secret_hash] = session.id
-
-    for item in payload.get("connections", []):
-        connection_id = item["id"]
-        raw_namespace = item.get("namespace")
-        # Only a literal "" (the operator-set exemption sentinel, see module
-        # docstring) may stay empty. Whitespace-only, null, and missing values
-        # fail closed to a derived namespace so a connection can never become
-        # namespace-exempt by accident.
-        if raw_namespace == "":
-            namespace = ""
-        elif isinstance(raw_namespace, str) and raw_namespace.strip():
-            namespace = raw_namespace.strip().lower()
-        else:
-            namespace = _derive_namespace(connection_id)
-        connection = LocalConnection(
-            id=connection_id,
-            user_id=item["user_id"],
-            client_name=item["client_name"],
-            fingerprint=item["fingerprint"],
-            namespace=namespace,
-            client_secret_hash=item["client_secret_hash"],
-            created_at=_from_utc_iso(item["created_at"]) or _now_utc(),
-            last_seen_at=_from_utc_iso(item["last_seen_at"]) or _now_utc(),
-            revoked_at=_from_utc_iso(item.get("revoked_at")),
-        )
+    for row in db.execute("SELECT * FROM connections"):
+        connection = _connection_from_row(dict(row))
         state.connections[connection.id] = connection
+
+    connections_by_user: dict[str, list[LocalConnection]] = {}
+    for connection in state.connections.values():
+        connections_by_user.setdefault(connection.user_id, []).append(connection)
+    for owned in connections_by_user.values():
+        _delete_excess_connections_unlocked(state, owned, keep=MAX_CONNECTIONS_PER_USER)
+    db.commit()
 
 
 def _normalize_pair_code(pair_code: str) -> str:
@@ -653,7 +774,7 @@ def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_
     poll still reports "expired" (410 / ``status="expired"``) instead of "not
     found" after the CLI renews its code. Connected sessions stay one code
     lifetime past completion so a replayed poll still reports 410. Connections
-    themselves are never pruned.
+    are bounded per user when one is created and when state loads instead.
     """
     retain_after = now - timedelta(seconds=pair_code_ttl_seconds)
     finished_ids = []
@@ -672,6 +793,9 @@ def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_
         session = state.pair_sessions.pop(session_id)
         state.pair_session_by_hash.pop(session.pair_code_hash, None)
         state.pair_session_by_device_secret_hash.pop(session.device_secret_hash, None)
+    if finished_ids:
+        state.db.executemany("DELETE FROM pair_sessions WHERE id = ?", [(session_id,) for session_id in finished_ids])
+        state.db.commit()
 
 
 def _cleanup_rate_limit_buckets_unlocked(
@@ -725,6 +849,14 @@ def _require_local_client(
     return connection
 
 
+def _record_last_seen_unlocked(state: ProvisioningState, connection: LocalConnection, now: datetime) -> None:
+    """Refresh last_seen_at, writing the connection's row at most once per LAST_SEEN_RESOLUTION."""
+    if now - connection.last_seen_at >= LAST_SEEN_RESOLUTION:
+        connection.last_seen_at = now
+        _save_connection(state.db, connection)
+        state.db.commit()
+
+
 async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> str:
     url = f"{config.matrix_homeserver}/_matrix/federation/v1/openid/userinfo"
     try:
@@ -760,9 +892,10 @@ async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> s
 
 async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAgentRequest) -> RegisterAgentResponse:
     register_url = f"{config.matrix_homeserver}/_matrix/client/v3/register"
+    generated_password = None if payload.password else secrets.token_urlsafe(32)
     request_payload = {
         "username": payload.username,
-        "password": payload.password,
+        "password": payload.password or generated_password,
         "device_name": "mindroom_agent",
         "auth": {
             "type": "m.login.registration_token",
@@ -797,7 +930,7 @@ async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAg
             except httpx.HTTPError:
                 pass
 
-        return RegisterAgentResponse(status="created", user_id=user_id)
+        return RegisterAgentResponse(status="created", user_id=user_id, password=generated_password)
 
     detail = response.text.strip() or "unknown error"
     errcode = None
@@ -860,7 +993,12 @@ def _create_connection_unlocked(
     fingerprint: str,
     now: datetime,
 ) -> tuple[LocalConnection, str]:
-    """Create a local connection and return it with its one-time plaintext secret."""
+    """Create a local connection and return it with its one-time plaintext secret; the caller commits.
+
+    Keeps the user within MAX_CONNECTIONS_PER_USER, deleting one of their connections when they are at the limit.
+    """
+    owned = [connection for connection in state.connections.values() if connection.user_id == user_id]
+    _delete_excess_connections_unlocked(state, owned, keep=MAX_CONNECTIONS_PER_USER - 1)
     client_secret = secrets.token_urlsafe(32)
     connection = LocalConnection(
         id=secrets.token_urlsafe(18),
@@ -873,6 +1011,7 @@ def _create_connection_unlocked(
         last_seen_at=now,
     )
     state.connections[connection.id] = connection
+    _save_connection(state.db, connection)
     return connection, client_secret
 
 
@@ -932,7 +1071,8 @@ async def start_device_pair(
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
         state.pair_session_by_device_secret_hash[session.device_secret_hash] = session.id
-        _persist_state_unlocked(state, config.state_path)
+        _save_pair_session(state.db, session)
+        state.db.commit()
     return DevicePairStartResponse(
         pair_code=pair_code,
         device_secret=device_secret,
@@ -958,7 +1098,6 @@ async def inspect_device_pair(
 async def approve_device_pair(
     payload: DevicePairCodeRequest,
     user_id: Annotated[str, Depends(_verify_openid_user)],
-    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
 ) -> DevicePairSessionOut:
     """Bind a waiting device session to the approving Matrix user."""
@@ -973,7 +1112,8 @@ async def approve_device_pair(
             session.user_id = user_id
             session.approved_at = now
             session.expires_at = max(session.expires_at, now + timedelta(seconds=APPROVED_CLAIM_GRACE_SECONDS))
-            _persist_state_unlocked(state, config.state_path)
+            _save_pair_session(state.db, session)
+            state.db.commit()
         return _device_session_out(session)
 
 
@@ -981,7 +1121,6 @@ async def approve_device_pair(
 async def poll_device_pair(
     request: Request,
     payload: DevicePairPollRequest,
-    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
 ) -> DevicePairPollResponse:
     """Report device pairing progress and hand out credentials once after approval."""
@@ -1025,7 +1164,8 @@ async def poll_device_pair(
         session.status = "connected"
         session.completed_at = now
         session.connection_id = connection.id
-        _persist_state_unlocked(state, config.state_path)
+        _save_pair_session(state.db, session)
+        state.db.commit()
     return DevicePairPollResponse(
         status="connected",
         client_id=connection.id,
@@ -1052,7 +1192,6 @@ async def list_connections(
 async def revoke_connection(
     connection_id: str,
     user_id: Annotated[str, Depends(_verify_openid_user)],
-    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
 ) -> RevokeConnectionResponse:
     """Revoke a previously paired local client connection."""
@@ -1064,12 +1203,17 @@ async def revoke_connection(
             raise HTTPException(status_code=404, detail="Connection not found")
         connection.revoked_at = now
         connection.last_seen_at = now
-        _persist_state_unlocked(state, config.state_path)
+        _save_connection(state.db, connection)
+        state.db.commit()
 
     return RevokeConnectionResponse(revoked=True, connection_id=connection_id)
 
 
-@router.post("/v1/local-mindroom/register-agent", response_model=RegisterAgentResponse)
+@router.post(
+    "/v1/local-mindroom/register-agent",
+    response_model=RegisterAgentResponse,
+    response_model_exclude_none=True,
+)
 async def register_agent(
     payload: RegisterAgentRequest,
     config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
@@ -1104,15 +1248,13 @@ async def register_agent(
                 status_code=403,
                 detail=NAMESPACE_MISMATCH_DETAIL,
             )
-        connection.last_seen_at = now
-        _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now)
 
     return await _register_agent_with_matrix(config, payload)
 
 
 @router.post("/v1/local-mindroom/heartbeat", response_model=HeartbeatResponse)
 async def heartbeat(
-    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
     x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
     x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
@@ -1122,9 +1264,7 @@ async def heartbeat(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"heartbeat:{connection.id}", limit=10, window_seconds=60)
-        if now - connection.last_seen_at >= HEARTBEAT_LAST_SEEN_RESOLUTION:
-            connection.last_seen_at = now
-            _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now)
     return HeartbeatResponse(status="ok")
 
 
@@ -1141,8 +1281,7 @@ async def google_oauth_client(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"oauth:google-client:{connection.id}", limit=60, window_seconds=60)
-        connection.last_seen_at = now
-        _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now)
 
     if not config.google_oauth_client_id or not config.google_oauth_client_secret:
         raise HTTPException(status_code=503, detail="Google OAuth client is not configured")
@@ -1156,17 +1295,21 @@ async def google_oauth_client(
 def create_app(config: ServiceConfig | None = None) -> FastAPI:
     """Create the standalone provisioning FastAPI app."""
     service_config = config or _load_service_config_from_env()
-    runtime_state = _new_runtime_state()
     # httpx logs full request URLs at INFO, and the OpenID userinfo URL carries the token in its query string.
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.service_config = service_config
-        app.state.runtime_state = runtime_state
-        async with runtime_state.lock:
-            _load_state_from_disk_unlocked(runtime_state, service_config.state_path)
-        yield
+        db = _open_state_database(service_config.state_path)
+        try:
+            runtime_state = _new_runtime_state(db)
+            app.state.service_config = service_config
+            app.state.runtime_state = runtime_state
+            async with runtime_state.lock:
+                _load_state_unlocked(runtime_state, service_config.state_path)
+            yield
+        finally:
+            db.close()
 
     app = FastAPI(title="MindRoom Local Provisioning Service", version="0.1.0", lifespan=lifespan)
     app.add_middleware(

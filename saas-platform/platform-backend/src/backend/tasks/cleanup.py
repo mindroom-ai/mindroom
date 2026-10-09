@@ -3,44 +3,104 @@ Nightly cleanup job: data retention, GDPR hard deletes, and the hosted instance 
 Each task runs independently, and every run is recorded in `cleanup_runs` for the admin portal.
 """
 
-from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 import logging
 from typing import Any
 
+from backend.config import ACCOUNT_DELETION_GRACE_DAYS
 from backend.deps import ensure_supabase
-from backend.services.instance_lifecycle import reconcile_all_subscriptions
+from backend.entitlements import parse_timestamp
+from backend.services.instance_lifecycle import (
+    account_pending_deletion,
+    cancel_unpaid_subscriptions,
+    delete_auth_user,
+    end_account_billing_at_period_end,
+    reconcile_all_subscriptions,
+    resume_subscriptions,
+    tear_down_account,
+)
 
 logger = logging.getLogger(__name__)
+_PAGE_SIZE = 1000
 
 
-def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
+async def cleanup_soft_deleted_accounts() -> dict:
     """
-    Hard delete accounts that have been soft-deleted for longer than grace period.
+    Hard delete accounts whose deletion grace period has ended.
     This ensures GDPR compliance while giving users time to recover accounts.
+
+    Each account is first claimed, which ends its restore window, then its Stripe billing is cancelled and its
+    hosted instances are uninstalled before its rows go, because those rows are the only record of what to tear
+    down; its auth user goes last and takes the account row with it. An account whose teardown or delete fails keeps
+    its account row, is reported in `errors`, and is retried by the next run.
+    An account still inside its grace period gets the Stripe steps of its deletion request again: renewing
+    subscriptions set to end with their period and unpaid ones cancelled. That retries a step the request could not
+    finish, such as a failed cancellation, and also covers requests made before these steps existed.
     """
     sb = ensure_supabase()
-    cutoff_date = datetime.now(UTC) - timedelta(days=grace_period_days)
+    cutoff_date = datetime.now(UTC) - timedelta(days=ACCOUNT_DELETION_GRACE_DAYS)
 
-    # Find accounts ready for hard deletion
-    result = (
-        sb.table("accounts")
-        .select("id")
-        .not_.is_("deleted_at", "null")
-        .lt("deleted_at", cutoff_date.isoformat())
-        .execute()
-    )
+    pending = _pending_deletion_accounts(sb)
 
     accounts_deleted = 0
+    errors: list[str] = []
 
-    for account in result.data or []:
-        # Call hard delete function
-        sb.rpc("hard_delete_account", {"target_account_id": account["id"]}).execute()
+    for account in pending:
+        account_id = account["id"]
+        try:
+            deleted_at = parse_timestamp(account["deleted_at"])
+            if deleted_at is not None and deleted_at >= cutoff_date:
+                await _end_billing_unless_restored(sb, account_id)
+                continue
+            # The claim uses the database clock, like restore_account, so a restore can never land mid-teardown.
+            if not sb.rpc("claim_account_hard_delete", {"target_account_id": account_id}).execute().data:
+                logger.info("Skipping account %s: it was restored or its grace period has not ended", account_id)
+                continue
+            await tear_down_account(account_id)
+            sb.rpc("hard_delete_account", {"target_account_id": account_id}).execute()
+            await delete_auth_user(account_id)
+        except Exception as exc:
+            logger.exception("Deletion step failed for account %s; the next run retries", account_id)
+            errors.append(f"account {account_id}: {exc}")
+            continue
         accounts_deleted += 1
-        logger.info(f"Hard deleted account {account['id']} after {grace_period_days} day grace period")
+        logger.info("Hard deleted account %s after its grace period", account_id)
 
-    return {"accounts_deleted": accounts_deleted, "timestamp": datetime.now(UTC).isoformat()}
+    return {"accounts_deleted": accounts_deleted, "errors": errors, "timestamp": datetime.now(UTC).isoformat()}
+
+
+def _pending_deletion_accounts(sb: Any) -> list[dict[str, Any]]:  # noqa: ANN401
+    """Return every account pending deletion, paged past PostgREST's row limit."""
+    rows: list[dict[str, Any]] = []
+    while True:
+        page = (
+            sb.table("accounts")
+            .select("id,deleted_at")
+            .not_.is_("deleted_at", "null")
+            .order("id")
+            .range(len(rows), len(rows) + _PAGE_SIZE - 1)
+            .execute()
+            .data
+            or []
+        )
+        if not page:
+            return rows
+        rows.extend(page)
+
+
+async def _end_billing_unless_restored(sb: Any, account_id: str) -> None:  # noqa: ANN401
+    """Repeat the deletion's Stripe steps, unless the customer restored the account since it was listed."""
+    if not account_pending_deletion(sb, account_id):
+        return
+    scheduled = await end_account_billing_at_period_end(account_id)
+    # A restore that landed during the Stripe calls resumed only what it saw marked, so undo this run's own marks.
+    if not account_pending_deletion(sb, account_id):
+        await resume_subscriptions(scheduled)
+        return
+    # A restore landing in the one Stripe round trip after this check can still see an unpaid subscription cancelled;
+    # it had no paid period, and checkout accepts the account again.
+    await cancel_unpaid_subscriptions(account_id)
 
 
 def cleanup_old_audit_logs(retention_days: int = 90) -> dict:
@@ -78,25 +138,6 @@ def cleanup_old_audit_logs(retention_days: int = 90) -> dict:
     }
 
 
-def cleanup_old_usage_metrics(retention_days: int = 365) -> dict:
-    """
-    Clean up old usage metrics beyond retention period.
-    Keep aggregated data for longer-term analytics.
-    """
-    sb = ensure_supabase()
-    cutoff_date = datetime.now(UTC) - timedelta(days=retention_days)
-
-    result = sb.table("usage_metrics").delete().lt("metric_date", cutoff_date.date().isoformat()).execute()
-
-    metrics_deleted = len(result.data or [])
-
-    return {
-        "usage_metrics_deleted": metrics_deleted,
-        "cutoff_date": cutoff_date.isoformat(),
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
-
-
 async def run_cleanup_job() -> dict[str, Any]:
     """Run every nightly task independently and record the run.
 
@@ -105,18 +146,20 @@ async def run_cleanup_job() -> dict[str, Any]:
     started_at = datetime.now(UTC)
     summary: dict[str, Any] = {}
     ok = True
-    retention_tasks: dict[str, Callable[[], dict]] = {
-        "accounts": cleanup_soft_deleted_accounts,
-        "audit_logs": cleanup_old_audit_logs,
-        "usage_metrics": cleanup_old_usage_metrics,
-    }
-    for name, task in retention_tasks.items():
-        try:
-            summary[name] = task()
-        except Exception as exc:
-            logger.exception("Cleanup task %s failed", name)
-            summary[name] = {"error": str(exc)}
-            ok = False
+    try:
+        summary["accounts"] = await cleanup_soft_deleted_accounts()
+        ok = not summary["accounts"]["errors"]
+    except Exception as exc:
+        logger.exception("Cleanup task accounts failed")
+        summary["accounts"] = {"error": str(exc)}
+        ok = False
+
+    try:
+        summary["audit_logs"] = cleanup_old_audit_logs()
+    except Exception as exc:
+        logger.exception("Cleanup task audit_logs failed")
+        summary["audit_logs"] = {"error": str(exc)}
+        ok = False
 
     try:
         lifecycle = await reconcile_all_subscriptions()

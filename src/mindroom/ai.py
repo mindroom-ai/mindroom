@@ -41,6 +41,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
+from mindroom.cli_shell_agent import CliShellAgent
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -109,6 +110,7 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
+from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
@@ -899,6 +901,12 @@ async def _run_non_streaming_agent_attempts(
     try:
         with (
             participation_model(agent.model, run_context.turn.participation, run_id=attempt.attempt_run_id),
+            observe_final_request(
+                run_context.turn.skill_review_capture,
+                agent.model,
+                run_id=attempt.attempt_run_id,
+                model_name=run_context.prepared_run.runtime_model_name,
+            ),
             bind_llm_request_log_context(
                 **_attempt_request_log_context(
                     run_context.turn,
@@ -1001,6 +1009,23 @@ async def _close_agent_on_preparation_failure(
         raise
 
 
+def _standard_turn_enrichment(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    session_preamble: str,
+    transient_memory: str,
+) -> str:
+    """Put enrichment in the prompt and bind the turn for an agent whose shell can call its other tools."""
+    if isinstance(agent, CliShellAgent):
+        agent.response_context = ctx
+    _append_additional_context(agent, session_preamble)
+    if ctx.system_enrichment_items:
+        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+    return render_transient_context(
+        (transient_memory, render_enrichment_block(list(ctx.transient_enrichment_items))),
+    )
+
+
 def _minimal_turn_enrichment(
     agent: MinimalAgent,
     ctx: ResponseTurnContext,
@@ -1021,7 +1046,7 @@ def _minimal_turn_enrichment(
 
 
 @timed("system_prompt_assembly")
-async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard preparation beside explicit minimal context
+async def _prepare_agent_and_prompt(
     ctx: ResponseTurnContext,
     *,
     prompt: str,
@@ -1087,6 +1112,7 @@ async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard prepar
                 supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
+                agent_cli_in_shell=True,
             )
             prewarm_agent_model_client(
                 agent,
@@ -1178,17 +1204,11 @@ async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard prepar
                 prompt_parts.transient_turn_context,
             )
         else:
-            _append_additional_context(agent, prompt_parts.session_preamble)
-            if ctx.system_enrichment_items:
-                _append_additional_context(
-                    agent,
-                    _render_system_enrichment_context(ctx.system_enrichment_items),
-                )
-            transient_turn_context = render_transient_context(
-                (
-                    prompt_parts.transient_turn_context,
-                    render_enrichment_block(list(ctx.transient_enrichment_items)),
-                ),
+            transient_turn_context = _standard_turn_enrichment(
+                agent,
+                ctx,
+                prompt_parts.session_preamble,
+                prompt_parts.transient_turn_context,
             )
 
         prepared_execution = await prepare_agent_execution_context(
@@ -1212,7 +1232,7 @@ async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard prepar
             config=config,
             resolved_runtime_model=runtime_model,
             compaction_lifecycle=compaction_lifecycle,
-            current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
+            current_sender_id=None if include_openai_compat_guidance else ctx.current_sender_id or ctx.requester_id,
             current_timestamp_ms=current_timestamp_ms,
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
@@ -1353,7 +1373,11 @@ async def run_delegated_child_response(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool,
 ) -> str:
-    """Execute the normal response envelope for a prepared child owned by either adapter."""
+    """Execute the normal response envelope for a prepared child owned by either adapter.
+
+    A minimal child cannot pause for approval: approval-gated tools stay hidden from it,
+    so no adapter ever has to resume it natively.
+    """
     identity = child_execution_identity(child)
     active_config = authorize_delegation(
         child.caller_agent_name,
@@ -1385,6 +1409,7 @@ async def run_delegated_child_response(
         else None
     )
     turn = ResponseTurnContext(
+        agent_mode=child.agent_mode,
         entity_label=child.child_agent_name,
         session_id=child.session_id,
         run_id=child.run_id,
@@ -1412,7 +1437,7 @@ async def run_delegated_child_response(
             delegation_depth=child.depth,
             refresh_scheduler=refresh_scheduler,
             attempt_model_runtime=ToolRuntimeModelBinding(),
-            supports_native_tool_approval=supports_native_tool_approval,
+            supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
             collect_streamed_response=True,
             turn_recorder=TurnRecorder(user_message=prompt),
         )
@@ -1934,7 +1959,7 @@ async def _stream_agent_attempt_chunks(
         )
         if transform_events is not None:
             stream_generator = transform_events(stream_generator)
-        if run_context.turn.agent_mode == "minimal":
+        if run_context.turn.agent_mode == "minimal" or isinstance(agent, CliShellAgent):
             stream_generator = stream_cli_events(stream_generator)
         chunks = _process_stream_events(
             stream_generator,
@@ -2213,7 +2238,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ),
             active_model_name=prepared_run.runtime_model_name,
         )
-        with participation_model(prepared_run.agent.model, ctx.participation, run_id=attempt.attempt_run_id):
+        with (
+            participation_model(prepared_run.agent.model, ctx.participation, run_id=attempt.attempt_run_id),
+            observe_final_request(
+                ctx.skill_review_capture,
+                prepared_run.agent.model,
+                run_id=attempt.attempt_run_id,
+                model_name=prepared_run.runtime_model_name,
+            ),
+        ):
             async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
                 owned_stream = context_bound_async_stream(
                     context_factory=bind_owner,
@@ -2234,7 +2267,16 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(skipped)
             else:
                 yield get_user_friendly_error_message(run_error, agent_name, runtime_paths=runtime_paths)
-                yield AttemptResolved(HandledAttempt())
+                yield AttemptResolved(
+                    HandledAttempt(
+                        metadata_content=_build_interrupted_metadata(
+                            state,
+                            RunStatus.error,
+                            attempt.attempt_run_id,
+                            session_id,
+                        ),
+                    ),
+                )
             return
 
         if state.cancelled_run_event is not None:

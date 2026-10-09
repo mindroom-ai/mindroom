@@ -6,6 +6,7 @@ and Stripe configuration so other modules can import from a single place.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from datetime import UTC
@@ -66,6 +67,12 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower() in {"1", "true", "yes"}
 # Days a stopped instance of an inactive subscription keeps its data before teardown.
 INSTANCE_TEARDOWN_GRACE_DAYS = max(1, int(os.getenv("INSTANCE_TEARDOWN_GRACE_DAYS", "30")))
+# Days an account pending deletion can still be restored; restore_account enforces the same 7 days.
+ACCOUNT_DELETION_GRACE_DAYS = 7
+# Peers, such as the ingress controller, whose X-Real-IP header names the client for rate limits and auth lockout.
+TRUSTED_PROXY_NETWORKS = tuple(
+    ipaddress.ip_network(cidr.strip()) for cidr in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if cidr.strip()
+)
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
@@ -77,6 +84,7 @@ if stripe.api_key and not STRIPE_WEBHOOK_SECRET:
 PROVISIONER_API_KEY = _get_secret("PROVISIONER_API_KEY", "")
 INSTANCE_BASE_DOMAIN = os.getenv("INSTANCE_BASE_DOMAIN", PLATFORM_DOMAIN)
 INSTANCE_STORAGE_CLASS_NAME = os.getenv("INSTANCE_STORAGE_CLASS_NAME", "")
+INSTANCE_INGRESS_CONTROLLER_NAMESPACE = os.getenv("INSTANCE_INGRESS_CONTROLLER_NAMESPACE", "")
 INSTANCE_MINDROOM_IMAGE = os.getenv("INSTANCE_MINDROOM_IMAGE", "")
 INSTANCE_MINDROOM_IMAGE_PULL_POLICY = os.getenv("INSTANCE_MINDROOM_IMAGE_PULL_POLICY", "")
 INSTANCE_IMAGE_PULL_SECRET_NAMES = os.getenv("INSTANCE_IMAGE_PULL_SECRET_NAMES", "")
@@ -146,12 +154,14 @@ def _build_allowed_origins(domain: str, environment: str) -> list[str]:
 ALLOWED_ORIGINS = _build_allowed_origins(PLATFORM_DOMAIN, ENVIRONMENT)
 
 __all__ = [
+    "ACCOUNT_DELETION_GRACE_DAYS",
     "ALLOWED_ORIGINS",
     "ENABLE_CLEANUP_SCHEDULER",
     "ENVIRONMENT",
     "INSTANCE_BASE_DOMAIN",
     "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET",
     "INSTANCE_IMAGE_PULL_SECRET_NAMES",
+    "INSTANCE_INGRESS_CONTROLLER_NAMESPACE",
     "INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS",
     "INSTANCE_MINDROOM_IMAGE",
     "INSTANCE_MINDROOM_IMAGE_PULL_POLICY",
@@ -189,6 +199,7 @@ __all__ = [
     "STRIPE_WEBHOOK_SECRET",
     "SUPABASE_ANON_KEY",
     "SUPABASE_URL",
+    "TRUSTED_PROXY_NETWORKS",
     "UTC",
     "auth_client",
     "logger",

@@ -1,138 +1,38 @@
 ---
-icon: lucide/ship
+icon: simple/kubernetes
 ---
 
 # Kubernetes Deployment
 
-Deploy MindRoom on Kubernetes for production multi-tenant deployments.
+This page covers running MindRoom on Kubernetes with Helm: the available charts, a runtime-only install, worker backends for isolated tool execution, and backup and restore.
+For the hosted multi-tenant platform (platform and instance charts), see [SaaS Platform](saas-platform.md).
 
-## Architecture
+## Charts
 
-MindRoom uses five Helm charts:
-
-- **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
-- **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
-- **Runtime Chart** (`cluster/k8s/runtime/`) - MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services externally
-- **Tuwunel Chart** (`cluster/k8s/tuwunel/`) - Standalone Tuwunel homeserver (MindRoom fork) for clusters that pair the runtime chart with a chart-managed Matrix homeserver
-- **Client Chart** (`cluster/k8s/client/`) - Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS
+| Chart | Path | Use |
+|-------|------|-----|
+| Runtime | `cluster/k8s/runtime/` | MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services |
+| Tuwunel | `cluster/k8s/tuwunel/` | Standalone Tuwunel homeserver (MindRoom fork) to pair with the runtime chart |
+| Client | `cluster/k8s/client/` | Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS |
+| MatrixRTC | `cluster/k8s/matrixrtc/` | Optional LiveKit SFU and MatrixRTC authorization service for [voice calls](../voice-calls.md), proxied by the client chart |
+| Instance | `cluster/k8s/instance/` | One hosted MindRoom runtime with bundled dashboard/API and Matrix/Synapse, deployed by the SaaS platform |
+| Platform | `cluster/k8s/platform/` | SaaS control plane (API, frontend, provisioner) |
 
 ## Prerequisites
 
-- Kubernetes cluster (tested with k3s via kube-hetzner)
-- kubectl and helm installed
+- A Kubernetes cluster (tested with k3s via kube-hetzner)
+- `kubectl` and `helm`
 - NGINX Ingress Controller
-- cert-manager (for TLS certificates)
+- cert-manager for TLS certificates
 - Hetzner Cloud Controller Manager and Hetzner CSI Driver when using `hcloud-volumes`
 
-## Hetzner Scaling Baseline
-
-Start with one K3s server node and keep tenant storage on Hetzner Cloud Volumes.
-This keeps the current bill low while making later worker nodes possible.
-Use `hcloud-volumes` for provisioned instance PVCs and avoid `local-path` for tenant data that must survive node replacement.
-The platform frontend and backend are stateless and can use HPA once metrics-server is installed.
-Tenant MindRoom and Synapse releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
-
-Production platform values should make the storage class explicit:
-
-```yaml
-provisioner:
-  instanceStorageClassName: hcloud-volumes
-
-autoscaling:
-  enabled: false
-```
-
-Enable `autoscaling.enabled` only after the cluster has metrics-server and enough nodes or headroom to schedule the extra replicas.
-
-## Instance Deployment
-
-### Via Provisioner API (Recommended)
-
-Create customer instances through the portal or `POST /my/instances/provision` using the customer's Supabase access token.
-The route checks subscription entitlement and derives the account, subscription, and tier from the authenticated customer.
-Set `PLATFORM_DOMAIN` to the deployment domain and `SUPABASE_ACCESS_TOKEN` to that customer's access token:
-
-```bash
-curl --fail-with-body --request POST \
-  "https://api.${PLATFORM_DOMAIN}/my/instances/provision" \
-  --header @- <<EOF
-Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}
-EOF
-```
-
-The authorization header is read from standard input so the token does not appear in curl's process arguments.
-
-Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned, restarted when an inactive subscription stopped it, or re-provisioned when deprovisioned.
-Use the returned `customer_id` with the CLI's `logs <id>` command.
-The CLI's `provision <id>` command uses fixed test metadata and is not the new-customer creation path.
-
-### Direct Helm Installation
-
-For debugging only, first create a private values file with a nonempty sandbox token from a trusted working directory:
-
-```bash
-(
-  set -eu
-  umask 077
-  test ! -d ./instance-secrets.yaml
-  instance_secrets_tmp="$(mktemp ./instance-secrets.yaml.XXXXXX)"
-  trap 'rm -f -- "$instance_secrets_tmp"' EXIT
-  instance_sandbox_token="$(openssl rand -hex 32)"
-  printf 'sandbox_proxy_token: "%s"\n' "$instance_sandbox_token" > "$instance_secrets_tmp"
-  mv -f -- "$instance_secrets_tmp" ./instance-secrets.yaml
-)
-```
-
-The private temporary file replaces `instance-secrets.yaml` atomically, without reusing an existing file's permissions or following a file symlink.
-Keep this file out of version control.
-With Helm's default Secret storage backend, the command below also retains supplied values and rendered Secrets in release history in `mindroom-instances`.
-Readers of those release Secrets can recover the sandbox token and other supplied credentials.
-Restrict access to both the instance Secret and every retained Helm release Secret, as well as this local values file.
-Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
-The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
-The provisioner supplies this token automatically, while a direct install must provide it.
-Browser dashboard login through the platform also needs `platformSsoSecret` set to the key the platform derives for that instance; without it the instance accepts only Supabase bearer tokens.
-
-```bash
-helm upgrade --install instance-1 ./cluster/k8s/instance \
-  --namespace mindroom-instances \
-  --create-namespace \
-  -f instance-secrets.yaml \
-  --set customer=1 \
-  --set accountId="your-account-uuid" \
-  --set baseDomain=mindroom.chat \
-  --set anthropic_key="your-key" \
-  --set openrouter_key="your-key" \
-  --set supabaseUrl="https://your-project.supabase.co" \
-  --set supabaseAnonKey="your-anon-key"
-```
-
-Never give an instance the Supabase service-role key; the runtime authenticates with the anon key only.
-
-Only enable trusted upstream auth when the instance is behind a verified access layer that strips client-supplied copies of those headers and injects authenticated values itself:
-
-```bash
-helm upgrade --install instance-1 ./cluster/k8s/instance \
-  --namespace mindroom-instances \
-  --reset-then-reuse-values \
-  --set-string trustedUpstreamAuth.enabled=true \
-  --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
-  --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
-  --set trustedUpstreamAuth.matrixUserIdHeader=X-MindRoom-Matrix-User-Id \
-  --set trustedUpstreamAuth.emailToMatrixUserIdTemplate='@{localpart}:example.org' \
-  --set trustedUpstreamAuth.emailDomain=example.com
-```
-
-When using the provisioner, configure the platform chart with `provisioner.trustedUpstreamAuth.enabled="true"` and the matching `provisioner.trustedUpstreamAuth.*Header` values.
-If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template and `provisioner.trustedUpstreamAuth.emailDomain` with the allowed email domain.
-The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` and `emailDomain` values in both the instance and platform chart configuration.
+For Hetzner sizing, see [Hetzner Scaling Baseline](saas-platform.md#hetzner-scaling-baseline).
 
 ## Runtime-Only Deployment
 
 Use the runtime chart when you already operate the surrounding platform and only want Kubernetes to run the MindRoom runtime.
-
-The chart intentionally does not create Matrix, ingress, a model gateway, or platform services.
-For a chart-managed homeserver, deploy the Tuwunel chart (`cluster/k8s/tuwunel/`) alongside it and point `matrix.homeserverUrl`, `matrix.serverName`, and `matrix.registrationToken` at it as described in `cluster/k8s/tuwunel/README.md`.
+It does not create Matrix, ingress, a model gateway, or platform services.
+For a chart-managed homeserver, deploy the Tuwunel chart alongside it and point `matrix.homeserverUrl`, `matrix.serverName`, and `matrix.registrationToken` at it as described in `cluster/k8s/tuwunel/README.md`.
 
 ```bash
 helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
@@ -173,365 +73,227 @@ workers:
       key: MINDROOM_SANDBOX_PROXY_TOKEN
 ```
 
-See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
-For chart-managed worker egress with human-approved temporary hostname grants, see [Approved Egress](approved-egress.md).
+The runtime chart reads provider API keys from Kubernetes Secrets listed in `providerCredentials` (see [Provider API Keys from Kubernetes Secrets](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#provider-api-keys-from-kubernetes-secrets)).
+Its `env` value is a map with `extra` and `envFrom`, not a list of environment variables.
+The hosted instance chart instead mounts provider keys as files under `/etc/secrets/` and sets the matching [`*_API_KEY_FILE`](../configuration/models.md#file-based-secrets) variables.
+
+For passwordless agent accounts ([`appservice` mode](../matrix.md#agent-users)), set `matrix.managedAccountAuth: appservice` and point `matrix.appserviceToken` at a Secret holding the registration's `as_token`, and leave `matrix.registrationToken` unset (see [Matrix Managed Account Authentication](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#matrix-managed-account-authentication)).
+On the Tuwunel chart, mount the complete registration YAML from a Secret through `tuwunel.appserviceRegistration`, whose `key` is also the mounted filename and must end in `.yaml` or `.yml`, and optionally disable password login with `login_with_password: false` in `tuwunel.settings` (see [Passwordless MindRoom Accounts](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#passwordless-mindroom-accounts)).
+
+### Chart Reference
+
+Each chart's README documents its full values: [runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md), [Tuwunel](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md), [client](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md), and [MatrixRTC](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md).
+Optional features:
+
+- [Background script gateway](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway) (`scriptGateway`) lets dedicated workers run [background scripts](../tools/background-scripts.md) and [minimal-mode](../tools/agent-cli.md) shells without reaching the general API port.
+- [Content bundles](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#content-bundles) (`contentBundles`, `config.bootstrapContentBundle`) ship config, plugins, and skills as digest-pinned images, including how to update a bootstrapped config.
+- [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
+- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, the Agent Vault server's `extraEnv` and `envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
+- [Approved Egress](approved-egress.md) gives workers human-approved temporary hostname grants.
+- [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
+- Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
+- The client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy the MatrixRTC chart's call backend.
+- [Operational log events](operational-log-events.md) feed log-based metrics and alerts once `MINDROOM_LOG_FORMAT=json` is set through `env.extra`.
 
 ## Worker Backends
 
-The instance and runtime charts support two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
-
-The dedicated-worker provisioning flow is implemented today.
-
-Both modes store agent data in the same per-agent directory structure.
+Worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell` run in one of two backends.
+Which tools are routed and how `worker_scope` shares workers are described in [Sandbox Proxy Isolation](sandbox-proxy.md).
 
 | Helm value | Behavior | Best for |
 |------------|----------|----------|
-| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments |
-| `workerBackend: kubernetes` | Creates dedicated worker Deployments and Services on demand | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
+| `workers.backend: static_runner` (default) | One shared sandbox-runner sidecar inside the MindRoom pod | Simpler deployments |
+| `workers.backend: kubernetes` | Dedicated worker Deployments and Services created on demand | Isolation between agents or users |
+
+The hosted instance chart supports only `static_runner` (`workerBackend`) and fails rendering for any other backend, because its tenants share one namespace.
+Deploy the runtime chart in a namespace of its own when an instance needs dedicated workers.
 
 ### Shared Sidecar Mode
 
-`workerBackend: static_runner` is the default.
-The primary runtime talks to a shared sidecar over `localhost`.
-This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
-It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
-The primary leases each proxied tool's saved settings to the runner per call.
-The runner's own config file is only the seed the pod started with, so each call also carries the primary's [live config snapshot](sandbox-proxy.md#live-config-snapshots) with sensitive keys removed, and the runner resolves the requesting agent and its settings from it.
-Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
-When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
-See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
+The primary runtime reaches the sidecar over `localhost`, and all proxied tool calls share one runner process.
+The sidecar shares agent workspaces with the primary but cannot read the credential store, Matrix state, or the credentials encryption key, and it is not an isolation boundary between agents.
+To enable encrypted credential storage, set `workers.sandbox.credentialsEncryptionKey.existingSecret`; only the primary runtime receives that key.
+See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-workerbackend-static_runner) for its mounts and limits.
 
 ### Dedicated Worker Mode
 
-`workerBackend: kubernetes` enables the built-in Kubernetes worker backend.
-The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker.
-Each worker pod runs the sandbox-runner app and mounts the same agent workspace as every other runtime for that agent; the agent's sessions, memory, and learning data stay with the primary.
-Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
-When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
-The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
-If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
-The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
-The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
+With `workers.backend: kubernetes`, the primary runtime creates a worker Deployment and Service per worker on demand and routes tool calls to it.
+Idle workers scale to zero, keeping agent data and worker caches.
+Each worker keeps its own caches and virtualenvs under `workers.kubernetes.storageSubpathPrefix`.
+[Worker scopes](sandbox-proxy.md#worker-scopes) describes which workspaces each worker mounts, and [Credential leases](sandbox-proxy.md#credential-leases) describes how tool settings reach workers.
+`google_vertex_adc` tools must run in the primary runtime, because workers receive no Google application default credentials.
 
-> [!WARNING]
-> **Filesystem isolation depends on `worker_scope`.**
-> With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's workspace — this is the strongest isolation available.
-> With `user`, the worker can see the workspaces of every non-private `worker_scope: user` agent, plus that user's own private workspaces, because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
-> Use `user_agent` for per-agent filesystem isolation.
+Typical Helm values:
+
+```yaml
+storage:
+  accessModes:
+    - ReadWriteMany
+workers:
+  backend: kubernetes
+  cleanupIntervalSeconds: 30
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+  kubernetes:
+    idleTimeoutSeconds: 1800
+    readyTimeoutSeconds: 60
+    runtimeClassName: ""
+```
+
+#### Worker settings
+
+The runtime chart sets these environment variables from its values; set them directly when deploying the backend without Helm.
+Further options, such as extra labels, annotations, volumes, containers, and the seccomp profile, are in `cluster/k8s/runtime/values.yaml` and `src/mindroom/workers/backends/kubernetes_config.py`.
+
+| Helm value | Environment variable | Default | Effect |
+|------------|----------------------|---------|--------|
+| `workers.kubernetes.image` | `MINDROOM_KUBERNETES_WORKER_IMAGE` | Chart: the main MindRoom image; required without Helm | Worker image |
+| `workers.kubernetes.namespace` | `MINDROOM_KUBERNETES_WORKER_NAMESPACE` | Chart: the release namespace; otherwise the pod namespace or `default` | Namespace for worker resources |
+| _(storage claim)_ | `MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME` | Chart: the runtime storage claim; required without Helm | PVC holding agent workspaces |
+| `storage.mountPath` | `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH` | Chart: `/app/agent_data`; otherwise `/app/worker` | Where workers mount storage |
+| `workers.kubernetes.storageSubpathPrefix` | `MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX` | `workers` | Storage directory for worker-local caches |
+| `workers.kubernetes.port` | `MINDROOM_KUBERNETES_WORKER_PORT` | `8766` | Internal Service and container port |
+| `workers.kubernetes.readyTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS` | `60` | How long the primary waits for a worker to become ready |
+| `workers.kubernetes.idleTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` | `1800` | Idle time before a worker may scale to zero |
+| `workers.cleanupIntervalSeconds` | `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` | Chart: `30`; otherwise `0` (no automatic cleanup) | How often idle-worker cleanup runs |
+| `workers.kubernetes.reconcilePodTemplates` | `MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES` | `true` | Recreate workers whose image, env, or resources changed |
+| `workers.kubernetes.namePrefix` | `MINDROOM_KUBERNETES_WORKER_NAME_PREFIX` | `mindroom-worker` | Prefix for worker resource names |
+| `workers.kubernetes.runtimeClassName` | `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME` | Cluster default | RuntimeClass for all dedicated workers, including background-script workers |
+| `workers.kubernetes.resources` | `MINDROOM_KUBERNETES_WORKER_CPU_REQUEST`, `_CPU_LIMIT`, `_MEMORY_REQUEST`, `_MEMORY_LIMIT` | `100m`, `500m`, `256Mi`, `1Gi` | Worker container resources |
+| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](../tools/background-scripts.md) resource profiles, all three required |
+| `workers.kubernetes.nodeName`, `colocateWithControlPlaneNode` | `MINDROOM_KUBERNETES_WORKER_NODE_NAME`, `MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE` | Unset, `false` | Pin workers to one node (see [Storage Requirements](#storage-requirements)) |
+| `workers.kubernetes.extraEnv` | `MINDROOM_KUBERNETES_WORKER_ENV_JSON` | `{}` | Extra environment variables for worker pods |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` | `1Gi` | Size of each worker's `/tmp` |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` | `{}` | Per-requester worker resources |
+
+Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
+Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
+
+Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that worker pod rather than refusing writes.
+`MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` (for example `4Gi`) also requests and limits the same amount of container `ephemeral-storage`, which clusters such as GKE Autopilot otherwise cap at 1 GiB.
+Tool subprocesses already get a `TMPDIR` on persistent storage, so only explicit `/tmp` paths use this space.
+
+`MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` maps a Matrix user ID to `requests` and/or `limits` with `cpu` and/or `memory`, for example `{"@alice:example.org": {"limits": {"memory": "4Gi"}}}`.
+Listed quantities replace the global values for that requester's `user` and `user_agent` workers; shared and unscoped workers, other requesters, and background-script profiles are unchanged.
+
+`workers.kubernetes.extraEnv` drops MindRoom's own control variables and vendor telemetry variables, except `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, which tunes runner subprocess timeouts.
+Workers do not inherit the runtime's `.env` or provider keys; for per-workspace variables such as `PATH` entries or package indexes, use the [workspace env hook](sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh), which takes effect without redeploying.
 
 ### Knowledge Source Visibility
 
-Dedicated Kubernetes workers expose assigned knowledge-base source directories only when the resolved source is inside the shared worker-storage root.
-The worker key and resolved agent policy determine which agent assignments are visible.
-Shared, unscoped, and `user_agent` worker keys select their encoded agent, while a `user` worker key selects every configured agent that resolves to `worker_scope: user` because those agents share that worker.
-Knowledge bases assigned to other agents and configured knowledge bases with no matching assignment are not mounted.
-
-For a source at `<shared-storage-root>/<relative-path>`, the worker-visible path is `<worker-storage-mount>/<relative-path>`.
-The effective default depends on the deployment:
+Dedicated workers can read the knowledge-base source directories assigned to the agents they serve, mounted read-only at the same path relative to the worker storage mount.
+A `user` worker sees the knowledge of every `worker_scope: user` agent; other workers see only their own agent's.
 
 | Deployment | Worker storage mount | Visible path for `knowledge/reference` |
 | --- | --- | --- |
 | Runtime chart (`storage.mountPath`) | `/app/agent_data` | `/app/agent_data/knowledge/reference` |
-| Instance chart (`storagePath`) | `/mindroom_data` | `/mindroom_data/knowledge/reference` |
 | Direct backend without a mount override | `/app/worker` | `/app/worker/knowledge/reference` |
 
-Both charts set `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`; the direct-backend fallback applies when that environment override is absent.
-Custom chart values or runtime environment settings can select another root.
-The worker mounts that directory from the existing worker-storage PVC with `subPath: <relative-path>` and `readOnly: true`.
-The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
-MindRoom does not copy or clone the source per agent.
-
-If the source already lies inside a workspace the worker mounts, that writable workspace mount provides access and MindRoom does not add a nested duplicate mount.
-Sources outside the shared worker-storage root are ignored so existing configurations continue to work without granting access to host-only paths.
-MindRoom plans each mount from the configured path, not its link target: a source that is missing or reached through a link is skipped with a warning, and a source inside another agent's workspace, a private instance, or a worker root is refused with an error, because kubelet follows links inside the volume when it mounts and those directories are written by other workers.
-Mount plans that would overlap another knowledge source or contain an existing scoped mount fail closed before a Deployment is created.
-The final knowledge mount list is part of the worker pod-template hash, so reconciliation recreates workers whose mounted assignments are stale.
-
-Typical Helm values look like:
-
-```yaml
-workerBackend: kubernetes
-workerCleanupIntervalSeconds: 30
-storageAccessMode: ReadWriteMany
-controlPlaneNodeName: ""
-kubernetesWorkerImage: ""
-kubernetesWorkerImagePullPolicy: ""
-kubernetesWorkerServiceAccountName: ""
-kubernetesWorkerNamePrefix: "mindroom-worker"
-kubernetesWorkerStorageSubpathPrefix: "workers"
-kubernetesWorkerPort: 8766
-kubernetesWorkerReadyTimeoutSeconds: 60
-kubernetesWorkerIdleTimeoutSeconds: 1800
-kubernetesWorkerRuntimeClassName: ""
-sandbox_proxy_token: "replace-me"
-```
-
-The runtime chart exposes the same concepts under the nested `workers.*` values.
-
-Important behavior and constraints:
-
-- `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
-- `workerCleanupIntervalSeconds` controls how often the primary runtime runs idle-worker cleanup.
-- Worker pod-template drift (image, env, resources) is reconciled automatically: each cleanup pass recreates scaled-down worker Deployments whose pod template no longer matches the configured spec, and running workers are recreated on their next provisioning after they scale down.
-- Reconciliation is controlled by `workers.kubernetes.reconcilePodTemplates` in the runtime chart (`MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES`, default on), so worker Deployments do not need manual recycling after image or pod-template changes.
-- `kubernetesWorkerIdleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
-- `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
-- `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
-- `kubernetesWorkerRuntimeClassName` selects one Kubernetes RuntimeClass for the entire dedicated-worker pool, including background-script workers. The runtime chart uses `workers.kubernetes.runtimeClassName`; direct deployments can set `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME`. Leave it empty for the cluster default.
-- Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior. Changing the value participates in worker reconciliation and can recreate existing workers when they are next ensured, so finish active work before changing it.
-- Dedicated workers need access to the shared instance PVC so they can reach agent workspaces.
-- For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's workspace plus the worker's scratch space; each workspace is a `subPath` mount at its canonical path.
-- Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
-- Dedicated workers start with no shared credentials by default.
-- Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.
-- `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
-- `workers.kubernetes.extraEnv` and `MINDROOM_KUBERNETES_WORKER_ENV_JSON` are filtered before reaching worker pods or startup manifests: generated worker env, runtime control env, Kubernetes backend config env, and vendor telemetry env are dropped.
-- The one sandbox-control value intentionally allowed through Kubernetes worker extra env is `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, so operators can tune runner subprocess timeouts.
-- Dedicated worker runtime env stays deny-by-default for provider and arbitrary `.env` values, while basic runtime plumbing such as `PATH`, `VIRTUAL_ENV`, and linker vars is set separately.
-- This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
-- For agent-editable per-workspace env (extra PATH entries, package indexes, npm cache dirs, etc.), use the request-time `.mindroom/worker-env.sh` overlay documented in [Sandbox Proxy Isolation](sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh). The overlay is sourced inside the running worker per request, so it does not change the worker Deployment, the startup manifest, the pod-template hash, or any Helm value, and does not require a worker restart when edited.
-- MindRoom-owned workspace identity, cache, and virtualenv env names remain controlled by the worker runtime and cannot be redirected by `.mindroom/worker-env.sh`: `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, and `VIRTUAL_ENV`.
-- Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
+The worker sees the complete source directory, including files excluded from indexing, and MindRoom does not copy or clone it per agent.
+Only sources inside the shared storage root are mounted.
+A source inside a workspace the worker already mounts stays reachable through that writable workspace mount.
+Sources that are missing, reached through a link, or inside another agent's workspace, a private instance, or a worker directory are skipped with a logged warning or error.
+A knowledge source that overlaps another knowledge source or another worker mount prevents the worker from starting.
+Changing knowledge assignments recreates the affected workers.
 
 ### Storage Requirements
 
-Dedicated workers need access to the same PVC as the primary runtime.
-Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
-If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
-The chart enforces this constraint during template rendering.
-For the hosted SaaS instance chart, keep the default `static_runner` backend on single-node clusters.
-Switching hosted instances to dedicated Kubernetes workers on a multi-node cluster requires either a real `ReadWriteMany` storage class or explicit node pinning.
+Dedicated workers mount the runtime's storage PVC.
+Set `storage.accessModes` to `ReadWriteMany` so several workers can use it at once.
+If your storage class only supports `ReadWriteOnce`, keep the runtime and workers on one node: set `workers.kubernetes.colocateWithControlPlaneNode: true`, or set `workers.kubernetes.nodeName` and pin the runtime to that same node with `nodeSelector` or `affinity`.
 
 ### RBAC And Network Policy
 
-When `workerBackend: kubernetes` is enabled, the chart creates:
+With `workers.backend: kubernetes`, the runtime chart creates:
 
 - A worker-manager ServiceAccount for the primary runtime.
-- A Role and RoleBinding that allow managing worker Deployments and Services in the instance namespace.
-- In the runtime chart's default same-namespace mode, a chart-created worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
-- In the runtime chart's explicit separate worker namespace mode, Secret CRUD for per-worker auth Secrets in that worker namespace.
-- In the hosted instance chart, a pre-created tenant worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
-- NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
+- A Role and RoleBinding that manage worker Deployments and Services in the worker namespace.
+- Access to worker auth Secrets: one chart-created Secret in the release namespace, or per-worker Secrets when `workers.kubernetes.namespace` names a separate namespace.
+- NetworkPolicy rules that let the primary reach the worker port and deny worker-to-worker runner traffic.
+
+That Role reaches every Deployment and Service in its namespace, so give each runtime release a namespace of its own.
+Label that namespace with `pod-security.kubernetes.io/enforce=baseline` so admission rejects privileged containers, host namespaces, and `hostPath` volumes; the chart's runtime and worker pods satisfy that profile.
 
 ### Operations
 
-The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually.
-Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`.
-See [Sandbox Proxy Isolation](sandbox-proxy.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
+To list active and idle workers or run an idle-worker cleanup pass, use the dashboard's [Workers API](../dashboard.md#workers-api).
 
-## Secrets Management
+## Backup and Restore
 
-The hosted instance chart mounts provider keys as files under `/etc/secrets/` and sets the matching `*_API_KEY_FILE` variables:
+This section covers the runtime chart and the Tuwunel chart.
+Several volumes and Secrets only work together, so back them up and restore them as units.
 
-```yaml
-env:
-  - name: ANTHROPIC_API_KEY_FILE
-    value: "/etc/secrets/anthropic_key"
-  - name: OPENROUTER_API_KEY_FILE
-    value: "/etc/secrets/openrouter_key"
-```
+### What each volume holds
 
-The standalone runtime chart instead reads `providerCredentials` Secret keys into direct provider environment variables.
-Its `env` values shape is a map with `extra` and `envFrom`, not the list shown above for the hosted instance container.
+| Volume | Values | Contents |
+|--------|--------|----------|
+| `<fullname>-storage` | `storage` | The storage root (`MINDROOM_STORAGE_PATH`, default `/app/agent_data`): `matrix_state.yaml` with each agent's Matrix account and access token; `tracking/`; `credentials/` and `private_oauth/`; agent and team sessions, learning, memory, and workspaces; `control_state/`; `knowledge_db/` and `knowledge_git/`; `logs/`; and `encryption_keys/` and `sync_continuity/` unless `stateStorage` is enabled |
+| `<fullname>-state` | `stateStorage` | When enabled, `encryption_keys/` (each agent's Matrix device store with its E2EE keys and sync position) and `sync_continuity/`, plus each `stateStorage.extraSubPaths` directory, such as `tracking/` |
+| `<fullname>-sessions` | `sessionStorage` | When enabled, the agent and team session databases (`MINDROOM_SESSION_STORAGE_PATH`) |
+| `<fullname>-knowledge` | `knowledgeStorage` | When enabled, `knowledge_db/` |
+| `<volumeName>-<fullname>-event-cache-postgres-0`, default `data-<fullname>-event-cache-postgres-0` | `eventCache.postgres.persistence` | The PostgreSQL event journal, which records which messages were already answered |
+| `<server.name>-data`, default `agent-vault-data` | `workers.kubernetes.agentVault.server.persistence` | The chart-managed Agent Vault server's data |
+| `<approved egress name>-data`, default `<fullname>-egress-proxy-data` | `approvedEgress.persistence` | Temporary hostname grants of the approved egress proxy |
+| Tuwunel `<fullname>-data` | Tuwunel chart `storage` | The homeserver's RocksDB database and its `media/` directory |
 
-For production SaaS instance provisioning, the instance chart is rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`.
-After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
-Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
-Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
-The sandbox proxy token is random per instance.
-Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
-Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
-Standalone chart installs that set the retired `supabaseServiceKey` value keep that key in the chart-created Secret until it is deleted manually.
+Back up the sessions volume together with the storage claim.
+[Data Persistence](storage.md#data-persistence) describes the storage root's directories in more detail.
 
-## Ingress
+### Restore units
 
-Each instance gets three hosts:
+Restore each of these sets together, from the same point in time:
 
-- `{customer}.{baseDomain}` - MindRoom dashboard and API
-- `{customer}.api.{baseDomain}` - Direct API access
-- `{customer}.matrix.{baseDomain}` - Matrix/Synapse server
+- **Credentials encryption key and credential stores.**
+  With `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` set (for example through `workers.sandbox.credentialsEncryptionKey.existingSecret`), credential files and OAuth stores are encrypted under that key.
+  Under a different key MindRoom logs `Failed to load encrypted credentials` and will not overwrite them, so back up the key's Secret value with the storage claim.
+- **Agent Vault volume and its bootstrap Secret.**
+  The Secret named by `workers.kubernetes.agentVault.bootstrapSecretName`, with its `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`, must accompany every vault snapshot.
+- **Event journal, `tracking/`, and Matrix device stores.**
+  The journal, `tracking/event_journal_binding.json`, `encryption_keys/`, `matrix_state.yaml`, and `sync_continuity/` must come from the same moment, or startup refuses the journal or the device stores.
+  A restored chart-managed PostgreSQL volume keeps its original password, while the chart generates a new one when `<fullname>-event-cache-postgres-auth` is missing, so back up that password too.
+  To reuse it, set `eventCache.postgres.auth.password`, or set both `eventCache.postgres.auth.existingSecret` and `eventCache.databaseUrl.existingSecret` to a Secret holding the password and the matching connection URL.
+- **Homeserver and runtime Matrix state.**
+  If the homeserver no longer knows an agent's stored access token or device, that agent does not start.
+  If the runtime snapshot is older than the homeserver, encryption keys received since then are lost and agents may answer messages again.
+  When both are lost, restore both from the same point.
 
-## Platform Deployment
+### Snapshot consistency
 
-```bash
-# Create values file from example
-cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
-# Edit with your configuration
+Volume snapshots taken at different times while MindRoom runs are not a consistent restore set.
+Take them from one quiet point:
 
-helm upgrade --install platform ./cluster/k8s/platform \
-  -f ./cluster/k8s/platform/values-staging.yaml \
-  --namespace staging --create-namespace
-```
+1. Scale the runtime Deployment to zero and wait until its Pod has terminated, then scale dedicated worker Deployments (label `mindroom.ai/worker-id`) to zero and wait until their Pods have terminated, because workers write to the storage claim.
+2. Snapshot the storage claim, the sessions claim if enabled, the state claim, and the event journal volume, or dump the journal database with `pg_dump`.
+   When the homeserver belongs to the same restore set, back it up in this window too.
+3. Scale the runtime back up; it recreates workers on demand.
 
-For a fresh install, `staging` stores Helm release records; the chart creates application resources in `mindroom-{environment}`, with `environment` set in values.
-For an existing release, retain its original release name and namespace when upgrading.
-Ingress hosts use `domain`, independently of the namespace; the base values use `mindroom.chat`, while the staging example uses `staging.mindroom.chat`.
-Populate the staging file's credentials before deploying and keep it private.
-With this chart-managed Secret workflow, Helm also retains the supplied values and rendered Secrets in release history in `staging`; anyone with permission to read those release Secrets can recover the credentials.
-Restrict access to the values file and all retained release Secrets.
-For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
-This external-Secret option is also available in staging; omit credential material from Helm values when using it.
-Provisioning that external Secret requires the application namespace to exist with ownership compatible with the chart, which still declares `mindroom-{environment}` regardless of `platformSecrets.create`.
-Switching to the external-Secret option does not remove credentials from earlier release revisions.
-The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
+A storage-level group snapshot that captures all these volumes at the same instant is also safe without stopping MindRoom.
+The Agent Vault, approved egress, and knowledge volumes can be snapshotted on their own schedules.
+For the Tuwunel volume, use an offline snapshot or Tuwunel's own database backups, which do not include media; see the fork's [backup guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/backups.md).
 
-Platform ingress hosts:
+### Rebuildable data
 
-- `app.{domain}` - Platform frontend
-- `api.{domain}` - Platform backend API
-- `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
+- `knowledge_db/` holds only knowledge indexes.
+  A missing index is rebuilt in the background the next time the base is used, repeating every embedding call, and agents report the base as initializing meanwhile.
+  The sources, including files uploaded through the dashboard, are not rebuildable unless they come from Git, in which case they are cloned again from the configured repository.
+- `logs/` only holds runtime log files.
+- The approved egress volume only holds temporary grants, which expire after at most `approvedEgress.maxTtlSeconds`.
 
-## Local Development with Kind
+Everything else on the storage, sessions, state, and journal volumes is not rebuildable.
 
-```bash
-just cluster-kind-fresh              # Start cluster with everything
-just cluster-kind-port-frontend      # http://localhost:3000
-just cluster-kind-port-backend       # http://localhost:8000
-just cluster-kind-down               # Clean up
-```
+### Restoring
 
-See `cluster/k8s/kind/README.md` for details.
+1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `workers.kubernetes.agentVault.server.persistence.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
+   The chart-managed PostgreSQL adopts a claim restored under `<volumeName>-<fullname>-event-cache-postgres-0`; set its original password as described in [Restore units](#restore-units).
+   With an external database, restore the database and keep its URL Secret.
+   To restore a `pg_dump` instead, install with a new journal volume and `replicaCount: 0`, load the dump, then set `replicaCount` back to 1.
+2. Recreate the Secrets with their original values, including the credentials encryption key, the Agent Vault bootstrap Secret, and the Matrix registration token or application-service registration.
+3. Start Tuwunel first, then the runtime.
 
-## CLI Helper
+If the runtime log shows `The bound Matrix device store is missing`, `Matrix stream changed`, or `IngestionBatchSequenceError`, the device stores do not match the journal; an event journal binding error means `tracking/` and the journal database do not match.
+Restore the matching backups instead of deleting state, because automatic device replacement is unsupported.
+See [Moving a journal safely](storage.md#moving-a-journal-safely) for copying or adopting a journal database, and [Device recovery after the upgrade](upgrades.md#device-recovery-after-the-upgrade) for device-store recovery.
 
-```bash
-./cluster/scripts/mindroom-cli.sh list              # List instances
-./cluster/scripts/mindroom-cli.sh status            # Overall status
-./cluster/scripts/mindroom-cli.sh logs <id>         # View logs
-./cluster/scripts/mindroom-cli.sh provision <id>    # Re-provision an existing test fixture
-./cluster/scripts/mindroom-cli.sh deprovision <id>  # Remove instance
-./cluster/scripts/mindroom-cli.sh upgrade <id>      # Upgrade instance
-```
-
-Reads configuration from `saas-platform/.env`.
-The `provision` helper always sends an instance ID, a fixed test account UUID, a synthetic subscription ID, and the BYOK tier.
-Use it only with a prepared test fixture whose instance and account records already exist, including the account email used to derive the owner identity.
-Use the customer route above for customer provisioning; operators should use real account and subscription records with the API below.
-
-## Provisioner API
-
-All endpoints require bearer token (`PROVISIONER_API_KEY`).
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/system/provision` | POST | Create or re-provision an instance |
-| `/system/instances/{id}/start` | POST | Start a stopped instance |
-| `/system/instances/{id}/stop` | POST | Stop a running instance |
-| `/system/instances/{id}/restart` | POST | Restart an instance |
-| `/system/instances/{id}/uninstall` | DELETE | Remove an instance: Helm release, PVCs, instance Secrets, and its OpenRouter key |
-| `/system/sync-instances` | POST | Sync states between DB and K8s |
-
-For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
-Supplying `instance_id` selects an update of an existing instance; a missing row returns `404`.
-The account must have an email for owner identity derivation.
-Replace the placeholders in this operator request with those database values:
-
-```bash
-curl -X POST "https://api.mindroom.chat/system/provision" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "<account-uuid>", "subscription_id": "<subscription-row-uuid>", "tier": "<subscription-tier>"}'
-```
-
-The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
-For provisioned instance charts, set `provisioner.instanceCredentialsEncryptionSecret` to a stable high-entropy value so the provisioner can derive stable per-instance `credentials_encryption_key` chart values.
-If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner falls back to `PROVISIONER_API_KEY` when generating keys for new instances or explicit existing-instance opt-ins.
-Keep this source stable because changing it changes future derived credential encryption keys.
-New provisioned instances receive a derived credential encryption key by default.
-When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present.
-To enable credential encryption for an existing keyless instance, include `"enable_credentials_encryption": true` in the `POST /system/provision` request body.
-Treat that opt-in as a one-way switch until a plaintext migration exists.
-If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
-Clear or replace stale plaintext credential files before enabling the flag.
-If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
-
-## Subscription Lifecycle
-
-Hosted instances follow their subscription, and one backend module (`services/instance_lifecycle.py`) owns that behavior.
-Stripe subscription and invoice webhooks reconcile the account's instances in a background task after the webhook response, so Kubernetes or OpenRouter trouble never fails a webhook.
-The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an instance the same way, which also catches missed webhooks and retries failed steps.
-
-| Subscription state | Instance | Platform OpenRouter key | Data |
-|--------------------|----------|-------------------------|------|
-| `active`, unexpired `trialing`, or `past_due` (Stripe is retrying payment) | Keeps running | Enabled | Kept |
-| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, or free tier | Stopped | Disabled | Kept until the teardown date |
-| Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | PVCs and instance Secrets deleted |
-| Entitled again while stopped | Started | Re-enabled | Kept |
-| Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
-
-The grace period defaults to 30 days, is at least 1 day, and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
-Only the lifecycle sets `instances.lifecycle_stopped_at` and `instances.teardown_after`, so an instance a customer or admin stopped manually is never restarted automatically.
-A failed step is stored in `instances.lifecycle_error` and retried on the next run.
-Before stopping or resuming a Stripe-billed instance, and for every Stripe-billed subscription during the nightly run, the lifecycle asks Stripe for the current status and corrects a stale stored status, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped.
-A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
-A delayed creation event for a Stripe subscription older than the account's current one is ignored.
-Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
-Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
-Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
-The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
-Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).
-Customers whose instance is stopped for an inactive subscription see a dashboard banner with the teardown date and a link to billing.
-The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
-
-## Release Deployment
-
-Every release tag publishes versioned images (`ghcr.io/mindroom-ai/{platform-backend,platform-frontend,mindroom}:vYYYY.M.N`), and `cluster/scripts/deploy-release.sh` rolls one of them out to the hosted cluster.
-Run it from a repository checkout that has the tag (`git fetch --tags`), with `kubectl` and `helm` pointed at the cluster, for example on the k3s node with `KUBECONFIG=/etc/rancher/k3s/k3s.yaml`.
-
-```bash
-cluster/scripts/deploy-release.sh v2026.9.351 --dry-run              # Show the plan and render the Helm upgrade
-cluster/scripts/deploy-release.sh v2026.9.351                        # Platform plus running instances
-cluster/scripts/deploy-release.sh v2026.9.351 --instances all        # Running plus lifecycle-held instances
-cluster/scripts/deploy-release.sh v2026.9.351 --instances 1,7        # Only these instances
-cluster/scripts/deploy-release.sh v2026.9.351 --instances none       # Platform only
-```
-
-The script performs these steps:
-
-1. Pre-pull the three release images on the node with `sudo k3s crictl pull`, locally or over ssh when `NODE_SSH` is set.
-2. Save the current platform Helm values to `BACKUP_DIR` (default `~/saas-deploy`), then `helm upgrade --wait` the `platform` release with the chart from the same tag, setting `imageTag`, `backendImageTag`, `frontendImageTag`, and `provisioner.instanceMindroomImage`.
-3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `synapse-{id}` and `mindroom-{id}` rollouts.
-4. Check `https://{id}.{baseDomain}/api/health` for every re-provisioned running instance, where `baseDomain` is `provisioner.instanceBaseDomain` or, when that is empty, `domain`.
-
-It reads the domain, environment, Supabase URL, and platform Secret name from the release's computed Helm values, and reads `provisioner_api_key` and `supabase_service_key` from that Secret in the chart's `mindroom-{environment}` namespace; secrets are never printed.
-`--dry-run` still performs these reads and the platform health check, but changes nothing and hides the rendered Helm output because it can contain secrets.
-`NAMESPACE` (default `mindroom-production`) and `RELEASE` (default `platform`) select the Helm release to upgrade.
-Re-provisioning rewrites the tenant Secret and applies the new MindRoom image, while the live tenant config on the instance PVC is left untouched.
-`/system/provision` is rate limited to five requests per minute, so the script waits between instances.
-An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
-The script never re-provisions an instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`), because re-provisioning would start it, and it refuses such ids when they are requested explicitly.
-Starting a stopped instance through the portal or `/system/instances/{id}/start` only scales its existing deployments back up, so it keeps running the old MindRoom image until it is re-provisioned; run the script with `--instances <id>` after it has been started.
-Deprovisioned instances are never re-provisioned either, because that would recreate them empty.
-A failed instance does not stop the run; the script reports every failure at the end and exits non-zero.
-When the node's memory requests are nearly full, rollout pods can stay `Pending`; stop idle instances or resize the node first.
-
-### Database Migrations
-
-Apply any new files from `saas-platform/supabase/migrations` before deploying a release whose backend depends on them.
-Operators have no database password, so `cluster/scripts/db/apply-migration.sh` sends the SQL through the Supabase Management API (`POST https://api.supabase.com/v1/projects/{ref}/database/query`) with a personal access token:
-
-```bash
-SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<project-ref> \
-  cluster/scripts/db/apply-migration.sh saas-platform/supabase/migrations/004_instance_lifecycle.sql
-```
-
-The script prints the API response and exits non-zero when the query fails.
-Migrations `002` through `004` are written to be re-runnable on a database that already has the baseline schema, while `000_consolidated_complete_schema.sql` is for fresh installs only.
-Snapshot the tables a migration touches before applying it, because the Management API cannot roll a committed query back.
-
-## Multi-Tenant Architecture
-
-Each customer instance gets:
-
-- Separate Kubernetes deployment in `mindroom-instances` namespace
-- Isolated PersistentVolumeClaim for data
-- Own Matrix/Synapse server (SQLite)
-- Independent ConfigMap configuration
-- Dedicated ingress routes
-
-Platform services run in `mindroom-{environment}` namespace.
-The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
-The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetzner-matrix`.
-Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
-The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.
+<a id="database-migrations"></a>See [SaaS Platform](saas-platform.md#secrets-management) and [Database Migrations](saas-platform.md#database-migrations).

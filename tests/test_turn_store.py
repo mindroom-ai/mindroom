@@ -6,12 +6,13 @@ import ast
 import asyncio
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
@@ -23,6 +24,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.agent_storage import create_state_storage, get_agent_session
@@ -39,6 +41,7 @@ from mindroom.handled_turns import (
 )
 from mindroom.history import archive
 from mindroom.history.storage import (
+    archive_compaction_chunk,
     read_scope_seen_event_ids,
     read_scope_state,
     update_scope_seen_event_ids,
@@ -50,7 +53,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_record import EditPreparation, PreparedVoiceSource, RevisionReplay
+from mindroom.turn_record import EditPreparation, PreparedVoiceSource, RevisionReplay, RevisionSnapshotChangedError
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -64,6 +67,8 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.history_helpers import StoredGeneration, compaction_generations
+from tests.journal_helpers import admit_room_event
+from tests.redaction_helpers import remove_redacted_history_like_next_response
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -82,6 +87,7 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
@@ -430,6 +436,7 @@ async def _store_with_storage(
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -514,6 +521,103 @@ async def test_response_preparation_does_not_sanitize_unrelated_turns(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted_event_id", ["$user_msg", "$physical-edit"])
+async def test_redaction_delivered_in_another_room_leaves_the_recorded_conversation_untouched(
+    journal_store: EventJournalStore,
+    redacted_event_id: str,
+) -> None:
+    """A redaction names its target by ID alone, so one delivered in another room must not erase this one."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_prompts={"$user_msg": "Edited message"},
+            source_event_revisions={"$user_msg": (10, "$physical-edit")},
+        ),
+    )
+    before = store.get_turn_record("$user_msg")
+
+    assert await store.mark_source_redacted(redacted_event_id, room_id="!elsewhere:example.org") is None
+
+    assert store.get_turn_record("$user_msg") == before
+    assert not store.is_revision_redacted(redacted_event_id)
+    assert await store.redacted_history_events(target, (redacted_event_id,)) == {}
+    assert await store.mark_source_redacted(redacted_event_id, room_id=target.room_id) is not None
+    assert store.is_revision_redacted(redacted_event_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("known_before_redaction", ["unseen", "admitted", "pending_without_room"])
+async def test_redaction_in_another_room_cannot_tombstone_an_event_without_a_recorded_room(
+    journal_store: EventJournalStore,
+    known_before_redaction: str,
+) -> None:
+    """A foreign redaction of an unanswered event must not drop it or block replies in its own room."""
+    store = await _store(journal_store)
+    principal = journal_store.principal("agent@alice")
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    if known_before_redaction != "unseen":
+        await admit_room_event(principal, target.room_id, "$victim")
+    if known_before_redaction == "pending_without_room":
+        await store.record_pending_turn(TurnRecord.create(["$victim"], completed=False))
+    before = store.get_turn_record("$victim")
+
+    assert await store.mark_source_redacted("$victim", room_id="!elsewhere:example.org") is None
+
+    assert store.get_turn_record("$victim") == before
+    assert not store.is_handled("$victim")
+    await admit_room_event(principal, target.room_id, "$victim")
+    await store.record_pending_turn(replace(_owned_turn_record(target), response_event_id=None, completed=False))
+    suppressed = await store.prepare_pending_response_source(
+        target=target,
+        source_event_ids=("$user_msg",),
+        terminal_source_event_ids=("$user_msg",),
+        thread_history=[make_visible_message(event_id="$victim", body="Earlier message", thread_id="$thread")],
+    )
+    assert suppressed is False
+
+
+@pytest.mark.asyncio
+async def test_only_a_redaction_of_an_event_recorded_in_another_room_warns(journal_store: EventJournalStore) -> None:
+    """Deleting a sticker, poll, or old message the journal never admitted is routine, so it logs no warning."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+
+    with capture_logs() as logs:
+        assert await store.mark_source_redacted("$sticker", room_id=target.room_id) is None
+        assert await store.mark_source_redacted("$user_msg", room_id="!elsewhere:example.org") is None
+
+    warnings = [(log["event"], log["redacted_event_id"]) for log in logs if log["log_level"] == "warning"]
+    assert warnings == [("Ignoring redaction of an event recorded in another room", "$user_msg")]
+
+
+@pytest.mark.asyncio
+async def test_room_less_tombstone_from_an_earlier_release_stays_in_effect(journal_store: EventJournalStore) -> None:
+    """A tombstone an earlier release wrote for another room's redaction records no room, so it still applies."""
+    store = await _store(journal_store)
+    # v2026.10.30 wrote this record for a redaction of an event it had not seen in the redaction's room.
+    await store._ledger.record_handled_turn(
+        TurnRecord.create(["$victim"], redacted_source_event_ids=["$victim"], completed=False),
+    )
+    _reset_handled_turn_ledger_runtime()
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await admit_room_event(journal_store.principal("agent@alice"), target.room_id, "$victim")
+
+    assert store.is_handled("$victim")
+    await store.record_pending_turn(replace(_owned_turn_record(target), response_event_id=None, completed=False))
+    with pytest.raises(RevisionSnapshotChangedError):
+        await store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$user_msg",),
+            terminal_source_event_ids=("$user_msg",),
+            thread_history=[make_visible_message(event_id="$victim", body="Earlier message", thread_id="$thread")],
+        )
+
+
+@pytest.mark.asyncio
 async def test_redaction_sanitizes_only_turns_referencing_that_revision(journal_store: EventJournalStore) -> None:
     """One physical edit invalidates both its source and context consumers, not unrelated history."""
     store = await _store(journal_store)
@@ -534,18 +638,17 @@ async def test_redaction_sanitizes_only_turns_referencing_that_revision(journal_
             requester_id="@user:example.org",
             source_event_prompts={"$context-consumer": "Surviving message"},
             revision_replay={"$physical-edit": RevisionReplay("$user_msg", 10)},
-            conversation_target=MessageTarget.resolve("!other:example.org", "$other-thread", "$context-consumer"),
+            conversation_target=MessageTarget.resolve("!room:example.org", "$other-thread", "$context-consumer"),
         ),
     )
 
     with patch.object(store, "_sanitize_candidate", wraps=store._sanitize_candidate) as sanitize:
-        await store.mark_source_redacted("$physical-edit")
+        await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
 
     for source_id in ("$user_msg", "$context-consumer"):
         current = store.get_turn_record(source_id)
         assert current is not None
         assert current.revision_replay["$physical-edit"].redacted
-        assert current.revision_replay["$physical-edit"].cleanup_pending
     assert store.get_turn_record("$user_msg").source_event_prompts is None
     assert store.get_turn_record("$context-consumer").source_event_prompts == {"$context-consumer": "Surviving message"}
     assert {call.args[0].source_event_ids for call in sanitize.call_args_list} <= {
@@ -579,31 +682,28 @@ async def test_response_preparation_repairs_interrupted_redaction_in_its_convers
             patch.object(store, "_reconcile_revision_tombstones", side_effect=asyncio.CancelledError),
             pytest.raises(asyncio.CancelledError),
         ):
-            await store.mark_source_redacted(edit_id)
+            await store.mark_source_redacted(edit_id, room_id="!room:example.org")
 
-    with patch.object(store, "_remove_redacted_event_from_recorded_scopes", return_value=True):
-        assert not await store.prepare_pending_response_source(
-            target=first,
-            source_event_ids=("$next-first",),
-            terminal_source_event_ids=(),
-        )
-        repaired = store.get_turn_record("$first")
-        assert repaired.source_event_prompts is None
-        assert repaired.revision_replay["$first-edit"].redacted
-        assert not repaired.revision_replay["$first-edit"].cleanup_pending
-        untouched = store.get_turn_record("$second")
-        assert untouched.source_event_prompts == {"$second": "Deleted text"}
-        assert not untouched.revision_replay["$second-edit"].redacted
+    assert not await store.prepare_pending_response_source(
+        target=first,
+        source_event_ids=("$next-first",),
+        terminal_source_event_ids=(),
+    )
+    repaired = store.get_turn_record("$first")
+    assert repaired.source_event_prompts is None
+    assert repaired.revision_replay["$first-edit"].redacted
+    untouched = store.get_turn_record("$second")
+    assert untouched.source_event_prompts == {"$second": "Deleted text"}
+    assert not untouched.revision_replay["$second-edit"].redacted
 
-        assert not await store.prepare_pending_response_source(
-            target=second,
-            source_event_ids=("$next-second",),
-            terminal_source_event_ids=(),
-        )
-        repaired = store.get_turn_record("$second")
-        assert repaired.source_event_prompts is None
-        assert repaired.revision_replay["$second-edit"].redacted
-        assert not repaired.revision_replay["$second-edit"].cleanup_pending
+    assert not await store.prepare_pending_response_source(
+        target=second,
+        source_event_ids=("$next-second",),
+        terminal_source_event_ids=(),
+    )
+    repaired = store.get_turn_record("$second")
+    assert repaired.source_event_prompts is None
+    assert repaired.revision_replay["$second-edit"].redacted
 
 
 async def _prepare_redaction(
@@ -612,12 +712,18 @@ async def _prepare_redaction(
     *,
     redacted_event_id: str = "$user_msg",
 ) -> bool:
-    """Tombstone one source and run the next response's locked cleanup gate."""
-    await store.mark_source_redacted(redacted_event_id)
-    return await store._prepare_response_for_redactions(
+    """Tombstone one source and run the next response's locked gate and history cleanup."""
+    await store.mark_source_redacted(redacted_event_id, room_id="!room:example.org")
+    should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
+    await remove_redacted_history_like_next_response(
+        store,
+        target,
+        store.deps.state_writer.create_storage(None, scope=HistoryScope(kind="agent", scope_id="agent")),
+    )
+    return should_suppress
 
 
 @pytest.mark.asyncio
@@ -774,6 +880,76 @@ async def test_pending_delivery_intent_does_not_require_model_history_scope(jour
     assert record.response_owner == "agent"
     assert record.conversation_target == target
     assert record.history_scope is None
+
+
+@pytest.mark.asyncio
+async def test_edit_registration_behind_cleanup_treats_the_evicted_record_as_missing(
+    journal_store: EventJournalStore,
+) -> None:
+    """An edit that saw a record before cleanup evicted it must take the missing-record path."""
+    store = await _store(journal_store)
+    ledger = store._ledger
+    await ledger.record_handled_turn(TurnRecord.create(["$old"], timestamp=time.time() - 40 * 24 * 60 * 60))
+    forgetting = asyncio.Event()
+    release = asyncio.Event()
+    forget = TurnRecordStore.forget
+
+    async def held_forget(records: TurnRecordStore, **kwargs: Sequence[str]) -> None:
+        forgetting.set()
+        await release.wait()
+        await forget(records, **kwargs)
+
+    with patch.object(TurnRecordStore, "forget", held_forget):
+        cleanup = asyncio.create_task(store.cleanup())
+        await asyncio.wait_for(forgetting.wait(), timeout=1.0)
+        registration = asyncio.create_task(store.register_edit_revision("$old", (20, "$edit")))
+        await asyncio.sleep(0)
+        assert not registration.done(), "the edit saw the record and now waits behind cleanup"
+        release.set()
+        await cleanup
+
+    assert await registration is None
+    assert store.get_turn_record("$old") is None
+
+
+@pytest.mark.asyncio
+async def test_tombstone_reconciliation_skips_a_record_evicted_since_its_snapshot(
+    journal_store: EventJournalStore,
+) -> None:
+    """Reconciliation works from a snapshot, so an owner may be gone by the time it holds the lock."""
+    store = await _store(journal_store)
+    evicted = TurnRecord.create(["$evicted"])
+
+    with patch.object(store, "_sanitize_candidate", side_effect=lambda candidate: replace(candidate, timestamp=1.0)):
+        await store._reconcile_revision_tombstones((evicted,))
+
+    assert store.get_turn_record("$evicted") is None
+
+
+@pytest.mark.asyncio
+async def test_tombstone_reconciliation_yields_to_the_event_loop(journal_store: EventJournalStore) -> None:
+    """Reconciling a large ledger must not hold the event loop for the whole pass."""
+    store = await _store(journal_store)
+    records = tuple(TurnRecord.create([f"$source{index}"]) for index in range(2_000))
+    probe_ran = False
+    probe_seen_by_last_record: list[bool] = []
+    sanitize = store._sanitize_candidate
+
+    async def probe() -> None:
+        nonlocal probe_ran
+        probe_ran = True
+
+    def observed_sanitize(candidate: TurnRecord, authority: TurnRecord | None = None) -> TurnRecord:
+        if candidate is records[-1]:
+            probe_seen_by_last_record.append(probe_ran)
+        return sanitize(candidate, authority)
+
+    probe_task = asyncio.create_task(probe())
+    with patch.object(store, "_sanitize_candidate", side_effect=observed_sanitize):
+        await store._reconcile_revision_tombstones(records)
+    await probe_task
+
+    assert probe_seen_by_last_record == [True]
 
 
 @pytest.mark.asyncio
@@ -1041,6 +1217,66 @@ async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJ
 
 
 @pytest.mark.asyncio
+async def test_edit_pruning_follows_a_redaction_rollback(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """A rollback that restores the edited turn's compacted run happens before pruning, not after."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$a")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+
+    def run(event_id: str) -> RunOutput:
+        return RunOutput(
+            run_id=f"{event_id}-run",
+            agent_id="agent",
+            session_id=target.session_id,
+            metadata={
+                constants.MATRIX_EVENT_ID_METADATA_KEY: event_id,
+                constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: [event_id],
+                constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: [event_id],
+            },
+        )
+
+    storage = _seeded_storage_with_runs(
+        tmp_path,
+        AgentSession(session_id=target.session_id, agent_id="agent", runs=[run("$a"), run("$b")]),
+    )
+    stored = get_agent_session(storage, target.session_id)
+    assert stored is not None
+    archive_compaction_chunk(
+        storage=storage,
+        session=stored,
+        scope=scope,
+        summary=SessionSummary(summary="summary of a and b"),
+        summary_model="summary-model",
+        archived_runs=list(stored.runs or []),
+    )
+    store = await _store_with_storage(journal_store, storage)
+    records = {
+        event_id: TurnRecord.create(
+            [event_id],
+            response_event_id=f"{event_id}-reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            history_scope=scope,
+            conversation_target=target,
+        )
+        for event_id in ("$a", "$b")
+    }
+    for record in records.values():
+        await store.record_turn(record)
+    await store.mark_source_redacted("$b", room_id=target.room_id)
+
+    await store.remove_stale_runs_for_edit(turn_record=records["$a"], requester_user_id="@user:example.org")
+    await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
+
+    persisted = get_agent_session(storage, target.session_id)
+    assert persisted is not None
+    assert [stored_run.run_id for stored_run in persisted.runs or []] == []
+    assert persisted.summary is None
+
+
+@pytest.mark.asyncio
 async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     journal_store: EventJournalStore,
     tmp_path: Path,
@@ -1086,7 +1322,7 @@ async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     )
     await store.record_turn(source_record)
 
-    store.remove_stale_runs_for_edit(
+    await store.remove_stale_runs_for_edit(
         turn_record=source_record,
         requester_user_id="@user:example.org",
     )
@@ -1145,11 +1381,11 @@ async def test_prepare_redaction_removes_runs_that_consumed_the_source(
 
 
 @pytest.mark.asyncio
-async def test_prepare_redaction_removes_source_from_every_recorded_history_scope(
+async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_opened(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """Later ad-hoc responses must not retain a source consumed outside its original scope."""
+    """Each history scope that read a redacted source drops it when it next opens, not only the source's own."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     agent_scope = HistoryScope(kind="agent", scope_id="agent")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
@@ -1195,6 +1431,7 @@ async def test_prepare_redaction_removes_source_from_every_recorded_history_scop
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1215,6 +1452,7 @@ async def test_prepare_redaction_removes_source_from_every_recorded_history_scop
     )
 
     should_suppress = await _prepare_redaction(store, target)
+    await remove_redacted_history_like_next_response(store, target, storages[team_scope.key], scope=team_scope)
 
     assert should_suppress is False
     assert _stored_run_ids(storages[agent_scope.key], agent_session) == []
@@ -1223,13 +1461,13 @@ async def test_prepare_redaction_removes_source_from_every_recorded_history_scop
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source_owner", [None, "other"])
-async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
+async def test_another_requesters_private_scope_drops_a_redacted_source_when_opened(
     journal_store: EventJournalStore,
     tmp_path: Path,
     *,
     source_owner: str | None,
 ) -> None:
-    """An unowned source can still contaminate a later private response scope."""
+    """A private scope of another requester that read the source drops it when it next opens."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     default_scope = HistoryScope(kind="agent", scope_id="agent")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
@@ -1266,6 +1504,7 @@ async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1291,22 +1530,20 @@ async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
         ),
     )
 
-    should_suppress = await _prepare_redaction(store, target)
+    await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
+    should_suppress = await store._prepare_response_for_redactions(target=target, source_event_ids=("$later",))
+    await remove_redacted_history_like_next_response(store, target, team_storage, scope=team_scope)
 
     assert should_suppress is False
     assert _stored_run_ids(team_storage, team_session) == []
-    assert {call.kwargs["user_id"] for call in tool_runtime.build_execution_identity.call_args_list} == {
-        "@source:example.org",
-        "@later:example.org",
-    }
 
 
 @pytest.mark.asyncio
-async def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(
+async def test_redaction_before_its_turn_registers_still_removes_the_replay(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """A redaction race should become cleanup work only when its source turn registers."""
+    """A redaction that lands before its source turn registers is still found by the next response."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -1322,10 +1559,10 @@ async def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(
     )
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
-    marked = await store.mark_source_redacted("$user_msg")
+    await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", "$user_msg")
+    marked = await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
     assert marked is not None
     assert marked.conversation_target is None
-    assert marked.pending_redaction_cleanup_event_ids == ()
     pending = await store.record_pending_turn(
         TurnRecord.create(
             ["$user_msg"],
@@ -1337,18 +1574,16 @@ async def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(
         ),
     )
     assert pending is not None
-    assert pending.pending_redaction_cleanup_event_ids == ("$user_msg",)
+    assert pending.redacted_source_event_ids == ("$user_msg",)
 
     should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$user_msg",),
     )
+    await remove_redacted_history_like_next_response(store, target, storage)
 
     assert should_suppress is True
     assert _stored_run_ids(storage, session) == []
-    cleaned = store.get_turn_record("$user_msg")
-    assert cleaned is not None
-    assert cleaned.pending_redaction_cleanup_event_ids == ()
 
 
 @pytest.mark.asyncio
@@ -1409,7 +1644,8 @@ async def test_redaction_before_response_registration_tombstones_pending_coalesc
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
 
-    await store.mark_source_redacted("$first")
+    await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", "$first")
+    await store.mark_source_redacted("$first", room_id="!room:example.org")
     pending = await store.record_pending_turn(
         TurnRecord.create(
             ["$first", "$second"],
@@ -1458,13 +1694,12 @@ async def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_co
         ),
     )
 
-    marked = await store.mark_source_redacted("$first")
+    marked = await store.mark_source_redacted("$first", room_id="!room:example.org")
 
     assert marked is not None
     assert marked.source_event_ids == ("$first",)
     assert marked.anchor_event_id == "$first"
     assert marked.redacted_source_event_ids == ("$first",)
-    assert marked.pending_redaction_cleanup_event_ids == ("$first",)
     completed_sibling = store.get_turn_record("$second")
     assert completed_sibling is not None
     assert completed_sibling.source_event_ids == ("$second",)
@@ -1472,11 +1707,11 @@ async def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_co
 
 
 @pytest.mark.asyncio
-async def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(
+async def test_completed_sibling_detaches_redacted_alias_from_coalesced_turn(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """A completed sibling must not leave an old alias cleanup pending forever."""
+    """A completed sibling leaves the redacted alias as its own tombstoned turn."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     scope = HistoryScope(kind="agent", scope_id="agent")
     storage = _seeded_storage(tmp_path)
@@ -1490,7 +1725,7 @@ async def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(
         conversation_target=target,
     )
     await store.record_pending_turn(pending)
-    await store.mark_source_redacted("$first")
+    await store.mark_source_redacted("$first", room_id="!room:example.org")
     await store.record_turn(
         TurnRecord.create(
             ["$second"],
@@ -1512,11 +1747,15 @@ async def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(
     assert cleaned is not None
     assert cleaned.source_event_ids == ("$first",)
     assert cleaned.redacted_source_event_ids == ("$first",)
-    assert cleaned.pending_redaction_cleanup_event_ids == ()
     completed_sibling = store.get_turn_record("$second")
     assert completed_sibling is not None
     assert completed_sibling.source_event_ids == ("$second",)
     assert completed_sibling.response_event_id == "$second-reply"
+    _reset_handled_turn_ledger_runtime()
+    reopened = await _store_with_storage(journal_store, storage)
+    persisted = reopened.get_turn_record("$first")
+    assert persisted is not None
+    assert persisted.redacted_source_event_ids == ("$first",)
 
 
 @pytest.mark.asyncio
@@ -1524,7 +1763,7 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """Projecting a redacted physical source must retain the context needed to sanitize it."""
+    """Projecting a redacted physical source keeps it findable when its conversation next responds."""
     relay_event_id = "$relay"
     human_event_id = "$human"
     requester_user_id = "@alice:example.org"
@@ -1571,28 +1810,25 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
         ),
     )
 
-    projected = await store.mark_source_redacted(human_event_id)
+    projected = await store.mark_source_redacted(human_event_id, room_id="!room:example.org")
 
     assert projected is not None
     assert projected.source_event_ids == (human_event_id,)
     assert projected.source_event_metadata == {}
     assert projected.requester_id == requester_user_id
     assert projected.requester_id_for_source(human_event_id) is None
-    assert projected.pending_redaction_cleanup_event_ids == (human_event_id,)
 
     should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
+    await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
 
     assert should_suppress is False
     stored = _stored(storage, session)
     assert stored.runs == []
     assert stored.summary is None
     assert read_scope_seen_event_ids(storage, stored, scope) == set()
-    cleaned = store.get_turn_record(human_event_id)
-    assert cleaned is not None
-    assert cleaned.pending_redaction_cleanup_event_ids == ()
 
 
 @pytest.mark.asyncio
@@ -1600,7 +1836,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """Post-lock cleanup must retain the exact team scope recorded before generation."""
+    """A team scope recorded before generation drops the redacted source when it next opens."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="team", scope_id="team_private")
     session = TeamSession(
@@ -1625,6 +1861,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1640,17 +1877,17 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
         conversation_target=target,
     )
     await store.record_pending_turn(response_record)
-    await store.mark_source_redacted("$user_msg")
+    await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
     await store.record_turn(replace(response_record, response_event_id="$reply"))
 
     should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
+    await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
 
     assert should_suppress is False
     assert _stored_run_ids(storage, session) == []
-    state_writer.create_storage.assert_called_with(ANY, scope=scope)
 
 
 @pytest.mark.asyncio
@@ -1673,7 +1910,7 @@ async def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(journal_
         ),
     )
 
-    sanitized = await store.mark_source_redacted("$first")
+    sanitized = await store.mark_source_redacted("$first", room_id="!room:example.org")
 
     assert sanitized is not None
     assert sanitized.redacted_source_event_ids == ("$first",)
@@ -1691,13 +1928,12 @@ async def test_turn_merge_preserves_redacted_discovery_alias(
     *,
     terminal: bool,
 ) -> None:
-    """Backfilled aliases must retain their tombstone and cleanup intent across turn merges."""
+    """Backfilled aliases must retain their tombstone across turn merges."""
     store = await _store(journal_store)
     existing = TurnRecord.create(
         ["$question"],
         discovery_event_ids=["$selection"],
         redacted_source_event_ids=["$selection"],
-        pending_redaction_cleanup_event_ids=["$selection"],
         completed=False,
     )
     await store.record_pending_turn(existing)
@@ -1716,15 +1952,14 @@ async def test_turn_merge_preserves_redacted_discovery_alias(
     assert merged is not None
     assert merged.discovery_event_ids == ("$selection",)
     assert merged.redacted_source_event_ids == ("$selection",)
-    assert merged.pending_redaction_cleanup_event_ids == ("$selection",)
 
 
 @pytest.mark.asyncio
-async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
+async def test_multi_bot_redaction_only_changes_the_history_that_read_the_source(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """Bots that never handled a source must not accumulate or probe cleanup work."""
+    """Each bot drops only the history that derives from the redacted source."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
     owner_session = AgentSession(
@@ -1759,22 +1994,28 @@ async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
         agent_name="unrelated",
     )
 
-    owner_marked = await owner_store.mark_source_redacted("$user_msg")
-    unrelated_marked = await unrelated_store.mark_source_redacted("$user_msg")
+    await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", "$user_msg")
+    owner_marked = await owner_store.mark_source_redacted("$user_msg", room_id="!room:example.org")
+    unrelated_marked = await unrelated_store.mark_source_redacted("$user_msg", room_id="!room:example.org")
 
     assert owner_marked is not None
-    assert owner_marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
     assert unrelated_marked is not None
     assert unrelated_marked.redacted_source_event_ids == ("$user_msg",)
-    assert unrelated_marked.pending_redaction_cleanup_event_ids == ()
 
     await owner_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
+    await remove_redacted_history_like_next_response(owner_store, target, owner_storage, scope=scope)
     should_suppress = await unrelated_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
+    )
+    await remove_redacted_history_like_next_response(
+        unrelated_store,
+        target,
+        unrelated_storage,
+        scope=HistoryScope(kind="agent", scope_id="unrelated"),
     )
 
     assert should_suppress is False
@@ -1782,7 +2023,6 @@ async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
     assert stored_owner.summary is None
     assert read_scope_seen_event_ids(owner_storage, stored_owner, scope) == set()
     assert _stored(unrelated_storage, unrelated_session).summary is not None
-    unrelated_store.deps.state_writer.create_storage.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1819,7 +2059,7 @@ async def test_redaction_tombstone_persists_across_ledger_reload(journal_store: 
         ),
     )
 
-    await store.mark_source_redacted("$event")
+    await store.mark_source_redacted("$event", room_id="!room:example.org")
     _reset_handled_turn_ledger_runtime()
     reloaded_store = await _store(journal_store)
 
@@ -1832,11 +2072,11 @@ async def test_redaction_tombstone_persists_across_ledger_reload(journal_store: 
 
 
 @pytest.mark.asyncio
-async def test_warm_preserves_lazy_cleanup_until_next_response(
+async def test_redaction_cleanup_survives_restart_until_next_response(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """A restart must retain replay cleanup for the conversation's next response."""
+    """A ledger tombstone alone still lets the next response after a restart remove the replay."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -1853,10 +2093,9 @@ async def test_warm_preserves_lazy_cleanup_until_next_response(
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
     await store.record_turn(_owned_turn_record(target))
-    marked = await store.mark_source_redacted("$user_msg")
+    marked = await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
 
     assert marked is not None
-    assert marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
     _reset_handled_turn_ledger_runtime()
     restarted_store = await _store_with_storage(journal_store, storage)
 
@@ -1866,7 +2105,6 @@ async def test_warm_preserves_lazy_cleanup_until_next_response(
     restarted_record = restarted_store.get_turn_record("$user_msg")
     assert restarted_record is not None
     assert restarted_record.redacted_source_event_ids == ("$user_msg",)
-    assert restarted_record.pending_redaction_cleanup_event_ids == ("$user_msg",)
     assert (
         await restarted_store._prepare_response_for_redactions(
             target=target,
@@ -1874,18 +2112,16 @@ async def test_warm_preserves_lazy_cleanup_until_next_response(
         )
         is False
     )
+    await remove_redacted_history_like_next_response(restarted_store, target, storage)
     assert _stored_run_ids(storage, session) == []
-    cleaned_record = restarted_store.get_turn_record("$user_msg")
-    assert cleaned_record is not None
-    assert cleaned_record.pending_redaction_cleanup_event_ids == ()
 
 
 @pytest.mark.asyncio
-async def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(
+async def test_next_response_removes_replay_of_a_redacted_source(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """The under-lock gate removes replay and acknowledges the completed work."""
+    """The next response's history scope drops the run that answered a redacted source."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -1902,18 +2138,16 @@ async def test_locked_response_preparation_sanitizes_and_acknowledges_history_cl
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
     await store.record_turn(_owned_turn_record(target))
-    await store.mark_source_redacted("$user_msg")
+    await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
 
     should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
+    await remove_redacted_history_like_next_response(store, target, storage)
 
     assert should_suppress is False
     assert _stored_run_ids(storage, session) == []
-    record = store.get_turn_record("$user_msg")
-    assert record is not None
-    assert record.pending_redaction_cleanup_event_ids == ()
 
 
 def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> None:
@@ -2339,7 +2573,8 @@ async def test_routed_alias_redaction_marks_owning_relay_under_lock(journal_stor
         ),
     )
 
-    marked = await store.mark_source_redacted("$human")
+    await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", "$human")
+    marked = await store.mark_source_redacted("$human", room_id="!room:example.org")
 
     assert marked is not None
     assert marked.source_event_prompts == {"$anchor": "keep"}
@@ -3121,6 +3356,7 @@ async def test_absent_source_import_declines_occupied_discovery_alias(
 ) -> None:
     """Historical import cannot replace an alias owner or carry its saved facts."""
     store = await _store(journal_store)
+    await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", "$selection")
     recovery_record = _saved_turn_with_selection_alias()
 
     async def record_alias_owner() -> TurnRecord:
@@ -3136,7 +3372,7 @@ async def test_absent_source_import_declines_occupied_discovery_alias(
                 ),
             )
         else:
-            await store.mark_source_redacted("$selection")
+            await store.mark_source_redacted("$selection", room_id="!room:example.org")
         owner = store.get_turn_record("$selection")
         assert owner is not None
         return owner
@@ -3238,6 +3474,7 @@ async def test_absent_row_import_returns_concurrent_redaction_tombstone_unchange
 ) -> None:
     """A redaction landing after the history read must remain the exact source authority."""
     store = await _store(journal_store)
+    await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", "$event")
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id="$stale-response",
@@ -3253,7 +3490,7 @@ async def test_absent_row_import_returns_concurrent_redaction_tombstone_unchange
         nonlocal current, tombstone_recorded
         if not tombstone_recorded:
             tombstone_recorded = True
-            await store.mark_source_redacted("$event")
+            await store.mark_source_redacted("$event", room_id="!room:example.org")
             current = store.get_turn_record("$event")
         return await real_update(*args, **kwargs)
 
@@ -3333,6 +3570,7 @@ async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
                 agent_name="router",
                 turn_records=journal_store.turn_records("router"),
                 redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+                relations=journal_store.principal("agent@alice"),
                 legacy_responses_file=None,
                 state_writer=ConversationStateWriter(
                     ConversationStateWriterDeps(
@@ -3553,12 +3791,13 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     ).arun("BASELINE_INPUT", session_id=target.session_id)
     assert "DELETED_EDIT_MARKER" in str(before_model.requests)
     storage.close()
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     _reset_handled_turn_ledger_runtime()
     reopened = TurnStore(store.deps)
     await reopened.warm()
     assert not await reopened._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     storage = storage_factory()
+    await remove_redacted_history_like_next_response(reopened, target, storage, scope=scope)
     persisted = get_agent_session(storage, target.session_id)
     assert persisted is not None
     next_model = _ReplayCaptureModel(id="test", name="test", provider="test")
@@ -3599,7 +3838,7 @@ async def test_edit_tombstone_sanitizes_recovery_before_revision_tags_are_stripp
         source_event_revisions={"$user_msg": (10, "$physical-edit")},
     )
     await store.record_turn(edited)
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     recovered = await _load_with_recovery(
         store,
         original_event_id="$user_msg",
@@ -3623,9 +3862,10 @@ async def test_edit_tombstone_registration_crash_reopens_cleanup_owner(
     if crash_before_join:
         await store.register_edit_revision("$user_msg", (10, "$physical-edit"))
         with patch.object(store, "_reconcile_revision_tombstones"):
-            await store.mark_source_redacted("$physical-edit")
+            await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     else:
-        await store.mark_source_redacted("$physical-edit")
+        await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", "$physical-edit")
+        await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
         await store.register_edit_revision("$user_msg", (10, "$physical-edit"))
     _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store)
@@ -3635,7 +3875,7 @@ async def test_edit_tombstone_registration_crash_reopens_cleanup_owner(
     assert owner.completed
     assert owner.response_event_id == "$reply"
     assert owner.replay_source_event_ids == ("$user_msg",)
-    assert owner.revision_replay["$physical-edit"].cleanup_pending
+    assert owner.revision_replay["$physical-edit"].redacted
     assert "$physical-edit" not in owner.indexed_event_ids
 
 
@@ -3668,19 +3908,18 @@ async def test_late_completed_edit_keeps_consumption_proof_without_restoring_tex
         source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
         source_event_revisions={"$user_msg": (10, "$physical-edit")},
     )
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store.record_responded_turn(snapshot)
     owner = store.get_turn_record("$user_msg")
     assert owner is not None
     assert owner.revision_replay["$physical-edit"].response_event_id == "$reply"
-    assert owner.revision_replay["$physical-edit"].cleanup_pending
+    assert owner.revision_replay["$physical-edit"].redacted
     assert not owner.source_event_prompts
-    with patch.object(store, "_remove_redacted_event_from_recorded_scopes", return_value=True):
-        await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
+    await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     await store.record_pending_turn(snapshot)
     await store.record_responded_turn(snapshot)
     owner = store.get_turn_record("$user_msg")
-    assert not owner.revision_replay["$physical-edit"].cleanup_pending
+    assert owner.revision_replay["$physical-edit"].redacted
     assert not owner.source_event_prompts
 
 
@@ -3725,7 +3964,7 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
             source_event_revisions={"$user_msg": (20, "$surviving-edit")},
         ),
     )
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     stored = _stored(storage, session)
     assert [run.run_id for run in stored.runs or []] == ["newest"]
@@ -3736,38 +3975,6 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
     assert owner.source_event_prompts == {"$user_msg": "SURVIVING_EDIT"}
     assert owner.source_event_revisions == {"$user_msg": (20, "$surviving-edit")}
     assert owner.revision_replay["$physical-edit"].response_event_id == "$reply"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_edit_cleanup_failure_keeps_debt_through_reopen(
-    journal_store: EventJournalStore,
-    cancel: bool,
-) -> None:
-    """Failed or cancelled cleanup cannot acknowledge a partially sanitized conversation."""
-    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    store = await _store(journal_store)
-    await store.record_responded_turn(
-        replace(
-            _owned_turn_record(target),
-            source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
-            source_event_revisions={"$user_msg": (10, "$physical-edit")},
-        ),
-    )
-    await store.mark_source_redacted("$physical-edit")
-    failure = asyncio.CancelledError() if cancel else OSError("storage unavailable")
-    with (
-        patch.object(store, "_remove_redacted_event_from_recorded_scopes", side_effect=failure),
-        pytest.raises(type(failure)),
-    ):
-        await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
-    _reset_handled_turn_ledger_runtime()
-    reopened = await _store(journal_store)
-    owner = reopened.get_turn_record("$user_msg")
-    assert owner.revision_replay["$physical-edit"].cleanup_pending
-    with patch.object(reopened, "_remove_redacted_event_from_recorded_scopes", return_value=True):
-        await reopened._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
-    assert not reopened.get_turn_record("$user_msg").revision_replay["$physical-edit"].cleanup_pending
 
 
 @pytest.mark.asyncio
@@ -3827,7 +4034,10 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
         if mutation == "newer":
             await store.register_edit_revision("$user_msg", (30, "$newer-edit"))
         else:
-            await store.mark_source_redacted("$driving-edit" if mutation == "driver" else "$sibling-edit")
+            await store.mark_source_redacted(
+                "$driving-edit" if mutation == "driver" else "$sibling-edit",
+                room_id="!room:example.org",
+            )
         preparation_release.set()
         result = await task
     assert result is (True if mutation == "driver" else EditPreparation.REBUILD)
@@ -3842,11 +4052,13 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("explicit_revision_replay", "historical_summary_owner"),
+    ("explicit_revision_replay", "historical_summary_owner", "later_run_names_revision"),
     [
-        pytest.param(None, True, id="historical-summary-only"),
+        pytest.param(None, True, False, id="historical-summary-only"),
+        pytest.param(None, True, True, id="historical-summary-and-later-run"),
         pytest.param(
             RevisionReplay("$user_msg", 10, response_event_id="$reply"),
+            False,
             False,
             id="modern-per-revision",
         ),
@@ -3857,6 +4069,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     tmp_path: Path,
     explicit_revision_replay: RevisionReplay | None,
     historical_summary_owner: bool,
+    later_run_names_revision: bool,
 ) -> None:
     """Only legacy summaries lacking physical IDs use retained source ownership."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
@@ -3880,22 +4093,49 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         return create_state_storage("agent", tmp_path, subdir="sessions", session_table="agent_sessions")
 
     storage = storage_factory()
+    later_run = RunOutput(
+        run_id="later",
+        agent_id="agent",
+        session_id=target.session_id,
+        metadata={
+            constants.MATRIX_EVENT_ID_METADATA_KEY: "$later",
+            constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY: {"$user_msg": [10, "$physical-edit"]},
+        },
+    )
     session = AgentSession(
         session_id=target.session_id,
         agent_id="agent",
         summary=SessionSummary(summary="DELETED_EDIT_MARKER"),
+        runs=[later_run] if later_run_names_revision else [],
     )
     update_scope_seen_event_ids(session, scope, ["$user_msg"])
     storage.upsert_session(session)
+    for run in session.runs or []:
+        storage.upsert_run(run, session_id=session.session_id)
     storage.close()
+    if later_run_names_revision:
+        # A modern compaction archives the later run on top of the legacy summary.
+        storage = storage_factory()
+        reopened_session = get_agent_session(storage, target.session_id)
+        assert reopened_session is not None
+        archive_compaction_chunk(
+            storage=storage,
+            session=reopened_session,
+            scope=scope,
+            summary=SessionSummary(summary="DELETED_EDIT_MARKER and later"),
+            summary_model="summary-model",
+            archived_runs=list(reopened_session.runs or []),
+        )
+        storage.close()
     _reset_handled_turn_ledger_runtime()
     store = await _store(journal_store)
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
     store.deps.state_writer.session_type_for_scope.return_value = SessionType.AGENT
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     storage = storage_factory()
+    await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
     persisted = get_agent_session(storage, target.session_id)
     assert persisted is not None
     if historical_summary_owner:
@@ -3965,7 +4205,9 @@ async def test_prepared_voice_dropped_by_terminal_authority(journal_store: Event
     if terminal == "completed":
         await store.record_turn(TurnRecord.create(["$voice"]))
     else:
-        await store.mark_source_redacted("$alias" if terminal == "alias_redacted" else "$voice")
+        redacted = "$alias" if terminal == "alias_redacted" else "$voice"
+        await admit_room_event(journal_store.principal("agent@alice"), "!room:example.org", redacted)
+        await store.mark_source_redacted(redacted, room_id="!room:example.org")
     assert store.prepared_voice_for_source("$voice") is None
     assert await store.record_prepared_voice("$voice", snapshot) is None
     _reset_handled_turn_ledger_runtime()

@@ -63,6 +63,39 @@ final class LocalAgentsSetupTests: XCTestCase {
         XCTAssertNotEqual(after.configurationStamp, runtime.localSetupSnapshot().configurationStamp)
     }
 
+    func testRuntimeFromAnotherReleaseMustBeUpdatedBeforeSetupContinues() {
+        let setup = LocalAgentsSetupSnapshot(
+            runtimePath: "/example/mindroom", runtimeVersion: "2026.9.378", requiredRuntimeVersion: "2026.9.379", configurationExists: true
+        )
+        XCTAssertEqual(setup.runtimeUpdateReason, "This app needs MindRoom runtime 2026.9.379, but runtime 2026.9.378 is installed.")
+        XCTAssertFalse(setup.runtimeReady)
+        XCTAssertEqual(setup.progress(for: .install, service: .running, check: nil), .needsAction("Update needed"))
+        XCTAssertEqual(setup.nextStep(service: .running, check: nil), .install)
+        XCTAssertEqual(setup.nextStep(service: .pairing, check: nil), .install)
+        // Starting an installed service uses the version pinned at service install, not new CLI options.
+        XCTAssertTrue(setup.canStart(service: .stopped))
+        XCTAssertFalse(setup.canStart(service: .notInstalled))
+
+        let unknown = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", requiredRuntimeVersion: "2026.9.379", configurationExists: true)
+        XCTAssertEqual(unknown.runtimeUpdateReason, "This app needs MindRoom runtime 2026.9.379, but the installed runtime version is unknown.")
+    }
+
+    func testMatchingOrUnpinnedRuntimeIsReady() {
+        let matching = LocalAgentsSetupSnapshot(
+            runtimePath: "/example/mindroom", runtimeVersion: "2026.9.379", requiredRuntimeVersion: "2026.9.379", configurationExists: true
+        )
+        let unpinned = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", configurationExists: true)
+        for setup in [matching, unpinned] {
+            XCTAssertNil(setup.runtimeUpdateReason)
+            XCTAssertTrue(setup.runtimeReady)
+            XCTAssertEqual(setup.progress(for: .install, service: .running, check: nil), .complete("Installed"))
+            XCTAssertEqual(setup.nextStep(service: .running, check: nil), .start)
+        }
+        let missing = LocalAgentsSetupSnapshot(requiredRuntimeVersion: "2026.9.379")
+        XCTAssertNil(missing.runtimeUpdateReason)
+        XCTAssertEqual(missing.progress(for: .install, service: .runtimeMissing, check: nil), .needsAction("Needed"))
+    }
+
     func testServiceWaitingForPairingLeadsToConnectAccount() {
         let setup = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", configurationExists: true)
         XCTAssertEqual(setup.nextStep(service: .pairing, check: nil), .configure)

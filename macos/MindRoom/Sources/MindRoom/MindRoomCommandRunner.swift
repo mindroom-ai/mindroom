@@ -1,7 +1,8 @@
 import AppKit
+import Combine
 import Foundation
 
-typealias MindRoomProcessRunner = (MindRoomCommandInvocation) -> CommandResult
+typealias MindRoomProcessRunner = (MindRoomCommandInvocation, MindRoomCommandProcess) -> CommandResult
 
 struct CommandFeedback {
     let title: String
@@ -30,27 +31,42 @@ final class MindRoomCommandRunner: ObservableObject {
     @Published private(set) var isRefreshingStatus = false
     /// Set when Connect Account finds this Mac already connected, so the view can ask before pairing again.
     @Published var needsReconnectConfirmation = false
+    @Published private(set) var pairingApproval: LocalAgentPairingApproval?
+    @Published private(set) var isPairing = false
+    @Published var pairingCancelled = false
 
     /// Called on the main actor when a user-initiated command finishes.
     var onCommandFinished: ((MindRoomCommand, CommandResult) -> Void)?
 
+    let inference: LocalInferenceController
+    private var inferenceChanges: AnyCancellable?
     private var refreshRequested = false
+    private var activeProcess: MindRoomCommandProcess?
     private let runtime: MindRoomRuntime
     private let processRunner: MindRoomProcessRunner
     private let showSection: (AppSection) -> Void
 
     init(
         runtime: MindRoomRuntime = MindRoomRuntime(),
-        processRunner: @escaping MindRoomProcessRunner = MindRoomCommandRunner.runProcess,
+        processRunner: @escaping MindRoomProcessRunner = { invocation, process in process.run(invocation) },
         showSection: ((AppSection) -> Void)? = nil
     ) {
+        self.inference = LocalInferenceController(runtime: runtime)
         self.runtime = runtime
         self.processRunner = processRunner
         self.showSection = showSection ?? { AppWindowController.shared.show(section: $0) }
+        self.inferenceChanges = inference.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     var isRunningCommand: Bool {
-        runningCommandTitle != nil
+        runningCommandTitle != nil || inference.busy
+    }
+
+    /// `run()` refuses commands that need the runtime matching this app from every entry point until a
+    /// status refresh has read the installed version and found it matching. Settings also uses this to
+    /// disable Apply Runtime to Service.
+    func isBlockedByRuntimeUpdate(_ command: MindRoomCommand) -> Bool {
+        command.requiresMatchingRuntime && (!hasRefreshedStatus || localSetup.runtimeUpdateReason != nil)
     }
 
     // Status refreshes run independently of user commands so a background
@@ -69,7 +85,7 @@ final class MindRoomCommandRunner: ObservableObject {
         let processRunner = processRunner
         let runtime = runtime
         DispatchQueue.global(qos: .utility).async {
-            let result = processRunner(invocation)
+            let result = processRunner(invocation, MindRoomCommandProcess())
             let setup = runtime.localSetupSnapshot()
             DispatchQueue.main.async {
                 if self.refreshRequested {
@@ -86,6 +102,7 @@ final class MindRoomCommandRunner: ObservableObject {
                     : MindRoomServiceStatus(state: .unknown, message: "Could not check the background service. Refresh Status to retry.")
                 self.hasRefreshedStatus = true
                 self.isRefreshingStatus = false
+                Task { await self.inference.refresh() }
             }
         }
     }
@@ -103,15 +120,27 @@ final class MindRoomCommandRunner: ObservableObject {
         case .serviceStatus:
             refreshStatus()
         default:
-            guard let action = command.runtimeAction else { return }
+            guard let action = command.runtimeAction, !isBlockedByRuntimeUpdate(command) else { return }
             runUserCommand(command, action: action)
         }
     }
 
     private func runUserCommand(_ command: MindRoomCommand, action: MindRoomRuntimeAction) {
-        guard runningCommandTitle == nil else { return }
+        guard !isRunningCommand else { return }
         feedback = nil
         needsReconnectConfirmation = false
+        pairingCancelled = false
+        isPairing = action == .pairHosted || action == .reconnectHosted
+        let pairing = isPairing
+        let process = MindRoomCommandProcess(onOutput: pairing ? { output in
+            guard let approval = LocalAgentPairingApproval.parse(output) else { return }
+            DispatchQueue.main.async {
+                guard self.isPairing, !self.pairingCancelled, self.pairingApproval != approval else { return }
+                self.pairingApproval = approval
+                self.showSection(.chat)
+            }
+        } : nil)
+        activeProcess = process
         switch action {
         case .installRuntime, .updateRuntime, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted, .checkSetup:
             setupCheck = nil
@@ -123,7 +152,7 @@ final class MindRoomCommandRunner: ObservableObject {
         let runtime = runtime
         DispatchQueue.global(qos: .userInitiated).async {
             let before = runtime.localSetupSnapshot()
-            var result = processRunner(invocation)
+            var result = processRunner(invocation, process)
             let after = runtime.localSetupSnapshot()
             if action == .checkSetup && before.configurationStamp != after.configurationStamp {
                 result = CommandResult(exitCode: 1, output: "Configuration changed while checking. Run Check Setup again.")
@@ -135,43 +164,34 @@ final class MindRoomCommandRunner: ObservableObject {
                     self.setupCheck = completedResult
                 }
                 self.runningCommandTitle = nil
-                self.lastOutput = completedResult.output
+                self.activeProcess = nil
+                self.isPairing = false
+                self.pairingApproval = nil
+                // A cooperative CLI may finish saving, or report a save error, after Cancel was pressed.
+                let stoppedWhileWaiting = completedResult.exitCode == MindRoomCommand.pairingCancelledExitCode
+                    || completedResult.exitCode == SIGTERM
+                self.pairingCancelled = pairing && process.isCancelled && stoppedWhileWaiting
+                self.lastOutput = self.pairingCancelled ? "" : completedResult.output
                 // An already-connected Mac is a question for the user, not a failed action.
                 let alreadyConnected = action == .pairHosted && completedResult.exitCode == MindRoomCommand.alreadyConnectedExitCode
-                self.feedback = alreadyConnected ? nil : CommandFeedback(
+                self.feedback = alreadyConnected || self.pairingCancelled ? nil : CommandFeedback(
                     title: command.title, successMessage: command.successMessage, result: completedResult,
                     needsAttention: action == .checkSetup && completedResult.isSuccess && !completedResult.setupCheckPassed
                 )
                 if alreadyConnected {
                     self.needsReconnectConfirmation = true
                 }
+                if pairing { self.showSection(.localAgents) }
                 self.onCommandFinished?(command, completedResult)
                 self.refreshStatus()
             }
         }
     }
 
-    nonisolated static func runProcess(_ invocation: MindRoomCommandInvocation) -> CommandResult {
-        let process = Process()
-        process.executableURL = invocation.executableURL
-        process.arguments = invocation.arguments
-        process.environment = invocation.environment
-        // No TTY is attached, so any CLI prompt must see EOF instead of hanging.
-        process.standardInput = FileHandle.nullDevice
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        do {
-            try process.run()
-        } catch {
-            return CommandResult(exitCode: 127, output: error.localizedDescription)
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        return CommandResult(exitCode: process.terminationStatus, output: output)
+    func cancelPairing() {
+        guard isPairing, let process = activeProcess else { return }
+        process.cancel()
+        pairingCancelled = process.isCancelled
+        pairingApproval = nil
     }
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import ChainMap
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -16,7 +17,7 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -78,6 +79,7 @@ from mindroom.matrix_delivery import (
     SendDelivery,
     TurnHandoff,
 )
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -93,6 +95,7 @@ from mindroom.streaming import (
     cancel_source_from_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
+    format_stream_error_note,
     interactive_response_for_visible_body,
     send_streaming_response,
     stream_progress_edits,
@@ -117,7 +120,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
-    from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.streaming import ProgressPublisher, StreamInputChunk, UnfinishedStreamedReply
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -428,7 +431,8 @@ class StreamingDeliveryRequest:
     identity: ResponseIdentity
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
-    header: str | None = None
+    # What a stopped attempt at ``existing_event_id`` showed; the stream continues below it.
+    resumed: UnfinishedStreamedReply | None = None
     show_tool_calls: bool = False
     extra_content: dict[str, Any] | None = None
     tool_trace_collector: list[ToolTraceEntry] | None = None
@@ -505,6 +509,9 @@ class FinalizeStreamedResponseRequest:
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
     prepared_edit_record: TurnRecord | None = None
+    # What a stopped attempt at ``existing_event_id`` showed, for a continuation
+    # that may end before streaming anything below it.
+    resumed: UnfinishedStreamedReply | None = None
 
 
 @dataclass(frozen=True)
@@ -1690,7 +1697,7 @@ class DeliveryGateway:
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
-        delivery_extra_content = dict(draft.extra_content or {})
+        delivery_extra_content = dict(draft.extra_content or {}) | self._acting_requester_content(request.identity)
         if interactive_response.interactive_metadata is not None:
             delivery_extra_content.update(
                 interactive.build_prompt_content(
@@ -1712,6 +1719,8 @@ class DeliveryGateway:
             }
 
         if request.existing_event_id is not None:
+            # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
+            delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
             edited = await self.edit_text(
                 EditTextRequest(
                     target=request.target,
@@ -2042,6 +2051,13 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
             return await self._deliver_stream(request)
 
+    def _acting_requester_content(self, identity: ResponseIdentity) -> dict[str, str]:
+        """Name a human or bot-account requester on the reply, so entities it mentions act for that requester."""
+        requester_id = identity.response_envelope.requester_id
+        if not is_access_checked_requester_id(requester_id, self.deps.runtime.config, self.deps.runtime_paths):
+            return {}
+        return {ACTING_REQUESTER_KEY: requester_id}
+
     async def _deliver_stream(
         self,
         request: StreamingDeliveryRequest,
@@ -2066,11 +2082,14 @@ class DeliveryGateway:
             self.deps.runtime_paths,
             request.response_stream,
             streaming_cls=request.streaming_cls,
-            header=request.header,
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
-            extra_content=request.extra_content,
+            # A live view, because the caller keeps adding run metadata to its dict while the stream runs.
+            extra_content=ChainMap(
+                self._acting_requester_content(request.identity),
+                request.extra_content if request.extra_content is not None else {},
+            ),
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
@@ -2097,6 +2116,7 @@ class DeliveryGateway:
             interactive_creator_agent=self.deps.agent_name,
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
+            resumed=request.resumed,
         )
 
     def stream_progress(
@@ -2393,6 +2413,56 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
+    async def _end_resumed_reply_before_continuation(
+        self,
+        request: FinalizeStreamedResponseRequest,
+        *,
+        event_id: str,
+        resumed: UnfinishedStreamedReply,
+    ) -> FinalDeliveryOutcome:
+        """Put the terminal note below a stopped attempt whose continuation ended before streaming anything.
+
+        The reply still shows that attempt as in progress, so leaving it
+        untouched would leave it looking unfinished.
+        """
+        stream_outcome = request.stream_transport_outcome
+        failure_reason = stream_outcome.failure_reason or "interrupted"
+        cancel_source = None
+        if stream_outcome.terminal_status == "cancelled":
+            cancel_source = cancel_source_from_failure_reason(failure_reason)
+            terminal_text, stream_status = build_cancelled_response_update(
+                resumed.visible_text,
+                cancel_source=cancel_source,
+            )
+        else:
+            terminal_text = f"{resumed.visible_text.rstrip()}\n\n{format_stream_error_note(failure_reason)}"
+            stream_status = constants.STREAM_STATUS_ERROR
+        extra_content = {**(request.extra_content or {}), constants.STREAM_STATUS_KEY: stream_status}
+        tool_trace = list(resumed.tool_trace)
+        edited = await self._visible_notice_is_current(
+            request.identity,
+            request.target.room_id,
+        ) and await self.edit_text(
+            EditTextRequest(
+                target=request.target,
+                event_id=event_id,
+                new_text=terminal_text,
+                tool_trace=tool_trace,
+                extra_content=extra_content,
+            ),
+        )
+        return FinalDeliveryOutcome(
+            terminal_status=stream_outcome.terminal_status,
+            event_id=event_id,
+            is_visible_response=True,
+            final_visible_body=terminal_text if edited else None,
+            delivery_kind="edited" if edited else None,
+            cancel_source=cancel_source,
+            failure_reason=failure_reason,
+            tool_trace=tuple(tool_trace),
+            extra_content=extra_content,
+        )
+
     async def finalize_streamed_response(
         self,
         request: FinalizeStreamedResponseRequest,
@@ -2422,6 +2492,17 @@ class DeliveryGateway:
             visible_stream_event_id = stream_outcome.visible_event_id
             streamed_text = stream_outcome.visible_body_text
             final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
+            if (
+                request.resumed is not None
+                and request.existing_event_id is not None
+                and stream_outcome.terminal_status in {"cancelled", "error"}
+                and stream_outcome.visible_body_state == "none"
+            ):
+                return await self._end_resumed_reply_before_continuation(
+                    request,
+                    event_id=request.existing_event_id,
+                    resumed=request.resumed,
+                )
             if stream_outcome.terminal_status == "cancelled":
                 failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
                 cancel_source = cancel_source_from_failure_reason(failure_reason)

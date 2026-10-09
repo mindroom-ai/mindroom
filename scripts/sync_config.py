@@ -26,7 +26,7 @@ def saas_config() -> dict:
 
     # Hosted tenants choose from the central OpenRouter presets in the dashboard.
     config["models"] = {name: preset.to_config_dict() for name, preset in model_defaults.SAAS_MODEL_PRESETS.items()}
-    config["router"]["model"] = "gpt5luna"
+    config["router"]["model"] = "luna"
 
     # The instance image does not ship sentence_transformers (torch), and Hobby/Pro
     # tenants may only have an OpenRouter key, so semantic memory search embeds via OpenRouter.
@@ -59,6 +59,8 @@ def saas_config() -> dict:
     config["defaults"]["tools"].remove("update_awareness")
     for agent in config["agents"].values():
         agent["tools"].remove("update_awareness")
+        # Hosted agents learn workspace skills from their conversations.
+        agent["skill_learning"] = {"enabled": True}
     return config
 
 

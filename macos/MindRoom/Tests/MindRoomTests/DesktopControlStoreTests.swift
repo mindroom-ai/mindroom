@@ -53,6 +53,24 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertTrue(store.selectedAppIDs.isEmpty)
     }
 
+    func testMindRoomItselfIsNeverOfferedAsAControllableApplication() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("MindRoom.app")
+        let contents = bundle.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info = ["CFBundleIdentifier": "chat.mindroom.menubar", "CFBundleName": "MindRoom", "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        let store = DesktopControlStore()
+
+        XCTAssertNil(store.addApplication(at: bundle))
+
+        XCTAssertFalse(store.selectedAppIDs.contains("chat.mindroom.menubar"))
+        XCTAssertEqual(store.errorMessage, "Choose a macOS application with a bundle identifier other than MindRoom itself.")
+        XCTAssertFalse(InstalledApplicationCatalog.applications().contains { InstalledApplicationCatalog.mindRoomIdentifiers.contains($0.id) })
+    }
+
     func testStatusRefreshPreservesDeselectedAppsAcrossExternalConfigurationChanges() {
         let store = DesktopControlStore()
         store.hydrateConfiguration(from: configuredStatus(revision: 1, apps: ["com.example.Editor"]))
@@ -284,8 +302,49 @@ final class DesktopControlStoreTests: XCTestCase {
 
         store.saveAndConnect()
 
-        XCTAssertEqual(store.errorMessage, "Confirm the displayed controller, requester, and agent before saving.")
+        XCTAssertEqual(store.errorMessage, "Confirm the displayed homeserver, account, controller, requester, and agent before saving.")
         XCTAssertNil(store.recovery)
+    }
+
+    func testImportedHomeserverMustBeConfirmedBeforeSignInAndEditsResetConfirmation() async throws {
+        let helper = DesktopBridgeProcess()
+        let saved = configuredStatus(revision: 1, apps: [], homeserver: "https://saved.example.org", userID: "@person:example.org")
+        let descriptor: [String: Any] = [
+            "v": 1, "kind": "mindroom_desktop_setup", "homeserver": "https://other.example.net", "user_id": "@person:example.org",
+            "code": "one-time", "controller_user_id": "@controller:example.org", "controller_device_id": "DEVICE",
+            "controller_ed25519": "key", "requester_id": "@person:example.org", "agent_name": "assistant", "cloudflare_access": false,
+        ]
+        var actions: [String] = []
+        let store = DesktopControlStore(helper: helper, request: { action, _, _ in
+            actions.append(action)
+            return action == "import_setup" ? descriptor : try self.response(status: saved)
+        })
+        try await publish(saved, through: helper, to: store)
+        store.setupDescriptor = String(decoding: try JSONSerialization.data(withJSONObject: descriptor), as: UTF8.self)
+        store.importSetupDescriptor()
+        await waitUntilIdle(store)
+
+        store.login(replace: true)
+        await waitUntilIdle(store)
+        XCTAssertEqual(actions, ["import_setup"])
+        XCTAssertTrue(store.identityConfirmationLabel.contains("https://other.example.net"))
+        XCTAssertTrue(store.identityConfirmationLabel.contains("@person:example.org"))
+        XCTAssertTrue(store.replaceSessionMessage.contains("https://saved.example.org"))
+        XCTAssertTrue(store.replaceSessionMessage.contains("https://other.example.net"))
+
+        store.identityConfirmed = true
+        store.homeserver = "https://edited.example.net"
+        store.homeserver = "https://other.example.net"
+        XCTAssertFalse(store.identityConfirmed)
+        store.identityConfirmed = true
+        store.matrixUserID = "@edited:example.org"
+        store.matrixUserID = "@person:example.org"
+        XCTAssertFalse(store.identityConfirmed)
+
+        store.identityConfirmed = true
+        store.login(replace: true)
+        await waitUntilIdle(store)
+        XCTAssertEqual(actions, ["import_setup", "login"])
     }
 
     func testCancelImportedSetupRestoresSavedIdentitiesButKeepsAppAndBrowserDrafts() async throws {

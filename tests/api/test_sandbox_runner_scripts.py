@@ -972,12 +972,7 @@ _LIVE_SCRIPT_RUN_ID = f"script-{'e' * 32}"
 
 def _live_primary_script_snapshot(tmp_path: Path, *, private: bool) -> dict[str, object]:
     """Return what a Kubernetes primary sends for a `watcher` agent created after the worker was seeded."""
-    # Realistic live configs carry long instructions, so launches must fit well past the old 16 KiB body limit.
-    watcher: dict[str, object] = {
-        "display_name": "Watcher",
-        "tools": ["script"],
-        "instructions": [f"Instruction {index}: {'watch carefully ' * 20}" for index in range(64)],
-    }
+    watcher: dict[str, object] = {"display_name": "Watcher", "tools": ["script"]}
     if private:
         watcher["private"] = {"per": "user_agent", "root": "private-workspace"}
     else:
@@ -991,7 +986,14 @@ def _live_primary_script_snapshot(tmp_path: Path, *, private: bool) -> dict[str,
         {
             "models": {"default": {"provider": "openai", "id": "gpt-6-astra", "api_key": "sk-live-model-key"}},
             "router": {"model": "default"},
-            "agents": {"watcher": watcher},
+            # Snapshots grow with the agent count, so launches must fit well past the old 16 KiB body limit.
+            "agents": {
+                "watcher": watcher,
+                **{
+                    f"helper_{index:03d}": {"display_name": f"Helper {index}", "tools": ["shell", "file", "python"]}
+                    for index in range(256)
+                },
+            },
         },
         primary_paths,
     )

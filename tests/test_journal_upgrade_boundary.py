@@ -451,3 +451,25 @@ async def test_approval_toolkit_upgrade_preserves_frozen_final(
         assert legacy_database.query("SELECT * FROM matrix_delivery_outbox") == frozen
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_approval_argument_digest_upgrade_keeps_calls_unexecutable(legacy_database: _LegacyDatabase) -> None:
+    """Calls saved before argument digests reopen without one, so continuation can never execute them."""
+    store = legacy_database.open()
+    principal = store.principal("agent@alice")
+    await _ApprovalContinuations.admit_sources(principal)
+    original = _ApprovalContinuations.continuation()
+    original = replace(original, calls=(replace(original.calls[0], toolkit_name="shell"),))
+    assert await principal.create_approval_continuation(original) == original
+    await store.close()
+    legacy_database.execute("ALTER TABLE approval_continuation_calls DROP COLUMN arguments_digest")
+
+    for _ in range(2):
+        store = legacy_database.open()
+        try:
+            loaded = await store.principal("agent@alice").approval_continuation("approval-1")
+        finally:
+            await store.close()
+        assert loaded == replace(original, calls=(replace(original.calls[0], arguments_digest=None),))
+        assert not loaded.calls[0].binds_arguments({"command": "run it"})

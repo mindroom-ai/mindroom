@@ -128,9 +128,10 @@ class StopManager:
             return None
         return tracked
 
-    def can_handle_stop_reaction(self, message_id: str) -> bool:
-        """Return whether a stop reaction currently has a live semantic consumer."""
-        return self._get_active_tracked_message(message_id) is not None
+    def can_handle_stop_reaction(self, message_id: str, room_id: str) -> bool:
+        """Return whether a stop reaction in ``room_id`` currently has a live semantic consumer."""
+        tracked = self._get_active_tracked_message(message_id)
+        return tracked is not None and tracked.target.room_id == room_id
 
     async def _probe_graceful_cancel(self, message_id: str, run_id: str, deadline: float) -> str:
         """Request Agno run cancellation for one known run during the post-cancel probe window."""

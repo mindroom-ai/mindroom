@@ -95,7 +95,7 @@ services:
   # The per-address connection cap keeps the runner from exhausting the relay for MindRoom.
   # Disabled IP forwarding is defense in depth for runners started as root, which could send it raw packets.
   sandbox-relay:
-    image: busybox:1.36
+    image: mirror.gcr.io/library/busybox:1.36
     container_name: ${INSTANCE_NAME:-mindroom}-sandbox-relay
     restart: always
     user: "65534:65534"

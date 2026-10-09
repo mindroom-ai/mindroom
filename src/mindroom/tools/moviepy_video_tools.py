@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,7 +20,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="moviepy_video_tools",
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.AGENT,
     display_name="MoviePy Video Tools",
     description="Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
     category=ToolCategory.DEVELOPMENT,  # Derived from docs URL (/others/)
@@ -51,6 +58,7 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["moviepy"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/others/moviepy",  # URL from llms.txt but WITHOUT .md extension
     function_names=(
@@ -63,7 +71,7 @@ if TYPE_CHECKING:
     ),
 )
 def moviepy_video_tools() -> type[MindRoomMoviePyVideoTools]:
-    """Return MoviePy Video Tools for video processing, audio extraction, and caption generation."""
+    """Return MoviePy Video Tools whose media paths follow the agent's file_access."""
     from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 
     return MindRoomMoviePyVideoTools

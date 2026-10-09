@@ -181,6 +181,21 @@ def test_instance_sso_sends_unverified_cookies_to_platform_login(monkeypatch: py
     assert response.headers["location"].startswith("https://app.mindroom.chat/auth/login?")
 
 
+def test_instance_sso_refuses_inactive_accounts_without_restarting_login(
+    monkeypatch: pytest.MonkeyPatch, owned_instance_lookups: list[tuple[str, str]]
+) -> None:
+    """A suspended account's valid cookie is refused outright, since signing in again cannot help."""
+    monkeypatch.setattr(
+        sso, "verify_user", AsyncMock(side_effect=HTTPException(status_code=403, detail="Account is not active"))
+    )
+    client = TestClient(app)
+
+    response = _authorize(client, "https://1.mindroom.chat/")
+
+    assert response.status_code == 403
+    assert owned_instance_lookups == []
+
+
 def test_instance_sso_ticket_is_not_a_platform_credential(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ticket captured on an instance is rejected by the platform API and by Matrix OIDC."""
     location = urlparse(_authorize(TestClient(app), "https://1.mindroom.chat/").headers["location"])

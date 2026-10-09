@@ -36,7 +36,7 @@ api.mindroom.chat         → Platform API
 - **Production**: Live customer deployments
 
 Production runs published release images.
-Deploy a release tag with `cluster/scripts/deploy-release.sh` and apply database migrations with `cluster/scripts/db/apply-migration.sh`, as described in [Release Deployment](../docs/deployment/kubernetes.md#release-deployment).
+Deploy a release tag with `cluster/scripts/deploy-release.sh` and apply database migrations with `cluster/scripts/db/apply-migration.sh`, as described in [Release Deployment](../docs/deployment/saas-platform.md#release-deployment).
 
 ## Repository Structure
 

@@ -1,6 +1,6 @@
 # Multi-stage build for production frontend
 # Using official bun image for faster builds
-FROM oven/bun:1 AS base
+FROM mirror.gcr.io/oven/bun:1 AS base
 
 # Dependencies stage
 FROM base AS deps

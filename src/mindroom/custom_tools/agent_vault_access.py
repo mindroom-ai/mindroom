@@ -22,6 +22,8 @@ from urllib.parse import quote, urljoin
 import httpx
 from agno.tools import Toolkit
 
+from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
+from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_env_policy import AGENT_VAULT_ACCESS_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
 
@@ -67,6 +69,7 @@ class AgentVaultAccessTools(Toolkit):
             runtime_paths.env_value(env["vault_name_prefix"]) or _DEFAULT_VAULT_NAME_PREFIX
         ).strip()
         self._owner_email = (runtime_paths.env_value(env["owner_email"]) or "").strip()
+        self._matrix_domain = runtime_matrix_domain(runtime_paths)
         requires_grant_config = _requires_grant_config(worker_target)
         required = [(env["ui_base_url"], self._ui_base_url)]
         if requires_grant_config:
@@ -135,7 +138,7 @@ class AgentVaultAccessTools(Toolkit):
         if email is None:
             return self._error(
                 f"could not derive an email for requester {requester_id!r}; "
-                "expected a Matrix ID whose localpart maps to the configured email domain.",
+                "expected a Matrix ID on this homeserver whose localpart maps to the configured email domain.",
             )
 
         try:
@@ -184,15 +187,14 @@ class AgentVaultAccessTools(Toolkit):
         return urljoin(self._ui_base_url.rstrip("/") + "/", f"vaults/{quote(vault, safe='')}")
 
     def _requester_email(self, requester_id: str) -> str | None:
-        # Matrix IDs look like @localpart:server; map localpart to the configured domain.
-        localpart = requester_id[1:].split(":", 1)[0] if requester_id.startswith("@") else requester_id
-        localpart = localpart.strip()
-        if not localpart:
+        # Only this homeserver's users own the localpart that names their account in the configured email domain.
+        try:
+            matrix_id = MatrixID.parse(parse_current_matrix_user_id(requester_id))
+        except ValueError:
             return None
-        if "@" in localpart:
-            # Already an email-like value; trust it as-is.
-            return localpart
-        return f"{localpart}@{self._email_domain}"
+        if matrix_id.domain != self._matrix_domain:
+            return None
+        return f"{matrix_id.username}@{self._email_domain}"
 
     def _resolve_admin_token(self) -> str:
         # Re-read the token file on every call so a rotated Secret (refreshed

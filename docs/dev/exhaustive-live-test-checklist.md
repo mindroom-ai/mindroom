@@ -609,7 +609,7 @@ Expected outcome: Start, stop, restart, provision, and reprovision actions expos
 Expected outcome: Backend ownership checks reject the action instead of letting the user mutate another account's instance.
 
 - [ ] `SAAS-011` Load the billing page for a customer with a subscription.
-Expected outcome: Current plan, limits, trial and billing dates, and cancellation banners all match backend subscription state.
+Expected outcome: Current plan, trial and billing dates, and cancellation banners all match backend subscription state, and an account without a plan shows "No plan" with a way to choose one.
 
 - [ ] `SAAS-012` Load the upgrade flow and initiate checkout.
 Expected outcome: Plan pricing, billing-cycle toggles, quantity logic, enterprise contact behavior, and checkout redirection all use backend pricing configuration.
@@ -618,10 +618,7 @@ Expected outcome: Plan pricing, billing-cycle toggles, quantity logic, enterpris
 Expected outcome: Existing subscribers are redirected to the appropriate management flow instead of accidentally creating duplicate subscriptions.
 
 - [ ] `SAAS-014` Exercise customer cancel and reactivate subscription flows.
-Expected outcome: Backend state changes are reflected in the frontend without stale banners or stale limits.
-
-- [ ] `SAAS-015` Load the usage page for both populated and empty data cases.
-Expected outcome: Aggregated metrics, limit math, charts, and empty states all render correctly.
+Expected outcome: Backend state changes are reflected in the frontend without stale banners, and a cancelled plan can be chosen again from the plan list.
 
 - [ ] `SAAS-016` Exercise settings and GDPR flows for export, consent updates, deletion scheduling, sign-out after deletion scheduling, and cancel deletion.
 Expected outcome: Consent changes use the intended optimistic behavior and deletion state replaces the normal danger zone with pending-deletion messaging.
@@ -629,7 +626,7 @@ Expected outcome: Consent changes use the intended optimistic behavior and delet
 - [ ] `SAAS-017` Attempt to access admin routes as a non-admin user.
 Expected outcome: Admin gatekeeping blocks access instead of rendering privileged pages.
 
-- [ ] `SAAS-018` Exercise the admin dashboard, accounts, instances, subscriptions, audit logs, and usage pages as an admin user.
+- [ ] `SAAS-018` Exercise the admin dashboard, accounts, instances, subscriptions, and audit logs pages as an admin user.
 Expected outcome: Admin tables, metrics, detail pages, and state-specific instance actions all render and operate against the real backend.
 
 - [ ] `SAAS-019` Exercise backend-only platform endpoints such as `/health`, pricing endpoints, provisioner endpoints, and Stripe webhooks.
@@ -666,7 +663,7 @@ Expected outcome: Attachment metadata survives the tool boundary and context sco
 - [ ] `INT-008` Compare runtime integration behavior with the dashboard catalog and metadata presentation.
 Expected outcome: UI availability, required credentials, and runtime capability do not contradict each other for the same integration.
 
-- [ ] `INT-009` Exercise Google provider connect, callback, status, and disconnect through `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, `/api/oauth/google_calendar/*`, `/api/oauth/google_sheets/*`, or `/api/oauth/google_gmail/*`.
+- [ ] `INT-009` Exercise Google provider connect, callback, status, and disconnect through `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, `/api/oauth/google_calendar/*`, `/api/oauth/google_sheets/*`, `/api/oauth/google_tasks/*`, or `/api/oauth/google_gmail/*`.
 Expected outcome: OAuth client credentials are read from stored client config services such as `google_oauth_client` or a provider-specific `*_oauth_client` service, scoped tokens and settings stay separated, and disconnect clears only the provider token service for the selected scope while preserving editable tool settings.
 
 - [ ] `INT-010` Exercise Home Assistant via both OAuth and long-lived-token setup, then call `/api/homeassistant/entities` and `/api/homeassistant/service`.

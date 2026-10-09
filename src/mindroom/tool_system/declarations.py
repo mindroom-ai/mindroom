@@ -112,6 +112,7 @@ class ToolManagedInitArg(str, Enum):
     CURRENT_ROOM_ID = "current_room_id"
     AGENT_NAME = "agent_name"
     FILE_ACCESS = "file_access"
+    AGENT_STATE_ROOT = "agent_state_root"
 
 
 @dataclass

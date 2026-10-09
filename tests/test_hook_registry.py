@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.automations import automation
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import HookOverrideConfig, PluginEntryConfig
@@ -50,6 +51,7 @@ def _plugin(
     return SimpleNamespace(
         name=name,
         discovered_hooks=tuple(callbacks),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(
             path=f"./plugins/{name}",
             settings=settings or {},
@@ -190,3 +192,22 @@ def test_hook_registry_scope_filtering_uses_decorator_agents_and_rooms(tmp_path:
     eligible = _eligible_hooks(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path))
 
     assert [hook.hook_name for hook in eligible] == ["matching"]
+
+
+def test_the_plugin_snapshot_carries_the_automations_plugins_register() -> None:
+    """A plugin's decorated check reaches the runner through the compiled snapshot, beside the built-ins."""
+
+    def check(ctx: object) -> None:  # noqa: ARG001
+        return None
+
+    digest = automation("weekly_digest")(check)
+    plugin = _plugin("digest", [])
+    plugin.discovered_automations = (digest,)
+
+    registry = HookRegistry.from_plugins([plugin])
+
+    definition = registry.automations.get("weekly_digest")
+    assert definition is not None
+    assert definition.check is digest
+    assert registry.automations.get("dreaming") is not None
+    assert HookRegistry.empty().automations.get("weekly_digest") is None

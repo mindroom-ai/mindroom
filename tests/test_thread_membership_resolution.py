@@ -19,6 +19,7 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
+from tests.cpu_budget_helpers import cpu_budget
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
 )
@@ -213,6 +214,76 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             plain_reply_1_id: thread_root_id,
             plain_reply_2_id: thread_root_id,
         }
+
+    @pytest.mark.asyncio
+    async def test_resolve_thread_ids_for_event_infos_proves_roots_without_rescanning_every_event(self) -> None:
+        """Thousands of plain replies to one relation-free message resolve within a CPU budget."""
+
+        def message(event_id: str, relates_to: dict[str, object] | None = None) -> EventInfo:
+            content: dict[str, object] = {"body": event_id, "msgtype": "m.text"}
+            if relates_to is not None:
+                content["m.relates_to"] = relates_to
+            return EventInfo.from_event({"content": content, "event_id": event_id, "type": "m.room.message"})
+
+        event_infos = {
+            "$root": message("$root"),
+            "$child": message("$child", {"rel_type": "m.thread", "event_id": "$root"}),
+            "$child_reply": message("$child_reply", {"m.in_reply_to": {"event_id": "$child"}}),
+            "$plain": message("$plain"),
+            **{
+                f"$plain_reply_{index}": message(f"$plain_reply_{index}", {"m.in_reply_to": {"event_id": "$plain"}})
+                for index in range(5_000)
+            },
+        }
+
+        with cpu_budget(0.5):
+            resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+                "!test:localhost",
+                event_infos=event_infos,
+                ordered_event_ids=list(event_infos),
+            )
+
+        assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("descendants_first", [False, True])
+    async def test_resolve_thread_ids_for_event_infos_resolves_a_long_plain_reply_chain_without_rewalking(
+        self,
+        descendants_first: bool,
+    ) -> None:
+        """Thousands of chained plain replies under a relation-free message resolve within a CPU budget in either order."""
+
+        def message(event_id: str, relates_to: dict[str, object] | None = None) -> EventInfo:
+            content: dict[str, object] = {"body": event_id, "msgtype": "m.text"}
+            if relates_to is not None:
+                content["m.relates_to"] = relates_to
+            return EventInfo.from_event({"content": content, "event_id": event_id, "type": "m.room.message"})
+
+        event_infos = {
+            "$root": message("$root"),
+            "$child": message("$child", {"rel_type": "m.thread", "event_id": "$root"}),
+            "$child_reply": message("$child_reply", {"m.in_reply_to": {"event_id": "$child"}}),
+            "$child_reply_reply": message("$child_reply_reply", {"m.in_reply_to": {"event_id": "$child_reply"}}),
+            "$plain": message("$plain"),
+            "$plain_reply_0": message("$plain_reply_0", {"m.in_reply_to": {"event_id": "$plain"}}),
+            **{
+                f"$plain_reply_{index}": message(
+                    f"$plain_reply_{index}",
+                    {"m.in_reply_to": {"event_id": f"$plain_reply_{index - 1}"}},
+                )
+                for index in range(1, 5_000)
+            },
+        }
+
+        ordered_event_ids = list(event_infos)
+        with cpu_budget(0.5):
+            resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+                "!test:localhost",
+                event_infos=event_infos,
+                ordered_event_ids=ordered_event_ids[::-1] if descendants_first else ordered_event_ids,
+            )
+
+        assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root", "$child_reply_reply": "$root"}
 
     @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(

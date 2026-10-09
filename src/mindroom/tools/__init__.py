@@ -25,6 +25,7 @@ from mindroom.tools import (
     memory,  # noqa: F401
     report_publishing,  # noqa: F401
     self_config,  # noqa: F401
+    skill_manage,  # noqa: F401
 )
 from mindroom.tools.agentql import agentql_tools
 from mindroom.tools.airflow import airflow_tools
@@ -83,6 +84,7 @@ from mindroom.tools.google_drive import google_drive_tools
 from mindroom.tools.google_maps import google_maps_tools
 from mindroom.tools.google_scholar import google_scholar_tools
 from mindroom.tools.google_sheets import google_sheets_tools
+from mindroom.tools.google_tasks import google_tasks_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.groq import groq_tools
 from mindroom.tools.hackernews import hackernews_tools
@@ -218,6 +220,7 @@ __all__ = [
     "google_maps_tools",
     "google_scholar_tools",
     "google_sheets_tools",
+    "google_tasks_tools",
     "googlesearch_tools",
     "groq_tools",
     "hackernews_tools",

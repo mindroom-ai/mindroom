@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import httpx
 from pydantic import TypeAdapter
 
-from mindroom.constants import DEFAULT_MINDROOM_URL
+from mindroom.cli.api import resolve_api_target
 from mindroom.thread_export.models import ThreadExportStats
 
 if TYPE_CHECKING:
@@ -25,15 +25,20 @@ async def request_thread_export(
     max_thread_roots: int,
     include_invited_rooms: bool,
 ) -> ThreadExportStats:
-    """Use the runtime API and its normal bearer authentication, with no offline fallback."""
-    base_url = url or runtime_paths.env_value("MINDROOM_URL") or DEFAULT_MINDROOM_URL
-    token = runtime_paths.env_value("MINDROOM_API_KEY")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    """Use the runtime API and its normal bearer authentication, with no offline fallback.
+
+    Raises `ValueError` before any request when the URL is invalid or would carry `MINDROOM_API_KEY` over remote HTTP.
+    """
+    target = resolve_api_target(runtime_paths, url)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=None)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10, read=None),
+            follow_redirects=False,
+            trust_env=target.trust_env,
+        ) as client:
             response = await client.post(
-                f"{base_url.rstrip('/')}/api/threads/export",
-                headers=headers,
+                f"{target.base_url}/api/threads/export",
+                headers=target.headers,
                 json={
                     "config_path": str(runtime_paths.config_path),
                     "storage_root": str(runtime_paths.storage_root),
@@ -44,7 +49,7 @@ async def request_thread_export(
                 },
             )
     except httpx.HTTPError as exc:
-        msg = f"Cannot reach MindRoom at {base_url}; start MindRoom with its API enabled, or set --url / MINDROOM_URL"
+        msg = f"Cannot reach MindRoom at {target.base_url}; start MindRoom with its API enabled, or set --url / MINDROOM_URL"
         raise RuntimeError(msg) from exc
     if response.is_error:
         msg = f"Thread export request failed ({response.status_code}): {response.text}"

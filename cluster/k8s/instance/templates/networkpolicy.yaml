@@ -1,8 +1,3 @@
-{{- $workerBackend := .Values.workerBackend | default "static_runner" -}}
-{{- $workerPort := 8766 -}}
-{{- if eq $workerBackend "kubernetes" -}}
-{{- $workerPort = (.Values.kubernetesWorkerPort | default 8766) -}}
-{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -19,29 +14,15 @@ spec:
   - Ingress
   - Egress
   ingress:
-  # Allow only ingress-nginx and same-instance pods to reach the public service ports.
+  # Allow only the ingress controller and same-instance pods to reach the public service ports.
   - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: ingress-nginx
-      podSelector:
-        matchLabels:
-          app.kubernetes.io/component: controller
-          app.kubernetes.io/name: ingress-nginx
+    {{- include "mindroom.ingressControllerPeer" . | nindent 4 }}
     - podSelector:
         matchLabels:
           customer: {{ .Values.customer | quote }}
     ports:
     - port: 8765    # MindRoom runtime (bundled dashboard + API)
     - port: 8008    # synapse HTTP
-  # Allow the primary runtime to reach dedicated worker pods.
-  - from:
-    - podSelector:
-        matchLabels:
-          app: mindroom
-          customer: {{ .Values.customer | quote }}
-    ports:
-    - port: {{ $workerPort }}
   egress:
   # Allow intra-instance traffic between MindRoom and Synapse pods.
   - to:
@@ -51,14 +32,30 @@ spec:
     ports:
     - port: 8008
     - port: 8765
-    - port: {{ $workerPort }}
   # Allow DNS
   - ports:
     - port: 53
       protocol: UDP
     - port: 53
       protocol: TCP
-  # Allow HTTP/HTTPS outbound
-  - ports:
+  # Allow HTTP/HTTPS to public addresses and to the ingress controller, which serves the platform API and tenant hosts.
+  # Tool code shares this pod's network identity, so metadata services, private networks including
+  # private node addresses, and other pods stay unreachable over these ports.
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 100.64.0.0/10
+        - 169.254.0.0/16
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    - ipBlock:
+        cidr: ::/0
+        except:
+        - fc00::/7
+        - fe80::/10
+    {{- include "mindroom.ingressControllerPeer" . | nindent 4 }}
+    ports:
     - port: 80
     - port: 443

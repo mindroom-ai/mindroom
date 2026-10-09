@@ -10,14 +10,16 @@ from typing import TYPE_CHECKING, Literal
 
 import httpx
 import pytest
+import pytest_asyncio
 from agno.agent import Agent
 from agno.exceptions import ModelProviderError
 from agno.media import Image
 from agno.models.message import Message
+from agno.models.openai import OpenAIChat
 from agno.run.agent import RunCompletedEvent, RunErrorEvent
 from openai import AsyncOpenAI
 
-from mindroom import provider_stream_retry
+from mindroom import model_loading, provider_stream_retry
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
@@ -27,6 +29,11 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+# The retry_delays fixture replaces asyncio.sleep; fake providers keep real pacing.
+_REAL_SLEEP = asyncio.sleep
+# Idle limit for watchdog tests, wide enough for request setup on a loaded CI runner.
+_IDLE_SECONDS = 0.25
 
 
 @dataclass
@@ -83,19 +90,56 @@ def _answer(content: str) -> str:
     return _chunk({"content": content}) + _chunk({}, "stop") + "data: [DONE]\n\n"
 
 
+def _event_stream(body: AsyncIterator[bytes]) -> httpx.Response:
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+
+async def _silent_after(prefix: str = "", *, keepalive: bool = False) -> AsyncIterator[bytes]:
+    """Hold the connection open without another SSE event, like a stalled upstream."""
+    if prefix:
+        yield prefix.encode()
+    while True:
+        if keepalive:
+            # OpenRouter's documented keepalive comment while it waits on an upstream.
+            yield b": OPENROUTER PROCESSING\n\n"
+        await _REAL_SLEEP(0.01)
+
+
+async def _paced(events: list[str], *, gap: float) -> AsyncIterator[bytes]:
+    for event in events:
+        await _REAL_SLEEP(gap)
+        yield event.encode()
+
+
+async def _collect(model: OpenAIChat | MindRoomOpenAIResponses) -> list[str]:
+    """Collect streamed text, failing instead of hanging when no watchdog fires."""
+
+    async def collect() -> list[str]:
+        return [
+            chunk.content or ""
+            async for chunk in model.ainvoke_stream([Message(role="user", content="Hello")], Message(role="assistant"))
+        ]
+
+    return await asyncio.wait_for(collect(), timeout=5)
+
+
 @asynccontextmanager
 async def _model(
     provider: _Provider,
     tmp_path: Path,
     *,
     api: Literal["chat_completions", "responses"] = "chat_completions",
-) -> AsyncIterator[MindRoomOpenAIChat | MindRoomOpenAIResponses]:
-    config = bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="openai", id="test-model", api=api, api_key="test-key")}),
-        test_runtime_paths(tmp_path),
-    )
+    model_config: ModelConfig | None = None,
+) -> AsyncIterator[OpenAIChat | MindRoomOpenAIResponses]:
+    model_config = model_config or ModelConfig(provider="openai", id="test-model", api=api, api_key="test-key")
+    config = bind_runtime_paths(Config(models={"default": model_config}), test_runtime_paths(tmp_path))
     model = get_model_instance(config, runtime_paths_for(config))
-    assert isinstance(model, MindRoomOpenAIResponses if api == "responses" else MindRoomOpenAIChat)
+    if model_config.api == "responses":
+        assert isinstance(model, MindRoomOpenAIResponses)
+    elif model_config.provider == "openai":
+        assert isinstance(model, MindRoomOpenAIChat)
+    else:
+        assert isinstance(model, OpenAIChat)
     async with AsyncOpenAI(
         api_key="test-key",
         max_retries=0,
@@ -340,3 +384,201 @@ async def test_overload_followup_reuses_completed_tool_result(tmp_path: Path, re
         message["role"] == "tool" and message["content"] == "ready" for message in provider.requests[2]["messages"]
     )
     assert len(retry_delays) == 1
+
+
+def _watched(idle_seconds: float) -> ModelConfig:
+    return ModelConfig(provider="openai", id="test-model", api_key="test-key", stream_idle_timeout_seconds=idle_seconds)
+
+
+@pytest_asyncio.fixture
+async def warm_stream_path(tmp_path: Path) -> None:
+    """Pay the first request's lazy imports before a test times provider silence."""
+    async with _model(_Provider([_answer("Warm")]), tmp_path / "warm") as model:
+        await _collect(model)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("warm_stream_path")
+@pytest.mark.parametrize("keepalive", [False, True], ids=["silent", "keepalive-comments"])
+async def test_silent_stream_is_retried_before_output(
+    keepalive: bool,
+    tmp_path: Path,
+    retry_delays: list[float],
+) -> None:
+    """A provider that goes quiet before any output gets one prompt fresh request."""
+    provider = _Provider([_event_stream(_silent_after(keepalive=keepalive)), _answer("Recovered")])
+    async with _model(provider, tmp_path, model_config=_watched(_IDLE_SECONDS)) as model:
+        chunks = await _collect(model)
+
+    assert "".join(chunks) == "Recovered"
+    assert len(provider.requests) == 2
+    assert provider.requests[0] == provider.requests[1]
+    assert not retry_delays
+    assert all(response.is_closed for response in provider.responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("warm_stream_path")
+async def test_persistent_silence_fails_after_one_retry(tmp_path: Path) -> None:
+    """A provider that stays quiet ends the turn instead of retrying it indefinitely."""
+    provider = _Provider(
+        [_event_stream(_silent_after()), _event_stream(_silent_after()), _answer("Must not run")],
+    )
+    async with _model(provider, tmp_path, model_config=_watched(_IDLE_SECONDS)) as model:
+        with pytest.raises(ModelProviderError) as raised:
+            await _collect(model)
+
+    assert raised.value.status_code == 504
+    assert len(provider.requests) == 2
+    assert all(response.is_closed for response in provider.responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("warm_stream_path")
+async def test_silence_after_output_is_not_replayed(tmp_path: Path) -> None:
+    """Partial text already reached the user, so a later stall fails without replay."""
+    provider = _Provider([_event_stream(_silent_after(_chunk({"content": "Partial"}))), _answer("Must not run")])
+    async with _model(provider, tmp_path, model_config=_watched(_IDLE_SECONDS)) as model:
+        with pytest.raises(ModelProviderError) as raised:
+            await _collect(model)
+
+    assert raised.value.status_code == 504
+    assert len(provider.requests) == 1
+    assert all(response.is_closed for response in provider.responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("warm_stream_path")
+async def test_steady_stream_outlasting_the_idle_limit_completes(tmp_path: Path) -> None:
+    """The limit bounds gaps between provider events, not the length of a reply."""
+    events = [_chunk({"content": letter}) for letter in "abcde"] + [_chunk({}, "stop"), "data: [DONE]\n\n"]
+    provider = _Provider([_event_stream(_paced(events, gap=_IDLE_SECONDS / 3))])
+    async with _model(provider, tmp_path, model_config=_watched(_IDLE_SECONDS)) as model:
+        chunks = await _collect(model)
+
+    assert "".join(chunks) == "abcde"
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_during_silence_cancels_without_retry(tmp_path: Path) -> None:
+    """STOP while waiting on a quiet provider cancels the turn rather than starting a retry."""
+    provider = _Provider([_event_stream(_silent_after()), _answer("Must not run")])
+    async with _model(provider, tmp_path, model_config=_watched(1)) as model:
+        task = asyncio.create_task(_collect(model))
+        while not provider.requests:
+            await _REAL_SLEEP(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert len(provider.requests) == 1
+    assert all(response.is_closed for response in provider.responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("warm_stream_path")
+@pytest.mark.parametrize(
+    ("model_config", "dotenv", "expected"),
+    [
+        (ModelConfig(provider="openai", id="test-model", api_key="test-key"), None, "Retried"),
+        (
+            ModelConfig(
+                provider="openai",
+                id="test-model",
+                api_key="test-key",
+                extra_kwargs={"base_url": "http://localhost:8080/v1"},
+            ),
+            None,
+            "Late",
+        ),
+        (
+            ModelConfig(
+                provider="openai",
+                id="test-model",
+                api_key="test-key",
+                extra_kwargs={"client_params": {"base_url": "http://gpu.lan:8080/v1"}},
+            ),
+            None,
+            "Late",
+        ),
+        (
+            ModelConfig(provider="openai", id="test-model", api_key="test-key"),
+            "OPENAI_BASE_URL=http://localhost:8080/v1\n",
+            "Late",
+        ),
+        (ModelConfig(provider="llama_cpp", id="test-model", api_key="test-key"), None, "Late"),
+        (
+            ModelConfig(provider="openai", id="test-model", api_key="test-key", stream_idle_timeout_seconds=0),
+            None,
+            "Late",
+        ),
+        (
+            ModelConfig(
+                provider="llama_cpp",
+                id="test-model",
+                api_key="test-key",
+                stream_idle_timeout_seconds=_IDLE_SECONDS,
+            ),
+            None,
+            "Retried",
+        ),
+        (
+            ModelConfig(provider="openai", id="test-model", api_key="test-key", host="http://localhost:11434"),
+            None,
+            "Retried",
+        ),
+        (ModelConfig(provider="zai", id="test-model", api_key="test-key"), None, "Retried"),
+        (
+            ModelConfig(
+                provider="zai",
+                id="test-model",
+                api_key="test-key",
+                extra_kwargs={"base_url": "http://localhost:8080/v1"},
+            ),
+            None,
+            "Late",
+        ),
+        (
+            ModelConfig(
+                provider="openai",
+                id="test-model",
+                api_key="test-key",
+                extra_kwargs={"client_params": {"http_options": {"base_url": "http://gpu.lan:8080"}}},
+            ),
+            None,
+            "Late",
+        ),
+    ],
+    ids=[
+        "hosted-default",
+        "custom-base-url",
+        "client-params-base-url",
+        "dotenv-base-url",
+        "llama-cpp",
+        "explicitly-disabled",
+        "llama-cpp-opted-in",
+        "ignored-host",
+        "zai-built-in-endpoint",
+        "zai-custom-endpoint",
+        "nested-http-options-base-url",
+    ],
+)
+async def test_local_servers_may_stay_silent_while_loading_a_model(
+    model_config: ModelConfig,
+    dotenv: str | None,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only hosted APIs on their own endpoint get the automatic idle limit."""
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr(model_loading, "_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS", _IDLE_SECONDS)
+    if dotenv is not None:
+        (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
+    # A local server queueing behind another request, then loading this model.
+    provider = _Provider([_event_stream(_paced([_answer("Late")], gap=4 * _IDLE_SECONDS)), _answer("Retried")])
+    async with _model(provider, tmp_path, model_config=model_config) as model:
+        chunks = await _collect(model)
+
+    assert "".join(chunks) == expected

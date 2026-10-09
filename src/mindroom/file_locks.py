@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
+import sys
+import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
-from mindroom.path_confinement import open_regular_file_at
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -19,16 +18,57 @@ if TYPE_CHECKING:
 
 _DEFAULT_POLL_SECONDS = 0.1
 
+if sys.platform == "win32":
+    import msvcrt
+
+    # msvcrt locks a byte range starting at the current position, so every lock and
+    # unlock seeks to byte 0 and covers exactly that byte. It has no shared mode:
+    # shared requests lock exclusively, so concurrent shared holders wait for each other.
+
+    def _try_lock_exclusive(fd: int) -> bool:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except PermissionError:  # EACCES: another handle holds the byte.
+            return False
+        return True
+
+    def _lock(fd: int, *, exclusive: bool) -> None:  # noqa: ARG001
+        # LK_LOCK raises after ten one-second retries, so an unbounded wait polls instead.
+        while not _try_lock_exclusive(fd):
+            time.sleep(_DEFAULT_POLL_SECONDS)
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock_exclusive(fd: int) -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    def _lock(fd: int, *, exclusive: bool) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 __all__ = [
     "InheritedFileLockCapability",
     "acquire_shared_file_lock",
     "advisory_file_lock",
-    "advisory_file_lock_at",
     "async_exclusive_file_lock",
     "current_inherited_file_lock",
     "expose_inherited_file_lock",
     "file_lock_is_held",
     "release_file_lock",
+    "wait_for_exclusive_lock",
 ]
 
 
@@ -80,31 +120,17 @@ def _open_lock_file(lock_path: Path) -> TextIO:
 
 
 @contextmanager
-def advisory_file_lock_at(directory_fd: int, filename: str) -> Iterator[None]:
-    """Acquire a blocking exclusive lock on one file in an open directory without following a link there."""
-    descriptor = open_regular_file_at(directory_fd, filename, os.O_RDWR | os.O_CREAT)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
-
-
-@contextmanager
 def advisory_file_lock(lock_path: Path, *, exclusive: bool = True) -> Iterator[None]:
     """Acquire a blocking advisory file lock for synchronous code."""
     lock_file = _open_lock_file(lock_path)
     acquired = False
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        _lock(lock_file.fileno(), exclusive=exclusive)
         acquired = True
         yield
     finally:
         if acquired:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _unlock(lock_file.fileno())
         lock_file.close()
 
 
@@ -117,7 +143,7 @@ def acquire_shared_file_lock(lock_path: Path) -> TextIO:
     """
     lock_file = _open_lock_file(lock_path)
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+        _lock(lock_file.fileno(), exclusive=False)
     except BaseException:
         lock_file.close()
         raise
@@ -127,9 +153,24 @@ def acquire_shared_file_lock(lock_path: Path) -> TextIO:
 def release_file_lock(lock_file: TextIO) -> None:
     """Give up a lock taken by :func:`acquire_shared_file_lock`."""
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        _unlock(lock_file.fileno())
     finally:
         lock_file.close()
+
+
+def wait_for_exclusive_lock(descriptor: int, *, timeout_seconds: float) -> bool:
+    """Lock an open descriptor exclusively, returning whether that succeeded within ``timeout_seconds``.
+
+    For lock files that untrusted code can also open: a holder that never
+    releases makes the caller fail instead of waiting forever. Closing the
+    descriptor releases the lock.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while not _try_lock_exclusive(descriptor):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_DEFAULT_POLL_SECONDS)
+    return True
 
 
 def file_lock_is_held(lock_path: Path) -> bool:
@@ -141,11 +182,9 @@ def file_lock_is_held(lock_path: Path) -> bool:
     """
     lock_file = _open_lock_file(lock_path)
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    else:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        if not _try_lock_exclusive(lock_file.fileno()):
+            return True
+        _unlock(lock_file.fileno())
         return False
     finally:
         lock_file.close()
@@ -163,15 +202,13 @@ async def async_exclusive_file_lock(
     acquired = False
     try:
         while not acquired:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except BlockingIOError:
+            acquired = _try_lock_exclusive(lock_file.fileno())
+            if not acquired:
                 await asyncio.sleep(poll_seconds)
         yield lock_file
     finally:
         if acquired and not retain_for_inherited_fds:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        # With retention enabled, close without LOCK_UN: a subprocess may have
-        # inherited this open-file description and must keep the lock held.
+            _unlock(lock_file.fileno())
+        # With retention enabled, close without unlocking: on POSIX a subprocess may
+        # have inherited this open-file description and must keep the lock held.
         lock_file.close()

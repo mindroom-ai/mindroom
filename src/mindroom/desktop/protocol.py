@@ -6,9 +6,15 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Literal, cast
+from urllib.parse import urlsplit
 
 from mindroom.desktop.input import DESKTOP_SAFE_KEYS
-from mindroom.matrix.encrypted_file import encrypted_file_content_from_values
+from mindroom.matrix.encrypted_file import (
+    ENCRYPTED_FILE_KEY_ALGORITHM,
+    ENCRYPTED_FILE_KEY_TYPE,
+    ENCRYPTED_FILE_VERSION,
+    encrypted_file_content_from_values,
+)
 
 DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
@@ -19,8 +25,8 @@ MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 MAX_SHELL_OUTPUT_BYTES = 10 * 1024 * 1024
 SHELL_OUTPUT_MIME_TYPE = "text/plain"
-# Measured as ASCII-escaped JSON, the form nio encrypts. Olm framing and base64 then add a third, and
-# maximum-length Matrix IDs add about 1.5 KiB of envelope. The rest covers the bridge's metrics and the
+# Measured as ASCII-escaped JSON, the form nio encrypts, including the bridge's metrics. Olm framing and
+# base64 then add a third, and maximum-length Matrix IDs add about 1.5 KiB of envelope. The rest covers the
 # request_status receipt that wraps a stored response.
 MAX_INLINE_RESPONSE_BYTES = 40_960
 _MAX_COMMAND_PARAMETERS_BYTES = 16 * 1024
@@ -97,7 +103,7 @@ _MEDIA_MIME_TYPES: dict[DesktopMediaKind, frozenset[str]] = {
     "screenshot": frozenset({"image/jpeg", "image/png"}),
     "output_attachment": frozenset({SHELL_OUTPUT_MIME_TYPE}),
 }
-_MEDIA_MAX_BYTES: dict[DesktopMediaKind, int] = {
+MEDIA_MAX_BYTES: dict[DesktopMediaKind, int] = {
     "screenshot": MAX_SCREENSHOT_BYTES,
     "output_attachment": MAX_SHELL_OUTPUT_BYTES,
 }
@@ -163,7 +169,7 @@ class DesktopSetupDescriptor:
             msg = "Desktop setup descriptor has unsupported fields, version, or type."
             raise DesktopProtocolError(msg)
         return cls(
-            homeserver=_bounded_str(content, "homeserver", "setup", max_length=2048),
+            homeserver=_setup_homeserver(content),
             user_id=_bounded_str(content, "user_id", "setup", max_length=512),
             code=_bounded_str(content, "code", "setup", max_length=256),
             controller_user_id=_bounded_str(content, "controller_user_id", "setup", max_length=512),
@@ -252,20 +258,24 @@ class EncryptedDesktopMedia:
         content = _object_mapping(raw, kind)
         key = _object_mapping(content.get("key"), f"{kind}.key")
         hashes = _object_mapping(content.get("hashes"), f"{kind}.hashes")
-        if key.get("alg") != "A256CTR" or key.get("kty") != "oct" or key.get("ext") is not True:
-            msg = f"{kind}.key must describe an extractable A256CTR octet key."
+        if (
+            key.get("alg") != ENCRYPTED_FILE_KEY_ALGORITHM
+            or key.get("kty") != ENCRYPTED_FILE_KEY_TYPE
+            or key.get("ext") is not True
+        ):
+            msg = f"{kind}.key must describe an extractable {ENCRYPTED_FILE_KEY_ALGORITHM} octet key."
             raise DesktopProtocolError(msg)
         url = _required_str(content, "url", kind)
         if not url.startswith("mxc://"):
             msg = f"{kind}.url must be an mxc:// URI."
             raise DesktopProtocolError(msg)
         version = _required_str(content, "v", kind)
-        if version != "v2":
-            msg = f"{kind}.v must be v2."
+        if version != ENCRYPTED_FILE_VERSION:
+            msg = f"{kind}.v must be {ENCRYPTED_FILE_VERSION}."
             raise DesktopProtocolError(msg)
         size = _required_int(content, "size", kind)
-        if size <= 0 or size > _MEDIA_MAX_BYTES[kind]:
-            msg = f"{kind}.size must be between 1 and {_MEDIA_MAX_BYTES[kind]}."
+        if size <= 0 or size > MEDIA_MAX_BYTES[kind]:
+            msg = f"{kind}.size must be between 1 and {MEDIA_MAX_BYTES[kind]}."
             raise DesktopProtocolError(msg)
         mime_type = _required_str(content, "mimetype", kind)
         if mime_type not in _MEDIA_MIME_TYPES[kind]:
@@ -459,6 +469,18 @@ def _bounded_str(content: dict[str, object], key: str, label: str, *, max_length
     return value
 
 
+def _setup_homeserver(content: dict[str, object]) -> str:
+    # The app shows this URL as the sign-in server, so nothing may disguise its real host.
+    # Plain http would send the sign-in over the network unencrypted, so it is only for a homeserver on this computer.
+    value = _bounded_str(content, "homeserver", "setup", max_length=2048)
+    parts = urlsplit(value)
+    local_http = parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"}
+    if not value.isascii() or not (parts.scheme == "https" or local_http) or not parts.hostname or "@" in parts.netloc:
+        msg = "Desktop setup homeserver must be a plain https URL, or http on localhost."
+        raise DesktopProtocolError(msg)
+    return value
+
+
 def _require_protocol_version(content: dict[str, object]) -> None:
     version = _required_int(content, "v", "payload")
     if version != DESKTOP_PROTOCOL_VERSION:
@@ -482,6 +504,7 @@ __all__ = [
     "MAX_INLINE_RESPONSE_BYTES",
     "MAX_SCREENSHOT_BYTES",
     "MAX_SHELL_OUTPUT_BYTES",
+    "MEDIA_MAX_BYTES",
     "SHELL_OUTPUT_MIME_TYPE",
     "DesktopAction",
     "DesktopCommand",

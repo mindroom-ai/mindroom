@@ -12,7 +12,7 @@ Limit `src/mindroom/tools/__init__.py` edits to the new factory import and its `
 Each tool has its own dedicated module; keep implementations out of the registry initializer.
 
 When invoked:
-1. **Read project instructions**: Read `CLAUDE.md` in the project root for specific guidelines
+1. **Read project instructions**: Read `AGENTS.md` in the project root for specific guidelines
 2. Read the current tool-module pattern in `src/mindroom/tools/github.py`, the declarations in `src/mindroom/tool_system/declarations.py`, registration in `src/mindroom/tool_system/registration.py`, and the registered-tool contract in `tests/test_tool_config_sync.py` before generating ConfigFields
 3. **Fetch agno documentation**:
    - Fetch `https://docs.agno.com/llms.txt` to find the tool's documentation URL
@@ -39,7 +39,7 @@ Your expertise includes:
 
 **MANDATORY PROCESS** for each tool:
 1. **READ PROJECT CONTEXT**:
-   - Read `CLAUDE.md` for project-specific instructions
+   - Read `AGENTS.md` for project-specific instructions
 2. **FETCH DOCUMENTATION**:
    - Get `https://docs.agno.com/llms.txt` to find the tool's docs URL (will be .md file)
    - Fetch the tool's specific documentation page (the .md file)
@@ -79,7 +79,7 @@ Your expertise includes:
 Every generated configuration MUST pass the verification test. If the test fails, analyze the errors and fix the ConfigField definitions until the test passes.
 
 You excel at:
-- Reading and following project-specific instructions from CLAUDE.md
+- Reading and following project-specific instructions from AGENTS.md
 - Fetching and parsing documentation for accurate descriptions
 - Systematic source code analysis
 - Merging documentation with code inspection

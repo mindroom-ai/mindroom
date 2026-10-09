@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import UUID
 
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
+from mindroom.agent_cli.shell_contract import (
+    AGENT_CLI_TOKEN_ENV,
+    AGENT_CLI_URL_ENV,
+    AGENT_CLI_WINDOW_ENV,
+    AGENT_CLI_WINDOW_HEADER,
+)
 
 
 class AgentCliUnavailableError(RuntimeError):
@@ -37,11 +42,12 @@ class _NoRedirects(HTTPRedirectHandler):
 
 
 class AgentCliClient:
-    """Use the private token file; never print its contents or follow redirects."""
+    """Use the response's grant from the environment; never print it or follow redirects."""
 
     def __init__(self) -> None:
-        self._url = os.environ.get("MINDROOM_AGENT_CLI_GATEWAY_URL", "").rstrip("/")
-        token_path = os.environ.get("MINDROOM_AGENT_CLI_TOKEN_PATH", "")
+        self._url = os.environ.get(AGENT_CLI_URL_ENV, "").rstrip("/")
+        self._token = os.environ.get(AGENT_CLI_TOKEN_ENV, "")
+        self._window = os.environ.get(AGENT_CLI_WINDOW_ENV)
         parsed = urlsplit(self._url)
         try:
             if (
@@ -52,18 +58,17 @@ class AgentCliClient:
                 or parsed.query
                 or parsed.fragment
                 or parsed.path
-                or not token_path
+                or not self._token
+                or len(self._token) > 4096
+                or not self._token.isascii()
+                or any(character.isspace() for character in self._token)
             ):
                 raise ValueError  # noqa: TRY301 - Normalize configuration errors without exposing token data.
-            with Path(token_path).open("rb") as stream:
-                token = stream.read(4097)
-            self._token = token.decode("ascii").strip()
-            if not self._token or len(token) > 4096 or any(character.isspace() for character in self._token):
-                raise ValueError  # noqa: TRY301 - Normalize configuration errors without exposing token data.
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
             msg = "Agent CLI authority is unavailable"
             raise AgentCliUnavailableError(msg) from exc
-        self._opener = build_opener(_NoRedirects())
+        # The CLI only calls its own MindRoom API; never send the grant through an environment proxy.
+        self._opener = build_opener(ProxyHandler({}), _NoRedirects())
 
     def operation(self, payload: dict[str, object]) -> dict[str, object]:
         """Submit once; callers retain the exact call ID on uncertain acceptance."""
@@ -74,10 +79,13 @@ class AgentCliClient:
         return self._request(f"/api/agent-cli/calls/{UUID(call_id)}")
 
     def _request(self, route: str, data: bytes | None = None) -> dict[str, object]:
+        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        if self._window:
+            headers[AGENT_CLI_WINDOW_HEADER] = self._window
         request = Request(  # noqa: S310 - HTTP(S) origin validated at construction.
             self._url + route,
             data=data,
-            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with self._opener.open(request, timeout=30) as response:
@@ -88,7 +96,8 @@ class AgentCliClient:
             msg = "Agent CLI authority or transport is unavailable"
             raise AgentCliUnavailableError(msg) from None
         except (OSError, URLError, ValueError) as exc:
-            msg = "Agent CLI transport outcome is unknown"
+            # Name the address so a blocked route back to MindRoom is diagnosable from the shell.
+            msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"
             raise AgentCliUnavailableError(msg) from exc
         if not isinstance(result, dict):
             msg = "Agent CLI returned an invalid envelope"

@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import unicodedata
 from dataclasses import dataclass
+from glob import has_magic
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,7 @@ from mindroom.tools.path_safety import (
     is_within_base_dir,
     read_resolved_file,
     resolve_base_dir_path,
+    resolve_tool_base_dir,
     split_search_pattern,
     write_resolved_file,
 )
@@ -490,7 +492,10 @@ def _find_files_in(
         return f"Error: Invalid glob pattern '{pattern}': {e}"
 
     filter_root = base_dir if restrict_to_base_dir else search_path
-    filtered = _filter_hidden_and_ignored(candidates, filter_root)
+    # A dot directory named in `path` or in the pattern's literal prefix was asked for, so only dot paths below it hide.
+    parts = Path(pattern).parts
+    named = parts[: next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))]
+    filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
     matches: list[str] = []
     for candidate in filtered:
         try:
@@ -552,7 +557,7 @@ class CodingTools(Toolkit):
         base_dir: str | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
-        self.base_dir = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
+        self.base_dir = resolve_tool_base_dir(base_dir)
         self.restrict_to_base_dir = file_access == "workspace"
         super().__init__(
             name="coding",
@@ -686,9 +691,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = (
-                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
-            )
+            search_path = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
         effective_glob = glob
@@ -742,14 +745,13 @@ class CodingTools(Toolkit):
 
         Returns:
             List of matching file paths, one per line.
-            Hidden files/directories and gitignored files are automatically
-            excluded from results.
+            Hidden files/directories below the searched directory and gitignored
+            files are automatically excluded from results; a hidden directory
+            named in path or in the pattern's leading directories is searched.
 
         """
         try:
-            search_path = (
-                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
-            )
+            search_path = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
         search_pattern = pattern
@@ -785,7 +787,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            target = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            target = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
 
@@ -1030,9 +1032,10 @@ def _grep_file(
     return match_count
 
 
-def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Path]:
-    """Filter out hidden files (dotfiles) and gitignored files."""
+def _filter_hidden_and_ignored(files: list[Path], search_path: Path, visible_root: Path | None = None) -> list[Path]:
+    """Filter out files outside ``search_path``, gitignored files, and dotfiles below ``visible_root``."""
     search_root = search_path.resolve()
+    hidden_root = search_path if visible_root is None else visible_root
     visible: list[Path] = []
     for filepath in files:
         if not is_within_base_dir(filepath, search_root):
@@ -1040,7 +1043,7 @@ def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Pat
         if not filepath.is_file():
             continue
         try:
-            rel = filepath.relative_to(search_path)
+            rel = filepath.relative_to(hidden_root)
         except ValueError:
             rel = filepath.resolve()
         if any(part.startswith(".") for part in rel.parts):

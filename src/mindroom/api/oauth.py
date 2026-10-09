@@ -286,6 +286,7 @@ async def _issue_authorization_url(
             if connect_target is not None
             else await _credential_context_binding_payload(context)
         )
+        endpoints = await provider.runtime_endpoints(runtime_paths)
         code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
             request,
@@ -293,10 +294,12 @@ async def _issue_authorization_url(
             agent_name,
             payload=payload,
             code_verifier=code_verifier,
+            token_url=endpoints.token_url,
             browser_user_required=connect_target is None or connect_target.binding.worker_scope != "shared",
         )
         auth_url = await provider.authorization_uri_async(
             runtime_paths,
+            endpoints,
             state=state,
             code_verifier=code_verifier,
         )
@@ -804,6 +807,16 @@ async def _store_callback_credentials(
 ) -> bool:
     """Resolve and store one callback's exact credential target."""
     pending = consume_pending_oauth_request(request, provider.id, state)
+    token_url = pending.token_url
+    # LEGACY_COMPAT: Pending OAuth connect state without a bound token endpoint.
+    # Legacy format: pending `dashboard_oauth_state` records whose data has no `token_url`.
+    # Last legacy release: v2026.9.358; the unreleased replacement records the endpoint when building the auth URL.
+    # Handling: reject the callback before any token request; the state lives 600 seconds, so only connects started
+    # before an upgrade and completed after it must restart.
+    # Coverage: tests/api/test_oauth_api.py::test_callback_exchanges_code_only_at_token_endpoint_bound_during_connect
+    if token_url is None:
+        msg = "OAuth state does not record the token endpoint bound at authorization"
+        raise OAuthProviderError(msg)
     conversation_flow = pending.payload is not None and "conversation_requester_id" in pending.payload
     if not conversation_flow:
         target = _resolve_oauth_credentials_target(
@@ -825,6 +838,7 @@ async def _store_callback_credentials(
             context,
             code,
             pending.code_verifier,
+            token_url=token_url,
             expected_connection_generation=_pending_connection_generation(pending.payload),
         )
 

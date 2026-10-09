@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
-from typing import TYPE_CHECKING
+from pathlib import Path
+from threading import Barrier, Thread
 
 import pytest
 
@@ -19,9 +20,6 @@ from mindroom.private_instance_identity import (
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _scope_root(tmp_path: Path, worker_key: str) -> Path:
@@ -360,6 +358,49 @@ def test_load_rejects_a_non_regular_identity_record(tmp_path: Path) -> None:
         load_private_instance_identity(tmp_path, scope_root)
 
 
+def test_load_never_blocks_on_a_fifo_swapped_in_after_the_type_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that swaps a FIFO over the record between its type check and open cannot stall the loader."""
+    worker_key = "v1:tenant-a:user:~requester-a"
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester-a")
+    scope_root = _scope_root(tmp_path, worker_key)
+    record = scope_root / ".mindroom-private-instance.json"
+    checked_lstat = Path.lstat
+
+    def swap_after_check(path: Path) -> os.stat_result:
+        status = checked_lstat(path)
+        if path == record:
+            record.unlink()
+            os.mkfifo(record)
+        return status
+
+    monkeypatch.setattr(Path, "lstat", swap_after_check)
+    outcomes: list[BaseException | None] = []
+
+    def load() -> None:
+        try:
+            load_private_instance_identity(tmp_path, scope_root)
+        except BaseException as exc:
+            outcomes.append(exc)
+        else:
+            outcomes.append(None)
+
+    loader = Thread(target=load, daemon=True)
+    loader.start()
+    loader.join(timeout=5)
+    blocked = loader.is_alive()
+    if blocked:
+        # Give the stuck open its writer so the thread can finish.
+        os.close(os.open(record, os.O_WRONLY | os.O_NONBLOCK))
+        loader.join(timeout=5)
+
+    assert not blocked
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], PrivateInstanceIdentityError)
+
+
 def test_load_rejects_duplicate_json_record_fields(tmp_path: Path) -> None:
     """Repeated JSON object fields must not be collapsed into an accepted schema."""
     worker_key = "v1:tenant-a:user:~requester-a"
@@ -406,6 +447,34 @@ def test_private_instances_for_agent_lists_owned_roots_and_flags_the_rest(tmp_pa
             ),
             key=lambda instance: instance.state_root,
         ),
+    )
+
+
+def test_private_instances_for_agent_ignores_a_record_the_primary_never_wrote(tmp_path: Path) -> None:
+    """A self-consistent owner record that sandbox runner code plants in a scope names no owner until the primary materializes it."""
+    requester_id = "@secret:example.test"
+    worker_key = f"v1:tenant-a:user:~{requester_id}"
+    scope_root = _scope_root(tmp_path, worker_key)
+    (scope_root / "secret").mkdir(parents=True)
+    (scope_root / ".mindroom-private-instance.json").write_text(
+        json.dumps(
+            {
+                "format": "mindroom-private-instance",
+                "version": 1,
+                "worker_key": worker_key,
+                "requester_id": requester_id,
+            },
+        ),
+        encoding="utf-8",
+    )
+    assert load_private_instance_identity(tmp_path, scope_root) == PrivateInstanceIdentity(worker_key, requester_id)
+
+    assert private_instances_for_agent(tmp_path, "secret", "user") == (PrivateInstance(scope_root / "secret", None),)
+
+    # A scope from an earlier release gains its owner at the requester's next turn.
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id=requester_id)
+    assert private_instances_for_agent(tmp_path, "secret", "user") == (
+        PrivateInstance(scope_root / "secret", requester_id),
     )
 
 

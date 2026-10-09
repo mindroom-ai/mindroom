@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+import structlog
 
 import mindroom.attachments as attachments_module
 import mindroom.matrix.media as media_module
@@ -34,10 +37,15 @@ from mindroom.attachments import (
     parse_attachment_ids_from_thread_history,
     register_bytes_attachment,
     register_local_attachment,
+    register_matrix_media_attachment,
     resolve_attachments,
     resolve_thread_attachment_ids,
 )
-from tests.conftest import make_visible_message
+from mindroom.logging_config import bound_log_context
+from tests.conftest import FakeMediaResponse, make_matrix_client_mock, make_visible_message
+
+if TYPE_CHECKING:
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def test_attachment_id_for_event_is_stable() -> None:
@@ -191,8 +199,10 @@ async def test_register_media_attachment_offloads_registration_work(tmp_path: Pa
         sender: str | None = None,
         event_timestamp: int | None = None,
         cleanup_loop: asyncio.AbstractEventLoop | None = None,
+        retained_name: str | None = None,
     ) -> AttachmentRecord:
         assert cleanup_loop is not None
+        assert retained_name == local_path.name
         registration_thread_ids.append(threading.get_ident())
         return AttachmentRecord(
             attachment_id=attachment_id or "att_generated",
@@ -232,7 +242,7 @@ async def test_register_media_attachment_rejects_payload_over_limit(
     tmp_path: Path,
 ) -> None:
     """Direct media registration should not persist bytes over the Matrix media cap."""
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 5)
 
     record = await _register_media_attachment(
         storage_path=tmp_path,
@@ -249,6 +259,306 @@ async def test_register_media_attachment_rejects_payload_over_limit(
 
     assert record is None
     assert not (tmp_path / "incoming_media").exists()
+
+
+@pytest.mark.asyncio
+async def test_register_matrix_media_attachment_stops_reading_an_oversized_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Matrix file larger than the media cap is abandoned mid-transfer, never held whole.
+
+    nio's ``download`` reads the entire body into memory before anything can
+    measure it, so any room member could post a file as large as the
+    homeserver accepts and have every agent that reads it buffer all of it.
+    """
+    limit = 256 * 1024
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", limit)
+    response = FakeMediaResponse(b"x" * (5 * limit))
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(return_value=response)
+    event = nio.Event.parse_event(
+        {
+            "event_id": "$huge",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1780736400000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
+        },
+    )
+    assert isinstance(event, nio.RoomMessageFile)
+
+    record = await register_matrix_media_attachment(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        event=event,
+    )
+
+    assert record is None
+    client.download.assert_not_awaited()
+    assert response.streamed_bytes <= limit + 64 * 1024
+    assert response.released
+    assert not (tmp_path / "incoming_media").exists()
+
+
+@pytest.mark.asyncio
+async def test_thread_history_media_that_failed_is_not_downloaded_again_every_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed registration leaves no record, so each turn used to download the media again.
+
+    Anyone who can post can name media that always fails, such as a file over
+    the size cap, and every turn in that conversation fetched each one in full.
+    """
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 1024)
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"x" * 4096))
+    history = [
+        make_visible_message(
+            event_id=f"$huge{index}",
+            content={"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
+        )
+        for index in range(3)
+    ]
+
+    for _turn in range(2):
+        attachment_ids = await attachments_module.register_thread_history_media_attachments(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            thread_history=history,
+        )
+        assert attachment_ids == []
+
+    assert client.send.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_one_turn_downloads_a_bounded_number_of_thread_history_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A history full of failing media costs one turn a fixed number of downloads, not one per item.
+
+    The failure memory only stops repeats of media it still remembers, so the
+    turn itself must stop. Media left over waits for a later turn.
+    """
+    limit = attachments_module._MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 1024)
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"x" * 4096))
+    history = [
+        make_visible_message(
+            event_id=f"$huge{index}",
+            content={"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
+        )
+        for index in range(limit + 3)
+    ]
+
+    for expected_downloads in (limit, limit + 3):
+        attachment_ids = await attachments_module.register_thread_history_media_attachments(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            thread_history=history,
+        )
+        assert attachment_ids == []
+        assert client.send.await_count == expected_downloads
+
+
+@pytest.mark.asyncio
+async def test_failing_older_thread_history_media_cannot_hold_back_newer_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The download budget goes to the newest media first, and the result keeps history order.
+
+    Spent oldest first, earlier media that keeps failing used the whole budget
+    each time its failure memory ran out, so newer media never arrived. Media
+    the budget left out still arrives on a later turn.
+    """
+    limit = attachments_module._MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 1024)
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            b"%PDF-1.7 small" if "/media/download/localhost/good" in path else b"x" * 4096,
+        ),
+    )
+
+    history = [
+        make_visible_message(event_id=event_id, content={"msgtype": "m.file", "body": "f.pdf", "url": mxc})
+        for event_id, mxc in [
+            ("$good-old", "mxc://localhost/good"),
+            *((f"$huge{index}", "mxc://localhost/huge") for index in range(limit)),
+            ("$good-new", "mxc://localhost/good"),
+        ]
+    ]
+
+    attachment_ids = await attachments_module.register_thread_history_media_attachments(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        thread_history=history,
+    )
+
+    assert attachment_ids == [_attachment_id_for_event("$good-new")]
+    attachment_ids = await attachments_module.register_thread_history_media_attachments(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        thread_history=history,
+    )
+    assert attachment_ids == [_attachment_id_for_event("$good-old"), _attachment_id_for_event("$good-new")]
+
+
+@pytest.mark.asyncio
+async def test_thread_history_media_replaced_by_an_edit_uses_the_new_file(tmp_path: Path) -> None:
+    """An edit that replaces a message's media yields the new file, while unedited media keeps its record."""
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            b"NEW-BYTES" if "/media/download/localhost/new" in path else b"OLD-BYTES",
+        ),
+    )
+    edited = make_visible_message(
+        event_id="$media",
+        content={"msgtype": "m.file", "body": "report.txt", "url": "mxc://localhost/old"},
+    )
+    unedited = make_visible_message(
+        event_id="$other",
+        content={"msgtype": "m.file", "body": "other.txt", "url": "mxc://localhost/other"},
+    )
+
+    async def register(history: list[ResolvedVisibleMessage]) -> list[AttachmentRecord]:
+        attachment_ids = await attachments_module.register_thread_history_media_attachments(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            thread_history=history,
+        )
+        return resolve_attachments(tmp_path, attachment_ids)
+
+    await register([edited, unedited])
+    edited.apply_edit(
+        body="report-v2.txt",
+        timestamp=1,
+        latest_event_id="$edit",
+        content={"msgtype": "m.file", "body": "report-v2.txt", "url": "mxc://localhost/new"},
+    )
+    records = await register([edited, unedited])
+
+    assert [record.attachment_id for record in records] == [
+        _attachment_id_for_event("$edit"),
+        _attachment_id_for_event("$other"),
+    ]
+    assert [(record.filename, record.local_path.read_bytes()) for record in records] == [
+        ("report-v2.txt", b"NEW-BYTES"),
+        ("other.txt", b"OLD-BYTES"),
+    ]
+    assert _attachment_ids_for_visible_message(edited) == [_attachment_id_for_event("$edit")]
+    assert client.send.await_count == 3
+
+    voice_content = {"msgtype": "m.audio", "body": "voice.ogg", "url": "mxc://localhost/voice"}
+    voice = make_visible_message(event_id="$voice", content=voice_content)
+    voice.apply_edit(body="voice.ogg", timestamp=1, latest_event_id="$voice-edit", content=voice_content)
+    assert _attachment_ids_for_visible_message(voice) == [_attachment_id_for_event("$voice")]
+
+
+@pytest.mark.asyncio
+async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) -> None:
+    """Each event keeps its own record, but events naming one upload share its single copy."""
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"%PDF-1.7 shared"))
+    records = []
+    for index in range(3):
+        event = nio.Event.parse_event(
+            {
+                "event_id": f"$copy{index}",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1780736400000,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.file", "body": "report.pdf", "url": "mxc://localhost/shared"},
+            },
+        )
+        assert isinstance(event, nio.RoomMessageFile)
+        records.append(
+            await register_matrix_media_attachment(
+                client,
+                tmp_path,
+                room_id="!room:localhost",
+                thread_id=None,
+                event=event,
+            ),
+        )
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    stored = [record for record in records if record is not None]
+    assert [record.attachment_id for record in stored] == [
+        _attachment_id_for_event(f"$copy{index}") for index in range(3)
+    ]
+    assert {record.local_path for record in stored} == {stored[0].local_path}
+    assert [path.read_bytes() for path in (tmp_path / "incoming_media").iterdir()] == [b"%PDF-1.7 shared"]
+
+
+def test_shared_media_reused_while_cleanup_runs_outlives_its_expired_record(tmp_path: Path) -> None:
+    """Cleanup counts references before deleting, so media reused in between must survive it.
+
+    Events naming one upload share a single file. When the only record a
+    cleanup counted for it had expired, the cleanup deleted the file under a
+    record that a new event had just registered against it.
+    """
+    payload = b"%PDF-1.7 shared"
+
+    def register(event_id: str) -> AttachmentRecord | None:
+        local_path = attachments_module._store_media_bytes_locally(tmp_path, payload, "application/pdf")
+        assert local_path is not None
+        return register_local_attachment(
+            tmp_path,
+            local_path,
+            kind="file",
+            attachment_id=_attachment_id_for_event(event_id),
+            mime_type="application/pdf",
+            room_id="!room:localhost",
+            source_event_id=event_id,
+            retained_name=local_path.name,
+        )
+
+    old = register("$old")
+    assert old is not None
+    old_record_path = tmp_path / "attachments" / f"{old.attachment_id}.json"
+    expired = datetime.now(UTC) - timedelta(days=45)
+    old_record_path.write_text(
+        json.dumps(json.loads(old_record_path.read_text(encoding="utf-8")) | {"created_at": expired.isoformat()}),
+        encoding="utf-8",
+    )
+    os.utime(old.local_path, (expired.timestamp(), expired.timestamp()))
+
+    collect = attachments_module._collect_attachment_cleanup_state
+    reused: list[AttachmentRecord | None] = []
+
+    def collect_then_reuse(storage_path: Path, *, cutoff: datetime) -> object:
+        state = collect(storage_path, cutoff=cutoff)
+        reused.append(register("$new"))
+        return state
+
+    with patch.object(attachments_module, "_collect_attachment_cleanup_state", collect_then_reuse):
+        attachments_module._cleanup_attachment_storage(tmp_path)
+
+    [new] = reused
+    assert new is not None
+    assert new.local_path == old.local_path
+    assert load_attachment(tmp_path, old.attachment_id) is None
+    assert load_attachment(tmp_path, new.attachment_id) == new
+    assert new.local_path.read_bytes() == payload
 
 
 def test_register_bytes_attachment_retains_any_file_type_under_a_generated_name(tmp_path: Path) -> None:
@@ -288,7 +598,7 @@ def test_register_bytes_attachment_rejects_unsafe_ids_and_oversized_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unsafe IDs and payloads above the retained media limit never reach storage."""
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 5)
     common = {
         "kind": "file",
         "mime_type": "text/plain",
@@ -353,7 +663,7 @@ def test_register_local_attachment_rejects_sources_over_the_media_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Retaining a copy must not let an oversized or sparse source consume primary storage."""
-    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 5)
     source = tmp_path / "large.bin"
     source.write_bytes(b"123456")
 
@@ -450,12 +760,68 @@ def test_load_attachment_rejects_legacy_record_that_cannot_be_verified(tmp_path:
         payload = json.loads(record_path.read_text(encoding="utf-8"))
         del payload["content_sha256"]
         record_path.write_text(json.dumps(payload), encoding="utf-8")
-    original_record = record_path.read_text(encoding="utf-8")
 
     assert load_attachment(storage, "att_legacy") is None
     assert resolve_attachments(storage, ["att_legacy"]) == []
     assert list((storage / "incoming_media").glob("*")) == []
+    # The record is dropped rather than rewritten, so it never names the planted target.
+    assert not record_path.exists()
+
+
+@pytest.mark.parametrize("change", ["missing", "relocated_parent", "content"])
+def test_attachment_cleanup_does_not_retry_unadoptable_legacy_record(tmp_path: Path, change: str) -> None:
+    """A legacy record whose source can never verify again is dropped by one sweep instead of retried by every sweep."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes.txt"
+    source.write_bytes(b"notes")
+    record_path = _write_legacy_attachment_record(storage, "att_legacy", source, b"notes")
+    if change == "missing":
+        source.unlink()
+    elif change == "relocated_parent":
+        # A relocated directory whose old name became a link, which adoption must not follow.
+        workspace.rename(tmp_path / "relocated")
+        workspace.symlink_to(tmp_path / "relocated")
+    else:
+        source.write_bytes(b"edited")
+
+    with patch("mindroom.attachments.logger.warning") as mock_warning:
+        attachments_module._cleanup_attachment_storage(storage)
+        attachments_module._cleanup_attachment_storage(storage)
+
+    assert [call.args[0] for call in mock_warning.call_args_list] == [
+        "Legacy attachment cannot be adopted into retained media",
+    ]
+    assert not record_path.exists()
+    assert list((storage / "incoming_media").glob("*")) == []
+    assert load_attachment(storage, "att_legacy") is None
+
+
+@pytest.mark.parametrize("error_number", [errno.ENOSPC, errno.ENOENT])
+def test_load_attachment_keeps_legacy_record_after_retained_media_write_failure(
+    tmp_path: Path,
+    error_number: int,
+) -> None:
+    """A failure writing the retained copy says nothing about the source, so a later load still adopts it."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes.txt"
+    source.write_bytes(b"notes")
+    record_path = _write_legacy_attachment_record(storage, "att_legacy", source, b"notes")
+    original_record = record_path.read_text(encoding="utf-8")
+
+    with patch(
+        "mindroom.attachments.atomic_write_file_at",
+        side_effect=OSError(error_number, os.strerror(error_number)),
+    ):
+        assert load_attachment(storage, "att_legacy") is None
+
     assert record_path.read_text(encoding="utf-8") == original_record
+    record = load_attachment(storage, "att_legacy")
+    assert record is not None
+    assert record.local_path.read_bytes() == b"notes"
 
 
 def test_attachment_records_to_media_includes_images(tmp_path: Path) -> None:
@@ -643,6 +1009,36 @@ async def test_attachment_cleanup_does_not_resolve_storage_path_on_event_loop(tm
         assert registered is not None
         assert not slow_resolution_timed_out.is_set()
         assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_does_not_inherit_triggering_turn_log_context(tmp_path: Path) -> None:
+    """The sweep covers every room's records, so its logs must not carry the turn that happened to schedule it."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+    cleanup_log_contexts: list[dict[str, object]] = []
+
+    def capture_log_context(_storage_path: Path) -> None:
+        cleanup_log_contexts.append(structlog.contextvars.get_contextvars())
+
+    with (
+        patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}),
+        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=capture_log_context),
+        bound_log_context(requester_id="@alice:example.org", room_id="!room:example.org"),
+    ):
+        registered = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_turn_context",
+            room_id="!room:example.org",
+        )
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    assert registered is not None
+    assert len(cleanup_log_contexts) == 1
+    assert "requester_id" not in cleanup_log_contexts[0]
+    assert "room_id" not in cleanup_log_contexts[0]
 
 
 @pytest.mark.asyncio
@@ -1374,8 +1770,9 @@ async def test_cached_history_attachment_does_not_block_event_loop(
                 room_id="!room:example.org",
                 thread_id="$thread",
                 event=event,
+                may_download=True,
             )
-            assert loaded == record
+            assert loaded == (record, False)
         else:
             attachment_ids = await resolve_thread_attachment_ids(
                 AsyncMock(),

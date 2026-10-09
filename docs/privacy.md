@@ -1,8 +1,7 @@
 ---
-icon: lucide/shield-check
+icon: lucide/eye-off
 ---
 
-<!-- This page exists for iOS App Store submission requirements. Not included in sidebar nav. -->
 
 # Privacy Policy
 
@@ -48,7 +47,7 @@ To provide messaging features, MindRoom and your selected homeserver process dat
 - app configuration and local preferences stored on your device
 - diagnostic information you choose to share with support
 
-If you use MindRoom's hosted control plane, it also processes account profile and status data, subscription and payment records, hosted instance records, usage metrics, audit events, and marketing or analytics consent choices.
+If you use MindRoom's hosted control plane, it also processes account profile and status data, subscription and payment records, hosted instance records, audit events, and marketing or analytics consent choices.
 These records support service operation, billing, security, fraud prevention, compliance, and the preferences you select.
 Hosted account and instance data is stored with Supabase, and payment processing is handled by Stripe.
 
@@ -107,9 +106,9 @@ When a paired local installation uses MindRoom's desktop OAuth client, the provi
 The local MindRoom process performs the token exchange with Google and stores the resulting tokens; the provisioning service does not receive the Google authorization code, tokens, or Google API data.
 Control of the OAuth app registration lets the project maintainers manage or disable the client, but it does not by itself reveal a user's OAuth tokens or Google data to them.
 
-Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Calendar data, and Sheets spreadsheet values.
+Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Docs document contents, Calendar data, Sheets spreadsheet values, Tasks task lists and tasks, and Google Cloud data such as BigQuery table schemas and query results.
 
-The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, managing a calendar event, or reading and updating a spreadsheet.
+The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, editing a document, managing a calendar event, reading and updating a spreadsheet, creating and completing a task, or running a read-only BigQuery query.
 
 Google connections follow the selected agent's saved effective execution scope.
 MindRoom uses `private.per` first, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope:
@@ -142,7 +141,7 @@ Retention depends on the system component:
 - runtime sessions, credentials, workspaces, files, and persistent volumes are retained until the installation operator removes them or applies its own retention policy, except where component-specific cleanup applies
 - attachment metadata and eligible managed `incoming_media/` files older than 30 days are pruned opportunistically during new attachment registration
 - the hosted control plane schedules hard deletion of soft-deleted application accounts after a 7-day grace period
-- hosted non-critical audit logs are scheduled for deletion after 90 days and usage metrics after 365 days; selected security and deletion audit events are excluded from that ordinary cleanup
+- hosted non-critical audit logs are scheduled for deletion after 90 days; selected security and deletion audit events are excluded from that ordinary cleanup
 - support emails and diagnostics may be retained for support and security purposes
 
 Registering a local or workspace file as an attachment retains a copy of its bytes in managed `incoming_media/` storage, subject to the same cleanup.
@@ -159,9 +158,10 @@ The MindRoom iOS app provides an in-app account deactivation path:
 Actual deletion/deactivation behavior depends on the capabilities and policies of your Matrix homeserver.
 
 Hosted MindRoom service account deletion is a separate control-plane flow with a 7-day grace period and is not triggered by Matrix account deactivation.
-The current hard-delete procedure targets application-database account, subscription, instance, audit-log, and subscription-linked usage records.
-Payment and webhook-event rows are not removed by that procedure and can prevent deletion while they still reference the account.
-It does not itself delete the upstream authentication user, Stripe customer or subscription data, Matrix account data, or installation persistent volumes; those processors and operators have separate deletion boundaries.
+Requesting deletion stops the account's hosted instances right away and lets its paid Stripe subscriptions end at the end of their current billing period; cancelling the deletion within the grace period keeps them.
+After the grace period, the hard-delete procedure cancels any remaining subscription, uninstalls the account's hosted instances, including their Matrix homeserver data, persistent volumes, and platform-paid AI keys, then targets application-database subscription, instance, audit-log, and subscription-linked usage records, and finally deletes the authentication user, which removes the account record.
+Payment and webhook-event rows are kept for accounting with only their account link cleared; they keep Stripe customer and subscription identifiers, and webhook payloads can include the account ID and invoice contact details.
+It does not delete Stripe customer or subscription records or copies of Matrix data held by other homeservers; those processors and operators have separate deletion boundaries.
 
 ## Security
 

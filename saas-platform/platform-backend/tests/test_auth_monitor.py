@@ -103,6 +103,20 @@ class TestAuthMonitor:
         assert len(failed_attempts[ip]) == 1
         assert not is_blocked(ip)
 
+    def test_failure_forgets_other_expired_addresses(self):
+        """A failure drops other addresses' expired failures and blocks and republishes the blocked count."""
+        now = datetime.now(UTC)
+        failed_attempts["192.168.1.20"] = [now - timedelta(minutes=WINDOW_MINUTES + 1)]
+        failed_attempts["192.168.1.21"] = [now]
+        blocked_ips["192.168.1.22"] = now - timedelta(minutes=BLOCK_DURATION_MINUTES + 1)
+        blocked_ips["192.168.1.23"] = now
+
+        record_failure("192.168.1.24")
+
+        assert set(failed_attempts) == {"192.168.1.21", "192.168.1.24"}
+        assert set(blocked_ips) == {"192.168.1.23"}
+        assert get_blocked_ip_count() == 1
+
     def test_record_success_clears_failures(self):
         """Test that successful auth clears failure history."""
         ip = "192.168.1.6"

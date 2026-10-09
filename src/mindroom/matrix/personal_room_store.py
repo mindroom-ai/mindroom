@@ -9,7 +9,7 @@ import nio
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.access import validate_concrete_matrix_user_ids
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, primary_records_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.tool_system.worker_routing import agent_state_root_path
 
@@ -81,9 +81,9 @@ def personal_room_digest(user_id: str) -> str:
 
 
 def personal_room_record_path(runtime_paths: RuntimePaths, agent_name: str, user_id: str) -> Path:
-    """Keep lifecycle records outside requester-private agent workspaces."""
+    """Keep lifecycle records in primary-only storage, outside every directory a worker mounts."""
     return (
-        agent_state_root_path(runtime_paths.storage_root, agent_name)
+        primary_records_dir(agent_state_root_path(runtime_paths.storage_root, agent_name), runtime_paths)
         / "personal_rooms"
         / f"{personal_room_digest(user_id)}.json"
     )
@@ -117,7 +117,10 @@ def retained_personal_rooms(runtime_paths: RuntimePaths, agent_name: str, *, use
     """Protect existing rooms even when onboarding has subsequently been disabled."""
     records = _personal_room_records(runtime_paths, agent_name)
     if agent_name == ROUTER_AGENT_NAME and user_id is not None:
-        directory = agent_state_root_path(runtime_paths.storage_root, agent_name).parent
+        directory = primary_records_dir(
+            agent_state_root_path(runtime_paths.storage_root, agent_name),
+            runtime_paths,
+        ).parent
         records.extend(
             record
             for path in directory.glob("*/personal_rooms/*.json")

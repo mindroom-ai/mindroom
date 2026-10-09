@@ -10,10 +10,12 @@ import httpx
 import pytest
 from agno.models.message import Message
 from anthropic import AsyncAnthropicVertex
+from anthropic.types import RedactedThinkingBlock, ThinkingBlock
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
+from structlog.testing import capture_logs
 
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _messages_with_thinking_as_text
 from tests.test_claude_native_compaction import _CHECKPOINT, _TEXT, _response
 
 
@@ -76,3 +78,186 @@ async def test_native_count_uses_vertex_supported_schema_without_changing_genera
             assert "Launch port 4321." in json.dumps(requests[-1]["messages"])
             assert "Original launch facts." not in json.dumps(requests[-1]["messages"])
             assert model.native_replay_messages(messages)[0].provider_data["content_blocks"][0] == _CHECKPOINT
+
+
+_REWRITTEN_BLOCK_TYPES = {"server_tool_use", "tool_search_tool_result", "compaction"}
+
+
+def _is_rewritten_block(block: dict[str, Any]) -> bool:
+    if block.get("type") != "text":
+        return False
+    try:
+        original = json.loads(block["text"])
+    except (TypeError, ValueError):
+        return False
+    return isinstance(original, dict) and original.get("type") in _REWRITTEN_BLOCK_TYPES
+
+
+@pytest.mark.asyncio
+async def test_count_accepts_a_tool_loop_turn_with_thinking_around_tool_search() -> None:
+    """Counting must not send a thinking turn whose server-tool blocks were rewritten."""
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        for message in payload["messages"]:
+            content = message["content"] if isinstance(message["content"], list) else []
+            if any(block["type"] in _REWRITTEN_BLOCK_TYPES for block in content):
+                return httpx.Response(
+                    400,
+                    json={
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": "Unsupported count schema"},
+                    },
+                )
+            has_thinking = any(block["type"] in {"thinking", "redacted_thinking"} for block in content)
+            if "thinking" in payload and has_thinking and any(_is_rewritten_block(block) for block in content):
+                message_text = (
+                    "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified."
+                )
+                return httpx.Response(
+                    400,
+                    json={"type": "error", "error": {"type": "invalid_request_error", "message": message_text}},
+                )
+        return httpx.Response(200, json={"input_tokens": 100})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = AsyncAnthropicVertex(
+            project_id="test-project",
+            region="global",
+            credentials=Credentials(token="test-token"),
+            http_client=http,
+            max_retries=0,
+        )
+        model = MindroomVertexAIClaude(id="claude-opus-5-5", async_client=client, thinking={"type": "adaptive"})
+        turn_blocks = [
+            {"type": "thinking", "thinking": "Find the tool first.", "signature": "a" * 400},
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "tool_search_tool_regex",
+                "input": {"pattern": "weather"},
+            },
+            {
+                "type": "tool_search_tool_result",
+                "tool_use_id": "srvtoolu_1",
+                "content": {
+                    "type": "tool_search_tool_search_result",
+                    "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
+                },
+            },
+            {"type": "thinking", "thinking": "", "signature": "b" * 800},
+            {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
+        ]
+        messages = [
+            Message(role="user", content="What is the weather in Paris?"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "toolu_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                    },
+                ],
+                provider_data={"content_blocks": turn_blocks, "signature": "b" * 800},
+            ),
+            Message(role="tool", content="18C and sunny", tool_call_id="toolu_1", tool_name="get_weather"),
+        ]
+        original = [message.model_dump() for message in messages]
+
+        weather_tool = {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a city.",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+            },
+        }
+        count = await model._count_request_input_tokens(
+            messages,
+            tools=[weather_tool],
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    # Signatures encrypt the full reasoning: one token per four base64 characters each.
+    assert count == 100 + 400 // 4 + 800 // 4
+    counted = requests[-1]
+    assert "thinking" not in counted
+    counted_blocks = [
+        block for message in counted["messages"] if isinstance(message["content"], list) for block in message["content"]
+    ]
+    assert {"type": "text", "text": "Find the tool first."} in counted_blocks
+    assert not any(block["type"] == "text" and not block["text"].strip() for block in counted_blocks)
+    assert not any(block["type"] in {"thinking", "redacted_thinking"} for block in counted_blocks)
+    assert [message.model_dump() for message in messages] == original
+
+
+def test_thinking_counts_as_text_for_sdk_blocks_and_drops_emptied_messages() -> None:
+    """Stored dict blocks and rebuilt SDK blocks count alike, and no empty message remains."""
+    messages = [
+        {"role": "user", "content": "Start."},
+        {
+            "role": "assistant",
+            "content": [
+                ThinkingBlock(type="thinking", thinking="Plan the lookup.", signature="s" * 40),
+                RedactedThinkingBlock(type="redacted_thinking", data="r" * 80),
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
+            ],
+        },
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": ""}]},
+        {"role": "user", "content": "Continue."},
+    ]
+
+    assert _messages_with_thinking_as_text(messages) == (
+        [
+            {"role": "user", "content": "Start."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Plan the lookup."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
+                ],
+            },
+            {"role": "user", "content": "Continue."},
+        ],
+        40 // 4 + 80 // 4,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_count_sends_the_request_instead_of_failing_the_turn() -> None:
+    """The count only advises, so a count the endpoint rejects must not end the turn."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert "count-tokens" in request.url.path
+        return httpx.Response(
+            400,
+            json={"type": "error", "error": {"type": "invalid_request_error", "message": "Unsupported count schema"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = AsyncAnthropicVertex(
+            project_id="test-project",
+            region="global",
+            credentials=Credentials(token="test-token"),
+            http_client=http,
+            max_retries=0,
+        )
+        model = MindroomVertexAIClaude(id="claude-opus-5-5", async_client=client, max_tokens=1000)
+        model.context_window = 4000
+        messages = [Message(role="user", content="Status report. " * 800)]
+
+        with capture_logs() as logs:
+            fitted = await model._fit_request_messages(
+                messages,
+                tools=None,
+                response_format=None,
+                compress_tool_results=False,
+            )
+
+    assert fitted == messages
+    assert any(log["event"] == "vertex_claude_token_count_rejected" for log in logs)

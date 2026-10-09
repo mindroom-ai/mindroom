@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import suppress
+from contextvars import Context
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -207,10 +208,19 @@ class KnowledgeRefreshScheduler:
         retry_handle = self._claim_retry_handles.pop(key, None)
         if retry_handle is not None:
             retry_handle.cancel()
-        task = loop.create_task(self._run_refresh(key, request), name=f"knowledge_refresh:{key.base_id}")
+        # A tool call can schedule a refresh that outlives it, and a turn's contextvars hold its Agent and tools.
+        context = Context()
+        task = loop.create_task(
+            self._run_refresh(key, request),
+            name=f"knowledge_refresh:{key.base_id}",
+            context=context,
+        )
         self._tasks[key] = task
 
-        task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
+        task.add_done_callback(
+            lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed),
+            context=context,
+        )
 
     def _schedule_claim_retry(
         self,
@@ -219,10 +229,12 @@ class KnowledgeRefreshScheduler:
     ) -> None:
         if key in self._claim_retry_handles:
             return
+        # Each retry reschedules from the last one, so a copy of the scheduling turn's context would live on.
         self._claim_retry_handles[key] = loop.call_later(
             _REFRESH_CLAIM_RETRY_SECONDS,
             self._retry_pending_claim,
             key,
+            context=Context(),
         )
 
     def _retry_pending_claim(self, key: KnowledgeRefreshTarget) -> None:

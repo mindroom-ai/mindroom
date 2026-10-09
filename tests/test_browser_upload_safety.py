@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import stat
+import tempfile
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from playwright.async_api import async_playwright
 
 from mindroom.attachments import register_local_attachment
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.custom_tools.browser import BrowserTools, _BrowserProfileState, _BrowserTabState
+from mindroom.custom_tools.browser import BrowserTools, _BrowserProfileState, _BrowserTabState, _copy_within_limit
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -284,6 +285,61 @@ async def test_upload_preserves_internal_links_duplicate_names_and_private_stagi
 
 
 @pytest.mark.asyncio
+async def test_upload_snapshots_stay_within_one_budget_until_their_tabs_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshots stay on the primary's disk until their tab closes, so repeated or growing uploads are refused.
+
+    Without a budget, one attachment uploaded over and over, or one sparse file
+    worker code planted in the workspace, writes real bytes into the primary's
+    temp directory on every call until the disk is full.
+    """
+    monkeypatch.setattr("mindroom.custom_tools.browser._MAX_STAGED_UPLOAD_BYTES", 10)
+    staging_root = tmp_path / "tmp"
+    staging_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(staging_root))
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
+    source = root / "upload.bin"
+    source.write_bytes(b"123456")
+    sparse = root / "sparse.bin"
+    with sparse.open("wb") as output:
+        output.truncate(8 * 1024 * 1024)
+    tab = tool._profiles["mindroom"].tabs["tab-1"]
+
+    await _upload(tool, [source])
+    for paths in ([source], [sparse]):
+        with pytest.raises(ValueError, match="close tabs to release earlier uploads"):
+            await _upload(tool, paths)
+
+    consumer.assert_awaited_once()
+    [staging] = tab.upload_staging
+    assert sorted(path.stat().st_size for path in Path(staging.name).rglob("*") if path.is_file()) == [6]
+    assert list(staging_root.iterdir()) == [Path(staging.name)]
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_parallel_uploads_cannot_each_spend_the_whole_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploads running at once share one budget instead of each seeing all of it."""
+    monkeypatch.setattr("mindroom.custom_tools.browser._MAX_STAGED_UPLOAD_BYTES", 10)
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
+    source = root / "upload.bin"
+    source.write_bytes(b"123456")
+    tab = tool._profiles["mindroom"].tabs["tab-1"]
+
+    results = await asyncio.gather(_upload(tool, [source]), _upload(tool, [source]), return_exceptions=True)
+
+    assert [type(result) for result in results] == [dict, ValueError]
+    consumer.assert_awaited_once()
+    assert tab.upload_staged_bytes == 6
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
 async def test_upload_keeps_large_files_as_file_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -541,17 +597,15 @@ async def test_upload_cancellation_drains_snapshot_before_cleanup(
     copy_started = asyncio.Event()
     release_copy = threading.Event()
     loop = asyncio.get_running_loop()
-    original_copy = shutil.copyfileobj
     staging: list[Path] = []
 
-    def blocked_copy(source: BinaryIO, output: BinaryIO, length: int) -> None:
-        assert 0 < length <= 1024 * 1024
+    def blocked_copy(source: BinaryIO, output: BinaryIO, max_bytes: int) -> int:
         staging.append(Path(output.name))
         loop.call_soon_threadsafe(copy_started.set)
         assert release_copy.wait(timeout=5)
-        original_copy(source, output, length)
+        return _copy_within_limit(source, output, max_bytes)
 
-    monkeypatch.setattr(shutil, "copyfileobj", blocked_copy)
+    monkeypatch.setattr("mindroom.custom_tools.browser._copy_within_limit", blocked_copy)
     task = asyncio.create_task(_upload(tool, [source]))
     try:
         await asyncio.wait_for(copy_started.wait(), timeout=5)

@@ -5,9 +5,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+import typer
 
 from mindroom import constants
 from mindroom.cli import thread_export
+from mindroom.cli.main import _threads_export
 
 
 @pytest.mark.asyncio
@@ -86,3 +88,68 @@ async def test_export_cli_unreachable_runtime(tmp_path: Path, monkeypatch: pytes
             include_invited_rooms=True,
         )
     assert not paths.storage_root.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "trust_env"),
+    [
+        ("http://10.0.0.1", None),
+        ("http://remote.test", None),
+        ("http://[::2]", None),
+        ("http://127.0.0.1:8765", False),
+        ("http://localhost:8765", False),
+        ("http://[::1]:8765", False),
+        ("https://remote.test", True),
+    ],
+)
+async def test_export_cli_sends_the_key_only_over_loopback_http_or_https(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    trust_env: bool | None,
+) -> None:
+    """A watched export refuses remote plaintext HTTP before any request, and plaintext keys skip environment proxies."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    clients: list[dict[str, object]] = []
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"output_dir": str(tmp_path / "exports")})
+
+    client_type = httpx.AsyncClient
+
+    def client(**kwargs: object) -> httpx.AsyncClient:
+        clients.append(kwargs)
+        return client_type(transport=httpx.MockTransport(respond), **kwargs)
+
+    async def stop_watching(_seconds: int) -> None:
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(thread_export.httpx, "AsyncClient", client)
+    monkeypatch.setattr("mindroom.cli.main.asyncio.sleep", stop_watching)
+    with pytest.raises(typer.Exit) as exit_info:
+        await _threads_export(
+            config_path=tmp_path / "config.yaml",
+            url=url,
+            storage_path=tmp_path / "storage",
+            output=None,
+            room=None,
+            watch=True,
+            interval=1,
+            max_thread_roots=1,
+            include_invited_rooms=True,
+        )
+
+    if trust_env is None:
+        assert exit_info.value.exit_code == 1
+        assert clients == sent == []
+    else:
+        assert exit_info.value.exit_code == 0
+        assert [request.headers["Authorization"] for request in sent] == ["Bearer test-secret"]
+        assert clients[0]["trust_env"] is trust_env
+        assert clients[0]["follow_redirects"] is False

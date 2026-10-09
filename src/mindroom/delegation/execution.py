@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -25,6 +26,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
     approval_denial_context,
+    approved_executions_context,
     required_approval_tool_names,
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
@@ -77,6 +79,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
     from agno.team import Team
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import ChildResponseRunner
@@ -119,6 +122,7 @@ class _DelegationTarget:
     agent_name: str
     task: str
     previous_child: DelegationChild | None = None
+    agent_mode: AgentMode = "standard"
 
 
 def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequirement]:
@@ -307,6 +311,7 @@ async def _execute_child(
         validate_approval_tool_owners([agent], approved_calls, requirements)
         with (
             tool_runtime_context(child_context),
+            approved_executions_context(agent, {child.run_id: approved_calls}),
             approval_denial_context(
                 agent,
                 {child.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id))},
@@ -643,13 +648,17 @@ async def _resolve_delegation_target(
             msg = "Subagent ID no longer matches its retained requirement"
             raise RuntimeError(msg)
         child_name = previous_child.child_agent_name
+        agent_mode = previous_child.agent_mode
     else:
-        child_name, task = args.get("agent_name"), args.get("task")
+        child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
         if child_name is None:
             child_name = caller_identity.agent_name
+        if minimal is not None and not isinstance(minimal, bool):
+            return "Cannot delegate: minimal must be a boolean or null."
+        agent_mode = "minimal" if minimal else "standard"
     if not isinstance(child_name, str) or not isinstance(task, str):
         return "Cannot delegate: task must be a string and agent_name must be a string or null."
-    return _DelegationTarget(child_name, task, previous_child)
+    return _DelegationTarget(child_name, task, previous_child, agent_mode)
 
 
 def _validate_child_scope(
@@ -807,7 +816,13 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         resolve_result = partial(resolve_result, output_request=output_request)
 
     # Approval and the before hook must settle before a child can start.
-    if tool_may_require_approval(config, tool.tool_name or "run_subagent") and requirement_key not in state.gates:
+    gated = tool_may_require_approval(config, tool.tool_name or "run_subagent")
+    approved_here = decisions is not None and decisions.get(requirement_key) is True
+    if gated and retained is None and not approved_here and state.gates.get(requirement_key) is not False:
+        # Saved gates live in session storage that worker code can write, so only an approval
+        # consumed by this continuation can start a fresh child; otherwise ask again.
+        state.gates.pop(requirement_key, None)
+    if gated and requirement_key not in state.gates:
         projected = deepcopy(tool)
         projected.external_execution_required = False
         projected.requires_confirmation = True
@@ -821,7 +836,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if state.gates.get(requirement_key) is False:
         resolve_result("Delegation denied by requester; child was not executed.")
         return False
-    if requirement.id not in state.hooks:
+    if decisions is not None and requirement_key in decisions:
+        # The approved gate card shows the projected call; the child starts from this separate requirement.
+        call = next((call for call in approval_calls if call.tool_call_id == requirement_key), None)
+        if call is None or not call.binds_arguments(tool.tool_args):
+            msg = "Saved delegation approval no longer matches its pending arguments; retry the request"
+            raise RuntimeError(msg)
+    # Hook records live in storage worker code can write, so only a started child may reuse its stored gate.
+    if retained is None or requirement.id not in state.hooks:
         state.hooks[requirement.id] = await before_delegation(
             execution_identity=caller_identity,
             arguments=args,
@@ -854,6 +876,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             runtime_paths=runtime_paths,
             depth=delegation_depth,
             model=model,
+            agent_mode=target.agent_mode,
             previous=target.previous_child,
             parent_tool_call_id=tool.tool_call_id,
             parent_requirement_id=requirement.id,
@@ -1017,15 +1040,15 @@ async def drive_delegations(  # noqa: C901, PLR0912
     )
     while response.status == RunStatus.paused:
         external = _external_requirements(response)
+        # Worker code can write the stored run, and one approval binds a call ID, so a copied call must not start twice.
+        call_keys = [
+            (item.member_agent_id, cast("ToolExecution", item.tool_execution).tool_call_id) for item in external
+        ]
+        if len(set(call_keys)) < len(call_keys):
+            msg = "Paused run holds the same delegation call more than once; retry the request"
+            raise RuntimeError(msg)
         ordinary = [requirement for requirement in response.requirements or () if requirement.needs_confirmation]
-        if ordinary:
-            state.pending_requirements = [requirement.to_dict() for requirement in ordinary]
-            state.pending_tools = [
-                requirement.tool_execution.to_dict() for requirement in ordinary if requirement.tool_execution
-            ]
-            await persist_delegation_state(entity, response, state)
-            return response
-        if not external and any(not item.is_resolved() for item in response.requirements or ()):
+        if not external and not ordinary and any(not item.is_resolved() for item in response.requirements or ()):
             return response
         for requirement in external:
             if await advance_delegation_call(
@@ -1048,6 +1071,14 @@ async def drive_delegations(  # noqa: C901, PLR0912
                 on_event=on_event,
             ):
                 return response
+        # Ask for ordinary calls last, so the approval that covers them belongs to the continuation that runs them.
+        if ordinary:
+            state.pending_requirements = [requirement.to_dict() for requirement in ordinary]
+            state.pending_tools = [
+                requirement.tool_execution.to_dict() for requirement in ordinary if requirement.tool_execution
+            ]
+            await persist_delegation_state(entity, response, state)
+            return response
         await persist_delegation_state(entity, response, state)
         if isinstance(response, RunOutput):
             continuation_stream = cast("Agent", entity).acontinue_run(
@@ -1073,14 +1104,21 @@ async def drive_delegations(  # noqa: C901, PLR0912
             )
         continued = None
         error_event: RunErrorEvent | TeamRunErrorEvent | None = None
-        async with closing_async_stream(continuation_stream):
-            async for event in continuation_stream:
-                if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
-                    error_event = event
-                if isinstance(event, (RunOutput, TeamRunOutput)):
-                    continued = event
-                elif not isinstance(event, (RunPausedEvent, TeamRunPausedEvent)) and on_event is not None:
-                    on_event(event)
+        # Agno re-reads this run from storage worker code can write, and without decisions no stored call is approved.
+        unapproved_refusal = (
+            approved_executions_context(cast("Agent", entity), {})
+            if decisions is None and isinstance(response, RunOutput)
+            else nullcontext()
+        )
+        with unapproved_refusal:
+            async with closing_async_stream(continuation_stream):
+                async for event in continuation_stream:
+                    if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
+                        error_event = event
+                    if isinstance(event, (RunOutput, TeamRunOutput)):
+                        continued = event
+                    elif not isinstance(event, (RunPausedEvent, TeamRunPausedEvent)) and on_event is not None:
+                        on_event(event)
         entity_label = "Team" if isinstance(response, TeamRunOutput) else "Agent"
         if continued is None:
             if error_event is not None:

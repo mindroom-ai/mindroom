@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import patch
 
 import pytest
+import requests
 from agno.tools import github as agno_github_module
 from agno.utils import log as agno_log_module
 from github import BadCredentialsException, Github, GithubException
@@ -38,6 +39,7 @@ from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oau
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
@@ -392,6 +394,9 @@ class _ProviderControlledFailureGithub:
         self._raise_provider_error()
 
     def get_pulls(self, **_kwargs: object) -> _FakePullsWithoutTotal:
+        self._raise_provider_error()
+
+    def get_contents(self, _path: str, **_kwargs: object) -> object:
         self._raise_provider_error()
 
     def close(self) -> None:
@@ -756,6 +761,47 @@ def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -
     assert tool.access_token == ENV_ACCESS_TOKEN
 
 
+@pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+@pytest.mark.parametrize("use_oauth", [False, True])
+def test_worker_github_config_cannot_redirect_primary_token(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+    use_oauth: bool,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path, {} if use_oauth else {"GITHUB_ACCESS_TOKEN": ENV_ACCESS_TOKEN})
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target_for_scope("@alice:example.test", worker_scope)
+    assert target.worker_key is not None
+    manager.for_worker(target.worker_key).save_credentials("github", {"base_url": "https://worker.example.test"})
+    if use_oauth:
+        _save_scoped_oauth_credentials(
+            "github_oauth",
+            _oauth_credentials("oauth-access"),
+            credentials_manager=manager,
+            worker_target=_oauth_target("@alice:example.test"),
+        )
+    sent: list[tuple[str | None, str | None]] = []
+
+    def send(_session: requests.Session, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+        sent.append((request.url, request.headers.get("Authorization")))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b"[]"
+        return response
+
+    with patch.object(requests.Session, "send", autospec=True, side_effect=send):
+        tool = get_tool_by_name("github", runtime_paths, credentials_manager=manager, worker_target=target)
+        assert isinstance(tool, GithubTools)
+        try:
+            assert json.loads(tool.list_repositories()) == []
+            assert tool.g.requester.base_url == "https://api.github.com"
+        finally:
+            tool.g.close()
+
+    expected_token = "oauth-access" if use_oauth else ENV_ACCESS_TOKEN
+    assert sent == [("https://api.github.com:443/user/repos", f"token {expected_token}")]
+
+
 @pytest.mark.parametrize(
     ("access_token", "extra_env"),
     [
@@ -947,6 +993,28 @@ def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) 
 
     assert github.queries == ["created:>=2026-08-07"]
     assert result["query"] == "created:>=2026-08-07"
+
+
+def test_issue_search_treats_all_state_as_no_state_filter(tmp_path: Path) -> None:
+    """GitHub search has no state:all qualifier; sending it silently matches nothing."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _SearchGithub()
+    tool.g = github
+
+    tool.search_issues_and_prs("narrowband", state="all", repo="example/project")
+    tool.search_issues_and_prs("narrowband", state="closed", repo="example/project")
+
+    assert github.queries == [
+        "narrowband repo:example/project",
+        "narrowband state:closed repo:example/project",
+    ]
 
 
 def test_update_file_reports_success_without_refetching_commit_details(tmp_path: Path) -> None:
@@ -1267,6 +1335,7 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
         "delete_file",
         "edit_issue",
         "get_pull_request_count",
+        "get_file_content",
     ],
 )
 def test_github_provider_failures_do_not_expose_provider_controlled_text(
@@ -1302,8 +1371,10 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
                 result = tool.delete_file("example/project", "notes.txt", "Delete", "old-sha")
             elif operation == "edit_issue":
                 result = tool.edit_issue("example/project", 7, title="Updated")
-            else:
+            elif operation == "get_pull_request_count":
                 result = tool.get_pull_request_count("example/project")
+            else:
+                result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
     finally:
         agno_github_module.logger.removeHandler(agno_handler)
         agno_handler.close()
@@ -1313,7 +1384,8 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
         assert payload["oauth_connection_required"] is True
         assert payload["reason"] == "access_rejected"
     else:
-        assert payload == {"error": "GitHub request failed"}
+        assert set(payload) == {"error"}
+        assert payload["error"].startswith(f"GitHub request failed with HTTP {status_code}")
     captured_logs = (
         agno_log_output.getvalue(),
         repr(mindroom_logger.warning_calls),
@@ -1340,8 +1412,48 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
 
     result = tool.list_repositories()
 
-    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
     assert sentinel not in result
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (
+            404,
+            "GitHub request failed with HTTP 404: the requested repository, ref, path, issue, or other resource "
+            "does not exist, or this GitHub connection cannot access it",
+        ),
+        (418, "GitHub request failed with HTTP 418"),
+        (600, "GitHub request failed"),
+    ],
+)
+def test_github_provider_failure_reports_status_without_provider_text(
+    tmp_path: Path,
+    status_code: int,
+    expected_error: str,
+) -> None:
+    """Agents need the status to tell a missing path on a ref apart from a broken tool."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    _save_scoped_oauth_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = "provider-controlled-secret-for-status"
+    tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
+
+    wrapped_result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
+    owned_result = tool.edit_issue("example/project", 7, title="Updated")
+
+    assert json.loads(wrapped_result) == {"error": expected_error}
+    assert json.loads(owned_result) == {"error": expected_error}
+    assert sentinel not in wrapped_result
+    assert sentinel not in owned_result
 
 
 def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabled(tmp_path: Path) -> None:
@@ -1371,7 +1483,7 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
     finally:
         agno_github_module.logger.disabled = previous_disabled
 
-    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
     assert sentinel not in result
 
 
@@ -1403,7 +1515,7 @@ def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
     finally:
         agno_github_module.logger.disabled = previous_disabled
 
-    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert json.loads(result)["error"].startswith("GitHub request failed with HTTP 403")
     assert sentinel not in result
     assert sentinel not in caplog.text
 

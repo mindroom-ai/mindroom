@@ -67,6 +67,15 @@ def is_human_requester_id(
     return user_id not in {mindroom_user_id(config, runtime_paths), configured_internal_user_id}
 
 
+def is_access_checked_requester_id(
+    user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether responder access applies to one requester: a human or a configured bot account."""
+    return user_id in config.bot_accounts or is_human_requester_id(user_id, config, runtime_paths)
+
+
 def resolve_human_requester_alias(
     user_id: str,
     config: Config,

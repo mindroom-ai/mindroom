@@ -163,7 +163,7 @@ async def test_post_tool_backoff_preserves_turn_history_and_followup(  # noqa: P
         waiting.set()
         await release.wait()
 
-    monkeypatch.setattr(provider_stream_retry, "asyncio", SimpleNamespace(sleep=wait))
+    monkeypatch.setattr(provider_stream_retry, "asyncio", SimpleNamespace(sleep=wait, timeout=asyncio.timeout))
     overload = (_created() if api == "responses" else "") + _overload()
     attempts = [_tool_stream(api, 1), _tool_stream(api, 2), overload]
     if finish == "recover":

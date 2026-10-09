@@ -26,8 +26,7 @@ test.describe('Admin Panel Tests', () => {
       '/admin/accounts',
       '/admin/subscriptions',
       '/admin/instances',
-      '/admin/audit-logs',
-      '/admin/usage'
+      '/admin/audit-logs'
     ];
 
     for (const route of adminRoutes) {

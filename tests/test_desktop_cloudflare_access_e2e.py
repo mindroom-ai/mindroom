@@ -357,8 +357,8 @@ if os.environ.get("MINDROOM_TEST_STATUS_ONLY_DESKTOP") == "1":
             return None
 
     provider.PyAutoGuiDesktopProvider = StatusOnlyProvider
+    provider.request_macos_desktop_permissions = lambda: ()
     desktop_cli._ensure_desktop_dependencies = lambda _runtime_paths: None
-    desktop_cli._request_required_desktop_permissions = lambda: None
 """
 
 

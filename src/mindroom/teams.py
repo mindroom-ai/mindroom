@@ -93,6 +93,7 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
@@ -124,6 +125,7 @@ from mindroom.team_exact_members import (
     resolve_team_materializable_agent_names,
 )
 from mindroom.team_scope import ad_hoc_team_scope_id
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.events import (
@@ -250,6 +252,10 @@ class _TeamModeDecision(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
 
+_TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
+_TEAM_HEADER_END = "):\n\n"
+
+
 def _format_team_header(agent_names: list[str]) -> str:
     """Format the team response header.
 
@@ -260,7 +266,15 @@ def _format_team_header(agent_names: list[str]) -> str:
         Formatted header string
 
     """
-    return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+    return f"{_TEAM_HEADER_PREFIX}{', '.join(agent_names)}{_TEAM_HEADER_END}"
+
+
+def strip_team_display(text: str) -> str:
+    """Remove the display-only header and no-consensus note from a visible team reply."""
+    if text.startswith(_TEAM_HEADER_PREFIX):
+        _header, separator, body = text.partition(_TEAM_HEADER_END)
+        text = body if separator else text
+    return text.removesuffix(_format_no_consensus_note()).rstrip()
 
 
 def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
@@ -277,7 +291,9 @@ def _format_member_contribution(agent_name: str, content: str, indent: int = 0) 
     """
     indent_str = "  " * indent
     first_line = content.lstrip().splitlines()[0] if content.strip() else ""
-    separator = "\n\n" if is_visible_tool_marker_line(first_line) else " "
+    # Content that opens with a tool marker or a block such as a table needs its own paragraph to render.
+    own_paragraph = is_visible_tool_marker_line(first_line) or opens_with_markdown_block(content)
+    separator = "\n\n" if own_paragraph else " "
     return f"{indent_str}**{agent_name}**:{separator}{content}"
 
 
@@ -2382,6 +2398,9 @@ def resolve_team_turn_models(
     active_model_name: str | None = None,
 ) -> TeamTurnModelSelection:
     """Freeze the coordinator and member model aliases in one synchronous snapshot."""
+    # A configured team's access reaches its members, so its thread override governs them during its turns.
+    if active_model_name is None and thread_id is not None and team_name in config.teams:
+        active_model_name = resolve_thread_model_override(runtime_paths, thread_id, config=config).active.get(team_name)
     if active_model_name is not None:
         return TeamTurnModelSelection(
             team_model_name=active_model_name,
@@ -3058,7 +3077,7 @@ async def team_response(  # noqa: C901, PLR0915
             runtime_paths=orchestrator.runtime_paths,
             runtime_model=attempt_runtime_model,
             response_sender_id=response_sender_id,
-            current_sender_id=user_id,
+            current_sender_id=ctx.current_sender_id or user_id,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
@@ -3530,7 +3549,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             runtime_paths=orchestrator.runtime_paths,
             runtime_model=attempt_runtime_model,
             response_sender_id=response_sender_id,
-            current_sender_id=user_id,
+            current_sender_id=ctx.current_sender_id or user_id,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
@@ -3630,6 +3649,24 @@ async def team_response_stream(  # noqa: C901, PLR0915
         paused_resolution: PausedAttempt | None = None
         usage = _TeamStreamUsage()
 
+        def _interrupted_metadata(
+            status: RunStatus,
+            event_run_id: str | None,
+            event_session_id: str | None,
+        ) -> dict[str, Any] | None:
+            if run_metadata_collector is None:
+                return None
+            return _build_streamed_team_run_metadata_content(
+                config=config,
+                prepared_execution=prepared_execution,
+                completed_run_event=None,
+                usage=usage,
+                run_id=event_run_id or attempt_run_id,
+                session_id=event_session_id or ctx.session_id,
+                status=status,
+                tool_count=len(completed_tool_executions),
+            )
+
         ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
         request_context = _team_request_log_context(
             ctx,
@@ -3727,15 +3764,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
                 if is_errored_run_output(event):
                     error_text = str(event.content or "Unknown team error")
-                    if run_metadata_collector is not None and event_metadata_content is not None:
-                        run_metadata_collector.update(event_metadata_content)
                     _record_interrupted_team_turn()
                     yield get_user_friendly_error_message(
                         Exception(error_text),
                         team_label,
                         runtime_paths=orchestrator.runtime_paths,
                     )
-                    yield AttemptResolved(HandledAttempt())
+                    yield AttemptResolved(HandledAttempt(metadata_content=event_metadata_content))
                     return
 
                 if event.status == RunStatus.paused:
@@ -3806,50 +3841,29 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if event.team_id and event.team_id != bound_team_id:
                     continue
                 error_text = event.content or "Unknown team error"
-                if run_metadata_collector is not None:
-                    run_metadata_collector.update(
-                        _build_streamed_team_run_metadata_content(
-                            config=config,
-                            prepared_execution=prepared_execution,
-                            completed_run_event=None,
-                            usage=usage,
-                            run_id=event.run_id or attempt_run_id,
-                            session_id=event.session_id or ctx.session_id,
-                            status=RunStatus.error,
-                            tool_count=len(completed_tool_executions),
-                        ),
-                    )
                 _record_interrupted_team_turn()
                 yield get_user_friendly_error_message(
                     Exception(error_text),
                     team_label,
                     runtime_paths=orchestrator.runtime_paths,
                 )
-                yield AttemptResolved(HandledAttempt())
+                yield AttemptResolved(
+                    HandledAttempt(
+                        metadata_content=_interrupted_metadata(RunStatus.error, event.run_id, event.session_id),
+                    ),
+                )
                 return
 
             if isinstance(event, TeamRunCancelledEvent):
                 if event.team_id and event.team_id != bound_team_id:
                     continue
-                cancelled_metadata_content: dict[str, Any] | None = None
-                if run_metadata_collector is not None:
-                    cancelled_metadata_content = _build_streamed_team_run_metadata_content(
-                        config=config,
-                        prepared_execution=prepared_execution,
-                        completed_run_event=None,
-                        usage=usage,
-                        run_id=event.run_id or attempt_run_id,
-                        session_id=event.session_id or ctx.session_id,
-                        status=RunStatus.cancelled,
-                        tool_count=len(completed_tool_executions),
-                    )
                 yield AttemptResolved(
                     ExcludedAttempt(
                         reason=event.reason,
                         partial_text=_current_canonical_partial_text(),
                         completed_tools=tuple(completed_tools),
                         interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
-                        metadata_content=cancelled_metadata_content,
+                        metadata_content=_interrupted_metadata(RunStatus.cancelled, event.run_id, event.session_id),
                     ),
                 )
                 return
@@ -3875,6 +3889,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
                         session_id=event.session_id,
                         run_id=event.run_id or attempt_run_id,
+                        metadata_content=_interrupted_metadata(RunStatus.paused, event.run_id, event.session_id),
                     ),
                 )
                 return
@@ -4098,6 +4113,7 @@ __all__ = [
     "resolve_team_turn_models",
     "select_ad_hoc_team_mode",
     "select_model_for_team",
+    "strip_team_display",
     "team_response",
     "team_response_stream",
 ]

@@ -175,6 +175,13 @@ class TestUpdateInstance:
     def test_returns_empty_list_when_no_rows_matched(self):
         assert instances_data.update_instance(StubSupabase([]), "123", {"status": "error"}) == []
 
+    def test_expected_status_updates_only_a_row_still_in_that_status(self):
+        sb = StubSupabase([ROW_A])
+        instances_data.update_instance(sb, "123", {"status": "provisioning"}, expected_status="deprovisioned")
+        update_payload = next(payload for call, payload in sb.calls if call == "update")
+        assert update_payload["status"] == "provisioning"
+        assert ("eq", ("status", "deprovisioned")) in sb.calls
+
 
 class TestUpdateInstanceStatus:
     def test_returns_true_on_success(self):

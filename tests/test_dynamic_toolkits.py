@@ -236,7 +236,7 @@ def test_config_rejects_lazy_flags_inside_named_tool_overrides(tmp_path: Path, l
         _validated_config(tmp_path, raw)
 
 
-@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "invite_router", "self_config"])
+@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "invite_router", "self_config", "skill_manage"])
 def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: str) -> None:
     """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""
     raw = _base_config_data()
@@ -1152,7 +1152,9 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
     assert "sleep" in function_names
     assert "add" in function_names
     assert "load_tool" not in function_names
@@ -1438,6 +1440,102 @@ def test_homegrown_load_tool_makes_toolkit_instructions_available(
     assert instruction_marker in _render_system_prompt(loaded_agent)
 
 
+@pytest.mark.parametrize(
+    ("tool_entry", "excluded"),
+    [
+        ("chat_ui", ("show_canvas", "read_canvas_state")),
+        ({"chat_ui": {"enable_show_canvas": True}}, ()),
+        ({"chat_ui": {"enable_show_canvas": True, "exclude_tools": ["open_settings"]}}, ("open_settings",)),
+    ],
+)
+def test_chat_ui_instructions_map_only_the_enabled_functions(
+    tmp_path: Path,
+    tool_entry: object,
+    excluded: tuple[str, ...],
+) -> None:
+    """The agent's prompt names what each chat_ui function works on, and nothing it cannot call.
+
+    Canvases are opt-in, so a plain chat_ui entry neither has show_canvas nor describes it.
+    """
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [tool_entry]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    prompt = _render_system_prompt(agent)
+
+    assert "chat_ui shows parts of MindRoom Chat to the user." in prompt
+    for name in TOOL_METADATA["chat_ui"].function_names:
+        assert (f"\n- {name}(" in prompt) is (name not in excluded)
+    assert "open_panel(panel='computer') shows the Computer panel" in prompt
+    assert "open_panel(panel='members') shows the Members panel" in prompt
+
+
+@pytest.mark.parametrize(
+    ("options", "named"),
+    [
+        ({"enable_show_canvas": True}, False),
+        ({"enable_canvas_libraries": True}, False),
+        ({"enable_show_canvas": True, "enable_canvas_libraries": True}, True),
+        ({"enable_show_canvas": True, "enable_canvas_libraries": True, "exclude_tools": ["show_canvas"]}, False),
+    ],
+)
+def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases(
+    tmp_path: Path,
+    options: dict[str, object],
+    named: bool,
+) -> None:
+    """Pages that load libraries break where Chat blocks them, so the source is opt-in like canvases."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    prompt = _render_system_prompt(agent)
+
+    assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
+
+
+def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path) -> None:
+    """An operator may exclude show_canvas defensively; that must not drop the other chat_ui functions."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": {"exclude_tools": ["show_canvas"]}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
+
+    assert sorted(toolkit.async_functions) == ["open_panel", "open_settings", "show_computer"]
+
+
+@pytest.mark.parametrize(
+    ("options", "available"),
+    [
+        ({"include_tools": ["show_computer"]}, "show_computer"),
+        ({"enable_show_canvas": True, "include_tools": ["show_canvas"]}, "show_canvas"),
+    ],
+)
+def test_chat_ui_instructions_never_point_at_a_missing_function(
+    tmp_path: Path,
+    options: dict[str, object],
+    available: str,
+) -> None:
+    """With one function left, neither the map nor the function's own description names another."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
+    instructions = toolkit.instructions
+    description = toolkit.async_functions[available].entrypoint.__doc__
+
+    for name in set(TOOL_METADATA["chat_ui"].function_names) - {available}:
+        assert f"{name}(" not in instructions
+        assert f"{name}(" not in description
+    assert f"- {available}(" in _render_system_prompt(agent)
+
+
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
 def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(
     tmp_path: Path,
@@ -1456,7 +1554,9 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrow
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
     assert "sleep" in function_names
     assert "add" in function_names
     assert "load_tool" not in function_names
@@ -1491,7 +1591,9 @@ def test_explicit_openai_api_keeps_homegrown_tool_discovery_when_native_is_unava
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
     assert "load_tool" in function_names
     assert "sleep" not in function_names
     assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
@@ -1533,7 +1635,9 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
         eager_deferred_tools=True,
     )
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
     assert "sleep" in function_names
     assert "add" in function_names
     assert "load_tool" not in function_names
@@ -1560,7 +1664,9 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         tool_function_filter=lambda _function: False,
     )
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
     assert "sleep" not in function_names
     assert "load_tool" not in function_names
     assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
@@ -1593,7 +1699,9 @@ def test_unsupported_models_keep_homegrown_dynamic_tools_path(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
     assert "load_tool" in function_names
     assert "sleep" not in function_names
     assert "add" in function_names

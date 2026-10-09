@@ -9,13 +9,13 @@ models:
     provider: openrouter
     id: openai/gpt-6-astra
     context_window: 1050000
-  gpt5terra:
+  sol:
     provider: openrouter
-    id: openai/gpt-5.6-terra
+    id: openai/gpt-6.1-sol
     context_window: 1050000
-  gpt5luna:
+  luna:
     provider: openrouter
-    id: openai/gpt-5.6-luna
+    id: openai/gpt-6-luna
     context_window: 1050000
   fable:
     provider: openrouter
@@ -23,16 +23,16 @@ models:
     context_window: 1000000
   opus:
     provider: openrouter
-    id: anthropic/claude-opus-5
+    id: anthropic/claude-opus-5.5
     context_window: 1000000
   sonnet:
     provider: openrouter
-    id: anthropic/claude-sonnet-5
+    id: anthropic/claude-sonnet-5.5
     context_window: 1000000
   haiku:
     provider: openrouter
-    id: anthropic/claude-haiku-4.5
-    context_window: 200000
+    id: anthropic/claude-haiku-5.5
+    context_window: 1000000
   gemini_flash:
     provider: openrouter
     id: google/gemini-3.8-flash
@@ -113,8 +113,10 @@ agents:
     - When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess.
     - Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell details unless
       they ask.
+    skill_learning:
+      enabled: true
 router:
-  model: gpt5luna
+  model: luna
   accept_invites: true
 mindroom_user:
   username: mindroom_user

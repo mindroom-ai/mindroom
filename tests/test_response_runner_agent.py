@@ -25,6 +25,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_COMPLETED,
@@ -59,7 +60,8 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -827,8 +829,8 @@ class TestAgentBot(AgentBotTestBase):
         # Metadata was populated during generator iteration (not synchronously),
         # proving the mutable reference is preserved through _merge_response_extra_content.
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
-        # The extra_content dict IS the same object as the collector
-        assert sent_extra_content is captured_collector["ref"]
+        # The stream sees the collector's live contents plus the human the reply was written for.
+        assert dict(sent_extra_content) == {**captured_collector["ref"], ACTING_REQUESTER_KEY: "@user:localhost"}
 
     def test_merge_response_extra_content_preserves_mutable_reference(self) -> None:
         """_merge_response_extra_content must return the SAME dict object when extra_content is provided."""
@@ -3464,7 +3466,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
             model.decision = RuntimeError("Decision provider unavailable")
         typesafe_calls: list[bytes] = []
 
-        async def post(_self: SystemOneClient, body: bytes) -> bytes:
+        async def post(_self: JudgmentClient, body: bytes) -> bytes:
             typesafe_calls.append(body)
             if action == "sync_restart":
                 raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
@@ -3473,13 +3475,13 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 raise RuntimeError(msg)
             return json.dumps(
                 {
-                    "model": PINNED_MODEL,
+                    "model": _PINNED_MODEL,
                     "answers": {"participation": {"type": "noul", "noul": 0.95 if action == "respond" else 0.05}},
                     "usage": {"input_tokens": 100, "output_tokens": 1},
                 },
             ).encode()
 
-        monkeypatch.setattr(SystemOneClient, "_post", post)
+        monkeypatch.setattr(JudgmentClient, "_post", post)
         judge = ParticipationModel(
             asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
             if action == "sync_restart"

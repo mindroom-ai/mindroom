@@ -37,7 +37,6 @@ async def test_ledger_rebuild_keeps_event_loop_responsive(
             discovery_event_ids=["$alias"],
             conversation_target=target,
             redacted_source_event_ids=["$source"],
-            pending_redaction_cleanup_event_ids=["$source"],
             completed=False,
         ),
     )
@@ -84,7 +83,6 @@ async def test_ledger_rebuild_keeps_event_loop_responsive(
         assert ledger.get_turn_record("$source") is not None
         assert ledger.get_turn_record("$alias") is not None
         assert len(ledger.turn_records_for_conversation(session_id=target.session_id)) == 1
-        assert ledger.pending_redaction_cleanup_event_ids() == ("$source",)
     finally:
         release.set()
         await asyncio.gather(heartbeat_task, return_exceptions=True)

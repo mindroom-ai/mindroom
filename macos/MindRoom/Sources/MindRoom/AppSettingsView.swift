@@ -47,7 +47,10 @@ struct AppSettingsView: View {
             }
             AppSectionCard {
                 Text("Updates").font(.headline)
-                Text("App updates include the computer-access helper. The local-agent runtime updates separately.").foregroundStyle(.secondary)
+                Text("App updates include the computer-access helper. The local-agent runtime updates separately to the version that matches this app.").foregroundStyle(.secondary)
+                if let reason = runner.localSetup.runtimeUpdateReason {
+                    Text(reason).foregroundStyle(.orange)
+                }
                 HStack {
                     Button("Check App Updates…") {
                         do { try AppUpdater.shared.checkForUpdates() }
@@ -59,7 +62,8 @@ struct AppSettingsView: View {
                 Text("After updating the runtime, apply it to the background service to use the new version. This starts or restarts local agents.")
                     .font(.callout).foregroundStyle(.secondary)
                 Button("Apply Runtime to Service…") { confirmServiceInstall = true }
-                    .disabled(runner.isRunningCommand || runner.serviceStatus.state == .runtimeMissing)
+                    .disabled(runner.isRunningCommand || runner.serviceStatus.state == .runtimeMissing
+                              || runner.isBlockedByRuntimeUpdate(.installService))
                     .confirmationDialog("Apply the runtime and restart local agents?", isPresented: $confirmServiceInstall) {
                         Button("Apply and Start Agents") { runner.run(.installService) }
                     } message: {

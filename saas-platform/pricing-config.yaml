@@ -5,33 +5,14 @@ product:
     platform: mindroom
 plans:
   free:
-    name: Free
+    name: No plan
     price_monthly: 0
     price_yearly: 0
-    description: Get started with basic features
+    description: Choose a plan to run a hosted MindRoom instance
     included_ai_budget_usd: 0
     requires_customer_provider_keys: true
     resource_profile: small
-    features:
-    - 1 AI Agent
-    - 100 messages per day
-    - 1GB storage
-    - Community support
-    - Basic integrations
-    limits:
-      max_agents: 1
-      max_messages_per_day: 100
-      storage_gb: 1
-      support: Community
-      integrations: Basic
-      workflows: false
-      analytics: basic
-      sla: false
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
+    features: []
   byok:
     name: Bring Your Own Keys
     price_monthly: 1000
@@ -45,27 +26,10 @@ plans:
     requires_customer_provider_keys: true
     resource_profile: small
     features:
-    - 100 AI Agents
-    - Unlimited messages
-    - 5GB storage
-    - Bring your own model provider keys
-    - All integrations
-    - Custom workflows
-    - Analytics dashboard
-    limits:
-      max_agents: 100
-      max_messages_per_day: unlimited
-      storage_gb: 5
-      support: Email
-      integrations: All integrations
-      workflows: true
-      analytics: advanced
-      sla: false
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
+    - Hosted MindRoom instance
+    - Your own model provider keys
+    - 10 GB storage
+    - Email support
   hobby:
     name: Hobby
     price_monthly: 2000
@@ -78,27 +42,10 @@ plans:
     resource_profile: small
     recommended: true
     features:
-    - 100 AI Agents
-    - Unlimited messages
-    - 5GB storage
-    - $15 included monthly AI usage
-    - All integrations
-    - Custom workflows
-    - Analytics dashboard
-    limits:
-      max_agents: 100
-      max_messages_per_day: unlimited
-      storage_gb: 5
-      support: Email
-      integrations: All integrations
-      workflows: true
-      analytics: advanced
-      sla: false
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
+    - Hosted MindRoom instance
+    - $15 of AI credit every month
+    - 10 GB storage
+    - Email support
     stripe_price_id_monthly_live: price_1TZRzu3GVsrZHuzXUXJEQ6Ng
     stripe_price_id_yearly_live: price_1TZRzu3GVsrZHuzX77678390
   pro:
@@ -112,28 +59,10 @@ plans:
     requires_customer_provider_keys: false
     resource_profile: pro
     features:
-    - Unlimited AI Agents
-    - Unlimited messages
-    - 25GB storage
-    - $150 included monthly AI usage
+    - Larger hosted MindRoom instance
+    - $150 of AI credit every month
+    - 25 GB storage
     - Priority support
-    - Advanced analytics
-    - Larger hosted resource profile
-    - SLA guarantee
-    limits:
-      max_agents: unlimited
-      max_messages_per_day: unlimited
-      storage_gb: 25
-      support: Priority support
-      integrations: All integrations + custom
-      workflows: true
-      analytics: advanced
-      sla: true
-      training: false
-      sso: false
-      custom_development: false
-      on_premise: false
-      dedicated_infrastructure: false
     stripe_price_id_monthly_live: price_1TZRzv3GVsrZHuzXFRd9cUgz
     stripe_price_id_yearly_live: price_1TZRzv3GVsrZHuzXrXOhvBy0
   enterprise:
@@ -145,28 +74,10 @@ plans:
     requires_customer_provider_keys: false
     resource_profile: pro
     features:
-    - Unlimited everything
-    - Custom limits
+    - Custom limits and AI budget
     - Dedicated infrastructure
-    - White-glove support
-    - Custom development
-    - On-premise option
-    - Compliance certifications
-    - Dedicated account manager
-    limits:
-      max_agents: unlimited
-      max_messages_per_day: unlimited
-      storage_gb: unlimited
-      support: White-glove
-      integrations: Custom development
-      workflows: true
-      analytics: custom
-      sla: true
-      training: true
-      sso: true
-      custom_development: true
-      on_premise: true
-      dedicated_infrastructure: true
+    - On-premises deployment
+    - Dedicated support
 trial:
   enabled: true
   days: 3

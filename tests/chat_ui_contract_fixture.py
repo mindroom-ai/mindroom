@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, get_args, get_type_hints
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 
@@ -39,6 +40,17 @@ REQUESTER_ID = "@alice:example.org"
 CONTRACT_ROOM_ID = "!room:localhost"
 CONTRACT_REQUESTER_ID = "@alice:localhost"
 CONTRACT_THREAD_ID = "$thread"
+CONTRACT_CANVAS_TITLE = "Choose a plan"
+# Too large to ride inside an edit, so the backend uploads it and the event carries a reference.
+CONTRACT_CANVAS_DOCUMENT_HTML = "<main>" + "<p>Quarterly row</p>" * 2000 + "</main>"
+CONTRACT_CANVAS_DOCUMENT_URL = "mxc://localhost/canvas-document"
+CONTRACT_CANVAS_UPDATE_HTML = (
+    '<form data-mindroom-label="Seats chosen"><input name="seats" value="3"><button>Continue</button></form>'
+)
+CONTRACT_CANVAS_HTML = (
+    '<form data-mindroom-label="Plan chosen"><label><input type="radio" name="plan" value="pro" checked> Pro</label>'
+    "<button>Choose</button></form>"
+)
 
 
 def make_chat_ui_context(
@@ -56,7 +68,10 @@ def make_chat_ui_context(
     """Build the explicit stable runtime used by Chat UI tool tests and export."""
     config = bind_runtime_paths(
         Config(
-            agents={"researcher": AgentConfig(display_name="Researcher")},
+            agents={
+                "researcher": AgentConfig(display_name="Researcher"),
+                "general": AgentConfig(display_name="General"),
+            },
             teams=(
                 {
                     "research": TeamConfig(
@@ -121,8 +136,13 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
             _ContractCase(f"open_panel/{panel}", "", "open_panel", panel)
             for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])
         ),
+        _ContractCase("show_canvas", "", "show_canvas"),
+        _ContractCase("show_canvas/update", "", "show_canvas", "update"),
+        _ContractCase("show_canvas/document", "", "show_canvas", "document"),
+        _ContractCase("show_canvas/shared", "", "show_canvas", "shared"),
     )
-    registered_actions = set(ChatUITools().get_async_functions())
+    # read_canvas_state only reads, so it sends no UI action for Chat to handle.
+    registered_actions = set(ChatUITools(enable_show_canvas=True).get_async_functions()) - {"read_canvas_state"}
     exported_actions = {case.action for case in actions}
     if registered_actions != exported_actions:
         msg = (
@@ -142,7 +162,39 @@ async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
         return await tool.show_computer()
     if case.action == "open_settings":
         return await tool.open_settings(section=case.argument)  # type: ignore[arg-type]
+    if case.action == "show_canvas":
+        html = CONTRACT_CANVAS_DOCUMENT_HTML if case.argument == "document" else CONTRACT_CANVAS_HTML
+        return await tool.show_canvas(title=CONTRACT_CANVAS_TITLE, html=html, share_state=case.argument == "shared")
     return await tool.open_panel(panel=case.argument)  # type: ignore[arg-type]
+
+
+def _contract_event(context: ToolRuntimeContext, event_id: str) -> dict[str, object]:
+    return {
+        "content": sent_chat_ui_content(context),
+        "event_id": event_id,
+        "origin_server_ts": 100_000,
+        "room_id": CONTRACT_ROOM_ID,
+        "sender": context.client.user_id,
+        "type": "m.room.message",
+    }
+
+
+async def _update_contract_canvas(context: ToolRuntimeContext, original: dict[str, object], edit_id: str) -> str:
+    """Serve the created canvas back to the tool and update it in place."""
+    event = MagicMock(spec=nio.RoomMessageNotice)
+    event.event_id = original["event_id"]
+    event.sender = original["sender"]
+    event.source = original
+    response = nio.RoomGetEventResponse()
+    response.event = event
+    context.client.room_get_event = AsyncMock(return_value=response)
+    context.client.room_send.return_value = nio.RoomSendResponse(edit_id, CONTRACT_ROOM_ID)
+    with tool_runtime_context(context):
+        return await ChatUITools().show_canvas(
+            title=CONTRACT_CANVAS_TITLE,
+            html=CONTRACT_CANVAS_UPDATE_HTML,
+            canvas_event_id=str(original["event_id"]),
+        )
 
 
 async def build_chat_ui_contract(tmp_path: Path) -> dict[str, object]:
@@ -160,24 +212,23 @@ async def build_chat_ui_contract(tmp_path: Path) -> dict[str, object]:
             requester_id=CONTRACT_REQUESTER_ID,
             event_id=event_id,
         )
+        context.client.upload = AsyncMock(
+            return_value=(nio.UploadResponse.from_dict({"content_uri": CONTRACT_CANVAS_DOCUMENT_URL}), None),
+        )
         with tool_runtime_context(context):
             result = json.loads(await _invoke_contract_case(ChatUITools(), case))
         if result.get("status") != "ok" or result.get("event_id") != event_id:
             msg = f"Chat UI contract case {case_id!r} failed to emit: {result!r}"
             raise RuntimeError(msg)
-        exported_cases.append(
-            {
-                "id": case_id,
-                "event": {
-                    "content": sent_chat_ui_content(context),
-                    "event_id": event_id,
-                    "origin_server_ts": 100_000,
-                    "room_id": CONTRACT_ROOM_ID,
-                    "sender": context.client.user_id,
-                    "type": "m.room.message",
-                },
-            },
-        )
+        exported: dict[str, object] = {"id": case_id, "event": _contract_event(context, event_id)}
+        if case.argument in {"update", "shared"}:
+            edit_id = f"{event_id}-edit"
+            update = json.loads(await _update_contract_canvas(context, exported["event"], edit_id))  # type: ignore[arg-type]
+            if update.get("status") != "ok" or update.get("revision_event_id") != edit_id:
+                msg = f"Chat UI contract case {case_id!r} failed to update: {update!r}"
+                raise RuntimeError(msg)
+            exported["replacement"] = _contract_event(context, edit_id)
+        exported_cases.append(exported)
     return {
         "cases": exported_cases,
         "room_id": CONTRACT_ROOM_ID,

@@ -9,21 +9,28 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.tools.function import Function
+from agno.tools.function import Function, ToolResult
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom import model_loading
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
-from mindroom.judgment.state import JudgmentMessage
+from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
-from mindroom.mid_turn_judgment import create_mid_turn_gate
+from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
+from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.response_lifecycle import _QueuedMessageState
-from tests.conftest import request_envelope, test_runtime_paths
+from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
+from tests.cpu_budget_helpers import cpu_budget
 from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
@@ -253,8 +260,8 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "progress",
-    [None, "x" * 16001, '{"password": "fake_secret_for_test"}'],
-    ids=["unknown", "oversized", "secret"],
+    [None, '{"password": "fake_secret_for_test"}'],
+    ids=["unknown", "secret"],
 )
 async def test_unknown_or_unsafe_visible_progress_keeps_wrap_up(progress: str | None) -> None:
     """Unavailable or sensitive user-visible context must not leave the runtime."""
@@ -530,12 +537,12 @@ async def test_configured_backends_control_resumed_turns(
 ) -> None:
     """Backend errors retain the actual notice; valid approvals suppress it."""
 
-    async def post(_client: SystemOneClient, _body: bytes) -> bytes:
+    async def post(_client: JudgmentClient, _body: bytes) -> bytes:
         if outcome == "timeout":
             await asyncio.Event().wait()
         return json.dumps(
             {
-                "model": PINNED_MODEL,
+                "model": _PINNED_MODEL,
                 "usage": {"input_tokens": 20, "output_tokens": 1},
                 "answers": {
                     "interrupt_current_turn": {
@@ -546,7 +553,7 @@ async def test_configured_backends_control_resumed_turns(
             },
         ).encode()
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     judge = ParticipationModel(
         TimeoutError()
         if outcome == "timeout"
@@ -644,6 +651,66 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("interrupt", [False, True])
+@pytest.mark.parametrize("media", [False, True])
+async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool, interrupt: bool, media: bool) -> None:
+    """A delegation paused beside other calls must not request a wrap-up the judge did not ask for."""
+    state = _QueuedMessageState()
+    judgments: list[JudgmentRequest] = []
+    messages = [Message(role="user", content="Do the task")]
+
+    def work() -> ToolResult:
+        state.add_waiting_human_message("$new", text="Thanks")
+        images = [Image(content=b"image", mime_type="image/png")] if media else None
+        return ToolResult(content="Completed action", images=images)
+
+    def delegate() -> str:
+        return "Child result"
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        return not interrupt
+
+    delegation = Function.from_callable(delegate)
+    delegation.external_execution = True
+    tools = [Function.from_callable(work), delegation]
+    model = ParticipationModel(
+        ModelResponse(
+            tool_calls=[
+                {"id": "work", "type": "function", "function": {"name": "work", "arguments": "{}"}},
+                {"id": "child", "type": "function", "function": {"name": "delegate", "arguments": "{}"}},
+            ],
+        ),
+    )
+    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+
+    async def respond() -> None:
+        if stream:
+            async for _ in model.aresponse_stream(messages, tools=tools):
+                pass
+        else:
+            await model.aresponse(messages, tools=tools)
+
+    with queued_message_signal_context(
+        state,
+        mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate),
+    ):
+        # Agno runs the ordinary call and pauses the delegation for its external driver.
+        await respond()
+        assert len(model.requests) == 1
+        assert judgments == []
+        assert not any(message.content == "WRAP UP NOW" for message in messages)
+        # Agno moves generated media into a user-role message after the ordinary call's result.
+        assert (messages[-1].role == "user") is media
+        # The driver resumes the run with the child's result, completing the batch for the judge.
+        messages.append(Message(role="tool", content="Child result", tool_call_id="child", tool_name="delegate"))
+        await respond()
+    assert len(judgments) == 1
+    assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is interrupt
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("probability", "threshold", "finish"),
     [
@@ -657,41 +724,47 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
         (1.0, 0.0, True),
     ],
 )
+@pytest.mark.parametrize("provider", ["typesafe", "openai_decisions"])
 async def test_interrupt_probability_preserves_continuation_threshold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
     probability: float,
     threshold: float,
     *,
     finish: bool,
 ) -> None:
-    """A low-confidence no-interruption answer must still request a handoff."""
+    """A low-confidence no-interruption answer must still request a handoff on every probability backend."""
 
-    async def post(_client: SystemOneClient, body: bytes) -> bytes:
-        question_id = next(iter(json.loads(body)["questions"]))
+    async def post(_client: JudgmentClient, body: bytes) -> bytes:
+        questions = json.loads(body)["questions"]
+        if provider == "typesafe":
+            question_id = next(iter(questions))
+            model, answers = _PINNED_MODEL, {question_id: {"type": "noul", "noul": probability}}
+        else:
+            question_id = questions[0]["name"]
+            model = OPENAI_DECISIONS_MODEL
+            answers = [{"type": "predicate", "name": question_id, "probability": probability}]
         assert question_id == "interrupt_current_turn"
         return json.dumps(
-            {
-                "model": PINNED_MODEL,
-                "usage": {"input_tokens": 20, "output_tokens": 1},
-                "answers": {question_id: {"type": "noul", "noul": probability}},
-            },
+            {"model": model, "usage": {"input_tokens": 20, "output_tokens": 1}, "answers": answers},
         ).encode()
 
-    monkeypatch.setattr(SystemOneClient, "_post", post)
+    monkeypatch.setattr(JudgmentClient, "_post", post)
     config = Config.model_validate(
         {
             "agents": {
                 "test_agent": {
                     "display_name": "Test",
                     "mid_turn": {
-                        "judgment": {"provider": "typesafe", "threshold": threshold},
+                        "judgment": {"provider": provider, "threshold": threshold},
                     },
                 },
             },
         },
     )
     paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": "synthetic"})
+    get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "synthetic"})
     gate = create_mid_turn_gate(config, paths, request_envelope(), prompt="Do the task", has_media=False)
     assert gate is not None
     assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is finish
@@ -711,3 +784,246 @@ async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget(
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
     assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
     assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]
+
+
+def test_earlier_media_reaches_the_judge_as_a_placeholder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A thread holding files or images is still judged, each shown only by its file name and caption."""
+    history = [
+        make_visible_message(body="report.pdf", event_id="$root", content={"msgtype": "m.file"}),
+        make_visible_message(body="Summarize this report", event_id="$ask"),
+        make_visible_message(
+            sender="@mindroom_helper:localhost",
+            body="Here is the chart",
+            event_id="$chart",
+            content={"msgtype": "m.image", "filename": "chart.png"},
+        ),
+        make_visible_message(event_id="$clip", content={"msgtype": "m.video"}),
+        make_visible_message(event_id="$photo", content={"msgtype": "m.image", "filename": "photo.png"}),
+        make_visible_message(body="x", event_id="$odd", content={"msgtype": ["m.text"]}),
+        make_visible_message(body="Use these too", event_id="$more", content={ATTACHMENT_IDS_KEY: ["att_1"]}),
+        make_visible_message(body="Continue", event_id="$source"),
+    ]
+    monkeypatch.setattr(
+        "mindroom.mid_turn_judgment.current_internal_sender_ids",
+        lambda *_: frozenset({"@mindroom_helper:localhost"}),
+    )
+
+    def context() -> tuple[JudgmentMessage, ...] | None:
+        return conversation_context_for_mid_turn(
+            history,
+            source_event_ids=("$source",),
+            thread_id="$root",
+            config=Config(),
+            runtime_paths=test_runtime_paths(tmp_path),
+        )
+
+    assert context() == (
+        JudgmentMessage("user", "[file: report.pdf]"),
+        JudgmentMessage("user", "Summarize this report"),
+        JudgmentMessage("assistant", "[image: chart.png]\nHere is the chart"),
+        JudgmentMessage("user", "[video]"),
+        JudgmentMessage("user", "[image: photo.png]"),
+        JudgmentMessage("user", "[media: x]"),
+        JudgmentMessage("user", "Use these too\n[with attachments]"),
+    )
+    # An empty text message or a long-text preview whose full text was never fetched is still unreadable history.
+    for unreadable in (
+        make_visible_message(event_id="$ask"),
+        make_visible_message(
+            body="Preview",
+            event_id="$ask",
+            content={
+                "msgtype": "m.file",
+                "url": "mxc://localhost/full-text",
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            },
+        ),
+    ):
+        history[1] = unreadable
+        assert context() is None
+
+
+@pytest.mark.asyncio
+async def test_earlier_attachment_annotation_does_not_block_judgment() -> None:
+    """An earlier reply that repeats an attachment annotation is background, like a media placeholder."""
+    requests: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        requests.append(request)
+        return True
+
+    annotation = '[attachments: att_1 (file, "report.pdf")]'
+    gate = MidTurnGate(
+        active_text="Continue",
+        evaluate=evaluate,
+        conversation_context=(JudgmentMessage("assistant", f"Saved the report {annotation}"),),
+    )
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert len(requests) == 1
+    # The same annotation in a queued message still means an attachment the judge cannot open.
+    assert not await gate.should_finish((QueuedMessage("$newer", annotation),))
+
+
+def _skip_reasons(logs: list[dict]) -> list[str]:
+    return [log["reason"] for log in logs if log["event"] == "Mid-turn judgment skipped"]
+
+
+@pytest.mark.asyncio
+async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
+    """A long earlier reply or reply snapshot no longer disables the judge; the request and queued text stay whole."""
+    requests: list[dict] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        assert request.body is not None
+        requests.append(json.loads(request.body))
+        return True
+
+    gate = MidTurnGate(
+        active_text="Triage the next batch",
+        evaluate=evaluate,
+        conversation_context=(
+            JudgmentMessage("user", "Triage the batch"),
+            JudgmentMessage("assistant", "Report start. " + "x" * 80_000 + " Report end."),
+        ),
+    )
+    state = _QueuedMessageState(mid_turn_gate=gate)
+    gate.record_visible_response("Progress start. " + "z" * 50_000 + " Progress end.")
+    queued = "Is this still running? " + "q" * 3_000
+    state.add_waiting_human_message("$queued", text=queued)
+    with capture_logs() as logs:
+        assert await gate.should_finish(state.pending_message_snapshot())
+    assert _skip_reasons(logs) == []
+    conversation = requests[0]["state"]["conversation"]
+    evidence = json.loads(conversation[-1]["text"])
+    assert conversation[0]["text"] == "Triage the batch"
+    assert evidence["active_request"] == "Triage the next batch"
+    assert evidence["queued_messages"][0]["text"] == queued
+    clipped = (conversation[1]["text"], evidence["queued_messages"][0]["visible_response"])
+    for text, label in zip(clipped, ("Report", "Progress"), strict=True):
+        assert text.startswith(f"{label} start.")
+        assert text.endswith(f"{label} end.")
+        assert "characters omitted" in text
+        assert len(text) < 2_100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("count", "size"), [(100, 10), (30, 1_900)], ids=["many", "large"])
+async def test_judge_sees_the_newest_conversation_that_fits(count: int, size: int) -> None:
+    """Older messages give way to newer ones under the message cap and the request byte limit."""
+    context = tuple(JudgmentMessage("user", f"{i:03} " + "x" * size) for i in range(count))
+    requests: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        requests.append(request)
+        return True
+
+    gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert requests[0].body is not None
+    assert len(requests[0].body) <= MAX_REQUEST_BYTES
+    sent = [message["text"] for message in json.loads(requests[0].body)["state"]["conversation"][:-1]]
+    assert sent == [message.text for message in context[-len(sent) :]]
+    assert len(sent) == 63 if count == 100 else 0 < len(sent) < count
+
+
+@pytest.mark.asyncio
+async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
+    """Redaction scans past each clip cut, so the kept half of a split credential never reaches the judge."""
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        pytest.fail("Credentials must not reach the judgment backend")
+
+    # The kept end starts hundreds of characters into the token, where it no longer looks like a credential.
+    token = "Authorization: Bearer eyJ" + "".join(chr(ord("a") + i * 7 % 26) for i in range(900))
+    text = "x" * 20_000 + token + "x" * 600
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        conversation_context=(JudgmentMessage("user", text),),
+    )
+    with capture_logs() as logs:
+        assert not await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert _skip_reasons(logs) == ["history_unjudgeable"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [False, True], ids=["history", "reply"])
+async def test_megabyte_texts_cost_only_what_the_judge_sees(*, reply: bool) -> None:
+    """Huge earlier messages and reply snapshots are scanned only around their clipped text, keeping the loop free."""
+    requests: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        requests.append(request)
+        return True
+
+    body = "a=" * 1_000_000
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        conversation_context=() if reply else tuple(JudgmentMessage("user", body) for _ in range(7)),
+    )
+    state = _QueuedMessageState(mid_turn_gate=gate)
+    gate.record_visible_response(body if reply else "")
+    state.add_waiting_human_message("$queued", text="Thanks")
+    with cpu_budget(0.25):
+        assert await gate.should_finish(state.pending_message_snapshot())
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newest", [False, True], ids=["gave-way", "kept"])
+async def test_only_conversation_that_reaches_the_judge_is_checked_for_credentials(*, newest: bool) -> None:
+    """A credential in older conversation that gives way to newer messages no longer forces a wrap-up."""
+    requests: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        requests.append(request)
+        return True
+
+    credential = JudgmentMessage("user", '{"password": "fake_secret_for_test"}')
+    newer = tuple(JudgmentMessage("user", f"{i:03} " + "x" * 1_900) for i in range(30))
+    gate = MidTurnGate(
+        active_text="Continue",
+        evaluate=evaluate,
+        conversation_context=(*newer, credential) if newest else (credential, *newer),
+    )
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is not newest
+    assert all(request.body is not None and b"fake_secret_for_test" not in request.body for request in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        ({"conversation_context": None}, "history_unavailable"),
+        ({"pending": tuple(QueuedMessage(f"${i}", "Thanks") for i in range(9))}, "queued_message_count"),
+        ({"pending": (QueuedMessage("$new", None),)}, "queued_message_unjudgeable"),
+        ({"pending": (QueuedMessage("$new", "x" * 16_001),)}, "queued_message_unjudgeable"),
+        ({"active_text": None}, "active_request_unjudgeable"),
+        ({"active_text": "x" * 16_001}, "active_request_unjudgeable"),
+        ({"pending": (QueuedMessage("$new", "Thanks", None),)}, "visible_response_unavailable"),
+        ({"pending": (QueuedMessage("$new", "x" * 15_000),)}, "essential_input_too_large"),
+        ({"evaluate_error": True}, "judge_error"),
+    ],
+    ids=["history", "count", "missing", "oversized", "media", "long-request", "progress", "request", "error"],
+)
+async def test_skipped_judgment_logs_its_reason(setup: dict, reason: str) -> None:
+    """Every wrap-up without a judge decision says why, once per queue snapshot."""
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        if setup.get("evaluate_error"):
+            msg = "private input"
+            raise RuntimeError(msg)
+        pytest.fail("A skipped judgment must not reach inference")
+
+    gate = MidTurnGate(
+        active_text=setup.get("active_text", "Do the task"),
+        evaluate=evaluate,
+        conversation_context=setup.get("conversation_context", ()),
+    )
+    pending = setup.get("pending", (QueuedMessage("$new", "Thanks"),))
+    with capture_logs() as logs:
+        assert not await gate.should_finish(pending)
+        assert not await gate.should_finish(pending)
+    assert _skip_reasons(logs) == [reason]
+    assert "private input" not in str(logs)

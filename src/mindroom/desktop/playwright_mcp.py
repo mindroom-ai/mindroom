@@ -89,9 +89,9 @@ class PlaywrightMCPBrowserProvider:
     permanently forbids restart. Screenshot files are removed after the shared
     session settles each call, including cancellation and late process output.
 
-    Callers must serialize execute calls, including stop and observations, as
-    the desktop bridge does. Observation gating and session selection assume
-    that ordering; concurrent execute calls are not supported.
+    Observations never create a session. That check and session selection run
+    together under the actor lock, so a local stop that overlaps a remote
+    observation leaves the extension disconnected.
     """
 
     def __init__(
@@ -166,18 +166,15 @@ class PlaywrightMCPBrowserProvider:
                 },
             )
 
-        if not self.running and not browser_action_requires_control(action):
-            msg = (
-                "Playwright browser observation requires an active local connection. "
-                "Run browser(action='start', target='desktop') while the desktop control lease is active."
-            )
-            raise PlaywrightBrowserError(msg)
-
         calls, screenshot_output = self._calls_with_screenshot_output(action, parameters)
         try:
             last_result: CallToolResult | None = None
             for call in calls:
-                last_result = await self._call_tool(call.tool_name, call.arguments)
+                last_result = await self._call_tool(
+                    call.tool_name,
+                    call.arguments,
+                    may_start=browser_action_requires_control(action),
+                )
                 _raise_result_error(action, last_result)
             if last_result is None:
                 msg = f"Browser action {action} did not produce an MCP call."
@@ -209,12 +206,18 @@ class PlaywrightMCPBrowserProvider:
                 await session.close()
                 self._session = None
 
-    async def _call_tool(self, tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+    async def _call_tool(self, tool_name: str, arguments: dict[str, object], *, may_start: bool) -> CallToolResult:
         async with self._actor_lock:
             if self._closed:
                 msg = "Playwright browser provider is closed."
                 raise PlaywrightBrowserError(msg)
             if self._session is None or not self._session.running:
+                if not may_start:
+                    msg = (
+                        "Playwright browser observation requires an active local connection. "
+                        "Run browser(action='start', target='desktop') while the desktop control lease is active."
+                    )
+                    raise PlaywrightBrowserError(msg)
                 self._session = self._new_session()
             session = self._session
         try:
@@ -387,13 +390,13 @@ def _provider_result(action: str, result: CallToolResult, *, max_chars: int) -> 
 
 def _result_text(result: CallToolResult) -> str:
     text_parts = [block.text for block in result.content if isinstance(block, TextContent)]
-    if result.structuredContent is not None:
-        text_parts.append(json.dumps(result.structuredContent, sort_keys=True, ensure_ascii=False))
+    if result.structured_content is not None:
+        text_parts.append(json.dumps(result.structured_content, sort_keys=True, ensure_ascii=False))
     return "\n\n".join(part for part in text_parts if part).strip()
 
 
 def _raise_result_error(action: str, result: CallToolResult) -> None:
-    if result.isError:
+    if result.is_error:
         text = _truncate_result_text(_result_text(result), max_chars=_MAX_RESULT_CHARS)
         raise PlaywrightBrowserError(text or f"Playwright MCP action {action} failed.")
 
@@ -404,7 +407,7 @@ def _browser_image(block: ImageContent) -> BrowserImage:
     except ValueError as exc:
         msg = "Playwright MCP returned invalid base64 image data."
         raise PlaywrightBrowserError(msg) from exc
-    return _validated_browser_image(content, block.mimeType)
+    return _validated_browser_image(content, block.mime_type)
 
 
 def _browser_image_file(path: Path, mime_type: str) -> BrowserImage:

@@ -238,3 +238,17 @@ def test_missing_required_header_fails() -> None:
             public_key_b64=_public_key_b64(private_key),
             now=1710000000,
         )
+
+
+def test_obs_text_nonce_is_limited_by_its_stored_size() -> None:
+    """A header nonce of non-ASCII bytes counts at the size of the escapes the replay store writes."""
+    headers = {
+        "x-mindroom-trigger-key-id": "campground-main",
+        "x-mindroom-trigger-timestamp": "1710000000",
+        "x-mindroom-trigger-signature": "c2lnbmF0dXJl",
+    }
+
+    with pytest.raises(TriggerAuthError, match="nonce must be at most 256 bytes once JSON-escaped"):
+        TriggerSignatureHeaders.from_mapping({**headers, "x-mindroom-trigger-nonce": "\xff" * 43})
+
+    assert TriggerSignatureHeaders.from_mapping({**headers, "x-mindroom-trigger-nonce": "n" * 256}).nonce == "n" * 256

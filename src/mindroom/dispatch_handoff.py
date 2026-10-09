@@ -60,6 +60,8 @@ class PreparedIngress:
     server_timestamp: int | float | None = None
     source_kind_override: str | None = None
     requester_user_id: str | None = None
+    # The sender wrote this reply for ``requester_user_id``, so it stays the message's speaker.
+    acts_for_requester: bool = False
     source_kind: str | None = None
     dispatch_policy_source_kind: str | None = None
     hook_source: str | None = None

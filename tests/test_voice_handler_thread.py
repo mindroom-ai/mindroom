@@ -12,7 +12,7 @@ import pytest
 from mindroom import voice_handler
 from mindroom.config.main import Config
 from tests.authorization_helpers import isolated_membership_index
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for, serve_media_from_download, test_runtime_paths
 
 
 @pytest.mark.asyncio
@@ -27,6 +27,7 @@ async def test_voice_handler_returns_transcription() -> None:
     # Mock client
     client = AsyncMock()
     client.download = AsyncMock()
+    serve_media_from_download(client)
 
     # Mock room
     room = MagicMock()

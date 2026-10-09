@@ -15,6 +15,35 @@ from mindroom.credential_policy import (
 
 
 @pytest.mark.parametrize(
+    ("service", "worker_scope", "agent_scoped", "requester_scoped", "local_shared"),
+    [
+        ("github", "shared", True, False, False),
+        ("github", "user", False, True, False),
+        ("github", "user_agent", False, True, False),
+        # A Google Cloud tool's own settings are primary-owned like any other tool's, not installation-wide.
+        ("google_bigquery", "shared", True, False, False),
+        ("google_bigquery", "user_agent", False, True, False),
+        # Local-only and OAuth services keep their own placement.
+        ("google_gmail", "shared", False, False, True),
+        ("github_oauth", "shared", True, False, False),
+    ],
+)
+def test_primary_built_tool_settings_use_primary_stores(
+    service: str,
+    worker_scope: str,
+    agent_scoped: bool,
+    requester_scoped: bool,
+    local_shared: bool,
+) -> None:
+    """Settings of a tool the primary builds stay in primary stores in every worker scope."""
+    policy = credential_service_policy(service, worker_scope, primary_built_tool=True)
+    assert policy.uses_primary_runtime_agent_scoped_credentials is agent_scoped
+    assert policy.uses_primary_runtime_scoped_credentials is requester_scoped
+    assert policy.uses_local_shared_credentials is local_shared
+    assert not credential_service_policy(service, worker_scope).primary_built_tool
+
+
+@pytest.mark.parametrize(
     ("service", "worker_scope", "expected"),
     [
         ("google_drive_oauth", "user", True),
@@ -79,6 +108,7 @@ def test_agent_scoped_service_policy(service: str, worker_scope: str | None, exp
         "google_drive_oauth",
         "google_gmail_oauth",
         "google_sheets_oauth",
+        "google_tasks_oauth",
     ],
 )
 def test_worker_grantable_policy_rejects_google_oauth_token_services(service: str) -> None:

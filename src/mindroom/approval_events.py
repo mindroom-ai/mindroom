@@ -10,7 +10,7 @@ from mindroom.legacy_approval_payloads import legacy_approval_card_id
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
 from mindroom.matrix.visible_body import visible_content_from_content
-from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS
+from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, SCHEDULED_SCOPE_OPTIONS
 
 _PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 
@@ -37,6 +37,7 @@ class PendingApproval:
     requested_at: str | None = None
     expires_at: str | None = None
     auto_approve_options: tuple[int, ...] = ()
+    scheduled_scope_options: tuple[str, ...] = ()
 
     @classmethod
     def from_card_event(cls, event: dict[str, Any], *, room_id: str) -> PendingApproval:
@@ -93,6 +94,9 @@ class PendingApproval:
             expires_at=expires_at,
             auto_approve_options=tuple(content["auto_approve_options"])
             if content.get("auto_approve_options") == list(AUTO_APPROVE_OPTIONS)
+            else (),
+            scheduled_scope_options=SCHEDULED_SCOPE_OPTIONS
+            if content.get("scheduled_scope_options") == list(SCHEDULED_SCOPE_OPTIONS)
             else (),
         )
 

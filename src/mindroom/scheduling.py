@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import typing
 import uuid
 from collections import deque
+from contextvars import Context
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -37,6 +39,16 @@ from mindroom.recurring_schedule import (
 )
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
+from mindroom.tool_approval import (
+    ToolApprovalScriptError,
+    arm_scheduled_call_approval,
+    evaluate_tool_approval,
+    request_scheduled_call_approval,
+    resolve_tool_approval_approver,
+    scheduled_call_offers_any_arguments,
+    withdraw_scheduled_call_approval,
+)
+from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -44,8 +56,10 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ScheduledApprovalArmState
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.scheduled_tool_calls import LiveFunction
 
 logger = get_logger(__name__)
 
@@ -54,6 +68,14 @@ _SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 
 # Maximum length for message preview in task listings
 _MESSAGE_PREVIEW_LENGTH = 50
+
+# Reasons shown on a scheduled tool call's approval card when its task changes.
+_SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
+# A stored call and its approval belong to the task as scheduled, so changing it means scheduling it again.
+_PRE_APPROVED_EDIT_ERROR = (
+    "runs a pre-approved tool call, which cannot be edited; cancel it and schedule the call again"
+)
+_SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
 
 # Shared validation message for edit attempts that change task type.
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
@@ -72,6 +94,10 @@ _DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
 _running_tasks: dict[str, asyncio.Task] = {}
 _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
+# The router restores runners when it starts and cancels them all when it stops, so new runners
+# use its runtime in rooms it can serve (write schedule state and send the trigger); a runner on
+# another bot's client outlives that client when the bot is replaced.
+_runner_owner: ScheduledTaskRunnerOwner | None = None
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
 _schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
@@ -216,6 +242,15 @@ class ScheduledWorkflow(BaseModel):
     room_id: str | None = None
     new_thread: bool = False
     silent: bool = False
+    # LEGACY_COMPAT: Scheduled workflows without the pre-approved call flag.
+    # Legacy format: Scheduled workflows omitted pre_approved_call before scheduled tool calls existed.
+    # Last legacy release: v2026.10.148; replacement: the next release writes the flag on every workflow.
+    # Handling: Pydantic defaults absence to False, which is correct because no earlier task carried an approval.
+    # Coverage: tests/test_scheduled_tool_approval.py::test_workflow_without_flag_loads_as_ordinary_task.
+    pre_approved_call: bool = Field(
+        default=False,
+        description="Whether the requester approved this one-time task's tool call while scheduling it",
+    )
 
     @field_validator("execute_at")
     @classmethod
@@ -280,6 +315,26 @@ class SchedulingRuntime:
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     matrix_admin: HookMatrixAdmin | None = None
     config_provider: Callable[[], Config | None] | None = None
+
+
+@dataclass(frozen=True)
+class ScheduledTaskRunnerOwner:
+    """The started router's runtime, used for new runners in rooms it can serve."""
+
+    client: nio.AsyncClient
+    conversation_reader: ConversationReader
+
+
+def set_scheduled_task_runner_owner(owner: ScheduledTaskRunnerOwner) -> None:
+    """Offer a started router's runtime to new scheduled-task runners."""
+    global _runner_owner
+    _runner_owner = owner
+
+
+def clear_scheduled_task_runner_owner() -> None:
+    """Stop starting runners on a router that is shutting down."""
+    global _runner_owner
+    _runner_owner = None
 
 
 @dataclass
@@ -538,6 +593,7 @@ def _start_scheduled_task(
             logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
             return False
 
+    # A schedule outlives the tool call or command that creates it, and a turn's contextvars hold its Agent and tools.
     if workflow.schedule_type == "once":
         task = asyncio.create_task(
             _run_once_task(
@@ -550,6 +606,7 @@ def _start_scheduled_task(
                 matrix_admin,
                 config_provider=config_provider,
             ),
+            context=Context(),
         )
     else:
         task = asyncio.create_task(
@@ -564,9 +621,62 @@ def _start_scheduled_task(
                 matrix_admin,
                 config_provider=config_provider,
             ),
+            context=Context(),
         )
     _running_tasks[task_id] = task
     return True
+
+
+def _router_runtime_for_room(workflow: ScheduledWorkflow) -> ScheduledTaskRunnerOwner | None:
+    """Return the router runtime when the router has joined the room and may write its state and triggers."""
+    assert workflow.room_id is not None  # Callers save the schedule in its room first.
+    owner = _runner_owner
+    if owner is None:
+        return None
+    room = owner.client.rooms.get(workflow.room_id)
+    if room is None:
+        return None
+    router_id = owner.client.user_id
+    trigger_type = (
+        "m.room.encrypted" if room.encrypted else scheduling_executor.scheduled_trigger_message_type(workflow)
+    )
+    if not (
+        room.power_levels.can_user_send_state(router_id, _SCHEDULED_TASK_EVENT_TYPE)
+        and room.power_levels.can_user_send_message(router_id, trigger_type)
+    ):
+        return None
+    return owner
+
+
+def _start_new_scheduled_task(
+    client: nio.AsyncClient,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader,
+    matrix_admin: HookMatrixAdmin | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> None:
+    """Start a newly saved schedule's runner, on the router's runtime whenever the router can serve the room.
+
+    The router restores schedules when it starts and cancels them when it stops, so its runners never
+    outlive their client. A room the router cannot serve keeps the creating bot's runtime.
+    """
+    owner = _router_runtime_for_room(workflow)
+    if owner is not None:
+        client = owner.client
+        conversation_reader = owner.conversation_reader
+    _start_scheduled_task(
+        client,
+        task_id,
+        workflow,
+        config,
+        runtime_paths,
+        conversation_reader,
+        matrix_admin,
+        config_provider=config_provider,
+    )
 
 
 def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> bool:
@@ -741,6 +851,33 @@ async def get_pending_schedule_thread_ids_for_room(
     )
 
 
+async def _homeserver_returns_full_state_events(client: nio.AsyncClient, room_id: str) -> bool:
+    """Return whether the homeserver honours ``format=event``, proven on the room's never-changing create event.
+
+    A server that ignores ``format=event`` answers both reads with the same content, which cannot hold itself
+    under ``content``.
+    """
+    try:
+        full, bare = [
+            await client._send(
+                nio.RoomGetStateEventResponse,
+                "GET",
+                nio.Api._build_path(["rooms", room_id, "state", "m.room.create", ""], query),
+                response_data=("m.room.create", "", room_id),
+            )
+            for query in ({"format": "event"}, None)
+        ]
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        msg = f"Failed to read the create event of room {room_id!r}"
+        raise _ScheduledTaskStateReadError(msg) from exc
+    if not isinstance(full, nio.RoomGetStateEventResponse) or not isinstance(bare, nio.RoomGetStateEventResponse):
+        msg = f"Failed to read the create event of room {room_id!r}: {full} {bare}"
+        raise _ScheduledTaskStateReadError(msg)
+    return full.content.get("content") == bare.content
+
+
 async def _read_scheduled_task_state(
     client: nio.AsyncClient,
     room_id: str,
@@ -771,6 +908,11 @@ async def _read_scheduled_task_state(
         transport = response.transport_response
         error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
         msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
+        raise _ScheduledTaskStateReadError(msg)
+    # A server that ignores format=event returns the state content itself, whose author can shape it like a
+    # bot-written event, so only a server proven to return whole events names the sender.
+    if not await _homeserver_returns_full_state_events(client, room_id):
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} was read from a homeserver that ignores format=event"
         raise _ScheduledTaskStateReadError(msg)
     return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
 
@@ -897,6 +1039,8 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                     return None
                 if current_task != departed_task:
                     continue
+                if current_task.workflow.pre_approved_call:
+                    await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                 await _persist_scheduled_task_state(
                     client=client,
                     room_id=room_id,
@@ -1053,7 +1197,7 @@ async def _save_pending_scheduled_task(
         created_at=created_at,
         matrix_admin=matrix_admin,
     )
-    _start_scheduled_task(
+    _start_new_scheduled_task(
         client,
         task_id,
         workflow,
@@ -1100,6 +1244,9 @@ async def save_edited_scheduled_task(
     """Persist edits to an existing task without touching runtime task runners."""
     if existing_task.status != "pending":
         msg = f"Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
+        raise ValueError(msg)
+    if existing_task.workflow.pre_approved_call:
+        msg = f"Task `{task_id}` {_PRE_APPROVED_EDIT_ERROR}."
         raise ValueError(msg)
 
     if workflow.schedule_type != existing_task.workflow.schedule_type:
@@ -1417,6 +1564,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     task_room_id = workflow.room_id
     current_target = MessageTarget.for_scheduled_task(workflow)
     latest_pending_task: ScheduledTaskRecord | None = None
+    approval_state: ScheduledApprovalArmState = "none"
     try:
         while True:
             latest_task = await _reconcile_runnable_task_retrying(
@@ -1470,16 +1618,28 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 logger.error("No execution time provided for one-time task", task_id=task_id)
                 return
 
-            outcome = await scheduling_executor.execute_scheduled_workflow(
-                client,
-                latest_workflow,
-                config,
-                runtime_paths,
-                conversation_reader,
-                task_id,
-                matrix_admin,
+            current_config = config_provider() if config_provider is not None else None
+            approval_state = (
+                await _arm_scheduled_call(task_id, latest_workflow, current_config or config)
+                if latest_workflow.pre_approved_call
+                else "none"
             )
-            final_status = "completed" if outcome.status == "delivered" else "failed"
+            if approval_state == "denied":
+                logger.info("scheduled_tool_call_skipped_after_denial", task_id=task_id)
+                final_status = "cancelled"
+            else:
+                outcome = await scheduling_executor.execute_scheduled_workflow(
+                    client,
+                    latest_workflow,
+                    config,
+                    runtime_paths,
+                    conversation_reader,
+                    task_id,
+                    matrix_admin,
+                )
+                if approval_state == "armed" and outcome.status != "delivered":
+                    await _withdraw_unsent_scheduled_call(task_id)
+                final_status = "completed" if outcome.status == "delivered" else "failed"
 
             try:
                 await _save_one_time_task_status(
@@ -1508,6 +1668,8 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             current_target = MessageTarget.for_scheduled_task(workflow)
         with bound_log_context(**current_target.log_context):
             logger.exception("one_time_task_failed", task_id=task_id)
+            if approval_state == "armed":
+                await _withdraw_unsent_scheduled_call(task_id)
             if workflow.room_id:
                 error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
                 await scheduling_executor.send_scheduled_failure_notice(
@@ -1570,6 +1732,11 @@ async def _validate_agent_mentions(
     )
 
 
+def _format_local_time(dt: datetime, timezone_str: str) -> str:
+    """Format a datetime as 24-hour wall time in the configured timezone, like "2024-01-15 15:30 EST"."""
+    return dt.astimezone(ZoneInfo(timezone_str)).strftime("%Y-%m-%d %H:%M %Z")
+
+
 def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     """Format a datetime with timezone and relative time delta.
 
@@ -1578,20 +1745,11 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
         timezone_str: Timezone string (e.g., 'America/New_York')
 
     Returns:
-        Formatted string like "2024-01-15 3:30 PM EST (in 2 hours)"
+        Formatted string like "2024-01-15 15:30 EST (in 2 hours)"
 
     """
-    # Convert UTC to target timezone
-    tz = ZoneInfo(timezone_str)
-    local_dt = dt.astimezone(tz)
-
-    # Get human-readable relative time using humanize
-    now = datetime.now(UTC)
-    relative_str = humanize.naturaltime(dt, when=now)
-
-    # Format the datetime string with 24-hour time
-    time_str = local_dt.strftime("%Y-%m-%d %H:%M %Z")
-    return f"{time_str} ({relative_str})"
+    relative_str = humanize.naturaltime(dt, when=datetime.now(UTC))
+    return f"{_format_local_time(dt, timezone_str)} ({relative_str})"
 
 
 def _extract_mentioned_agents_from_text(
@@ -1789,6 +1947,8 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     # Add metadata to workflow
     workflow_result.created_by = scheduled_by
+    # Only schedule_tool_call creates a call approval, and a pre-approved task is never edited.
+    workflow_result.pre_approved_call = False
     workflow_result.thread_id = None if new_thread else thread_id
     workflow_result.room_id = room_id
     workflow_result.new_thread = new_thread
@@ -1846,6 +2006,250 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     return (task_id, response_text)
 
 
+def _scheduled_call_workflow_digest(task_id: str, workflow: ScheduledWorkflow) -> str:
+    """Fingerprint the fields that define the call a scheduled-call approval was given for."""
+    execute_at = None if workflow.execute_at is None else workflow.execute_at.astimezone(UTC).isoformat()
+    defining_fields = [task_id, workflow.room_id, workflow.thread_id, workflow.created_by, workflow.message, execute_at]
+    return hashlib.sha256(json.dumps(defining_fields, separators=(",", ":")).encode()).hexdigest()
+
+
+def _stored_task_has_scheduled_call(room_id: str, task_id: str, content: dict[str, object]) -> bool:
+    """Return whether a stored task carries a call approval; an unreadable task counts, so cancelling fails closed."""
+    record = _parse_scheduled_task_record(room_id, task_id, content)
+    return record is None or record.workflow.pre_approved_call
+
+
+async def _withdraw_scheduled_call(task_id: str, *, reason: str) -> None:
+    """Withdraw a task's call approval, reporting a journal failure the way task-state failures are reported."""
+    try:
+        await withdraw_scheduled_call_approval(task_id, reason=reason)
+    except Exception as exc:
+        msg = f"could not withdraw the approval for its scheduled call ({exc})"
+        raise ValueError(msg) from exc
+
+
+async def _withdraw_unsent_scheduled_call(task_id: str) -> None:
+    """Withdraw an armed approval whose trigger never went out, so no other call can use it."""
+    try:
+        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_UNSENT_REASON)
+    except ValueError:
+        logger.exception("scheduled_tool_call_withdrawal_failed", task_id=task_id)
+
+
+async def _arm_scheduled_call(
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+) -> ScheduledApprovalArmState:
+    """Arm a firing task's call approval; an approval-journal error leaves the call asking at send time."""
+    try:
+        return await arm_scheduled_call_approval(
+            task_id,
+            _scheduled_call_workflow_digest(task_id, workflow),
+            any_arguments_allowed=config.tool_approval.scheduled_any_arguments,
+        )
+    except Exception:
+        logger.warning("scheduled_tool_call_arming_failed", task_id=task_id, exc_info=True)
+        return "unarmed"
+
+
+def _scheduled_call_trigger_message(
+    agent_name: str,
+    task_id: str,
+    tool_name: str,
+    description: str,
+    *,
+    any_arguments_offered: bool,
+) -> str:
+    """Ask the scheduling agent to run the stored call by its task ID; the arguments stay out of Matrix."""
+    message = (
+        f"@{agent_name} Run scheduled call `{task_id}` now: call `run_scheduled_call` with task_id "
+        f'"{task_id}" once, then report its result. It runs the `{tool_name}` call the requester approved.'
+    )
+    if any_arguments_offered:
+        message += (
+            "\n\nIf the requester approved any arguments, you may pass `arguments_json` with the "
+            f"arguments for `{tool_name}` that this task needs: {description}"
+        )
+    return message
+
+
+def _parse_send_time(execute_at: str) -> datetime | str:
+    """Return the future UTC send time, or why it cannot be used."""
+    try:
+        send_at = datetime.fromisoformat(execute_at)
+    except ValueError:
+        return "❌ execute_at must be an ISO 8601 date and time, e.g. 2026-10-04T09:00:00-04:00."
+    if send_at.tzinfo is None:
+        return "❌ execute_at must include a UTC offset, e.g. 2026-10-04T09:00:00-04:00."
+    if send_at <= datetime.now(UTC):
+        return "❌ execute_at must be in the future."
+    return send_at.astimezone(UTC)
+
+
+async def _scheduled_call_refusal(  # noqa: PLR0911 - one refusal per broken condition
+    runtime: SchedulingRuntime,
+    *,
+    thread_id: str | None,
+    scheduled_by: str,
+    agent_name: str,
+    call: LiveFunction,
+    tool_name: str,
+    arguments: dict[str, object],
+    execute_at: str,
+) -> tuple[datetime, str] | str:
+    """Return the send time and approver for a call that may be pre-approved, or why it may not."""
+    config = runtime.config
+    runtime_paths = runtime.runtime_paths
+    if thread_id is None:
+        return "❌ Pre-approved tool calls must be scheduled from a thread."
+    if agent_name not in config.agents:
+        return "❌ Only an agent, not a team, can schedule a pre-approved tool call."
+    send_at = _parse_send_time(execute_at)
+    if isinstance(send_at, str):
+        return send_at
+    approver_id = resolve_tool_approval_approver(config, runtime_paths, scheduled_by)
+    if approver_id is None:
+        return "❌ Only a human requester can pre-approve a scheduled tool call."
+    try:
+        requires_approval, _timeout_seconds = await evaluate_tool_approval(
+            config,
+            runtime_paths,
+            tool_name,
+            arguments,
+            agent_name,
+        )
+    except ToolApprovalScriptError as exc:
+        return f"❌ Could not evaluate the approval policy for `{tool_name}`: {exc}"
+    if not requires_approval and not call.authored_confirmation:
+        return f"❌ `{tool_name}` does not require approval; use `schedule` instead."
+    responders = await runtime.responder_candidates_for_room(runtime.room, scheduled_by)
+    if entity_identity_registry(config, runtime_paths).current_id(agent_name) not in responders:
+        return f"❌ `{agent_name}` cannot receive a scheduled call from you in this room."
+    return send_at, approver_id
+
+
+async def schedule_approved_tool_call(
+    *,
+    runtime: SchedulingRuntime,
+    room_id: str,
+    thread_id: str | None,
+    scheduled_by: str,
+    agent_name: str,
+    call: LiveFunction,
+    tool_name: str,
+    arguments: dict[str, object],
+    execute_at: str,
+    description: str,
+) -> tuple[str | None, str]:
+    """Store one gated call of the agent's own and ask the requester to approve it now.
+
+    Returns:
+        Tuple of (task_id, response_message)
+
+    """
+    config = runtime.config
+    checked = await _scheduled_call_refusal(
+        runtime,
+        thread_id=thread_id,
+        scheduled_by=scheduled_by,
+        agent_name=agent_name,
+        call=call,
+        tool_name=tool_name,
+        arguments=arguments,
+        execute_at=execute_at,
+    )
+    if isinstance(checked, str):
+        return (None, checked)
+    send_at, approver_id = checked
+    assert thread_id is not None
+
+    task_id = str(uuid.uuid4())[:8]
+    any_arguments_offered = scheduled_call_offers_any_arguments(
+        config,
+        tool_name,
+        arguments,
+        requester_id=scheduled_by,
+        approver_id=approver_id,
+        authored_confirmation=call.authored_confirmation,
+    )
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=send_at,
+        message=_scheduled_call_trigger_message(
+            agent_name,
+            task_id,
+            tool_name,
+            description,
+            any_arguments_offered=any_arguments_offered,
+        ),
+        description=description,
+        history_limit=0,
+        created_by=scheduled_by,
+        thread_id=thread_id,
+        room_id=room_id,
+        pre_approved_call=True,
+    )
+    binding = ScheduledCallBinding(
+        task_id=task_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=scheduled_by,
+        agent_name=agent_name,
+        toolkit_name=call.toolkit_name,
+        tool_name=tool_name,
+        arguments_json=canonical_arguments(arguments),
+        workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
+        execute_at_ns=int(send_at.timestamp() * 1_000_000_000),
+    )
+    # Publish the task only once its card exists, so no cancel or edit can reach a task whose
+    # card is still being prepared; a card whose task never published is withdrawn.
+    task_published = False
+    # None until the request answers: a request that raised may have reserved its card.
+    card_reserved: bool | None = None
+    try:
+        card_reserved = await request_scheduled_call_approval(
+            binding,
+            approver_user_id=approver_id,
+            scheduled_for_text=_format_local_time(send_at, config.timezone),
+            any_arguments_offered=any_arguments_offered,
+        )
+        if not card_reserved:
+            return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
+        await _persist_scheduled_task_state(
+            client=runtime.client,
+            room_id=room_id,
+            task_id=task_id,
+            workflow=workflow,
+            timezone=config.timezone,
+            created_at=datetime.now(UTC).isoformat(),
+            matrix_admin=runtime.matrix_admin,
+        )
+        task_published = True
+    except ValueError as e:
+        return (None, f"❌ Failed to schedule: {e!s}")
+    finally:
+        if not task_published and card_reserved is not False:
+            await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
+    scheduled_for = _format_scheduled_time(send_at, config.timezone)
+    _start_new_scheduled_task(
+        runtime.client,
+        task_id,
+        workflow,
+        config,
+        runtime.runtime_paths,
+        runtime.conversation_reader,
+        runtime.matrix_admin,
+        config_provider=runtime.config_provider,
+    )
+    return (
+        task_id,
+        f"✅ Scheduled `{tool_name}` for {scheduled_for} (task `{task_id}`).\n"
+        "Approve the card in this thread now to let it run then without asking again; "
+        "without that approval it will ask for approval when it runs.",
+    )
+
+
 async def edit_scheduled_task(
     runtime: SchedulingRuntime,
     room_id: str,
@@ -1870,6 +2274,8 @@ async def edit_scheduled_task(
         return f"❌ Task `{task_id}` not found."
     if existing_task.status != "pending":
         return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
+    if existing_task.workflow.pre_approved_call:
+        return f"❌ Task `{task_id}` {_PRE_APPROVED_EDIT_ERROR}."
 
     target_new_thread = existing_task.workflow.new_thread
     target_thread_id = None if target_new_thread else existing_task.workflow.thread_id
@@ -1995,8 +2401,12 @@ async def cancel_scheduled_task(
     if existing_content is None:
         return f"❌ Task `{task_id}` not found."
 
-    # Update to cancelled
+    # Withdraw a scheduled call's approval before publishing the cancellation, so an
+    # interruption between the two leaves a runnable task that asks again rather than
+    # a cancelled task whose approval still works.
     try:
+        if _stored_task_has_scheduled_call(room_id, task_id, existing_content):
+            await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
         await _put_scheduled_task_state_content(
             client=client,
             room_id=room_id,
@@ -2010,6 +2420,9 @@ async def cancel_scheduled_task(
     if cancel_in_memory:
         _cancel_running_task(task_id)
 
+    record = _parse_scheduled_task_record(room_id, task_id, existing_content)
+    if record is not None and record.workflow.pre_approved_call:
+        return f"✅ Cancelled task `{task_id}`; any approval given for its scheduled call is withdrawn."
     return f"✅ Cancelled task `{task_id}`"
 
 
@@ -2039,6 +2452,8 @@ async def cancel_all_scheduled_tasks(
 
                 # Update to cancelled in Matrix state
                 try:
+                    if _stored_task_has_scheduled_call(room_id, task_id, content):
+                        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                     await _put_scheduled_task_state_content(
                         client=client,
                         room_id=room_id,

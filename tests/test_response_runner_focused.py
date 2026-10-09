@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager, suppress
-from dataclasses import replace
+from contextlib import asynccontextmanager, nullcontext, suppress
+from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import count
 from types import SimpleNamespace
@@ -28,7 +28,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
 from agno.run.requirement import RunRequirement
 from agno.session.agent import AgentSession
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function, FunctionCall, UserInputField
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
@@ -40,7 +40,8 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import get_agent_session
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -53,6 +54,7 @@ from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -60,6 +62,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     EditTextRequest,
@@ -67,7 +70,12 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
+from mindroom.dispatch_source import (
+    HOOK_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+    ScheduledHistoryBudget,
+)
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
     ApprovalCall,
@@ -81,6 +89,7 @@ from mindroom.event_journal import (
     InboundEvent,
     PrincipalStore,
     ProjectedEvent,
+    approval_arguments_digest,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
@@ -119,11 +128,17 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
+    paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
 )
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    RuntimeShutdownIntent,
+)
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -146,6 +161,7 @@ from mindroom.turn_record import EditPreparation, canonicalize_turn_record
 from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
+    message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
     request_envelope,
@@ -172,7 +188,7 @@ from tests.test_response_turn import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
     from pathlib import Path
     from typing import Literal
 
@@ -575,6 +591,42 @@ async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() ->
 
     assert cancellation_count == 5
     assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shutdown_intent", "handed_off"),
+    [(ORDERLY_SHUTDOWN, True), (SYNC_RESTART_SHUTDOWN, True), (ENTITY_REMOVED_SHUTDOWN, False)],
+    ids=["process_shutdown", "entity_replacement", "entity_removal"],
+)
+async def test_a_successor_runtime_inherits_cancelled_responses(
+    shutdown_intent: RuntimeShutdownIntent,
+    handed_off: bool,
+) -> None:
+    """A stopping process or a replaced entity leaves its replies pending for the runtime that replays them."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    observed: list[bool] = []
+
+    async def response() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed.append(current_task_is_process_shutdown())
+            raise
+
+    runner.track_inbox_response(
+        response(),
+        name="test_inherited_response",
+        recovery_proof_ready=lambda: True,
+        room_id=_target().room_id,
+    )
+    await response_started.wait()
+
+    await runner.drain_inbox_responses(cancel_after_seconds=0.05, shutdown_intent=shutdown_intent)
+
+    assert observed == [handed_off]
 
 
 @pytest.mark.asyncio
@@ -1429,7 +1481,6 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     runner = unwrap_extracted_collaborator(bot._response_runner)
     preparation_started = asyncio.Event()
     allow_preparation_finish = asyncio.Event()
-    retries: list[str] = []
 
     async def prepare_source_turn(_history: object) -> bool:
         preparation_started.set()
@@ -1446,7 +1497,6 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         user_id="@user:localhost",
         response_envelope=_envelope(target, source_event_id="$event"),
         prepare_source_turn=prepare_source_turn,
-        on_interrupted_response_recoverable=lambda: retries.append("retry"),
     )
     preparation_task = asyncio.create_task(
         runner._begin_locked_turn(
@@ -1468,7 +1518,6 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     allow_preparation_finish.set()
     with pytest.raises(asyncio.CancelledError):
         await preparation_task
-    assert retries == []
 
 
 @pytest.mark.asyncio
@@ -2077,8 +2126,16 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
 
 
 @pytest.mark.asyncio
-async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Path) -> None:
-    """Restart recovery retires an uncertain claim without replacing its streamed body."""
+@pytest.mark.parametrize(
+    "failure_reason",
+    [None, response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON],
+    ids=["stale_claim", "handoff_fence"],
+)
+async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
+    tmp_path: Path,
+    failure_reason: str | None,
+) -> None:
+    """An approved run a restart cut short ends its cards and leaves its reply and source for replay to continue."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -2097,62 +2154,101 @@ async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Pa
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    claimed = await store.claim_approval_continuation(
+    owned = await store.claim_approval_continuation(
         continuation.approval_id,
         runtime_generation="previous-runtime",
     )
-    assert claimed is not None
-    interrupted_body = f"committed partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
-
-    async def acknowledge_interruption_edit(request: EditTextRequest) -> bool:
-        await store.enqueue_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            payload={"body": request.new_text},
-            edits_event_id="$waiting",
+    assert owned is not None
+    if failure_reason is not None:
+        owned = await store.request_approval_failure(
+            continuation.approval_id,
+            failure_reason,
+            expected_state="claimed",
+            expected_runtime_generation="previous-runtime",
         )
-        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            event_id="$waiting",
-            delivered_projections=(),
-        )
-        return True
-
-    edit_text = AsyncMock(side_effect=acknowledge_interruption_edit)
+        assert owned is not None
+    edit_text = AsyncMock()
+    expire_cards = AsyncMock(return_value=True)
 
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch(
-            "mindroom.response_runner.fetch_latest_visible_body",
-            new=AsyncMock(return_value="committed partial"),
-        ),
-        patch(
             "mindroom.approval_response.approval_manager.get_approval_store",
-            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+            return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
-        event_id = await runner._recover_claimed_approval_lifecycle(
-            claimed,
+        recovered, event_id = await runner._recover_nonready_approval(
+            owned,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$waiting"
-    edit_request = edit_text.await_args.args[0]
-    assert edit_request.new_text == interrupted_body
-    assert edit_request.extra_content == {
-        STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
-    }
+    assert recovered
+    assert event_id is None
+    edit_text.assert_not_awaited()
+    expire_cards.assert_awaited_once_with(continuation.approval_id)
     assert await store.approval_continuation(continuation.approval_id) is None
-    assert not await store.is_pending("$source")
+    assert await store.is_pending("$source")
 
 
 @pytest.mark.asyncio
-async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_path: Path) -> None:
-    """A restart cancellation stays recognizable after the claim is fenced."""
+async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Path) -> None:
+    """A hand-back whose cards did not expire waits for the next pass instead of settling the reply."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-retry-cards",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(continuation.approval_id, runtime_generation="previous-runtime")
+    assert claimed is not None
+    edit_text = AsyncMock()
+    expire_cards = AsyncMock(side_effect=[False, True])
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
+        ),
+    ):
+        first = await runner._recover_nonready_approval(claimed, target=target)
+        waiting = await store.approval_continuation(continuation.approval_id)
+        assert waiting is not None
+        second = await runner._recover_nonready_approval(waiting, target=target)
+
+    assert first == (True, None)
+    assert waiting.state == "failing"
+    assert second == (True, None)
+    edit_text.assert_not_awaited()
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handed_off", "failure_reason"),
+    [(True, response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON), (False, "sync_restart_cancelled")],
+    ids=["handed_to_successor", "cancelled_in_place"],
+)
+async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
+    tmp_path: Path,
+    handed_off: bool,
+    failure_reason: str,
+) -> None:
+    """A run handed to a successor runtime is fenced as restart-interrupted; any other cancellation keeps its provenance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -2176,25 +2272,31 @@ async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_pa
         runtime_generation="current-runtime",
     )
     assert claimed is not None
+    started = asyncio.Event()
+
+    async def run_until_cancelled(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
 
     with (
-        patch.object(
-            runner,
-            "_run_claimed_approval_lifecycle",
-            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
-        ),
+        patch.object(runner, "_run_claimed_approval_lifecycle", new=run_until_cancelled),
         patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
-        pytest.raises(asyncio.CancelledError),
     ):
-        await runner._run_owned_approval_continuation(
-            claimed,
-            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        task = asyncio.create_task(
+            runner._run_owned_approval_continuation(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            ),
         )
+        await started.wait()
+        request_task_cancel(task, cancel_source="sync_restart", process_shutdown=handed_off)
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     failing = await store.approval_continuation(continuation.approval_id)
     assert failing is not None
     assert failing.state == "failing"
-    assert failing.failure_reason == "sync_restart_cancelled"
+    assert failing.failure_reason == failure_reason
 
 
 @pytest.mark.asyncio
@@ -3506,6 +3608,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
                 invoking_agent="general",
                 toolkit_name="shell",
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(requirement.tool_execution.tool_args),
             ),
         ),
         execution_identity={},
@@ -3582,6 +3685,151 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
     assert register_notice.call_args.kwargs["entity_name"] == "general"
     assert callable(register_notice.call_args.kwargs["storage_factory"])
+
+
+@pytest.mark.parametrize(
+    ("mutation", "approved"),
+    [
+        (None, True),
+        ("rewritten", True),
+        ("planted", True),
+        ("planted", False),
+        ("copied", True),
+        ("user_input", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_agent_continuation_runs_only_approved_calls(
+    tmp_path: Path,
+    mutation: str | None,
+    *,
+    approved: bool,
+) -> None:
+    """Calls rewritten or added in the session store while a card waits must never run under that decision."""
+    executed: list[list[str]] = []
+
+    def run_shell_command(args: list[str]) -> str:
+        executed.append(args)
+        return "ok"
+
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    agent = AgnoAgent(
+        id="general",
+        model=SyntheticModel(id="synthetic", seed=1, chars_per_second=0, tool_call_probability=1),
+        tools=[
+            Function(
+                name="run_shell_command",
+                entrypoint=run_shell_command,
+                requires_confirmation=True,
+                owning_toolkit="shell",
+            ),
+        ],
+        db=runner.deps.state_writer.create_storage(identity),
+    )
+    paused = await agent.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
+    captured = paused_attempt_from_response(
+        paused,
+        fallback_session_id="session-1",
+        fallback_run_id=paused.run_id,
+        toolkit_owners=toolkit_owners_for_agents([agent]),
+    )
+    assert captured is not None
+    plan = await runner._approval_responses.plan_pause(
+        identify_approval_tools(captured, default_agent_name="general"),
+        requester_id="@user:localhost",
+        toolkit_owners=captured.toolkit_owners,
+    )
+    approved_args = (paused.tools or [])[0].tool_args
+    attacker_args = {"args": ["curl", "https://attacker.example"]}
+    if mutation == "rewritten":
+        for tool in (*(paused.tools or ()), *(item.tool_execution for item in paused.requirements or ())):
+            assert tool is not None
+            tool.tool_args = attacker_args
+    elif mutation == "planted":
+        paused.tools = [
+            *(paused.tools or ()),
+            ToolExecution(
+                tool_call_id="planted",
+                tool_name="run_shell_command",
+                tool_args=attacker_args,
+                requires_confirmation=True,
+                confirmed=True,
+            ),
+        ]
+    elif mutation == "copied":
+        # Delegation state routes the run through the delegated driver, which forwards every stored requirement.
+        pending = (paused.requirements or [])[0]
+        copy = RunRequirement.from_dict(pending.to_dict())
+        copy.confirm()
+        paused.tools = []
+        paused.requirements = [pending, copy]
+        paused.metadata = {
+            **(paused.metadata or {}),
+            DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
+        }
+    elif mutation == "user_input":
+        # The stored call keeps its approved arguments, but answered user input would replace them before it runs.
+        pending = (paused.requirements or [])[0]
+        paused.metadata = {
+            **(paused.metadata or {}),
+            DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
+        }
+        for tool in (*(paused.tools or ()), *(item.tool_execution for item in paused.requirements or ())):
+            assert tool is not None
+            tool.requires_confirmation = False
+            tool.requires_user_input = True
+            tool.answered = True
+            tool.user_input_schema = [UserInputField(name="args", field_type=list, value=attacker_args["args"])]
+    agent.db.upsert_run(paused, session_id="session-1")
+    continuation = ApprovalContinuation(
+        approval_id="approval-rewritten",
+        run_id=paused.run_id,
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=plan.calls,
+        execution_identity={},
+        sources=ResponseSources(("$source",), ("$source",)),
+        state="claimed",
+    )
+    runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
+
+    with (
+        patch.object(
+            runner.deps.knowledge_access,
+            "resolve_for_agent_async",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(knowledge=None),
+        ),
+        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch("mindroom.approval_execution.typing_indicator", _noop_typing),
+        pytest.raises(RuntimeError, match=r"arguments|does not cover") if mutation else nullcontext(),
+    ):
+        await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={call.tool_call_id: approved for call in plan.calls},
+            denial_reasons={call.tool_call_id: None for call in plan.calls},
+            tool_trace_collector=[],
+            typing_log_context={},
+            progress=None,
+        )
+
+    assert executed == ([] if mutation else [approved_args["args"]])
 
 
 @pytest.mark.parametrize(
@@ -4820,7 +5068,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
     assert outcome.terminal_status == "cancelled"
     assert _approval_reply_edits(client) == [
         (STREAM_STATUS_STREAMING, "Checking the report."),
-        (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**"),
+        (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**"),
     ]
     assert await runner.deps.approval_store.approval_continuation(claimed.approval_id) is None
 
@@ -6456,6 +6704,58 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
 
 
 @pytest.mark.asyncio
+async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Path) -> None:
+    """The turn driver's redaction lookup reads the tombstones the bot's own journal recorded for the room."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    store = coordinator.deps.approval_store
+    await _admit_approval_source(store, event_id="$older")
+    await store.admit(
+        InboundEvent(
+            event_id="$redaction",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.REDACTION,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={"event_id": "$redaction", "redacts": "$older", "content": {}},
+        ),
+        ProjectedEvent(
+            event_id="$redaction",
+            room_id="!room:localhost",
+            thread_id=None,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            content={},
+            replaces_event_id=None,
+            redacts_event_id="$older",
+        ),
+    )
+    found: list[Mapping[str, str | None]] = []
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        assert ctx.redacted_history_events is not None
+        found.append(await ctx.redacted_history_events(("$older", "$kept")))
+        return "final text"
+
+    with (
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator._process_and_respond(_plain_request(_target()))
+
+    assert found == [{"$older": None}]
+
+
+@pytest.mark.asyncio
 async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: Path) -> None:
     """A room-default change during locked preparation must wait for the next turn."""
     bot = _bot(tmp_path)
@@ -7172,53 +7472,6 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tmp_path: Path) -> None:
-    """A visible stream cancelled by sync restart should be retried even when no outer task cancel fired."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    retries: list[str] = []
-    cancelled_outcome = FinalDeliveryOutcome(
-        terminal_status="cancelled",
-        event_id="$stream",
-        is_visible_response=True,
-        final_visible_body=f"partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
-        delivery_kind="edited",
-        failure_reason="sync_restart_cancelled",
-    )
-
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = kwargs["response_function"]
-        await response_function("$thinking")  # type: ignore[operator]
-        return "$thinking"
-
-    with (
-        patch.object(
-            coordinator,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
-        patch.object(
-            coordinator,
-            "_process_and_respond_streaming",
-            new=AsyncMock(return_value=_ResponseGenerationOutcome(delivery=cancelled_outcome, run_succeeded=False)),
-        ),
-        patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            apply_post_response_effects=AsyncMock(),
-        ),
-    ):
-        result = await coordinator.generate_response(
-            replace(
-                _plain_request(_target(thread_id="$thread")),
-                on_interrupted_response_recoverable=lambda: retries.append("retry"),
-            ),
-        )
-
-    assert result == "$stream"
-    assert retries == ["retry"]
-
-
-@pytest.mark.asyncio
 async def test_cancelled_interrupted_persistence_offload_keeps_running(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -7791,14 +8044,13 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
 
 
 @pytest.mark.asyncio
-async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_path: Path) -> None:
-    """A deferred sync-restart cancel should finalize once, register its retry, then re-raise."""
+async def test_terminal_settlement_records_landed_interruption_before_rethrowing_cancel(tmp_path: Path) -> None:
+    """A deferred sync-restart cancel whose note landed should finalize once, record the turn handled, then re-raise."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     order: list[str] = []
     request = replace(
         _plain_request(_target(thread_id="$thread")),
-        on_interrupted_response_recoverable=lambda: order.append("retry"),
         on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
     )
     delivery_outcome = FinalDeliveryOutcome(
@@ -7841,7 +8093,7 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert order == ["post_effects", "retry", "handled:$response"]
+    assert order == ["post_effects", "handled:$response"]
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -7959,7 +8211,6 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
     order: list[str] = []
     request = replace(
         _plain_request(_target(thread_id="$thread")),
-        on_interrupted_response_recoverable=lambda: order.append("retry"),
         on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
     )
     progress = response_runner._DeliveryProgress()
@@ -8010,7 +8261,6 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
     callbacks: list[str] = []
     request = replace(
         _plain_request(_target(thread_id="$thread")),
-        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
         on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
     )
     progress = response_runner._DeliveryProgress()
@@ -8064,7 +8314,6 @@ async def test_terminal_send_cancellation_preserves_source_replay(
     callbacks: list[str] = []
     request = replace(
         _plain_request(target),
-        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
         on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
     )
     streaming = StreamingResponse(
@@ -8134,24 +8383,13 @@ async def test_terminal_send_cancellation_preserves_source_replay(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("target", "delivery_kind"),
-    [
-        pytest.param(_target(thread_id="$thread"), None, id="terminal-update-not-committed"),
-        pytest.param(_target(thread_id=None), "edited", id="threadless"),
-    ],
-)
-async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel(
-    tmp_path: Path,
-    target: MessageTarget,
-    delivery_kind: Literal["edited"] | None,
-) -> None:
-    """A cancelled outcome needs a landed, threaded recovery note before dedup."""
+async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(tmp_path: Path) -> None:
+    """A cancelled outcome needs a landed interruption note before dedup."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
     callbacks: list[str] = []
     request = replace(
         _plain_request(target),
-        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
         on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
     )
     progress = response_runner._DeliveryProgress()
@@ -8161,7 +8399,6 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
             event_id="$response",
             is_visible_response=True,
             final_visible_body=RESTART_INTERRUPTED_RESPONSE_NOTE,
-            delivery_kind=delivery_kind,
             failure_reason="sync_restart_cancelled",
         ),
     )
@@ -8196,28 +8433,29 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure_reason", "final_visible_body", "expected_recoveries", "expected_user_stops"),
+    ("thread_id", "failure_reason", "final_visible_body", "expected_user_stops"),
     [
-        ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"], []),
-        ("cancelled_by_user", "partial answer", [], [("$response", 7)]),
+        ("$thread", "interrupted", INTERRUPTED_RESPONSE_NOTE, []),
+        (None, "sync_restart_cancelled", RESTART_INTERRUPTED_RESPONSE_NOTE, []),
+        ("$thread", "cancelled_by_user", "partial answer", [("$response", 7)]),
     ],
+    ids=["interrupted", "threadless-restart", "user-stop"],
 )
-async def test_terminal_interruption_registers_recovery_unless_user_stopped(
+async def test_landed_terminal_interruption_settles_the_turn(
     tmp_path: Path,
+    thread_id: str | None,
     failure_reason: str,
     final_visible_body: str,
-    expected_recoveries: list[str],
     expected_user_stops: list[tuple[str, int]],
 ) -> None:
-    """A visible terminal interruption remains recoverable except after an explicit user stop."""
+    """A landed interruption is terminal, so the turn is handled; only an explicit user stop records a user stop."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    recoveries: list[str] = []
     user_stops: list[tuple[str, int]] = []
     coordinator._user_stop_receipt_orders["$response"] = {7}
     request = replace(
-        _plain_request(_target(thread_id="$thread")),
-        on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),
+        _plain_request(_target(thread_id=thread_id)),
+        on_deferred_outcome_handled=_async_callback(lambda _event_id: None),
         on_user_stop_handled=_async_callback(
             lambda event_id, receipt_order: user_stops.append((event_id, receipt_order)),
         ),
@@ -8259,7 +8497,6 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
         )
 
     assert result == "$response"
-    assert recoveries == expected_recoveries
     assert user_stops == expected_user_stops
 
 
@@ -8287,7 +8524,6 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     order: list[str] = []
     request = replace(
         _plain_request(_target()),
-        on_interrupted_response_recoverable=lambda: order.append("retry"),
         on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
     )
     progress = response_runner._DeliveryProgress()
@@ -9149,7 +9385,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     original_timeout = asyncio.timeout
     entered = asyncio.Event()
     stopped = asyncio.Event()
-    retired = asyncio.Event()
     observed = []
     real_read = store.approval_continuation_for_source
     raced = []
@@ -9175,13 +9410,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
             assert decision.continuation_ready
         return await real_read(source)
 
-    @asynccontextmanager
-    async def worker():  # noqa: ANN202
-        try:
-            yield SimpleNamespace()
-        finally:
-            retired.set()
-
     with (
         patch.object(cli_approval_waits, "time", SimpleNamespace(time_ns=lambda: clock.now)),
         patch.object(asyncio, "timeout", observe_timeout),
@@ -9203,10 +9431,8 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     build_execution_identity_from_runtime_context(catalog.runtime_context),
                     "turn",
                     "run",
-                    "worker",
                 ),
                 catalog=catalog,
-                worker=await lifetime.enter_worker(worker()),
                 authorize=AsyncMock(),
             )
             registry = TurnToolRegistry()
@@ -9267,7 +9493,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     show_tool_calls=False,
                 )
                 assert outcome.terminal_status == "suspended"
-        assert retired.is_set()
         with pytest.raises(CliAuthenticationError):
             registry.resolve("Bearer " + grant.raw_token, now_ns=grant.expires_at_ns - 1)
         current = await store.approval_continuation_for_source("$source")
@@ -9525,7 +9750,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     if failure == "secret":
         history[0].body = "My API key is sk-" + "a" * 48
     if failure == "oversized":
-        history[0].body = "x" * 16001
+        history[0].body = "Sleep thirty times for two seconds each. " + "x" * 16001 + " Log every sleep."
     refreshed = ThreadHistoryResult(
         history,
         is_full_history=failure != "partial",
@@ -9559,17 +9784,21 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
         finish = await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),))
-    if failure:
+    if failure not in {None, "oversized", "media"}:
         assert not finish
         assert payloads == []
     else:
         assert finish
         conversation = payloads[0]["state"]["conversation"]
         evidence = json.loads(conversation[-1]["text"])
-        assert conversation[:-1] == [
-            {"role": "user", "text": "Sleep thirty times for two seconds each"},
-            {"role": "user", "text": "Actually, make each sleep three seconds"},
-        ]
+        assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
+        root = conversation[0]["text"]
+        # Earlier media reaches the judge as a placeholder rather than disabling judgment.
+        assert root.startswith("[image: " if failure == "media" else "Sleep thirty times for two seconds each")
+        if failure == "oversized":
+            # A long message reaches the judge as its start and end rather than disabling judgment.
+            assert root.endswith("Log every sleep.")
+            assert "characters omitted" in root
         assert evidence["active_request"] == "Continue"
         assert "Stale input" not in str(payloads)
         assert "Future queued text" not in str(payloads)
@@ -9724,5 +9953,260 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         assert in_flight == []
 
     assert outcome.terminal_status == "cancelled"
-    assert landed == [STREAM_STATUS_COMPLETED]
-    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")
+    assert landed == [STREAM_STATUS_CANCELLED]
+    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**")
+
+
+@dataclass
+class _RecordedSkillReviews:
+    """The orchestrator's skill-review runner as a response sees it, recording what the response asked of it."""
+
+    cancelled: list[dict[str, object]] = field(default_factory=list)
+    counted: list[dict[str, object]] = field(default_factory=list)
+    fail: bool = False
+
+    def cancel(self, _config: object, **scope: object) -> None:
+        self.cancelled.append(scope)
+
+    async def count(self, _config: object, **counted: object) -> None:
+        self.counted.append(counted)
+        if self.fail:
+            msg = "count failed"
+            raise OSError(msg)
+
+
+async def _respond_with_skill_learning(
+    tmp_path: Path,
+    request_update: Callable[[ResponseRequest], ResponseRequest] = lambda request: request,
+    *,
+    streaming: bool = False,
+    fail: bool = False,
+) -> tuple[_RecordedSkillReviews, SyntheticModel, AsyncMock]:
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    reviews = _RecordedSkillReviews(fail=fail)
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=streaming),
+        ),
+    ):
+        await coordinator.generate_response(request_update(_plain_request(_target())))
+        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+    return reviews, model, bot.client.room_send
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill_reviews(
+    tmp_path: Path,
+    streaming: bool,
+) -> None:
+    """Both response drivers stop the conversation's review, then count the completed run with its final request."""
+    reviews, model, _send = await _respond_with_skill_learning(
+        tmp_path,
+        lambda request: replace(request, correlation_id="$correlation"),
+        streaming=streaming,
+    )
+    (counted,) = reviews.counted
+    scope = {key: counted[key] for key in ("agent_name", "session_id", "identity")}
+    assert reviews.cancelled == [scope]
+    assert counted["agent_name"] == "general"
+    assert counted["identity"].requester_id == "@user:localhost"
+    assert counted["correlation_id"] == "$correlation"
+    captured = counted["captured"]
+    assert captured is not None
+    assert captured.model is model
+    assert captured.run_id == counted["run_id"]
+    final = captured.messages[-1]
+    assert (final.role, bool(final.content), final.tool_calls) == ("assistant", True, None)
+    assert "skill_manage" in {tool.name for tool in captured.tools if isinstance(tool, Function)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent"])
+async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
+    """Like cron runs in Hermes, automation and agent requests have no person to learn from."""
+
+    def update(request: ResponseRequest) -> ResponseRequest:
+        envelope = request.response_envelope
+        if requested_by in {"a schedule", "a hook"}:
+            source_kind = SCHEDULED_SOURCE_KIND if requested_by == "a schedule" else HOOK_SOURCE_KIND
+            return replace(
+                request,
+                response_envelope=request_envelope(
+                    target=envelope.target,
+                    prompt=request.prompt,
+                    user_id=request.user_id,
+                    source_kind=source_kind,
+                ),
+            )
+        origin = message_origin(
+            sender_id="@mindroom_helper:localhost",
+            sender_entity_name="helper",
+            requester_entity_name="helper",
+        )
+        return replace(request, response_envelope=replace(envelope, origin=origin))
+
+    reviews, _model, send = await _respond_with_skill_learning(tmp_path, update)
+    send.assert_awaited()
+    assert reviews.counted == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path) -> None:
+    """Skill learning is background bookkeeping, so a failed count must not cost the user their answer."""
+    _reviews, _model, send = await _respond_with_skill_learning(tmp_path, fail=True)
+    send.assert_awaited()
+
+
+@dataclass
+class _RecordedAutomations:
+    """The orchestrator's automation runner as a response sees it, recording each finished response."""
+
+    finished: list[tuple[str, ...]] = field(default_factory=list)
+
+    def response_finished(self, source_event_ids: Sequence[str]) -> None:
+        self.finished.append(tuple(source_event_ids))
+
+
+@pytest.mark.asyncio
+async def test_a_finished_response_tells_automations_its_source_events(tmp_path: Path) -> None:
+    """An automation prompt's verify step waits for the response whose source is that prompt."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    automations = _RecordedAutomations()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    request = _plain_request(_target())
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(request)
+        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+
+    assert automations.finished == [tuple(request.sources.logical_source_event_ids)]
+
+
+def test_a_finished_approval_continuation_tells_automations_its_source_events(tmp_path: Path) -> None:
+    """A run that paused for approval is verified when its continuation ends, not after the hourly fallback."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    automations = _RecordedAutomations()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$prompt",
+        resolved_thread_id="$prompt",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-1",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$prompt",
+        requester_id="@user:localhost",
+        response_event_id="$response",
+        sources=ResponseSources(("$prompt",), ("$prompt",)),
+        calls=(),
+        state="running",
+        execution_identity=serialize_tool_execution_identity(identity),
+    )
+
+    deps = coordinator._approval_post_response_deps(continuation)
+    assert deps.notify_response_finished is not None
+    deps.notify_response_finished()
+
+    assert automations.finished == [("$prompt",)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("succeeded", [True, False])
+async def test_automations_hear_of_every_final_response(succeeded: bool) -> None:
+    """A failed run must still reach verify, which asks for a re-check when a broken run left the files off."""
+    calls: list[str] = []
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(terminal_status="completed" if succeeded else "error", event_id=None),
+        ResponseOutcome(response_run_id="run-1", run_succeeded=succeeded),
+        PostResponseEffectsDeps(logger=MagicMock(), notify_response_finished=lambda: calls.append("finished")),
+    )
+    assert calls == ["finished"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("succeeded", [True, False])
+async def test_only_a_completed_response_counts_toward_its_skill_review(succeeded: bool) -> None:
+    """Post-response effects count a completed response's run, and nothing for a failed one."""
+    calls: list[str] = []
+
+    async def count(run_id: str) -> None:
+        calls.append(run_id)
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(terminal_status="completed" if succeeded else "error", event_id=None),
+        ResponseOutcome(response_run_id="run-1", run_succeeded=succeeded),
+        PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=count),
+    )
+    assert calls == (["run-1"] if succeeded else [])
+
+
+@pytest.mark.parametrize(
+    ("hook_source", "flushed"),
+    [
+        (None, True),
+        ("automation/dreaming", False),
+        ("automation/weekly_digest", False),
+        ("digest:message:received", True),
+    ],
+)
+def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
+    """A maintenance turn, such as an unreviewed memory proposal, never reaches auto-flush; other turns do."""
+    runner = ResponseRunner(deps=MagicMock())
+    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "file"
+
+    with patch("mindroom.response_runner.mark_auto_flush_dirty_session") as mark_dirty:
+        queue = runner._memory_persistence(
+            agent_name="mind",
+            session_id="session",
+            execution_identity=MagicMock(),
+            prompt="Consolidate memory",
+            thread_history=(),
+            user_id=None,
+            hook_source=hook_source,
+        )
+        if queue is not None:
+            queue()
+
+    assert (queue is not None) is flushed
+    assert mark_dirty.called is flushed

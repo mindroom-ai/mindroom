@@ -12,7 +12,7 @@ Keep it simple and avoid adding features.
 
 ## First steps
 
-- Read project-specific instructions (CLAUDE.md, AGENTS.md, or similar) and follow them.
+- Read project-specific instructions (AGENTS.md or similar) and follow them.
 - Ask a brief clarification if the request is ambiguous (for example: report only vs refactor).
 
 ## Objective

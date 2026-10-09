@@ -130,14 +130,19 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         dashboard.uiDelegate = self
     }
 
-    func openChat(force: Bool = false) {
-        let url = preferences.url
+    func openChat(url: URL? = nil, force: Bool = false) {
+        let url = url ?? preferences.url
         guard force || chatLoadedURL != url else { return }
         chatSSO = ChatSSONavigation(root: url)
         chatLoadedURL = url
         chatError = nil
         chatLoading = true
         chat.load(URLRequest(url: url))
+    }
+
+    func canStartChatSSOPopup(_ url: URL, from source: URL) -> Bool {
+        WebNavigationPolicy.sameOrigin(source, chatSSO.root)
+            && ChatSSONavigation.isStart(url, returningTo: chatSSO.root)
     }
 
     func openDashboard(force: Bool = false) {
@@ -256,8 +261,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
             // Some SSO buttons use window.open. Accept only a Matrix SSO start from Chat itself.
             guard webView === chat, action.targetFrame == nil,
                   let source = action.sourceFrame.request.url,
-                  WebNavigationPolicy.sameOrigin(source, preferences.url),
-                  ChatSSONavigation.isStart(url, returningTo: preferences.url) else { return nil }
+                  canStartChatSSOPopup(url, from: source) else { return nil }
         }
         switch chatSSO.decide(url, clicked: true) {
         case .allow: webView.load(URLRequest(url: url))
@@ -288,7 +292,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         if webView === chat {
             chatLoading = false
             chatError = "Cannot load Chat. Check your connection or Chat website, then retry."
-            chatSSO = ChatSSONavigation(root: preferences.url)
+            chatSSO = ChatSSONavigation(root: chatSSO.root)
         } else {
             dashboardLoading = false
             dashboardError = LocalDashboardError.connectionFailed.localizedDescription

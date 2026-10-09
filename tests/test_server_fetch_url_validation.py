@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
+import threading
 from typing import get_type_hints
 
 import httpx
+import httpx2
 import pytest
 
+from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport
 from mindroom.server_fetch_url import (
     ServerFetchAsyncHTTPTransport,
     ServerFetchHTTPTransport,
@@ -23,7 +27,10 @@ def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]
     return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, 443))]
 
 
-@pytest.mark.parametrize("transport_cls", [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport])
+@pytest.mark.parametrize(
+    "transport_cls",
+    [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport, ServerFetchAsyncHTTPX2Transport],
+)
 def test_server_fetch_transport_type_hints_resolve_at_runtime(transport_cls: type[object]) -> None:
     """Transport constructor annotations should support runtime type inspection."""
     hints = get_type_hints(transport_cls.__init__)
@@ -222,6 +229,57 @@ def test_validate_server_fetch_url_keeps_ipv4_mapped_metadata_blocked_when_priva
     assert exc_info.value.reason == "metadata_address"
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "168.63.129.16",
+        "[::ffff:168.63.129.16]",
+        "[2002:a83f:8110::]",
+        "[2001:0:4136:e378::57c0:7eef]",
+        "[fd00:ec2::23]",
+        "[fd20:ce::254]",
+        "[fd00:c1::a9fe:a9fe]",
+    ],
+)
+@pytest.mark.parametrize("allow_private_networks", [False, True])
+def test_platform_agent_endpoints_are_metadata_addresses(host: str, *, allow_private_networks: bool) -> None:
+    """Host agent and credential endpoints are blocked on every port, in every embedded IPv4 form, under both policies."""
+    for url in (f"http://{host}/machine?comp=goalstate", f"http://{host}:32526/vmSettings"):
+        with pytest.raises(ServerFetchUrlError) as exc_info:
+            validate_server_fetch_url(url, allow_private_networks=allow_private_networks)
+        assert exc_info.value.reason == "metadata_address"
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_redirect_url(
+            "https://example.com/start",
+            f"http://{host}/",
+            allow_private_networks=allow_private_networks,
+        )
+    assert exc_info.value.reason == "metadata_address"
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validated_connect_addresses(host.strip("[]"), port=80, allow_private_networks=allow_private_networks)
+    assert exc_info.value.reason == "metadata_address"
+
+
+@pytest.mark.parametrize("allow_private_networks", [False, True])
+def test_dns_names_resolving_to_a_host_agent_endpoint_are_blocked_at_dial_time(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allow_private_networks: bool,
+) -> None:
+    """A public hostname that resolves to the Azure host agent must not be dialed."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("168.63.129.16"),
+    )
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validated_connect_addresses("wireserver.example", port=80, allow_private_networks=allow_private_networks)
+
+    assert exc_info.value.reason == "metadata_address"
+
+
 @pytest.mark.parametrize("url", ["http://169.254.1.1/", "http://[fe80::1]/"])
 def test_validate_server_fetch_url_keeps_link_local_blocked_when_private_is_enabled(url: str) -> None:
     """The local-network opt-in should not open link-local addresses."""
@@ -278,3 +336,69 @@ def test_server_fetch_http_transport_rejects_private_request_url_without_network
         transport.handle_request(request)
 
     assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+async def test_httpx2_transport_rejects_private_request_url_without_network() -> None:
+    """The httpx2 transport handed to the MCP SDK should deny unsafe request URLs before opening a socket."""
+    transport = ServerFetchAsyncHTTPX2Transport()
+    request = httpx2.Request("GET", "http://127.0.0.1/admin")
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        await transport.handle_async_request(request)
+
+    assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dialed_address", "reason"),
+    [("10.0.0.5", "private_address"), ("169.254.1.1", "blocked_address")],
+)
+async def test_httpx2_transport_rejects_dns_results_that_change_to_internal_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+    dialed_address: str,
+    reason: str,
+) -> None:
+    """The httpx2 transport validates the address resolved at dial time, not only the request URL."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo(dialed_address),
+    )
+
+    async with httpx2.AsyncClient(transport=ServerFetchAsyncHTTPX2Transport()) as client:
+        with pytest.raises(ServerFetchUrlError) as exc_info:
+            await client.get("https://rebinding.example/")
+
+    assert exc_info.value.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_cls", "transport_cls"),
+    [(httpx.AsyncClient, ServerFetchAsyncHTTPTransport), (httpx2.AsyncClient, ServerFetchAsyncHTTPX2Transport)],
+)
+async def test_async_transport_resolves_the_dialed_host_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    client_cls: type[httpx.AsyncClient | httpx2.AsyncClient],
+    transport_cls: type[ServerFetchAsyncHTTPTransport | ServerFetchAsyncHTTPX2Transport],
+) -> None:
+    """A slow DNS lookup for one connection must not stall other work on the event loop."""
+    loop = asyncio.get_running_loop()
+    loop_kept_running = threading.Event()
+    lookup_saw_loop_running: list[bool] = []
+
+    def slow_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        # The loop runs this callback during the lookup only when the lookup leaves the loop free.
+        loop.call_soon_threadsafe(loop_kept_running.set)
+        lookup_saw_loop_running.append(loop_kept_running.wait(timeout=2))
+        raise socket.gaierror
+
+    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", slow_getaddrinfo)
+
+    async with client_cls(transport=transport_cls()) as client:
+        with pytest.raises(ServerFetchUrlError) as exc_info:
+            await client.get("https://slow-dns.example/")
+
+    assert exc_info.value.reason == "dns_resolution_failed"
+    assert lookup_saw_loop_running == [True]

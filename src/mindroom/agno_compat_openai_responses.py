@@ -11,11 +11,13 @@ from agno.utils.log import log_warning
 from openai import APIStatusError
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseContentPartAddedEvent,
     ResponseCreatedEvent,
     ResponseErrorEvent,
     ResponseFailedEvent,
     ResponseIncompleteEvent,
     ResponseInProgressEvent,
+    ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
 )
 
@@ -77,13 +79,18 @@ _RESPONSES_FILE_MIME_TYPES = {
 # Remove when: The pinned Agno retry path proves that restarted streams cannot
 # reuse caller-visible partial assistant or tool state.
 # Coverage: tests/test_openai_responses_stream.py::test_agent_does_not_retry_incomplete_stream;
-# tests/test_openai_responses_stream.py::test_agent_still_retries_transient_provider_errors.
+# tests/test_openai_responses_stream.py::test_agent_still_retries_transient_provider_errors;
+# tests/test_responses_stream_retry.py::test_transient_failure_retries_before_visible_output;
+# tests/test_responses_stream_retry.py::test_stream_ended_before_visible_output_retries;
+# tests/test_responses_stream_retry.py::test_stream_ended_after_output_cannot_replay.
 
 # AGNO_COMPAT: Responses continuation depends on hard-coded model names.
 # Reason: Agno 3.0.9 gates Responses continuation behind a hard-coded model-name
 # predicate, which excludes aliases and compatible Responses endpoints.
-# Upstream issue: No matching issue identified; the public capability is proposed by the PR.
-# Upstream PR: https://github.com/agno-agi/agno/pull/10075
+# Upstream issue: Tracking gap; no issue identified for the model-name predicate.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10075, released in Agno 3.0.11, is related and
+# partial: it adds use_previous_response_id, but _using_reasoning_model still gates chaining by
+# model-name prefix in 3.0.11 and on main.
 # Remove when: A pinned Agno release exposes continuation independently of model
 # names while still honoring store=False and explicit replay.
 # Coverage: tests/test_openai_models.py::test_responses_continue_tool_calls_independently_of_model_name;
@@ -92,8 +99,8 @@ _RESPONSES_FILE_MIME_TYPES = {
 # AGNO_COMPAT: Responses usage parsing drops cache-write input tokens.
 # Reason: Agno 3.0.9 copies cached and reasoning token details but omits
 # OpenAI's input_tokens_details.cache_write_tokens counter.
-# Upstream issue: No matching issue identified; this metrics gap is untracked.
-# Upstream PR: None identified.
+# Upstream issue: https://github.com/agno-agi/agno/issues/10314, open.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10313, open.
 # Remove when: The pinned Agno parser preserves cache-write tokens while still
 # accepting provider payloads that predate the newer field.
 # Coverage: tests/test_openai_models.py::test_openai_metrics_preserve_sdk_input_details.
@@ -101,12 +108,29 @@ _RESPONSES_FILE_MIME_TYPES = {
 # AGNO_COMPAT: Failed Responses streams discard received terminal usage.
 # Reason: Agno parses usage only on response.completed, then transfers it to
 # assistant metrics only at clean EOF; failure cleanup therefore counts zero.
-# Upstream issue: None identified; tracked locally at https://github.com/mindroom-ai/mindroom/issues/1952.
+# Upstream issue: Tracking gap; no matching issue identified.
 # Upstream PR: None identified; PR #10135 does not preserve failed-stream usage.
 # Remove when: Agno preserves reported completed, incomplete, and failed usage
 # on stream failure or cancellation without counting successful streams twice.
 # Coverage: tests/test_openai_responses_stream.py::test_terminal_usage_survives_stream_failure;
 # tests/test_openai_responses_stream.py::test_codex_blocking_usage_is_not_counted_twice.
+
+
+def _exposes_no_output(stream_event: ResponseStreamEvent) -> bool:
+    """Return whether an event only frames output that a replay regenerates unseen.
+
+    Reasoning models open and close reasoning items long before any text, so
+    treating those boundaries as output would make every mid-thinking provider
+    failure final. Tool calls and hosted tools stay excluded: they may already
+    have been started or executed.
+    """
+    if isinstance(stream_event, (ResponseCreatedEvent, ResponseInProgressEvent)):
+        return not stream_event.response.output
+    if isinstance(stream_event, ResponseOutputItemAddedEvent):
+        return stream_event.item.type in {"message", "reasoning"}
+    if isinstance(stream_event, ResponseOutputItemDoneEvent):
+        return stream_event.item.type == "reasoning"
+    return isinstance(stream_event, ResponseContentPartAddedEvent)
 
 
 def _stream_error_types(error: BaseException) -> str:
@@ -232,6 +256,14 @@ class OpenAIResponsesProviderCompat:
         message = error.message if isinstance(error, APIStatusError) else str(error)
         return error_type(message=message, status_code=status, model_name=self.name, model_id=self.id)
 
+    def _missing_completion_error(self, *, yielded: bool) -> ModelProviderError:
+        """Leave an early end retryable only while the attempt exposed nothing to replay."""
+        msg = "OpenAI Responses stream ended without response.completed"
+        if yielded:
+            return IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
+        # Classify it like a pre-output connection drop on the committed 200 stream.
+        return ModelProviderError(message=msg, status_code=200, model_name=self.name, model_id=self.id)
+
     def invoke_stream(
         self,
         messages: list[Message],
@@ -284,8 +316,7 @@ class OpenAIResponsesProviderCompat:
                 self._retain_terminal_usage(assistant_message, terminal_usage)
             assistant_message.metrics.stop_timer()
         if not completed:
-            msg = "OpenAI Responses stream ended without response.completed"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
+            raise self._missing_completion_error(yielded=yielded)
 
     async def ainvoke_stream(
         self,
@@ -339,13 +370,12 @@ class OpenAIResponsesProviderCompat:
                 self._retain_terminal_usage(assistant_message, terminal_usage)
             assistant_message.metrics.stop_timer()
         if not completed:
-            msg = "OpenAI Responses stream ended without response.completed"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
+            raise self._missing_completion_error(yielded=yielded)
 
     # AGNO_COMPAT: A successful stream retry replaces earlier failed-attempt usage.
     # Reason: Agno replaces assistant metrics with only the successful stream's
     # metrics, dropping counters retained during failed invocation cleanup.
-    # Upstream issue: None identified; tracked locally at https://github.com/mindroom-ai/mindroom/issues/1952.
+    # Upstream issue: Tracking gap; no matching issue identified.
     # Upstream PR: None identified.
     # Remove when: Agno carries received usage across stream retries exactly once.
     # Coverage: tests/test_openai_responses_stream.py::test_terminal_usage_survives_retry.
@@ -411,9 +441,8 @@ class OpenAIResponsesProviderCompat:
         if response_items:
             tool_use[_RESPONSE_ITEMS_BUFFER_KEY] = response_items
         if (
-            isinstance(stream_event, (ResponseCreatedEvent, ResponseInProgressEvent))
-            and not stream_event.response.output
-            and not tool_use
+            _exposes_no_output(stream_event)
+            and not any(key != _RESPONSE_ITEMS_BUFFER_KEY for key in tool_use)
             and not any(
                 value for name, value in vars(model_response).items() if name not in {"created_at", "event", "role"}
             )

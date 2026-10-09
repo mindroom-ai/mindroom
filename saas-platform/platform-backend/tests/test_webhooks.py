@@ -65,7 +65,13 @@ class TestWebhookEndpoints:
     @pytest.fixture
     def mock_stripe_signature(self):
         """Mock Stripe signature verification."""
-        with patch("backend.routes.webhooks.stripe.Webhook.construct_event") as mock:
+        with (
+            patch("backend.routes.webhooks.stripe.Webhook.construct_event") as mock,
+            patch(
+                "backend.routes.webhooks.stripe.Subscription.retrieve",
+                side_effect=lambda _id: mock.return_value.data.object,
+            ),
+        ):
             yield mock
 
     @pytest.fixture
@@ -387,8 +393,6 @@ class TestWebhookEndpoints:
             "stripe_price_id": "price_pro_monthly",
             "tier": "pro",
             "status": "active",
-            "max_agents": 999999,
-            "max_messages_per_day": 999999,
             "trial_ends_at": "1970-01-01T00:00:00+00:00",
         }
         if event_kind == "created":
@@ -643,43 +647,6 @@ class TestWebhookEndpoints:
         data = response.json()
         assert data["received"] is True
         assert data["error"] is None
-
-    def test_pro_plan_uses_configured_limits(
-        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
-    ):
-        """Test pro plan ignores Stripe quantity and uses configured limits."""
-        # Setup
-        subscription_data = self._create_subscription_data(tier="pro", quantity=10)
-        event = self._create_stripe_event("customer.subscription.created", subscription_data)
-        mock_stripe_signature.return_value = event
-
-        # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
-
-        # Capture the insert call to verify configured limits
-        inserted_payloads = []
-
-        def capture_insert(data):
-            inserted_payloads.append(data)
-            return Mock(execute=Mock(return_value=Mock()))
-
-        mock_supabase.table().insert = capture_insert
-
-        # Make request
-        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
-
-        # Verify
-        assert response.status_code == 200
-        data = response.json()
-        assert data["received"] is True
-        assert data["error"] is None
-
-        subscription_payload = next(
-            payload for payload in inserted_payloads if payload.get("stripe_subscription_id") == "sub_test_123"
-        )
-        assert subscription_payload["max_agents"] == 999999
-        assert subscription_payload["max_messages_per_day"] == 999999
 
     def test_subscription_update_with_cancellation(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock

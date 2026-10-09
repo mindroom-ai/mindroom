@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
@@ -31,13 +32,18 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider"]
+__all__ = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past
 # 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
 # ceiling for non-streaming operations.
 _CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
+# A hosted API that sends no stream event for this long has stalled.
+_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
+# Local servers can stay silent for minutes while a request queues or a model
+# loads, so they and custom endpoints get an idle limit only when configured.
+_LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 
 
 def canonical_provider(provider: str) -> str:
@@ -48,9 +54,11 @@ def canonical_provider(provider: str) -> str:
 def _populate_azure_openai_runtime_kwargs(
     extra_kwargs: dict[str, Any],
     runtime_paths: RuntimePaths,
+    *,
+    shared_api_key: bool,
 ) -> None:
     """Populate Azure OpenAI client settings from the active runtime env."""
-    if "api_key" not in extra_kwargs:
+    if shared_api_key and "api_key" not in extra_kwargs:
         api_key = get_secret_from_env(AZURE_OPENAI_ENV_BY_KEY["api_key"], runtime_paths=runtime_paths)
         if api_key:
             extra_kwargs["api_key"] = api_key
@@ -168,9 +176,12 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     loads at first model construction (#1436).
     """
     canonical_provider_key = canonical_provider(provider)
+    # A model that authenticates another way (for example Anthropic's auth_token) never gets the shared key.
+    shared_api_key = not _uses_alternative_auth(model_config)
 
     if (
-        canonical_provider_key
+        shared_api_key
+        and canonical_provider_key
         not in {
             "ollama",
             "llama_cpp",
@@ -189,6 +200,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             extra_kwargs["api_key"] = api_key
 
     if canonical_provider_key == "vertexai_claude":
+        # Vertex authenticates with Google credentials and never sends an API key.
+        extra_kwargs.pop("api_key", None)
         if "project_id" not in extra_kwargs:
             project_id = get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
             if project_id:
@@ -210,7 +223,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             extra_kwargs["client_params"] = client_params
 
     if canonical_provider_key == "azure":
-        _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths)
+        _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths, shared_api_key=shared_api_key)
 
     if canonical_provider_key in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
         extra_kwargs.setdefault("cache_system_prompt", True)
@@ -256,12 +269,13 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 extra_kwargs["api_key"] = env_api_key
             else:
                 logger.warning("No Z.ai API key found in environment or CredentialsManager")
-        extra_kwargs.setdefault("base_url", ZAI_BASE_URL_DEFAULT)
         extra_kwargs.setdefault("name", "ZAI")
         extra_kwargs.setdefault("provider", "ZAI")
         from mindroom.openai_models import MindRoomOpenAILike  # noqa: PLC0415
 
-        return MindRoomOpenAILike(id=model_id, **extra_kwargs)
+        # The built-in endpoint stays out of extra_kwargs, which only carry configured endpoints.
+        zai_kwargs: dict[str, Any] = {"base_url": ZAI_BASE_URL_DEFAULT, **extra_kwargs}
+        return MindRoomOpenAILike(id=model_id, **zai_kwargs)
 
     if canonical_provider_key in {"codex", "openai_codex"}:
         from mindroom.codex_model import (  # noqa: PLC0415
@@ -364,6 +378,26 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     raise ValueError(msg)
 
 
+def _sets_base_url(kwargs: object) -> bool:
+    """Return whether provider kwargs, at any depth, point the client at an explicit endpoint."""
+    return isinstance(kwargs, dict) and any(
+        (key == "base_url" and bool(value)) or _sets_base_url(value) for key, value in kwargs.items()
+    )
+
+
+def _stream_idle_timeout_seconds(model_config: ModelConfig, model_kwargs: dict[str, Any]) -> float | None:
+    """Return the silence limit for streamed provider requests, or None for no limit.
+
+    ``model_kwargs`` are the kwargs the model was built with, so endpoints resolved
+    from the runtime env, such as ``OPENAI_BASE_URL``, count as configured too.
+    """
+    if model_config.stream_idle_timeout_seconds is not None:
+        return model_config.stream_idle_timeout_seconds or None
+    if canonical_provider(model_config.provider) in _LOCAL_STREAM_PROVIDERS or _sets_base_url(model_kwargs):
+        return None
+    return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+
+
 def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
     """Return the dashboard key saved for one model config (``model:<name>``), if any."""
     model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
@@ -379,14 +413,36 @@ _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _uses_alternative_auth(model_config: ModelConfig) -> bool:
+    """Return whether a model authenticates with a provider credential other than ``api_key``."""
+    provider = canonical_provider(model_config.provider)
+    extra_kwargs = model_config.extra_kwargs or {}
+    alternative_kwargs = _ALTERNATIVE_AUTH_KWARGS.get("google" if provider == "gemini" else provider, ())
+    return any(extra_kwargs.get(name) for name in alternative_kwargs)
+
+
+def model_uses_own_credential(model_name: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
+    """Return whether ``get_model_instance`` authenticates a model without the provider's shared key.
+
+    Its own credential is a key in config (``api_key`` or ``extra_kwargs.api_key``), a
+    provider's alternative credential such as Anthropic's ``auth_token``, or the key saved
+    for the model in the dashboard (``model:<name>``). Reading the dashboard key raises
+    ``OSError`` or ``ValueError`` when the credential store cannot be opened.
+    """
+    return bool(
+        model_config.configured_api_key()
+        or _uses_alternative_auth(model_config)
+        or _model_credential_api_key(model_name, runtime_paths),
+    )
+
+
 def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> str | None:
     """Return the provider service a configured model needs a key for when none resolves, else None.
 
-    Mirrors the key lookup in ``get_model_instance``: an explicit ``extra_kwargs.api_key``
-    (or a provider's alternative credential such as Anthropic's ``auth_token``), then the
-    per-model dashboard key, then the shared provider key (including its env-var-named
-    twin). Only providers that authenticate with one API key are checked, and unknown
-    model names are left to config validation.
+    A model needs no shared key when ``model_uses_own_credential`` holds; otherwise the shared
+    provider key (including its env-var-named twin) must resolve. Only providers that
+    authenticate with one API key are checked, and unknown model names are left to config
+    validation.
     """
     model_config = config.models.get(model_name)
     if model_config is None:
@@ -396,10 +452,7 @@ def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, 
         provider = "google"
     if provider == "ollama" or provider not in PROVIDER_ENV_KEYS:
         return None
-    extra_kwargs = model_config.extra_kwargs or {}
-    if any(extra_kwargs.get(name) for name in ("api_key", *_ALTERNATIVE_AUTH_KWARGS.get(provider, ()))):
-        return None
-    if _model_credential_api_key(model_name, runtime_paths):
+    if model_uses_own_credential(model_name, model_config, runtime_paths):
         return None
     if get_api_key_for_provider(provider, runtime_paths=runtime_paths):
         return None
@@ -422,7 +475,10 @@ def get_model_instance(
     provider = model_config.provider
     model_id = model_config.id
 
-    extra_kwargs = dict(model_config.extra_kwargs or {})
+    # Providers may write into authored nested values, such as an Agno Gemini generation_config dict.
+    extra_kwargs = deepcopy(model_config.extra_kwargs or {})
+    if configured_api_key := model_config.configured_api_key():
+        extra_kwargs["api_key"] = configured_api_key
 
     model_api_key = _model_credential_api_key(model_name, runtime_paths)
     if model_api_key:
@@ -454,7 +510,10 @@ def get_model_instance(
         configured_provider=provider,
     )
     install_claude_prompt_cache_hook(model)
-    install_provider_stream_retry_hook(model)
+    install_provider_stream_retry_hook(
+        model,
+        idle_timeout_seconds=_stream_idle_timeout_seconds(model_config, extra_kwargs),
+    )
     install_provider_media_fallback(
         model,
         fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),

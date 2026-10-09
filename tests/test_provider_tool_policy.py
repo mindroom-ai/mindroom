@@ -18,10 +18,12 @@ from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses, 
 from mindroom.openai_tool_search import install_openai_deferred_tool_search
 from mindroom.provider_tool_policy import without_provider_tools
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.gemini_helpers import gemini_client
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import httpx
     from agno.models.groq import Groq
 
 
@@ -172,9 +174,36 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
         assert config.tools[0].function_declarations[0].name == "read_status"
         assert config.system_instruction == "Stable agent instructions"
         assert config.tool_config.function_calling_config.mode == "NONE"
+    assert config.response_mime_type == "application/json"
     assert options == before
     regular = GenerateContentConfig.model_validate(model.get_request_params()["config"])
     assert any(tool.google_search is not None for tool in regular.tools)
+    assert regular.response_mime_type is None
+
+
+@pytest.mark.asyncio
+async def test_vertex_gemini_requests_json_only_without_declarations() -> None:
+    """Vertex AI acceptance of JSON beside disabled declarations is unverified, so declarations keep NONE only."""
+
+    def unreachable(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError
+
+    authored = {"response_mime_type": "application/json", "response_schema": {"type": "STRING"}}
+    async with gemini_client(unreachable, vertexai=True) as client:
+        model = MindRoomGoogleGemini(id="gemini-2.5-pro", client=client, generation_config=authored)
+        with without_provider_tools():
+            declared = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+            undeclared = model.get_request_params(system_message="Judge.", tool_choice="none")["config"]
+
+    assert declared.tools[0].function_declarations[0].name == "read_status"
+    assert declared.tool_config.function_calling_config.mode == "NONE"
+    # The reply's authored JSON output never reaches a Vertex decision that keeps declarations.
+    assert declared.response_mime_type is None
+    assert declared.response_schema is None
+    assert undeclared.tools is None
+    assert undeclared.tool_config is None
+    assert undeclared.response_mime_type == "application/json"
+    assert undeclared.response_schema is None
 
 
 def test_gemini_keeps_only_declarations_in_mixed_tool() -> None:

@@ -579,12 +579,11 @@ class TestCredentialsSync:
             constants_mod.build_execution_tool_env("python", isolated_runtime),
         ]
 
-        assert isolated_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) == "encryption-key-material"
+        assert isolated_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) is None
         for runtime_env in public_and_execution_envs:
             assert CREDENTIALS_ENCRYPTION_KEY_ENV not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in runtime_env
-        assert isolated_runtime.process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] == "encryption-key-material"
         assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in isolated_runtime.process_env
         assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in isolated_runtime.process_env
         assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in isolated_runtime.env_file_values

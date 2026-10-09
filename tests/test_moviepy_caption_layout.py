@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import tracemalloc
 from io import BytesIO
 from itertools import combinations
 from pathlib import Path
@@ -148,17 +149,24 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
     """Default-font glyphs fit both canvases and the timed background darkens video."""
     video = ColorClip(video_size, color=(255, 255, 255), duration=3).with_fps(30)
     monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
     srt_path = tmp_path / "captions.srt"
     srt_path.write_text(f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
     output = tmp_path / "captioned.mp4"
     rendered_frames: list[NDArray[np.uint8]] = []
+    rendered_words: list[list[TextClip]] = []
+    create_caption_clips = adapter.MindRoomMoviePyVideoTools.create_caption_clips
+
+    def record_words(toolkit: adapter.MindRoomMoviePyVideoTools, *args: object, **kwargs: object) -> list[TextClip]:
+        rendered_words.append(create_caption_clips(toolkit, *args, **kwargs))
+        return rendered_words[-1]
 
     def inspect_frame(final: CompositeVideoClip, path: str, **_kwargs: object) -> None:
         assert len(final.clips) == 2
         caption = final.clips[1]
         origin_x, origin_y = compute_position(caption.size, final.size, caption.pos(0))
         assert caption.h <= video_size[1]
-        for clip in caption.clips[1:]:
+        for clip in rendered_words[-1]:
             rows, columns = np.nonzero(clip.mask.get_frame(0))
             if not len(rows):  # Spaces have no visible pixels.
                 continue
@@ -180,9 +188,11 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
         rendered_frames.append(frame)
         Path(path).write_bytes(b"rendered frame")
 
+    monkeypatch.setattr(adapter.MindRoomMoviePyVideoTools, "create_caption_clips", record_words)
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", inspect_frame)
+    (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MindRoomMoviePyVideoTools().embed_captions(
+    result = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),
@@ -193,6 +203,48 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
     assert result == str(output)
     assert output.read_bytes() == b"rendered frame"
     assert len(rendered_frames) == 1
+
+
+def _captioned_render_peak(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line_count: int) -> int:
+    """Caption a white video with one three-second line per caption and return the traced memory peak."""
+    video = ColorClip((640, 360), color=(255, 255, 255), duration=3 * line_count).with_fps(10)
+    monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
+    # Each caption's single word lasts longer than a line may, so every caption becomes its own line.
+    captions = [
+        f"{index + 1}\n00:{index * 3 // 60:02d}:{index * 3 % 60:02d},000 --> "
+        f"00:{(index + 1) * 3 // 60:02d}:{(index + 1) * 3 % 60:02d},000\nAgyp{index}\n"
+        for index in range(line_count)
+    ]
+    srt_path = tmp_path / f"captions-{line_count}.srt"
+    srt_path.write_text("\n".join(captions), encoding="utf-8")
+    (tmp_path / "input.mp4").write_bytes(b"input video")
+
+    def render_every_line(final: CompositeVideoClip, path: str, **_kwargs: object) -> None:
+        for index in range(line_count):
+            # The 60%-opaque black background of the active line covers the white video.
+            assert final.get_frame(3 * index + 1.5)[-1, 0].tolist() == pytest.approx([102, 102, 102], abs=1)
+        Path(path).write_bytes(b"rendered")
+
+    monkeypatch.setattr(CompositeVideoClip, "write_videofile", render_every_line)
+    toolkit = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path)
+    tracemalloc.start()
+    try:
+        result = toolkit.embed_captions("input.mp4", srt_path.name, f"captioned-{line_count}.mp4")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result == f"captioned-{line_count}.mp4"
+    return peak
+
+
+def test_embed_captions_keeps_one_caption_line_in_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Caption memory stays flat as captions grow, instead of keeping every line's full-width canvases."""
+    short = _captioned_render_peak(monkeypatch, tmp_path, 3)
+    long = _captioned_render_peak(monkeypatch, tmp_path, 15)
+
+    # Each line's canvases take about 1.7 MiB at this width, so keeping all of them would add about 20 MiB.
+    assert long - short < 4 << 20
 
 
 @pytest.mark.parametrize("font_source", ["default", "file", "overhang-file"])
@@ -297,6 +349,7 @@ def test_oversized_captions_preserve_existing_output(
     """An impossible requested size fails before rendering or replacing output."""
     video = ColorClip((320, 180), color=(255, 255, 255), duration=3).with_fps(30)
     monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
     srt_path = tmp_path / "captions.srt"
     srt_path.write_text(f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
     output = tmp_path / "captioned.mp4"
@@ -306,8 +359,9 @@ def test_oversized_captions_preserve_existing_output(
         pytest.fail("Invalid caption geometry reached video encoding")
 
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", unexpected_render)
+    (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MindRoomMoviePyVideoTools().embed_captions(
+    result = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),
@@ -317,4 +371,4 @@ def test_oversized_captions_preserve_existing_output(
     assert result.startswith("Failed to embed captions:")
     assert dimension in result
     assert output.read_bytes() == b"existing video"
-    assert set(tmp_path.iterdir()) == {srt_path, output}
+    assert set(tmp_path.iterdir()) == {tmp_path / "input.mp4", srt_path, output}

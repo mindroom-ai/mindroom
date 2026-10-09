@@ -1,0 +1,50 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $clientPeers := include "mindroom-matrixrtc.clientPeers" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mindroom-matrixrtc.livekitName" . }}
+  labels:
+    {{- include "mindroom-matrixrtc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: livekit
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "livekit") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Signaling and the server API through the public proxy.
+    # The authorization service calls the server API through the public auth.livekitUrl, so its requests also arrive from the proxy.
+    - from:
+        {{- $clientPeers | trim | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.livekit.port }}
+    # WebRTC media arrives from any client through the media load balancer.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.livekit.media.ports.tcp }}
+        - protocol: UDP
+          port: {{ .Values.livekit.media.ports.udp }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mindroom-matrixrtc.authName" . }}
+  labels:
+    {{- include "mindroom-matrixrtc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auth
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "auth") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- $clientPeers | trim | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.auth.port }}
+{{- end }}

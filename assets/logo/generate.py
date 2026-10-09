@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 from animation import animated_document
 from app_icons import app_icon_document
-from artwork import SVG, XLINK, Network, build_document, group, polygon
+from artwork import SVG, XLINK, Network, build_document, group, open_frame_under_cube, polygon
 from geometry import joined_polygons, subtract
 from lxml import etree
 from optimize import compact_xml, optimize_document
@@ -208,6 +208,10 @@ def generate() -> dict[str, bytes]:
     for name, content in list(outputs.items()):
         if name.endswith(".svg"):
             outputs[name.removesuffix(".svg") + ".svgz"] = gzip.compress(content, mtime=0)
+    # MindRoom Chat copies this mark as plain SVG, and Git stores it as a small delta of logo-mark.svg; an SVGZ would not delta.
+    movable_cube = deepcopy(transparent)
+    open_frame_under_cube(movable_cube)
+    outputs["logo-mark-movable-cube.svg"] = framed_mark(serialize(movable_cube))
     return outputs
 
 

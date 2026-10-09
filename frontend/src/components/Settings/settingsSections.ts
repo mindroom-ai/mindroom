@@ -52,7 +52,6 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "show_stop_button",
           "show_tool_calls",
           "coalescing",
-          "auto_resume_after_restart",
         ],
       },
     ],

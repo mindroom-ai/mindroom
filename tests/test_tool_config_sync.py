@@ -31,12 +31,7 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # host runs this suite without it.
 OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
 IGNORED_AGNO_PARAMS = {
-    # Trusted live worker binding is never authored or serialized as user configuration.
-    "shell": {"worker_binding"},
-    # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
-    "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.
-    "crawl4ai": {"proxy_config"},
     "firecrawl": {"search_params"},
     "spider": {"optional_params"},
     "mem0": {"config"},
@@ -47,6 +42,8 @@ IGNORED_AGNO_PARAMS = {
     "youtube": {"proxies"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
+    # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
+    "newspaper": {"include_summary"},
 }
 IGNORED_EXTRA_CONFIG_FIELDS = {
     # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
@@ -233,6 +230,34 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
     assert captured["sandbox_language"] is None
     assert captured["sandbox_env_vars"] is None
     assert captured["sandbox_labels"] is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [({}, True), ({"verify_ssl": None}, True), ({"verify_ssl": True}, True), ({"verify_ssl": False}, False)],
+)
+def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, object],
+    *,
+    expected: bool,
+) -> None:
+    """Only an explicit false may disable certificate checks for Daytona's API key traffic; unset and null verify."""
+    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+
+    tool_class(api_key="dt-test", **overrides)
+
+    assert captured["verify_ssl"] is expected
+    fields = {field.name: field for field in TOOL_METADATA["daytona"].config_fields or []}
+    assert fields["verify_ssl"].default is True
 
 
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
@@ -440,6 +465,11 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
                 or "password" in param_name.lower()
                 or "secret" in param_name.lower()
                 or "key" in param_name.lower()
+                or "credential" in param_name.lower()
+                or "headers" in param_name.lower()
+                or "db_url" in param_name.lower()
+                or "env_vars" in param_name.lower()
+                or param_name.lower().endswith("_pat")  # personal access token
             ):
                 expected_type = "password"
             elif (

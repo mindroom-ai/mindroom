@@ -26,6 +26,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
 import mindroom.bedrock_claude as bedrock_claude_module
+from mindroom.agno_compat_claude import request_kwargs_with_replay_safe_tool_search_results
 from mindroom.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
 from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
@@ -34,7 +35,7 @@ from mindroom.claude_prompt_cache import (
     _count_cache_markers,
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
-    _request_kwargs_with_replay_safe_tool_search_results,
+    _request_kwargs_without_unavailable_tool_references,
     aclose_anthropic_async_client,
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
@@ -1440,12 +1441,12 @@ def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"][0] == _TOOL_SEARCH_RESULT_BLOCK
     assert prepared["messages"][0]["content"][1] == {"type": "text", "text": "found it"}
     assert "citations" in request_kwargs["messages"][0]["content"][0]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> None:
@@ -1466,7 +1467,7 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
@@ -1476,13 +1477,13 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
     ]
     assert request_kwargs["messages"][0]["content"][0] == _ORPHAN_TOOL_SEARCH_USE_BLOCK
     assert "citations" in request_kwargs["messages"][0]["content"][3]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
+def test_unavailable_tool_references_drops_unavailable_references() -> None:
     """A replayed search result should retain only tools available on the current request."""
     result_block = {
-        **_DIRTY_TOOL_SEARCH_RESULT_BLOCK,
+        **_TOOL_SEARCH_RESULT_BLOCK,
         "content": {
             "tool_references": [
                 {"type": "tool_reference", "tool_name": "get_weather"},
@@ -1502,7 +1503,7 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _SERVER_TOOL_USE_BLOCK,
@@ -1515,12 +1516,11 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
         },
     ]
     assert len(request_kwargs["messages"][0]["content"][1]["content"]["tool_references"]) == 4
-    assert "citations" in request_kwargs["messages"][0]["content"][1]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unavailable() -> None:
-    """A search use and result should both disappear when no referenced tool remains available."""
+def test_unavailable_tool_references_empties_result_when_all_references_are_unavailable() -> None:
+    """A search whose referenced tools are all unavailable keeps its pair with an empty result."""
     request_kwargs = {
         "tools": [_wire_tool("other_tool")],
         "messages": [
@@ -1529,26 +1529,32 @@ def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unav
                 "content": [
                     dict(_OTHER_SERVER_TOOL_USE_BLOCK),
                     dict(_SERVER_TOOL_USE_BLOCK),
-                    dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK),
+                    dict(_TOOL_SEARCH_RESULT_BLOCK),
                     {"type": "text", "text": "found it"},
                 ],
             },
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_01ABC",
+            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+        },
         {"type": "text", "text": "found it"},
     ]
     assert request_kwargs["messages"][0]["content"][1] == _SERVER_TOOL_USE_BLOCK
-    assert request_kwargs["messages"][0]["content"][2] == _DIRTY_TOOL_SEARCH_RESULT_BLOCK
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs["messages"][0]["content"][2] == _TOOL_SEARCH_RESULT_BLOCK
+    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_pairs_without_a_tools_array() -> None:
-    """Missing current tools means every replayed tool reference is stale."""
+def test_unavailable_tool_references_empties_results_without_a_tools_array() -> None:
+    """Missing current tools means every replayed tool reference is stale, so the result is emptied."""
     request_kwargs = {
         "messages": [
             {
@@ -1562,18 +1568,26 @@ def test_replay_safe_tool_search_results_drops_pairs_without_a_tools_array() -> 
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
 
-    assert prepared["messages"][0]["content"] == [_OTHER_SERVER_TOOL_USE_BLOCK]
+    assert prepared["messages"][0]["content"] == [
+        _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_01ABC",
+            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+        },
+    ]
     assert request_kwargs["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
         _SERVER_TOOL_USE_BLOCK,
         _TOOL_SEARCH_RESULT_BLOCK,
     ]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_returns_original_when_references_are_available() -> None:
+def test_unavailable_tool_references_returns_original_when_references_are_available() -> None:
     """A clean replay should preserve both payload bytes and object identity."""
     request_kwargs = {
         "tools": [_wire_tool("get_weather")],
@@ -1589,7 +1603,71 @@ def test_replay_safe_tool_search_results_returns_original_when_references_are_av
         ],
     }
 
-    assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
+    assert _request_kwargs_without_unavailable_tool_references(request_kwargs) is request_kwargs
+
+
+def test_unavailable_tool_references_keeps_empty_search_between_signed_thinking() -> None:
+    """A search that matched nothing must stay, or the tool loop's two thinking blocks become adjacent."""
+    request_kwargs = {
+        "tools": [_wire_tool("get_weather")],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "What is the weather?"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig-before-search"},
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    {
+                        **_TOOL_SEARCH_RESULT_BLOCK,
+                        "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+                    },
+                    {"type": "thinking", "thinking": "", "signature": "sig-after-search"},
+                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "sunny"}]},
+        ],
+    }
+
+    assert _request_kwargs_without_unavailable_tool_references(request_kwargs) is request_kwargs
+
+
+def test_unavailable_tool_references_empties_filtered_search_between_signed_thinking() -> None:
+    """A search whose found tools are all gone keeps its pair, so signed thinking blocks never become adjacent."""
+    thinking_before = {"type": "thinking", "thinking": "", "signature": "sig-before-search"}
+    thinking_after = {"type": "thinking", "thinking": "", "signature": "sig-after-search"}
+    request_kwargs = {
+        "tools": [_wire_tool("bridge_call_tool")],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "List the open jobs."}]},
+            {
+                "role": "assistant",
+                "content": [
+                    dict(thinking_before),
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    dict(_TOOL_SEARCH_RESULT_BLOCK),
+                    dict(thinking_after),
+                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "done"}]},
+        ],
+    }
+
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
+
+    content = prepared["messages"][1]["content"]
+    assert [block["type"] for block in content] == [
+        "thinking",
+        "server_tool_use",
+        "tool_search_tool_result",
+        "thinking",
+        "tool_use",
+    ]
+    assert content[0] == thinking_before
+    assert content[3] == thinking_after
+    assert content[2]["content"]["tool_references"] == []
+    assert request_kwargs["messages"][1]["content"][2] == _TOOL_SEARCH_RESULT_BLOCK
 
 
 @pytest.mark.asyncio
@@ -1856,15 +1934,22 @@ def _wire_tool_search_results(wire_messages: list[dict[str, object]]) -> list[ob
     ]
 
 
+_EMPTIED_TOOL_SEARCH_RESULT_BLOCK = {
+    "type": "tool_search_tool_result",
+    "tool_use_id": "srvtoolu_01ABC",
+    "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+}
+
+
 def test_prompt_cache_hook_sanitizes_replayed_tool_search_results() -> None:
-    """A replayed search pair with no currently available tool must not reach the wire."""
+    """A replayed search result with no currently available tool reaches the wire emptied and schema-clean."""
     model = _vertex_claude_model()
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
-    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == []
+    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
 
 
 def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_tools() -> None:
@@ -1882,7 +1967,7 @@ def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
     wire_messages = captured_kwargs[0]["messages"]
-    assert _wire_tool_search_results(wire_messages) == []
+    assert _wire_tool_search_results(wire_messages) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
     assert _count_cache_markers({"messages": list(wire_messages)}) == 0
 
 

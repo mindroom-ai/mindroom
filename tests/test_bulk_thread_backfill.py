@@ -14,13 +14,18 @@ from mindroom.event_journal import replacement_target
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
-    OpaqueEncryptedThreadHistoryError,
+    _MAX_THREAD_ROOM_SCAN_PAGES,
+    _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES,
+    _ThreadRoomScanBoundError,
+    _UnresolvedOpaqueRoomHistoryError,
     fetch_thread_event_sources_via_room_messages,
     fetch_thread_messages_from_source,
     find_outbox_delivery_event_id_via_room_messages,
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
+from tests.conftest import serve_media_from_download
+from tests.cpu_budget_helpers import cpu_budget
 
 
 def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:
@@ -122,11 +127,7 @@ def _messages_response(chunk: list[nio.Event], *, end: str | None) -> nio.RoomMe
 
 
 def _opaque_reply_event(event_id: str, *, replies_to: str, timestamp: int) -> nio.Event:
-    """Return ciphertext this client could not decrypt, replying to an event the scan never saw.
-
-    A client holding the megolm session decrypts the same event and resolves the relation, so
-    whether this lands in ``unresolved_opaque_event_ids`` depends on which client ran the scan.
-    """
+    """Return ciphertext this client could not decrypt, with its reply relation left in cleartext."""
     return raw_nio_event(
         {
             "event_id": event_id,
@@ -402,7 +403,7 @@ async def test_exact_delivery_scan_cannot_prove_absence_past_opaque_bot_cipherte
     client = AsyncMock()
     client.room_messages = AsyncMock(return_value=_messages_response([opaque], end=None))
 
-    with pytest.raises(OpaqueEncryptedThreadHistoryError, match="exact delivery"):
+    with pytest.raises(_UnresolvedOpaqueRoomHistoryError, match="exact delivery"):
         await find_response_event_ids_via_room_messages(
             client,
             _ROOM_ID,
@@ -486,6 +487,129 @@ async def test_scan_failure_log_names_the_acting_client() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_scan_stops_at_its_page_bound_without_calling_the_root_absent() -> None:
+    """A root older than the scan bound is unproven, not missing, and the walk stops at the bound."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    pages_served = 0
+
+    async def endless_history(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        nonlocal pages_served
+        pages_served += 1
+        if pages_served > _MAX_THREAD_ROOM_SCAN_PAGES + 5:
+            msg = "the room scan kept paging past its bound"
+            raise AssertionError(msg)
+        return _messages_response(
+            [_message_event(f"$filler-{pages_served}:localhost", "filler", timestamp=pages_served)],
+            end=f"page-{pages_served}",
+        )
+
+    client.room_messages = AsyncMock(side_effect=endless_history)
+
+    with pytest.raises(_ThreadRoomScanBoundError) as caught:
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$ancient-root:localhost")
+
+    assert not isinstance(caught.value, ThreadRoomScanRootNotFoundError)
+    assert client.room_messages.await_count == _MAX_THREAD_ROOM_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+async def test_thread_scan_stops_once_it_retains_its_message_bound() -> None:
+    """Ordinary messages are kept until the walk ends, so their count bounds the walk before the page bound does."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    per_page = 100
+    pages_served = 0
+
+    async def full_pages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        nonlocal pages_served
+        pages_served += 1
+        return _messages_response(
+            [
+                _message_event(f"$filler-{pages_served}-{index}:localhost", "filler", timestamp=pages_served)
+                for index in range(per_page)
+            ],
+            end=f"page-{pages_served}",
+        )
+
+    client.room_messages = AsyncMock(side_effect=full_pages)
+
+    with pytest.raises(_ThreadRoomScanBoundError):
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$ancient-root:localhost")
+
+    assert client.room_messages.await_count == _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES // per_page
+
+
+@pytest.mark.asyncio
+async def test_thread_scan_counts_edits_of_distinct_originals_toward_its_kept_bound() -> None:
+    """Edits naming different originals are each kept, so they count toward the kept-event bound."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    per_page = 100
+    pages_served = 0
+
+    async def edit_pages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        nonlocal pages_served
+        pages_served += 1
+        return _messages_response(
+            [
+                _edit_event(
+                    f"$edit-{pages_served}-{index}:localhost",
+                    f"$made-up-{pages_served}-{index}:localhost",
+                    timestamp=pages_served,
+                    thread_root_id="$other-root:localhost",
+                )
+                for index in range(per_page)
+            ],
+            end=f"page-{pages_served}",
+        )
+
+    client.room_messages = AsyncMock(side_effect=edit_pages)
+
+    with pytest.raises(_ThreadRoomScanBoundError):
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$ancient-root:localhost")
+
+    assert client.room_messages.await_count == _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES // per_page
+
+
+@pytest.mark.asyncio
+async def test_thread_scan_reaches_a_root_behind_hundreds_of_pages_of_other_replies_edits() -> None:
+    """Every streaming edit in the room counts toward the scan bound, so a busy room's ordinary thread still fits.
+
+    A streamed reply leaves dozens of edits on a homeserver that keeps them, so
+    a few hundred replies elsewhere in the room fill 100 pages.
+    """
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    edit_pages = [
+        _messages_response(
+            [
+                _edit_event(
+                    f"$edit-{page}:localhost",
+                    "$other-reply:localhost",
+                    timestamp=10_000 - page,
+                    thread_root_id="$other-root:localhost",
+                ),
+            ],
+            end=f"page-{page}",
+        )
+        for page in range(300)
+    ]
+    root_page = _messages_response(
+        [
+            _message_event("$reply:localhost", "reply", timestamp=2, thread_root_id="$root:localhost"),
+            _message_event("$root:localhost", "root", timestamp=1),
+        ],
+        end=None,
+    )
+    client.room_messages = AsyncMock(side_effect=[*edit_pages, root_page])
+
+    scan = await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$root:localhost")
+
+    assert [source["event_id"] for source in scan.event_sources] == ["$root:localhost", "$reply:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_root_not_found_log_names_the_acting_client() -> None:
     """A scan that never sees the thread root must also name the acting client.
 
@@ -510,32 +634,65 @@ async def test_root_not_found_log_names_the_acting_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unresolved_opaque_scan_log_names_the_acting_client() -> None:
-    """A scan blocked by undecryptable relations must name the client that could not decrypt them.
+@pytest.mark.parametrize("decrypted", [False, True])
+async def test_thread_scan_skips_a_reply_to_an_unseen_event_whether_or_not_it_decrypts(decrypted: bool) -> None:
+    """A reply whose target the scan never saw stays out of the thread, readable or not.
 
-    Whether ciphertext stays opaque is a property of the acting client's megolm store, not of the
-    room, so this is the failure where identity is the only thing separating a key-distribution
-    problem from a server one.
+    Its relation is cleartext either way, so whether this client holds the megolm session must not
+    decide whether the thread can be rebuilt at all.
     """
+    reply = (
+        _message_event("$reply:localhost", "reply", timestamp=3000, reply_to_event_id="$unscanned:localhost")
+        if decrypted
+        else _opaque_reply_event("$reply:localhost", replies_to="$unscanned:localhost", timestamp=3000)
+    )
     client = AsyncMock()
     client.user_id = "@agent:localhost"
     client.room_messages = AsyncMock(
         return_value=_messages_response(
             [
-                _opaque_reply_event("$opaque:localhost", replies_to="$unscanned:localhost", timestamp=2000),
+                reply,
+                _message_event("$child:localhost", "child", timestamp=2000, thread_root_id="$root:localhost"),
                 _message_event("$root:localhost", "root", timestamp=1000),
             ],
             end=None,
         ),
     )
 
-    with capture_logs() as logs, pytest.raises(OpaqueEncryptedThreadHistoryError):
-        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$root:localhost")
+    scan = await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$root:localhost")
 
-    opaque = [entry for entry in logs if "opaque encrypted relations with unresolved impact" in entry["event"]]
-    assert len(opaque) == 1
-    assert opaque[0]["user_id"] == "@agent:localhost"
-    assert opaque[0]["unresolved_opaque_event_ids"] == ["$opaque:localhost"]
+    assert [source["event_id"] for source in scan.event_sources] == ["$root:localhost", "$child:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_thread_scan_settles_a_long_opaque_reply_chain_within_a_cpu_budget() -> None:
+    """Thousands of chained undecryptable replies under an ordinary message are settled without rewalking."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    opaque_replies = [
+        _opaque_reply_event(
+            f"$opaque-{index}:localhost",
+            replies_to=f"$opaque-{index - 1}:localhost" if index else "$plain:localhost",
+            timestamp=10 + index,
+        )
+        for index in range(5_000)
+    ]
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                *reversed(opaque_replies),
+                _message_event("$plain:localhost", "plain", timestamp=3),
+                _message_event("$child:localhost", "child", timestamp=2, thread_root_id="$root:localhost"),
+                _message_event("$root:localhost", "root", timestamp=1),
+            ],
+            end=None,
+        ),
+    )
+
+    with cpu_budget(0.5):
+        scan = await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$root:localhost")
+
+    assert [source["event_id"] for source in scan.event_sources] == ["$root:localhost", "$child:localhost"]
 
 
 @pytest.mark.asyncio
@@ -574,6 +731,60 @@ async def test_thread_messages_from_source_resolves_edits_without_touching_a_sto
     # so the parameter list is the thing worth pinning.
     parameters = inspect.signature(fetch_thread_messages_from_source).parameters
     assert not [name for name in parameters if "cache" in name or "store" in name]
+
+
+@pytest.mark.asyncio
+async def test_thread_messages_from_source_never_download_sidecars() -> None:
+    """A freshness read must not fetch one attachment per message in the thread.
+
+    Its callers read senders, relations, and MindRoom metadata, which a sidecar
+    preview carries itself. Downloading every sidecar, original and edit alike,
+    let anyone who can post make each summary pass hold hundreds of files.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+    sidecar = {
+        "msgtype": "m.file",
+        "url": "mxc://localhost/sidecar",
+        "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+    }
+    client = AsyncMock()
+    client.download = AsyncMock(
+        return_value=nio.DownloadResponse(b'{"msgtype":"m.text","body":"full text"}', "application/json", None),
+    )
+    serve_media_from_download(client)
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [
+                    _edit_event(
+                        "$reply-edit:localhost",
+                        reply_id,
+                        timestamp=3000,
+                        thread_root_id=root_id,
+                        new_body="edited preview",
+                        msgtype="m.file",
+                        extra_content=sidecar,
+                    ),
+                    _message_event(
+                        reply_id,
+                        "preview",
+                        timestamp=2000,
+                        thread_root_id=root_id,
+                        msgtype="m.file",
+                        extra_content=sidecar,
+                    ),
+                    _message_event(root_id, "the question", timestamp=1000),
+                ],
+                end=None,
+            ),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    assert [message.body for message in messages] == ["the question", "edited preview"]
+    client.download.assert_not_awaited()
 
 
 def _one_page_thread_client(chunk: list[nio.Event]) -> AsyncMock:
@@ -989,13 +1200,7 @@ async def test_thread_read_excludes_an_edit_whose_original_the_scan_never_saw() 
 
 @pytest.mark.asyncio
 async def test_thread_messages_from_source_raises_rather_than_returning_a_partial_thread() -> None:
-    """A scan that never finds the root must raise, not answer with what it saw.
-
-    The auto-resume freshness check dropped its explicit completeness guard
-    because this raises. If it returned the partial page instead, a thread
-    whose root scrolled past the scan window would look like it had no newer
-    human activity, and a stale turn would resume on top of one.
-    """
+    """A scan that never finds the root must raise, not answer with what it saw."""
     client = AsyncMock()
     client.room_messages = AsyncMock(
         side_effect=[

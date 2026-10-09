@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
 from itertools import islice
@@ -17,11 +17,16 @@ from pydantic import BaseModel
 REDACTED = "***redacted***"
 REDACTION_FAILED = "[redaction failed]"
 __all__ = [
+    "MAX_CANONICAL_JSON_INTEGER",
     "REDACTED",
     "REDACTION_FAILED",
+    "URL_PATTERN",
+    "nests_beyond_redaction_depth",
+    "redact_config_text",
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
+    "truncate_review_text",
 ]
 _TRUNCATED = "... [truncated]"
 _MAX_TEXT_INPUT_LENGTH = 64 * 1024
@@ -34,7 +39,7 @@ _MAX_DEPTH = 32
 # Start once per scheme-character run, avoiding quadratic suffix rescans.
 # Preserve leading non-letters while still redacting embedded URLs such as
 # ``123https://user:password@host`` that the unanchored scan recognized.
-_URL_PATTERN = re.compile(
+URL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*+)"
     r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>]+)",
 )
@@ -91,6 +96,34 @@ _TOKEN_LIKE_MARKERS = (
     "github_pat_",
     "AIza",
 )
+# Reviewer-facing copies hide only credentials in known token formats with realistic lengths, so hosts,
+# paths, and short names such as `sk-deploy.sh` stay visible; a token may end a sentence but not a file
+# name or host. Every hidden span is letters, digits, and `._-`; possessive quantifiers and the lookbehind
+# keep matching linear on long runs of token characters.
+_REVIEW_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])(?P<token>"
+    r"(?:sk|pk)-[A-Za-z0-9_-]{16,}+"
+    r"|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}+"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}+"
+    r"|gh[pousr]_[A-Za-z0-9]{30,}+"
+    r"|github_pat_[A-Za-z0-9_]{30,}+"
+    r"|AIza[0-9A-Za-z_-]{30,}+"
+    r"|eyJ[A-Za-z0-9_-]{8,}+\.eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]*+"
+    r")(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])",
+)
+# Only the `sk-` and `pk-` prefixes also start ordinary kebab-case names such as pod, image, or branch
+# names; a generated key has a long run mixing character classes, so those names stay visible.
+_KEBAB_PREFIXES = ("sk-", "pk-")
+_RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
+# Config prose says "ask for the API key before calling", "bearer JWT", or "keep the API key server-side";
+# the word a log pattern takes for a token there is letters, possibly hyphen-joined and ending a sentence.
+_ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*\.?")
+# Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
+_LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
+_PLACEHOLDER_OPEN = "\u27e6"
+_PLACEHOLDER_CLOSE = "\u27e7"
+# Matrix canonical JSON, required for unencrypted room events, rejects floats and integers outside this range.
+MAX_CANONICAL_JSON_INTEGER = 2**53 - 1
 _SECRET_KEYS: frozenset[str] = frozenset(
     {
         "access_token",
@@ -322,10 +355,22 @@ class _RedactionError(Exception):
     """Internal signal for input that cannot be redacted safely within its budget."""
 
 
-def _next_assignment_value_end(value: str, value_start: int) -> int:
-    literal_terminator = _ASSIGNMENT_VALUE_TERMINATOR_PATTERN.search(value, value_start)
-    next_assignment = _NEXT_ASSIGNMENT_PATTERN.search(value, value_start)
-    return min(match.start() if match is not None else len(value) for match in (literal_terminator, next_assignment))
+def _forward_match_start(pattern: re.Pattern[str], value: str) -> Callable[[int], int]:
+    """Return a lookup of the first match start at or after each position of a forward-only scan.
+
+    A match found earlier is still the first one for any later position up to it, so the lookup
+    searches again only once the scan passes it and reads each stretch of text once in total.
+    """
+    match_start = -1
+
+    def lookup(position: int) -> int:
+        nonlocal match_start
+        if match_start < position:
+            match = pattern.search(value, position)
+            match_start = len(value) if match is None else match.start()
+        return match_start
+
+    return lookup
 
 
 def _find_unescaped_quote(value: str, quote: str, start: int, end: int) -> int:
@@ -340,13 +385,17 @@ def _find_unescaped_quote(value: str, quote: str, start: int, end: int) -> int:
     return -1
 
 
-def _assignment_value_span(value: str, value_start: int) -> tuple[int, int, int] | None:
+def _assignment_value_span(
+    value: str,
+    value_start: int,
+    unquoted_value_end: Callable[[int], int],
+) -> tuple[int, int, int] | None:
     if value_start >= len(value):
         return None
     if value[value_start] in "\r\n":
         raise _RedactionError
     if value[value_start] not in {"'", '"'}:
-        value_end = _next_assignment_value_end(value, value_start)
+        value_end = unquoted_value_end(value_start)
         if value_end == value_start:
             return None
         return value_start, value_end, value_end
@@ -382,6 +431,12 @@ def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> s
 def _redact_secret_assignments(value: str) -> str:
     """Redact shallow key assignments with one forward-only scan."""
     spans: list[tuple[int, int]] = []
+    literal_terminator = _forward_match_start(_ASSIGNMENT_VALUE_TERMINATOR_PATTERN, value)
+    next_assignment = _forward_match_start(_NEXT_ASSIGNMENT_PATTERN, value)
+
+    def unquoted_value_end(value_start: int) -> int:
+        return min(literal_terminator(value_start), next_assignment(value_start))
+
     search_start = 0
     while prefix_match := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start):
         search_start = prefix_match.end()
@@ -389,7 +444,7 @@ def _redact_secret_assignments(value: str) -> str:
         if not classification.is_secret:
             continue
 
-        value_span = _assignment_value_span(value, prefix_match.end())
+        value_span = _assignment_value_span(value, prefix_match.end(), unquoted_value_end)
         if value_span is None:
             continue
         value_start, value_end, match_end = value_span
@@ -485,7 +540,16 @@ def _redact_url_match(match: re.Match[str]) -> str:
     return match.group("prefix") + _redact_url(url) + trailing_backslashes
 
 
-def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
+def _redact_prose_token(match: re.Match[str]) -> str:
+    """Keep an ordinary word or kebab-case name that authored prose holds where a log would hold a token."""
+    token = match.group("token")
+    ordinary = _ORDINARY_WORD_PATTERN.fullmatch(token) and not token.lower().startswith(_KEBAB_PREFIXES)
+    if ordinary or not _looks_generated(token):
+        return match.group(0)
+    return _redact_matched_token(match)
+
+
+def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
     has_assignment = "=" in bounded_value or ":" in bounded_value
     has_url = "://" in bounded_value
@@ -495,21 +559,22 @@ def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
     if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token)):
         return _truncate_text(bounded_value, max_length)
-    redacted = _URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    redacted = URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    redact_token = _redact_prose_token if prose else _redact_matched_token
     if has_bearer:
-        redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
+        redacted = _BEARER_TOKEN_PATTERN.sub(redact_token, redacted)
     if has_api_key_message:
-        redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
+        redacted = _API_KEY_MESSAGE_PATTERN.sub(redact_token, redacted)
     if has_token:
-        redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
+        redacted = _TOKEN_LIKE_PATTERN.sub(redact_token, redacted)
     if has_assignment:
         redacted = _redact_secret_assignments(redacted)
     return _truncate_text(redacted, max_length)
 
 
-def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None) -> str:
+def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, prose: bool = False) -> str:
     try:
-        return _redact_sensitive_text(value, max_length=max_length)
+        return _redact_sensitive_text(value, max_length=max_length, prose=prose)
     except Exception:
         return _truncate_text(REDACTION_FAILED, max_length)
 
@@ -519,6 +584,76 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
         return _truncate_text(REDACTION_FAILED, max_length)
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
+
+
+def redact_config_text(value: str) -> str:
+    """Redact credential patterns in authored config text, showing the prose words log patterns would mask.
+
+    An ordinary word after "API key" or "bearer" and a kebab-case name such as ``sk-learn`` stay
+    visible; URL credentials, secret assignments, and generated tokens are masked as in logs.
+    """
+    if len(value) > _MAX_TEXT_INPUT_LENGTH:
+        return REDACTION_FAILED
+    return _redact_sensitive_text_fail_closed(value, max_length=None, prose=True)
+
+
+def _character_classes(run: str) -> int:
+    return len({"digit" if character.isdigit() else "upper" if character.isupper() else "lower" for character in run})
+
+
+def _looks_generated(token: str) -> bool:
+    if not token.startswith(_KEBAB_PREFIXES):
+        return True
+    return any(_character_classes(run) >= 2 for run in _RANDOM_RUN_PATTERN.findall(token))
+
+
+def truncate_review_text(value: str, max_length: int | None) -> str:
+    """Shorten reviewer-facing text without cutting a placeholder in half."""
+    if max_length is None or len(value) <= max_length:
+        return value
+    head = value[: max_length - len(_TRUNCATED)]
+    opening = head.rfind(_PLACEHOLDER_OPEN)
+    if opening > head.rfind(_PLACEHOLDER_CLOSE) and head[opening + 1 : opening + 2] != "=":
+        head = head[:opening]
+    return head + _TRUNCATED
+
+
+def _redact_review_tokens(value: str, *, max_length: int | None, placeholders: dict[str, str]) -> str:
+    """Replace each distinct credential in a known token format with its own numbered placeholder.
+
+    Equal tokens share a placeholder and different tokens get different ones, so the copy is
+    the original text with tokens renamed and loses only the characters of each hidden token.
+    A literal placeholder opening in the text is shown as ``\u27e6=``, so it cannot pass for a
+    placeholder, and a token that contains ``--``, which starts a comment in SQL, says so.
+    Tokens are replaced before shortening, so a shortened copy never numbers a cut-off token.
+    """
+
+    def placeholder(match: re.Match[str]) -> str:
+        token = match.group("token")
+        if not _looks_generated(token):
+            return token
+        if token not in placeholders:
+            comment = " --" if "--" in token else ""
+            placeholders[token] = f"{_PLACEHOLDER_OPEN}secret-{len(placeholders) + 1}{comment}{_PLACEHOLDER_CLOSE}"
+        return placeholders[token]
+
+    text = _LONE_SURROGATE_PATTERN.sub("\ufffd", value).replace(_PLACEHOLDER_OPEN, f"{_PLACEHOLDER_OPEN}=")
+    return truncate_review_text(_REVIEW_TOKEN_PATTERN.sub(placeholder, text), max_length)
+
+
+def _nests_beyond_depth(value: object, depth: int) -> bool:
+    if depth >= _MAX_DEPTH:
+        return True
+    if isinstance(value, Mapping):
+        return any(_nests_beyond_depth(item, depth + 1) for item in value.values())
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(_nests_beyond_depth(item, depth + 1) for item in value)
+    return False
+
+
+def nests_beyond_redaction_depth(value: object) -> bool:
+    """Return whether redaction would cut part of ``value`` off for nesting too deeply."""
+    return _nests_beyond_depth(value, 0)
 
 
 def _normalized_structured_value(value: object) -> object:
@@ -538,6 +673,28 @@ def _is_structured_mapping_key(value: object) -> bool:
     )
 
 
+def _review_mapping_key(
+    key_text: str,
+    index: int,
+    *,
+    unchanged_key_texts: frozenset[str],
+    taken: Mapping[str, object],
+    placeholders: dict[str, str],
+) -> str:
+    """Return a reviewer-facing key that gets the same treatment as text and never takes another key's text.
+
+    A key that review changed and that now collides is suffixed by its position, which stays linear
+    however many keys collide, and a key review left alone always keeps its own text.
+    """
+    review_key = _redact_review_tokens(key_text, max_length=None, placeholders=placeholders)
+    if review_key == key_text or (review_key not in unchanged_key_texts and review_key not in taken):
+        return review_key
+    review_key = f"{review_key}\ufffd{index}"
+    while review_key in unchanged_key_texts or review_key in taken:
+        review_key += "\ufffd"
+    return review_key
+
+
 def _redact_mapping(
     value: Mapping[object, object],
     *,
@@ -547,6 +704,7 @@ def _redact_mapping(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
+    token_placeholders: dict[str, str] | None,
     ancestor_ids: frozenset[int],
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
@@ -556,6 +714,12 @@ def _redact_mapping(
     items = list(value.items()) if max_collection_items is None else list(islice(value.items(), max_collection_items))
     key_texts = [_safe_str(key) for key, _ in items]
     reserved_keys: set[str] | None = None
+    # Only keys that review leaves unchanged keep their text; those are the texts a changed key must avoid.
+    unchanged_key_texts = (
+        frozenset(text for text in key_texts if _redact_review_tokens(text, max_length=None, placeholders={}) == text)
+        if token_placeholders is not None
+        else frozenset()
+    )
     for index, (key, item) in enumerate(items):
         key_text = key_texts[index]
         classification = _classify_key(key)
@@ -577,6 +741,14 @@ def _redact_mapping(
             while redacted_key in reserved_keys or redacted_key in redacted:
                 label_index += 1
                 redacted_key = f"<redacted structured key {label_index}>"
+        elif token_placeholders is not None:
+            redacted_key = _review_mapping_key(
+                key_text,
+                index,
+                unchanged_key_texts=unchanged_key_texts,
+                taken=redacted,
+                placeholders=token_placeholders,
+            )
         else:
             redacted_key = key_text
         redacted[redacted_key] = _redact_sensitive_data(
@@ -588,6 +760,7 @@ def _redact_mapping(
             _depth=depth + 1,
             _force_redact=force_redact or redact_key,
             _ancestor_ids=ancestor_ids,
+            token_placeholders=token_placeholders,
         )
     if mapping_is_truncated:
         redacted["__truncated__"] = f"{len(value) - len(items)} more items"
@@ -603,6 +776,7 @@ def _redact_sequence(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
+    token_placeholders: dict[str, str] | None,
     ancestor_ids: frozenset[int],
 ) -> list[_RedactedValue]:
     items = list(value) if max_collection_items is None else list(islice(value, max_collection_items))
@@ -616,6 +790,7 @@ def _redact_sequence(
             _depth=depth + 1,
             _force_redact=force_redact,
             _ancestor_ids=ancestor_ids,
+            token_placeholders=token_placeholders,
         )
         for item in items
     ]
@@ -624,17 +799,36 @@ def _redact_sequence(
     return redacted_items
 
 
+def _review_scalar_value(value: object, *, max_length: int | None, placeholders: dict[str, str]) -> _RedactedValue:
+    """Return a reviewer-facing copy of one scalar that Matrix can deliver unchanged."""
+    if isinstance(value, bytes):
+        return "<bytes>"
+    if isinstance(value, str | Path):
+        return _redact_review_tokens(str(value), max_length=max_length, placeholders=placeholders)
+    if isinstance(value, float):
+        # Matrix events cannot carry floats, so a reviewer-facing copy shows every float as text.
+        return str(value)
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > MAX_CANONICAL_JSON_INTEGER else value
+    return _redact_review_tokens(_safe_repr(value), max_length=max_length, placeholders=placeholders)
+
+
 def _redact_scalar_value(
     value: object,
     *,
     parent_key: str | None,
     max_string_length: int | None,
     force_redact: bool,
+    token_placeholders: dict[str, str] | None,
 ) -> _RedactedValue:
     if force_redact or (parent_key is not None and _should_redact_value_for_key(parent_key, value)):
-        redacted: _RedactedValue = REDACTED
-    elif isinstance(value, bytes):
-        redacted = "<bytes>"
+        return REDACTED
+    if token_placeholders is not None:
+        return _review_scalar_value(value, max_length=max_string_length, placeholders=token_placeholders)
+    if isinstance(value, bytes):
+        redacted: _RedactedValue = "<bytes>"
     elif isinstance(value, Path):
         redacted = str(value)
     elif isinstance(value, str):
@@ -657,6 +851,7 @@ def _redact_sensitive_data(
     max_string_length: int | None = None,
     max_collection_items: int | None = None,
     max_depth: int | None = None,
+    token_placeholders: dict[str, str] | None = None,
     _parent_key: str | None = None,
     _depth: int = 0,
     _force_redact: bool = False,
@@ -679,6 +874,7 @@ def _redact_sensitive_data(
             parent_key=_parent_key,
             max_string_length=max_string_length,
             force_redact=_force_redact,
+            token_placeholders=token_placeholders,
         )
     value_id = id(value)
     if value_id in _ancestor_ids:
@@ -695,6 +891,7 @@ def _redact_sensitive_data(
             max_depth=max_depth,
             force_redact=_force_redact,
             ancestor_ids=_ancestor_ids | {value_id},
+            token_placeholders=token_placeholders,
         )
     elif isinstance(value, list | tuple | set | frozenset):
         redacted = _redact_sequence(
@@ -706,6 +903,7 @@ def _redact_sensitive_data(
             max_depth=max_depth,
             force_redact=_force_redact,
             ancestor_ids=_ancestor_ids | {value_id},
+            token_placeholders=token_placeholders,
         )
     else:
         redacted = _redact_scalar_value(
@@ -713,6 +911,7 @@ def _redact_sensitive_data(
             parent_key=_parent_key,
             max_string_length=max_string_length,
             force_redact=_force_redact,
+            token_placeholders=token_placeholders,
         )
     return redacted
 
@@ -723,8 +922,15 @@ def redact_sensitive_data(
     max_string_length: int | None = None,
     max_collection_items: int | None = None,
     max_depth: int | None = None,
+    token_placeholders: dict[str, str] | None = None,
 ) -> _RedactedValue:
-    """Redact structured data without letting redaction break its caller."""
+    """Redact structured data without letting redaction break its caller.
+
+    With ``token_placeholders``, every field whose name marks it as secret is still hidden
+    whole, but inside text only credentials in known token formats are hidden, each distinct
+    token as a numbered placeholder recorded in the mapping. Reviewer-facing copies such as
+    tool approval cards use it, because hiding more of free text can hide what would run.
+    """
     collection_limit = None if max_collection_items is None else max(max_collection_items, 0)
     depth_limit = _MAX_DEPTH if max_depth is None else min(max(max_depth, 0), _MAX_DEPTH)
     try:
@@ -733,6 +939,7 @@ def redact_sensitive_data(
             max_string_length=max_string_length,
             max_collection_items=collection_limit,
             max_depth=depth_limit,
+            token_placeholders=token_placeholders,
         )
     except Exception:
         if isinstance(value, Mapping):

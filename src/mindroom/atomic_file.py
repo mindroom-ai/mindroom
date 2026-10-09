@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -61,3 +62,12 @@ def atomic_write_file_at(
             os.close(temp_fd)
         with suppress(FileNotFoundError):
             os.unlink(temp_name, dir_fd=directory_fd)
+
+
+def existing_file_mode(directory_fd: int, name: str) -> int | None:
+    """Return a regular entry's permission bits so a rewrite keeps them."""
+    try:
+        file_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return stat.S_IMODE(file_stat.st_mode) & 0o777 if stat.S_ISREG(file_stat.st_mode) else None

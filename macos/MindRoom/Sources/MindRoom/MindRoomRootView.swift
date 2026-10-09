@@ -24,6 +24,25 @@ struct MindRoomRootView: View {
             Divider()
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
+                    if runner.isPairing {
+                        HStack(spacing: 12) {
+                            if let approval = runner.pairingApproval {
+                                Text("Approve only if Chat shows code")
+                                Text(approval.code).monospaced().bold().textSelection(.enabled)
+                                Spacer()
+                                if navigation.section != .chat {
+                                    Button("Open Approval") { navigation.section = .chat }
+                                }
+                                Button("Open in Browser") { NSWorkspace.shared.open(approval.url) }
+                            } else {
+                                Text(runner.pairingCancelled ? "Cancelling connection…" : "Starting connection…")
+                                Spacer()
+                            }
+                            Button("Cancel", action: runner.cancelPairing).disabled(runner.pairingCancelled)
+                        }
+                        .padding(12)
+                        Divider()
+                    }
                     if navigation.section == .chat {
                         chatContent
                     } else if navigation.section == .dashboard {
@@ -98,6 +117,9 @@ struct MindRoomRootView: View {
             if state != .running { webTabs.serviceStopped() }
             else if navigation.section == .dashboard { webTabs.openDashboard() }
         }
+        .onChange(of: runner.pairingApproval) { _, approval in
+            if let approval { webTabs.openChat(url: approval.url) }
+        }
     }
 
     private var chatContent: some View {
@@ -105,8 +127,10 @@ struct MindRoomRootView: View {
             HStack {
                 Text("Chat").font(.headline)
                 Spacer()
-                Button("Reload") { webTabs.openChat(force: true) }
-                Button("Open in Browser") { NSWorkspace.shared.open(webTabs.preferences.url) }
+                Button("Reload") { webTabs.openChat(url: runner.pairingApproval?.url, force: true) }
+                if !runner.isPairing {
+                    Button("Open in Browser") { NSWorkspace.shared.open(webTabs.preferences.url) }
+                }
             }
             .padding(.horizontal, 16).padding(.vertical, 9)
             Divider()
@@ -115,14 +139,14 @@ struct MindRoomRootView: View {
                     .allowsHitTesting(webTabs.chatError == nil && !webTabs.chatLoading)
                     .accessibilityHidden(webTabs.chatError != nil || webTabs.chatLoading)
                 if let error = webTabs.chatError {
-                    webMessage(error, retry: { webTabs.openChat(force: true) })
+                    webMessage(error, retry: { webTabs.openChat(url: runner.pairingApproval?.url, force: true) })
                 } else if webTabs.chatLoading {
                     webLoading("Loading Chat…")
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { webTabs.openChat() }
+        .onAppear { webTabs.openChat(url: runner.pairingApproval?.url) }
     }
 
     @ViewBuilder

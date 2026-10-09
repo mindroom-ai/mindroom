@@ -26,11 +26,12 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import (
     configured_routable_entity_ids_for_room,
     entity_identity_registry,
+    persisted_bot_user_ids,
 )
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -74,6 +75,19 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
         CommandType.ENCRYPT,
+    },
+)
+# Commands an agent may post for a human; Desktop pairing, confirmations, and admin changes need the human in person.
+_COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN = frozenset(
+    {
+        CommandType.HELP,
+        CommandType.MODE,
+        CommandType.MODEL,
+        CommandType.SCHEDULE,
+        CommandType.LIST_SCHEDULES,
+        CommandType.CANCEL_SCHEDULE,
+        CommandType.EDIT_SCHEDULE,
+        CommandType.UNKNOWN,
     },
 )
 
@@ -262,6 +276,32 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
 
 
+def _room_admin_sender(context: CommandHandlerContext, event: _CommandEvent, requester_user_id: str) -> str:
+    """Return the sender whose room power may authorize a room-admin command besides the requester."""
+    # A managed entity's own room power never authorizes a command it posted for a human.
+    if event.sender in persisted_bot_user_ids(context.runtime_paths):
+        return requester_user_id
+    return event.sender
+
+
+def _room_has_only(config: Config, room: nio.MatrixRoom, member_ids: set[str]) -> bool:
+    """Return whether complete membership, including every invite, is exactly ``member_ids``."""
+    # The joined-member refresh never lists invites, so invites come from the synced projection.
+    # MindRoom's classic sync filter never loads members lazily, so that projection holds every invite.
+    # Sliding sync loads members lazily, so only the server's joined and invited counts can reveal an unseen invite.
+    # Without both counts, nio's member_count falls back to the projection size.
+    summary = room.summary
+    has_server_counts = (
+        summary is not None and summary.joined_member_count is not None and summary.invited_member_count is not None
+    )
+    return (
+        room_membership_is_complete(room)
+        and (has_server_counts or config.matrix_sync.mode == "classic")
+        and room.member_count == len(member_ids)
+        and cached_member_ids(room) == member_ids
+    )
+
+
 def agent_owns_command(
     command: Command,
     *,
@@ -275,10 +315,11 @@ def agent_owns_command(
         return True
     if command.type is not CommandType.DESKTOP:
         return False
-    return chat_pairing_desktop_error(config, agent_name) is None and cached_member_ids(room) == {
-        requester_user_id,
-        room.own_user_id,
-    }
+    return chat_pairing_desktop_error(config, agent_name) is None and _room_has_only(
+        config,
+        room,
+        {requester_user_id, room.own_user_id},
+    )
 
 
 async def _desktop_agent_for_room(
@@ -299,8 +340,7 @@ async def _desktop_agent_for_room(
     if len(eligible) != 1:
         return None
     agent_name, agent_user_id = eligible[0]
-    expected_members = {requester_user_id, room.own_user_id, agent_user_id}
-    if cached_member_ids(room) != expected_members:
+    if not _room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id}):
         return None
     return agent_name
 
@@ -312,6 +352,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     event: _CommandEvent,
     command: Command,
     requester_user_id: str,
+    acts_for_requester: bool = False,
 ) -> None:
     """Dispatch chat commands using injected bot context."""
     context.logger.info("Handling command", command_type=command.type.value)
@@ -321,7 +362,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     response_text = ""
     result_extra_content = None
 
-    if command.type == CommandType.HELP:
+    if acts_for_requester and command.type not in _COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN:
+        response_text = "❌ Agents cannot run this command for you. Send it yourself."
+
+    elif command.type == CommandType.HELP:
         topic = command.args.get("topic")
         response_text = get_command_help(topic)
 
@@ -356,8 +400,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
 
     elif command.type == CommandType.DESKTOP:
-        desktop_agent_name = await _desktop_agent_for_room(context, room, requester_user_id)
-        if desktop_agent_name is None:
+        if not room_membership_is_complete(room):
+            response_text = "❌ Couldn't confirm this room's membership; try again in a moment."
+        elif (desktop_agent_name := await _desktop_agent_for_room(context, room, requester_user_id)) is None:
             response_text = (
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
@@ -477,8 +522,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     room_id=room.room_id,
                     thread_id=effective_thread_id,
                     config_path=change_info["config_path"],
-                    old_value=change_info["old_value"],
                     new_value=change_info["new_value"],
+                    new_value_withheld=change_info["new_value_withheld"],
                     requester=resolved_requester_user_id,
                 )
 
@@ -504,6 +549,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 command.args.get("args_text", ""),
                 config=context.config,
                 runtime_paths=context.runtime_paths,
+                membership_index=context.agent_reply_memberships,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
                 requester_user_id=requester_user_id,
@@ -517,7 +563,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.THREAD_MODE:
@@ -527,7 +573,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.ENCRYPT:
@@ -536,7 +582,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             client=context.client,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.E2EE:

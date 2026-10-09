@@ -284,3 +284,20 @@ def test_build_mindroom_publishes_release_images_on_dispatch(
     manifest = build_mindroom_workflow["jobs"]["manifest"]
     assert manifest["if"] == "github.event_name == 'workflow_dispatch'"
     assert manifest["needs"] == "build"
+
+
+def _manifest_create_args(script: str) -> list[str]:
+    """Return the ``docker manifest create`` arguments of one workflow step, one image per continued line."""
+    lines = [line.removesuffix("\\").strip() for line in script.splitlines()]
+    start = lines.index("docker manifest create") + 1
+    return lines[start : lines.index("", start)]
+
+
+def test_latest_manifest_combines_this_releases_images(build_mindroom_workflow: dict[str, Any]) -> None:
+    """Overlapping releases rewrite the bare arch tags, so latest uses the same per-release images as the ref tag."""
+    runs = {step["name"]: step["run"] for step in _steps(build_mindroom_workflow, "manifest") if "run" in step}
+    latest = _manifest_create_args(runs["Create and push latest manifest"])
+    release = _manifest_create_args(runs["Create and push ref manifest"])
+
+    assert latest[0].endswith(":latest")
+    assert latest[1:] == release[1:]

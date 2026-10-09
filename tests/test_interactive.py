@@ -9,6 +9,33 @@ import pytest
 
 from mindroom import interactive
 from tests.conftest import make_matrix_client_mock
+from tests.cpu_budget_helpers import cpu_budget
+
+
+def test_hide_unfinished_interactive_handles_long_whitespace() -> None:
+    """Long whitespace runs finish promptly, including the stray-backtick fence line a backtracking matcher stalls on."""
+    for line, shown_before in (
+        (" " * 20_000, "Before."),
+        # Not a fence, because its info string holds a backtick; matching that by backtracking takes cubic time.
+        ("```" + " " * 2_000 + "`", "Before.\n```" + " " * 2_000 + "`"),
+    ):
+        text = f"Before.\n{line}\n```interactive\n{{"
+        with cpu_budget(0.5):
+            shown = interactive.hide_unfinished_interactive(text)
+        assert shown == shown_before
+
+
+def test_parse_and_format_interactive_handles_many_unclosed_openers() -> None:
+    """Thousands of interactive openers that never close parse in linear time, and the closed block still renders."""
+    block = (
+        '```interactive\n{"question": "Pick one", "options": [{"emoji": "✅", "label": "Yes", "value": "yes"}]}\n```\n'
+    )
+    for opener_count in (4_000, 9_000):
+        text = block + "```interactive\n" * opener_count
+        with cpu_budget(0.5):
+            response = interactive.parse_and_format_interactive(text, extract_mapping=True)
+        assert response.interactive_metadata is not None
+        assert response.formatted_text.startswith("Pick one\n")
 
 
 @pytest.fixture
@@ -21,6 +48,42 @@ def mock_client() -> AsyncMock:
 
 class TestInteractiveFunctions:
     """Test pure interactive formatting and Matrix button delivery."""
+
+    @pytest.mark.parametrize(
+        ("streamed", "shown"),
+        [
+            ('Two things.\n\n```interactive\n{"question": "What next?", "opt', "Two things."),
+            ("Two things.\n\n```interactive json\n", "Two things."),
+            ("Two things.\n\n```\ninteractive\n{", "Two things."),
+            ("Two things.\n\n```inter", "Two things.\n\n```inter"),
+            ("Two things.\n\n```", "Two things.\n\n```"),
+            ("Two things.\n\n```\nin", "Two things.\n\n```\nin"),
+            ("Two things.\n\n```python\nprint(", "Two things.\n\n```python\nprint("),
+            ('Two things.\n\n```json\n{"a": 1', 'Two things.\n\n```json\n{"a": 1'),
+            ("Two things.\n\nWhat next?\n1. 📊 Numbers", "Two things.\n\nWhat next?\n1. 📊 Numbers"),
+            ("Two things.\n\n```interactive js", "Two things.\n\n```interactive js"),
+            ("Notes:\n\n```text\ninteractive\n{", "Notes:\n\n```text\ninteractive\n{"),
+            ("Two things.\r\n\r\n```interactive\r\n{", "Two things."),
+            ("Before.\n\n```python\nprint(1)\n```", "Before.\n\n```python\nprint(1)\n```"),
+            (
+                'Pick:\n\n```interactive\n{"question": "Pick", "options": ["Yes", "No"]}\n```\n\nMore text.',
+                'Pick:\n\n```interactive\n{"question": "Pick", "options": ["Yes", "No"]}\n```\n\nMore text.',
+            ),
+            ("Code:\n\n````md\n```interactive\n{\n", "Code:\n\n````md\n```interactive\n{\n"),
+            ("Before.\n \t````\tinteractive json \t\r\n{", "Before."),
+            ("Before.\n``interactive\n{", "Before.\n``interactive\n{"),
+            ("Before.\n```interactive`\n{", "Before.\n```interactive`\n{"),
+            ("Before.\n\v```interactive\n{", "Before.\n\v```interactive\n{"),
+            ("Before.\n\r```interactive\n{", "Before.\n\r```interactive\n{"),
+            ("Before.\n````interactive\n{\n```", "Before."),
+            ("Before.\n```interactive\n{\n \t```` \t\r", "Before.\n```interactive\n{\n \t```` \t\r"),
+            ("Before.\n```interactive\n{\n```\r ", "Before."),
+            ("Before.\n```interactive\n{\n```\r\r", "Before."),
+        ],
+    )
+    def test_hide_unfinished_interactive_cuts_only_a_block_still_arriving(self, streamed: str, shown: str) -> None:
+        """Only a block marked exactly interactive is cut; partial markers and other code blocks stay as streamed."""
+        assert interactive.hide_unfinished_interactive(streamed) == shown
 
     @pytest.mark.parametrize(
         "response_text",

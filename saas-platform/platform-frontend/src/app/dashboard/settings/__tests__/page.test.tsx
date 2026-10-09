@@ -174,6 +174,7 @@ describe('SettingsPage', () => {
 
       expect(screen.getByText('Are you absolutely sure?')).toBeInTheDocument()
       expect(screen.getByText(/schedules your account for deletion/i)).toBeInTheDocument()
+      expect(screen.getByText(/Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion\. After 7 days, scheduled cleanup removes your hosted instances and account data when enabled\./)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /yes, delete my account/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
     })
@@ -193,6 +194,7 @@ describe('SettingsPage', () => {
     it('should request account deletion with confirmation', async () => {
       const deletionResponse = {
         status: 'deletion_scheduled',
+        message: 'Your account is scheduled for deletion. Stopping your hosted instances failed and is retried automatically. Paid subscriptions end at the end of their current billing period unless you cancel the deletion.',
         grace_period_days: 7
       }
       ;(api.requestAccountDeletion as jest.Mock).mockResolvedValue(deletionResponse)
@@ -207,8 +209,8 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(api.requestAccountDeletion).toHaveBeenCalledWith(true)
-        expect(screen.getByText(/account deletion scheduled/i)).toBeInTheDocument()
-        expect(screen.getByText(/While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
+        expect(screen.getByText(/Stopping your hosted instances failed and is retried automatically\. Paid subscriptions end at the end of their current billing period unless you cancel the deletion\. After 7 days, scheduled cleanup removes your hosted instances and account data when enabled\./)).toBeInTheDocument()
+        expect(screen.getByText(/Within those 7 days, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
       })
 
       // Should sign out and redirect after 3 seconds
@@ -239,7 +241,10 @@ describe('SettingsPage', () => {
     it('should cancel account deletion successfully', async () => {
       const deletedAccount = { ...mockAccount, deleted_at: '2025-01-01T00:00:00Z' }
       ;(api.getAccount as jest.Mock).mockResolvedValue(deletedAccount)
-      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({ status: 'success' })
+      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({
+        status: 'success',
+        message: 'Account deletion request has been cancelled. Stripe could not resume your subscription, so it still ends at the end of its billing period; resume it from the billing page.'
+      })
 
       render(<SettingsPage />)
 
@@ -252,7 +257,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(api.cancelAccountDeletion).toHaveBeenCalled()
-        expect(screen.getByText(/deletion has been cancelled/i)).toBeInTheDocument()
+        expect(screen.getByText(/Stripe could not resume your subscription, so it still ends at the end of its billing period; resume it from the billing page\./)).toBeInTheDocument()
       })
     })
 
@@ -281,9 +286,13 @@ describe('SettingsPage', () => {
       jest.useFakeTimers()
       ;(api.requestAccountDeletion as jest.Mock).mockResolvedValue({
         status: 'deletion_scheduled',
+        message: 'Your account is scheduled for deletion.',
         grace_period_days: 7
       })
-      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({ status: 'success' })
+      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({
+        status: 'success',
+        message: 'Account deletion request has been cancelled.'
+      })
       mockSupabase.auth.signOut.mockResolvedValue(undefined)
     })
 
@@ -312,7 +321,7 @@ describe('SettingsPage', () => {
       await scheduleDeletion()
       await cancelDeletion()
 
-      expect(screen.getByText('Account deletion has been cancelled.')).toBeInTheDocument()
+      expect(screen.getByText('Account deletion request has been cancelled.')).toBeInTheDocument()
       expect(screen.getByText('Danger Zone')).toBeInTheDocument()
       expect(screen.queryByText('Account Deletion Pending')).not.toBeInTheDocument()
       await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
@@ -330,7 +339,7 @@ describe('SettingsPage', () => {
       }))
       await cancelDeletion()
 
-      expect(screen.getByText('Account deletion has been cancelled.')).toBeInTheDocument()
+      expect(screen.getByText('Account deletion request has been cancelled.')).toBeInTheDocument()
       await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
       expect(mockSupabase.auth.signOut).not.toHaveBeenCalled()
       expect(mockRouter.push).not.toHaveBeenCalled()
@@ -460,11 +469,11 @@ describe('SettingsPage', () => {
       expect(screen.getByText(/Personal data:/, { exact: false })).toBeInTheDocument()
       expect(screen.getByText(/scheduled application-database cleanup attempts deletion when enabled; completion is not guaranteed/)).toBeInTheDocument()
       expect(screen.getByText(/Payment records:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/They are not removed by account cleanup and can prevent deletion/)).toBeInTheDocument()
+      expect(screen.getByText(/Payment records and Stripe webhook event records are kept for accounting after account deletion\. Only their account link is cleared/)).toBeInTheDocument()
       expect(screen.getByText(/Deletion audit record:/, { exact: false })).toBeInTheDocument()
       expect(screen.getByText(/After successful account deletion, a deletion audit record retains your account UUID/)).toBeInTheDocument()
       expect(screen.getByText(/External data:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/Account cleanup does not delete the authentication user, Stripe customer or subscription data, Matrix data, or persistent volumes/)).toBeInTheDocument()
+      expect(screen.getByText(/Account cleanup removes your hosted instances with their Matrix data and persistent volumes and deletes your login, but does not delete Stripe customer or subscription records/)).toBeInTheDocument()
     })
   })
 

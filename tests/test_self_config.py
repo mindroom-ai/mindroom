@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 
 from mindroom.agents import create_agent
@@ -175,7 +176,8 @@ class TestGetOwnConfig:
             tool = _self_config_tools(agent_name="writer", config_path=config_path)
 
             assert tool.config_path == config_path.resolve()
-            assert "Writer" in tool.get_own_config()
+            with _as_requester(tool):
+                assert "Writer" in tool.get_own_config()
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -188,7 +190,8 @@ class TestGetOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="writer", config_path=config_path)
-            result = tool.get_own_config()
+            with _as_requester(tool):
+                result = tool.get_own_config()
             assert "writer" in result
             assert "Writer" in result
             assert "Write things" in result
@@ -201,7 +204,8 @@ class TestGetOwnConfig:
         _, config_path = _make_config(agents={})
         try:
             tool = _self_config_tools(agent_name="ghost", config_path=config_path)
-            result = tool.get_own_config()
+            with _as_requester(tool):
+                result = tool.get_own_config()
             assert "Error" in result
             assert "ghost" in result
         finally:
@@ -212,7 +216,8 @@ class TestGetOwnConfig:
         config_path = _invalid_plugin_config_path(tmp_path)
         tool = _self_config_tools(agent_name="writer", config_path=config_path)
 
-        result = tool.get_own_config()
+        with _as_requester(tool):
+            result = tool.get_own_config()
 
         assert "Configuration for 'writer'" in result
         assert "Writer" in result
@@ -238,6 +243,53 @@ class TestGetOwnConfig:
         assert "Invalid configuration" in result
         assert "Could not load configuration" in result
 
+    @pytest.mark.parametrize("requester_id", ["@member:example.org", None])
+    def test_get_own_config_requires_platform_administrator(self, requester_id: str | None) -> None:
+        """Reading the agent's own config follows the same administrator rule as every config read."""
+        _, config_path = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="private-role-marker")},
+        )
+        try:
+            tool = _self_config_tools(agent_name="writer", config_path=config_path)
+            if requester_id is None:
+                result = tool.get_own_config()
+            else:
+                with _as_requester(tool, requester_id=requester_id):
+                    result = tool.get_own_config()
+            assert "platform administrator" in result
+            assert "private-role-marker" not in result
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_get_own_config_masks_secret_fields(self) -> None:
+        """Credentials in the agent's own config stay masked for administrators too."""
+        _, config_path = _make_config(
+            agents={
+                "writer": AgentConfig.model_validate(
+                    {
+                        "display_name": "Writer",
+                        "role": "Write things",
+                        "private": {
+                            "per": "user",
+                            "knowledge": {
+                                "path": "notes",
+                                "git": {"repo_url": "https://deploy:repo-url-sentinel@git.example.org/notes.git"},
+                            },
+                        },
+                    },
+                ),
+            },
+        )
+        try:
+            tool = _self_config_tools(agent_name="writer", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.get_own_config()
+            assert "Configuration for 'writer'" in result
+            assert "***redacted***" in result
+            assert "sentinel" not in result
+        finally:
+            config_path.unlink(missing_ok=True)
+
 
 class TestUpdateOwnConfig:
     """Tests for SelfConfigTools.update_own_config."""
@@ -257,6 +309,25 @@ class TestUpdateOwnConfig:
             # Verify persisted
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].role == "New role"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_refuses_instructions_copied_from_redacted_read(self) -> None:
+        """Appending to instructions read back redacted must not replace the real instructions with the marker."""
+        instructions = ["Never share the API key with anyone", "Log in with password: hunter2"]
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", instructions=instructions)},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                shown = tool.get_own_config()
+                shown_instructions = yaml.safe_load(shown.split("```yaml\n", 1)[1].removesuffix("```"))["instructions"]
+                result = tool.update_own_config(instructions=[*shown_instructions, "Be concise"])
+            assert "'instructions' holds the redaction marker" in result
+            assert "omit it to keep the stored value" in result
+            assert "Changes were NOT applied." in result
+            assert load_config_yaml(config_path).agents["coder"].instructions == instructions
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -801,7 +872,8 @@ class TestAgentCreationInjection:
             assert self_config_tool.config_path == config_path.resolve()
 
             # The tool should be able to read this agent's config from the temp file
-            result = self_config_tool.get_own_config()
+            with _as_requester(self_config_tool):
+                result = self_config_tool.get_own_config()
             assert "Writer" in result
             assert "Error" not in result
         finally:
@@ -821,7 +893,8 @@ class TestAgentCreationInjection:
             self_config_tool = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
             assert self_config_tool.config_path == config_path.resolve()
 
-            result = self_config_tool.get_own_config()
+            with _as_requester(self_config_tool):
+                result = self_config_tool.get_own_config()
             assert "Writer" in result
             assert "Error" not in result
         finally:

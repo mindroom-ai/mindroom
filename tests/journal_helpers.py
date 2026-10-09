@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.event_journal import AdmissionView, EventClass, EventKind
+    from mindroom.event_journal import AdmissionView
     from mindroom.journal_dispatch import JournalDispatcher
 
 
@@ -29,3 +30,19 @@ async def admit_dispatch_event(
         _projected_event(room.room_id, event, kind, self_sender=room.own_user_id),
     )
     dispatcher.wake()
+
+
+async def admit_room_event(store: AdmissionView, room_id: str, event_id: str) -> None:
+    """Record that sync delivered one event in a room, as it does before any redaction of it arrives."""
+    await store.admit(
+        InboundEvent(
+            event_id=event_id,
+            room_id=room_id,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender="@user:example.org",
+            origin_server_ts=0,
+            source={},
+        ),
+    )

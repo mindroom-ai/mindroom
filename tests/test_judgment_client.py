@@ -1,4 +1,4 @@
-"""The TypeSafe leaf adapter is bounded and validates the exact participation contract."""
+"""The bounded judgment client validates the exact System One participation contract."""
 
 from __future__ import annotations
 
@@ -15,11 +15,10 @@ import mindroom.judgment.client as client_module
 import mindroom.judgment.execution as execution_module
 from mindroom.judgment.client import (
     _MAX_RESPONSE_BYTES,
-    _TYPE_SAFE_ENDPOINT,
-    PINNED_MODEL,
-    SystemOneClient,
-    _decode_response,
-    _InvalidJudgmentResponseError,
+    InvalidJudgmentResponseError,
+    JudgmentClient,
+    _accept_probability,
+    _parse_json,
 )
 from mindroom.judgment.execution import JudgmentCapacity
 from mindroom.judgment.state import (
@@ -27,12 +26,14 @@ from mindroom.judgment.state import (
     JudgmentRequest,
     build_judgment_request,
 )
+from mindroom.judgment.typesafe import _ENDPOINT, _PINNED_MODEL, SYSTEM_ONE
 from mindroom.participation import PARTICIPATION_QUESTION
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from mindroom.judgment.answers import JudgmentResponse
+    from mindroom.judgment.client import WireAnswer
 
 
 pytestmark = pytest.mark.asyncio
@@ -49,7 +50,7 @@ def _request() -> JudgmentRequest:
 def _response_body(
     *,
     probability: object = 0.8,
-    model: str = PINNED_MODEL,
+    model: str = _PINNED_MODEL,
 ) -> bytes:
     return json.dumps(
         {
@@ -62,6 +63,10 @@ def _response_body(
     ).encode()
 
 
+def _decode(body: bytes) -> JudgmentResponse[bool]:
+    return _accept_probability(SYSTEM_ONE.decode_probability(_parse_json(body), "participation"), 0.8)
+
+
 async def test_client_posts_exact_contract_and_retains_probability() -> None:
     """Changing the endpoint, auth, request schema, or probability must fail."""
     seen: list[httpx.Request] = []
@@ -70,9 +75,9 @@ async def test_client_posts_exact_contract_and_retains_probability() -> None:
         seen.append(request)
         return httpx.Response(200, content=_response_body(probability=0.731234))
 
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="test-secret",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(respond),
     )
     result = await client.judge(_request(), owner="turn-1", allow_network=True)
@@ -80,12 +85,12 @@ async def test_client_posts_exact_contract_and_retains_probability() -> None:
     assert result.failure is None
     assert result.decision is not None
     assert result.probability == 0.731234
-    assert result.model_id == PINNED_MODEL
+    assert result.model_id == _PINNED_MODEL
     assert result.input_tokens == 123
     assert result.output_tokens == 7
     assert len(seen) == 1
     assert seen[0].method == "POST"
-    assert str(seen[0].url) == _TYPE_SAFE_ENDPOINT
+    assert str(seen[0].url) == _ENDPOINT
     assert seen[0].headers["authorization"] == "Bearer test-secret"
     assert json.loads(seen[0].content)["state"] == json.loads(_request().body or b"")["state"]
 
@@ -101,14 +106,14 @@ async def test_participation_client_validates_noul_and_network_opt_in(probabilit
             200,
             content=json.dumps(
                 {
-                    "model": PINNED_MODEL,
+                    "model": _PINNED_MODEL,
                     "answers": {"participation": {"type": "noul", "noul": probability}},
                     "usage": {"input_tokens": 100, "output_tokens": 1},
                 },
             ).encode(),
         )
 
-    client = SystemOneClient(api_key="test-secret", model=PINNED_MODEL, transport=httpx.MockTransport(respond))
+    client = JudgmentClient(api_key="test-secret", wire=SYSTEM_ONE, transport=httpx.MockTransport(respond))
     request = build_judgment_request(
         PARTICIPATION_QUESTION,
         (JudgmentMessage("user", "Any thoughts?"),),
@@ -140,7 +145,7 @@ async def test_client_requires_explicit_network_opt_in() -> None:
         msg = "transport must not run"
         raise AssertionError(msg)
 
-    client = SystemOneClient(api_key="secret", model=PINNED_MODEL, transport=httpx.MockTransport(refuse))
+    client = JudgmentClient(api_key="secret", wire=SYSTEM_ONE, transport=httpx.MockTransport(refuse))
     result = await client.judge(_request(), owner="turn-1")
 
     assert result.failure == "network_disabled"
@@ -155,9 +160,9 @@ async def test_incomplete_state_never_reaches_transport() -> None:
         (JudgmentMessage("user", "token=sk-secret"),),
         instructions="",
     )
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="secret",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(lambda _: pytest.fail("transport must not run")),
     )
 
@@ -171,9 +176,9 @@ async def test_incomplete_state_never_reaches_transport() -> None:
 async def test_client_rejects_requests_not_issued_by_the_bounded_builder(body: bytes) -> None:
     """Forged or mutated request bytes must not bypass the state builder at the network boundary."""
     forged = replace(_request(), body=body, state_bytes=len(body))
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="secret",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(lambda _: pytest.fail("transport must not run")),
     )
 
@@ -200,8 +205,8 @@ async def test_client_rejects_requests_not_issued_by_the_bounded_builder(body: b
 )
 async def test_decode_response_rejects_malformed_numbers_and_model_drift(body: bytes, match: str) -> None:
     """Malformed provider output must never be normalized into an accepted decision."""
-    with pytest.raises(_InvalidJudgmentResponseError, match=match):
-        _decode_response(body, expected_model=PINNED_MODEL, expected_question="participation", threshold=0.8)
+    with pytest.raises(InvalidJudgmentResponseError, match=match):
+        _decode(body)
 
 
 @pytest.mark.parametrize(
@@ -221,13 +226,8 @@ async def test_decode_response_rejects_schema_drift(mutate: Callable[[dict[str, 
     payload = json.loads(_response_body())
     mutate(payload)
 
-    with pytest.raises(_InvalidJudgmentResponseError):
-        _decode_response(
-            json.dumps(payload).encode(),
-            expected_model=PINNED_MODEL,
-            expected_question="participation",
-            threshold=0.8,
-        )
+    with pytest.raises(InvalidJudgmentResponseError):
+        _decode(json.dumps(payload).encode())
 
 
 async def test_http_failures_are_not_retried_or_leaked_to_logs(caplog: pytest.LogCaptureFixture) -> None:
@@ -239,9 +239,9 @@ async def test_http_failures_are_not_retried_or_leaked_to_logs(caplog: pytest.Lo
         calls += 1
         return httpx.Response(429, text="secret-response-body")
 
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="secret-api-key",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(respond),
     )
     result = await client.judge(_request(), owner="turn-1", allow_network=True)
@@ -254,9 +254,9 @@ async def test_http_failures_are_not_retried_or_leaked_to_logs(caplog: pytest.Lo
 
 async def test_model_drift_has_a_distinct_closed_failure() -> None:
     """A new provider version must be visible to the caller instead of looking generically malformed."""
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="secret",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(
             lambda _: httpx.Response(200, content=_response_body(model="jev-1.14.0")),
         ),
@@ -275,9 +275,9 @@ async def test_total_deadline_includes_the_response_wait() -> None:
         await asyncio.sleep(1)
         return httpx.Response(200, content=_response_body())
 
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="secret",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         timeout_seconds=0.01,
         transport=httpx.MockTransport(respond),
     )
@@ -307,9 +307,9 @@ async def test_decoded_response_body_is_bounded_while_streaming() -> None:
             stream=_OneChunkStream(gzip.compress(expanded)),
         )
 
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="secret",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(respond),
     )
     result = await client.judge(_request(), owner="turn-1", allow_network=True)
@@ -336,8 +336,8 @@ async def test_shared_capacity_rejects_globally_and_per_owner_without_waiting() 
         return httpx.Response(200, content=_response_body())
 
     transport = httpx.MockTransport(respond)
-    first_client = SystemOneClient(api_key="secret", model=PINNED_MODEL, transport=transport, capacity=capacity)
-    second_client = SystemOneClient(api_key="secret", model=PINNED_MODEL, transport=transport, capacity=capacity)
+    first_client = JudgmentClient(api_key="secret", wire=SYSTEM_ONE, transport=transport, capacity=capacity)
+    second_client = JudgmentClient(api_key="secret", wire=SYSTEM_ONE, transport=transport, capacity=capacity)
     first = asyncio.create_task(first_client.judge(_request(), owner="owner-a", allow_network=True))
     await first_entered.wait()
     same_owner = await second_client.judge(_request(), owner="owner-a", allow_network=True)
@@ -366,9 +366,9 @@ async def test_cancellation_propagates_and_releases_capacity() -> None:
             await asyncio.Event().wait()
         return httpx.Response(200, content=_response_body())
 
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="secret",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(respond),
         capacity=capacity,
     )
@@ -395,9 +395,9 @@ async def test_cancellation_propagates_and_releases_capacity() -> None:
 )
 async def test_adversarial_json_returns_invalid_response(body: bytes) -> None:
     """Parser recursion/digit limits and integer overflow remain closed failures."""
-    client = SystemOneClient(
+    client = JudgmentClient(
         api_key="synthetic",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body)),
     )
     result = await client.judge(_request(), owner="test", allow_network=True)
@@ -408,23 +408,18 @@ async def test_adversarial_json_returns_invalid_response(body: bytes) -> None:
 async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-yielding decoder still has to satisfy the total wall-time budget."""
     clock = [0.0]
-    original = client_module._decode_response
+    original = client_module._accept_probability
 
-    def slow_decode(body: bytes, *, expected_model: str, expected_question: str, threshold: float) -> JudgmentResponse:
-        response = original(
-            body,
-            expected_model=expected_model,
-            expected_question=expected_question,
-            threshold=threshold,
-        )
+    def slow_accept(wire_answer: WireAnswer[float], threshold: float) -> JudgmentResponse[bool]:
+        response = original(wire_answer, threshold)
         clock[0] = 2.0
         return response
 
     monkeypatch.setattr(execution_module, "perf_counter", lambda: clock[0])
-    monkeypatch.setattr(client_module, "_decode_response", slow_decode)
-    client = SystemOneClient(
+    monkeypatch.setattr(client_module, "_accept_probability", slow_accept)
+    client = JudgmentClient(
         api_key="synthetic",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         timeout_seconds=0.5,
         transport=httpx.MockTransport(lambda _: httpx.Response(200, content=_response_body())),
     )

@@ -90,3 +90,23 @@ Notes:
 - Local artifacts (backups, wgcf, etc.) are ignored by git.
 - Managed rooms reconcile `m.room.power_levels` so `com.mindroom.thread.tags` can be sent at PL0.
   If room reconciliation logs start failing, check that the service account is joined and allowed to update room power levels.
+
+## Releases
+
+Pushes to `main` run `.github/workflows/calver-auto-release.yml`, except pushes that only change `macos/appcast.xml`.
+The workflow serializes CalVer release creation and dispatches publishers only after confirming that the release tag points to the run's commit.
+It dispatches these workflows from `main`, passing the release tag as `release_ref`:
+
+- `build-mindroom.yml`: MindRoom container images.
+- `build-platform.yml`: Platform container images.
+- `publish-helm-charts.yml`: Helm charts.
+- `release.yml`: Python package and macOS desktop artifacts.
+
+Check the release workflow and publisher runs before retrying a failed publication.
+To retry one publisher for an existing intended release tag, use its workflow filename and pass that same tag as `release_ref`:
+
+```bash
+gh workflow run build-mindroom.yml --ref main --field release_ref='<existing-release-tag>'
+```
+
+Replace the example workflow with the publisher that needs recovery and the placeholder with the existing release tag.

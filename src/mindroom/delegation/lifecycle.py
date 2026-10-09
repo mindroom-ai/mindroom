@@ -15,11 +15,13 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.delegation.audit import (
     child_audit_context,
+    child_response_usage,
     finish_child_record,
     record_child_response,
     start_child_record,
 )
 from mindroom.delegation.audit import observe_child_event as record_child_event
+from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
@@ -30,6 +32,7 @@ from mindroom.tool_system.worker_routing import parse_tool_execution_identity_pa
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -143,14 +146,20 @@ async def settle_child_response(
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
     await update_subagent_turn(child, runtime_paths)
-    usage = await record_child_response(
-        child,
-        response,
-        config=config,
-        runtime_paths=runtime_paths,
-        decisions=decisions,
-        denial_reasons=denial_reasons,
-    )
+    try:
+        usage = await record_child_response(
+            child,
+            response,
+            config=config,
+            runtime_paths=runtime_paths,
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+        )
+    except DelegationRecordLimitError:
+        if child.status not in _TERMINAL:
+            raise
+        # A full record keeps room for its terminal event, so settle it without the remaining ordinary events.
+        usage = child_response_usage(response)
     if child.status in _TERMINAL:
         await finish_child_record(child, config=config, runtime_paths=runtime_paths, usage=usage)
 
@@ -316,11 +325,15 @@ def prepare_child_turn(
     runtime_paths: RuntimePaths,
     depth: int,
     model: str | None = None,
+    agent_mode: AgentMode = "standard",
     previous: DelegationChild | None = None,
     parent_tool_call_id: str = "",
     parent_requirement_id: str = "",
 ) -> DelegationChild:
-    """Prepare the same scoped fresh/follow-up turn for direct and native callers."""
+    """Prepare the same scoped fresh/follow-up turn for direct and native callers.
+
+    A follow-up keeps the model of the child it continues; callers pass its mode.
+    """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
     identity = (
@@ -358,4 +371,5 @@ def prepare_child_turn(
         previous_delegation_id=previous.delegation_id if previous is not None else None,
         parent_requirement_id=parent_requirement_id,
         storage_bindings=freeze_delegation_storage(config, (caller_name, agent_name)),
+        agent_mode=agent_mode,
     )

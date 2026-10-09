@@ -107,6 +107,7 @@ def test_managed_room_initial_state_does_not_embed_admin_ownership_metadata() ->
         ["@power:example.com"],
         ["@admin:example.com"],
         encrypted=False,
+        creators=frozenset(),
     )
 
     power_levels = initial_state[0]["content"]

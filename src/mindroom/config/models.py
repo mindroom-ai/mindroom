@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
-from mindroom.config.judgment import TypeSafeJudgmentConfig  # noqa: TC001
+from mindroom.config.automations import AutomationList  # noqa: TC001
+from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
@@ -403,9 +404,13 @@ class DefaultsConfig(BaseModel):
         description="Live message coalescing settings for rapid same-sender turns",
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
-    auto_resume_after_restart: bool = Field(
-        default=True,
-        description="Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
+    max_consecutive_agent_replies: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Most consecutive agent or team messages in one conversation before mentions in them stop waking "
+            "other agents and teams; a message from a person resets the count"
+        ),
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
@@ -491,6 +496,10 @@ class DefaultsConfig(BaseModel):
         ge=1,
         description="Hard cap for extra role preload context loaded from context_files",
     )
+    automations: AutomationList = Field(
+        default_factory=list,
+        description="Automations, built-in such as prompt_curation or from a plugin, for agents that do not list their own",
+    )
     tool_output_auto_save_threshold_bytes: int = Field(
         default=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
         ge=1,
@@ -513,8 +522,9 @@ class DefaultsConfig(BaseModel):
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, "
-            "Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries."
+            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, "
+            "Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and "
+            "Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(
@@ -626,6 +636,20 @@ class EmbedderConfig(BaseModel):
         return value.strip() or None
 
 
+def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
+    """Return settings with a trimmed string ``api_key``, dropped when null or blank; reject non-strings."""
+    if "api_key" not in settings:
+        return settings
+    normalized = dict(settings)
+    api_key = normalized.pop("api_key")
+    if api_key is not None and not isinstance(api_key, str):
+        msg = f"{field_name} must be a string"
+        raise ValueError(msg)
+    if api_key and api_key.strip():
+        normalized["api_key"] = api_key.strip()
+    return normalized
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -642,7 +666,7 @@ class ModelConfig(BaseModel):
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(
         default=None,
-        description="Optional API key (usually from env vars)",
+        description="Optional model-specific API key used instead of the provider's shared key",
         json_schema_extra=dashboard_hint(secret=True),
     )
     extra_kwargs: dict[str, Any] | None = Field(
@@ -662,6 +686,15 @@ class ModelConfig(BaseModel):
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )
+    stream_idle_timeout_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds a streamed model request may go without a provider event before MindRoom treats it as "
+            "stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their "
+            "built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit"
+        ),
+    )
 
     @field_validator("display_name")
     @classmethod
@@ -670,6 +703,20 @@ class ModelConfig(BaseModel):
         if value is None:
             return None
         return value.strip() or None
+
+    @field_validator("api_key")
+    @classmethod
+    def _normalize_api_key(cls, value: str | None) -> str | None:
+        """Trim the key and treat blank input as unset so the provider's shared key applies."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
+        return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
 
     @field_validator("icon")
     @classmethod
@@ -722,6 +769,17 @@ class ModelConfig(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _validate_single_api_key(self) -> Self:
+        if self.api_key is not None and "api_key" in (self.extra_kwargs or {}):
+            msg = "Set the model API key in either api_key or extra_kwargs.api_key, not both"
+            raise ValueError(msg)
+        return self
+
+    def configured_api_key(self) -> str | None:
+        """Return the key set through ``api_key`` or ``extra_kwargs.api_key``, if any."""
+        return self.api_key or (self.extra_kwargs or {}).get("api_key")
+
 
 class RouterConfig(BaseModel):
     """Configuration for the router system."""
@@ -731,9 +789,9 @@ class RouterConfig(BaseModel):
         description="Model to use for routing decisions",
         json_schema_extra=dashboard_hint(reference="model"),
     )
-    judgment: TypeSafeJudgmentConfig | None = Field(
+    judgment: ProbabilityJudgmentConfig | None = Field(
         default=None,
-        description="Optional JEV responder selection before the LLM router",
+        description="Optional System One or OpenAI Decisions responder selection before the LLM router",
     )
     accept_invites: InviteAcceptancePolicy = Field(
         default=True,

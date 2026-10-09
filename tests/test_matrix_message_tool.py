@@ -18,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
@@ -261,10 +262,10 @@ async def test_matrix_message_active_mentions_do_not_promote_managed_requester()
 
 
 @pytest.mark.parametrize(
-    ("requester_id", "bot_accounts", "mindroom_user"),
+    ("requester_id", "bot_accounts", "mindroom_user", "acting_requester"),
     [
-        ("@bridge_bot:localhost", ["@bridge_bot:localhost"], None),
-        ("@mindroom_user:localhost", [], MindRoomUserConfig()),
+        ("@bridge_bot:localhost", ["@bridge_bot:localhost"], None, "@bridge_bot:localhost"),
+        ("@mindroom_user:localhost", [], MindRoomUserConfig(), None),
     ],
 )
 @pytest.mark.asyncio
@@ -272,8 +273,9 @@ async def test_matrix_message_active_mentions_do_not_promote_non_human_requester
     requester_id: str,
     bot_accounts: list[str],
     mindroom_user: MindRoomUserConfig | None,
+    acting_requester: str | None,
 ) -> None:
-    """Trusted relay provenance should require a human requester."""
+    """Trusted relay provenance requires a human; the recipient still acts for a configured bot account."""
     tool = MatrixMessageTools()
     ctx = _make_context(
         thread_id=None,
@@ -306,6 +308,7 @@ async def test_matrix_message_active_mentions_do_not_promote_non_human_requester
     assert SKIP_MENTIONS_KEY not in sent_content
     assert ORIGINAL_SENDER_KEY not in sent_content
     assert SOURCE_KIND_KEY not in sent_content
+    assert sent_content.get(ACTING_REQUESTER_KEY) == acting_requester
 
 
 @pytest.mark.asyncio
@@ -608,6 +611,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         mimetype=attachment.mime_type,
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id="$evt",
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 
@@ -664,6 +668,7 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         mimetype=attachment.mime_type,
         thread_id=None,
         latest_thread_event_id=None,
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 
@@ -716,6 +721,7 @@ async def test_matrix_message_send_with_attachments_keeps_existing_thread(tmp_pa
         # The reply text this same call just sent, not the thread root a
         # projection read would still be answering with until its echo lands.
         latest_thread_event_id="$reply_evt",
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 
@@ -775,6 +781,7 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         thread_id=explicit_thread_id,
         # The text this same call just sent into the explicit thread.
         latest_thread_event_id="$send_evt",
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 
@@ -825,6 +832,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         mimetype=attachment.mime_type,
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id=ctx.resolved_thread_id,
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 
@@ -948,6 +956,7 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
         "mimetype": None,
         "thread_id": None,
         "latest_thread_event_id": None,
+        "extra_content": {SKIP_MENTIONS_KEY: True},
     }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
     assert second_call.kwargs == {
@@ -955,6 +964,7 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
         "mimetype": None,
         "thread_id": None,
         "latest_thread_event_id": "$file_one",
+        "extra_content": {SKIP_MENTIONS_KEY: True},
     }
 
 
@@ -1003,6 +1013,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         mimetype="text/plain",
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id="$evt",
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 
@@ -1049,6 +1060,7 @@ async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_
         mimetype="text/plain",
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id="$evt",
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 

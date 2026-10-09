@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from typing import TYPE_CHECKING
 
@@ -668,6 +669,35 @@ def test_admin_discovery_reports_directory_read_failure(
         and source.detail == "source discovery unavailable"
         for source in sources
     )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize("blocked", ["agents/broken", "agents/broken/sessions"])
+def test_admin_discovery_reports_unsearchable_shared_agent_directory(tmp_path: Path, blocked: str) -> None:
+    """One unsearchable agent directory becomes a coverage gap instead of failing discovery for every source."""
+    config = Config(agents={"broken": AgentConfig(display_name="Broken"), "shared": AgentConfig(display_name="Shared")})
+    runtime_paths = _paths(tmp_path)
+    root = runtime_paths.config_dir / "sessions"
+    (root / "agents" / "broken" / "sessions").mkdir(parents=True)
+    blocked_directory = root / blocked
+    blocked_directory.chmod(0)
+    try:
+        sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+    finally:
+        blocked_directory.chmod(0o755)
+
+    assert (
+        UsageStorageDiagnostic(
+            path_label="agents/broken/sessions/broken.db",
+            status="partial",
+            detail="source discovery unavailable",
+            scope="shared_agent",
+        )
+        in sources
+    )
+    assert [source.path_label for source in sources if isinstance(source, UsageStorageSource)] == [
+        "agents/shared/sessions/shared.db",
+    ]
 
 
 def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:

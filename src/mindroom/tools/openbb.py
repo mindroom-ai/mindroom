@@ -49,7 +49,7 @@ def _load_openbb_tools() -> type[OpenBBTools]:
         ConfigField(
             name="openbb_pat",
             label="Personal Access Token",
-            type="text",
+            type="password",
             required=False,
             default=None,
             description="OpenBB PAT for premium data providers. Optional - works without it using yfinance.",

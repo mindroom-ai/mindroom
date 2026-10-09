@@ -76,6 +76,7 @@ interface KeyDisplayInfo {
   maskedKey: string | null;
   keyId: string | null;
   sourceLabel: string;
+  copyable: boolean;
 }
 
 interface ModelRowData {
@@ -277,13 +278,42 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   return copied;
 }
 
+/** Whether config.yaml sets the model's own key, which the backend uses before the provider key. */
+function hasConfigApiKey(modelConfig: ModelConfigType | undefined): boolean {
+  const extraApiKey = modelConfig?.extra_kwargs?.api_key;
+  return Boolean(
+    modelConfig?.api_key?.trim() ||
+    (typeof extraApiKey === "string" && extraApiKey.trim()),
+  );
+}
+
+/** Describe the key a model uses when no new key is pasted or reused, in the backend's resolution order. */
+function keyFallbackHint(
+  keepsCustomKey: boolean,
+  usesConfigKey: boolean,
+  providerKey: KeyStatus | undefined,
+): string {
+  if (keepsCustomKey) {
+    return "This model keeps its saved custom key.";
+  }
+  if (usesConfigKey) {
+    return "No custom key provided. This model will use its config.yaml key.";
+  }
+  if (providerKey?.hasKey) {
+    const maskedKey = providerKey.maskedKey ? ` ${providerKey.maskedKey}` : "";
+    return `No custom key provided. This model will use the provider key (${keySourceLabel(providerKey)}${maskedKey}).`;
+  }
+  return "No custom key provided. This model will use the provider key (for example from .env) when available.";
+}
+
 function getKeyStatusDisplay(
   modelName: string,
   provider: string,
+  usesConfigKey: boolean,
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
-  if (provider === "ollama") {
+  if (!getProviderInfo(provider).requiresApiKey) {
     return null;
   }
 
@@ -297,6 +327,18 @@ function getKeyStatusDisplay(
         ? `key:${modelKey.maskedKey}`
         : `model:${modelName}`,
       sourceLabel: keySourceLabel(modelKey),
+      copyable: true,
+    };
+  }
+
+  if (usesConfigKey) {
+    return {
+      hasKey: true,
+      label: "Config key",
+      maskedKey: null,
+      keyId: `config:${modelName}`,
+      sourceLabel: "config.yaml",
+      copyable: false,
     };
   }
 
@@ -310,6 +352,7 @@ function getKeyStatusDisplay(
         ? `key:${providerKey.maskedKey}`
         : `provider:${provider}`,
       sourceLabel: keySourceLabel(providerKey),
+      copyable: true,
     };
   }
 
@@ -319,6 +362,7 @@ function getKeyStatusDisplay(
     maskedKey: null,
     keyId: null,
     sourceLabel: keySourceLabel(null),
+    copyable: false,
   };
 }
 
@@ -748,8 +792,13 @@ export function ModelConfig() {
     const hadCustomKey = Boolean(modelKeys[originalModelName]?.hasKey);
     const hasManualApiKey = Boolean(rowDraft.apiKey.trim());
     const hasKeyReuseSource = Boolean(rowDraft.selectedKeySourceModel);
+    // A saved key belongs to the provider it was saved for.
+    const clearsCustomKey =
+      rowDraft.clearCustomKey ||
+      rowDraft.provider !== originalModelConfig.provider;
 
     let keyOperationOk = true;
+    let deletedOriginalKey = false;
 
     if (rowDraft.provider !== "ollama") {
       if (hasKeyReuseSource) {
@@ -762,8 +811,9 @@ export function ModelConfig() {
           targetModelName,
           rowDraft.apiKey.trim(),
         );
-      } else if (rowDraft.clearCustomKey && hadCustomKey) {
+      } else if (clearsCustomKey && hadCustomKey) {
         keyOperationOk = await deleteModelApiKey(originalModelName);
+        deletedOriginalKey = true;
       } else if (renamed && hadCustomKey) {
         keyOperationOk = await copyModelApiKey(
           targetModelName,
@@ -772,9 +822,11 @@ export function ModelConfig() {
       }
     } else if (hadCustomKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
+      deletedOriginalKey = true;
     }
 
-    if (keyOperationOk && renamed && hadCustomKey && !rowDraft.clearCustomKey) {
+    // A renamed model's saved key must not stay behind under the old name.
+    if (keyOperationOk && renamed && hadCustomKey && !deletedOriginalKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
@@ -816,6 +868,11 @@ export function ModelConfig() {
     } else {
       delete nextExtraKwargs.base_url;
       delete nextModelConfig.api;
+    }
+    if (rowDraft.provider !== originalModelConfig.provider) {
+      // A config.yaml key belongs to the old provider; never send it to the new one.
+      delete nextModelConfig.api_key;
+      delete nextExtraKwargs.api_key;
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
@@ -974,6 +1031,7 @@ export function ModelConfig() {
       const keyDisplay = getKeyStatusDisplay(
         modelName,
         modelConfig.provider,
+        hasConfigApiKey(modelConfig),
         modelKeys,
         providerKeys,
       );
@@ -1024,7 +1082,7 @@ export function ModelConfig() {
               </span>
             )}
           </Badge>
-          {keyDisplay.hasKey && modelName && provider && (
+          {keyDisplay.copyable && modelName && provider && (
             <Button
               size="icon"
               variant="ghost"
@@ -1058,10 +1116,10 @@ export function ModelConfig() {
     setDraft: Dispatch<SetStateAction<RowDraft>>,
     currentModelName?: string,
   ) => {
-    if (draft.provider === "ollama") {
+    if (!getProviderInfo(draft.provider).requiresApiKey) {
       return (
         <span className="text-xs text-muted-foreground">
-          No key needed for Ollama
+          No key needed for {getProviderInfo(draft.provider).name}
         </span>
       );
     }
@@ -1076,16 +1134,26 @@ export function ModelConfig() {
     );
     const hasManualApiKey = Boolean(draft.apiKey.trim());
     const hasReuseSource = Boolean(draft.selectedKeySourceModel);
+    const currentModelConfig = currentModelName
+      ? models[currentModelName]
+      : undefined;
+    // Saving under another provider drops the saved key and the config.yaml key.
+    const providerChanged =
+      currentModelConfig !== undefined &&
+      currentModelConfig.provider !== draft.provider;
     const isClearingCustomKey =
       hasCustomKey &&
-      draft.clearCustomKey &&
+      (draft.clearCustomKey || providerChanged) &&
       !hasManualApiKey &&
       !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
+    const usesConfigKey =
+      !providerChanged && hasConfigApiKey(currentModelConfig);
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(
           currentModelName,
           draft.provider,
+          usesConfigKey,
           modelKeys,
           providerKeys,
         )
@@ -1100,35 +1168,35 @@ export function ModelConfig() {
               currentModelName,
               draft.provider,
             )}
-            {hasCustomKey && (
-              <>
-                <Button
-                  size="sm"
-                  variant={isClearingCustomKey ? "outline" : "ghost"}
-                  className={cn(
-                    "h-7 px-2 text-xs",
-                    isClearingCustomKey
-                      ? "border-amber-500/40 text-amber-700 dark:text-amber-300"
-                      : "text-destructive hover:text-destructive",
-                  )}
-                  onClick={() => {
-                    setDraft((current) => ({
-                      ...current,
-                      clearCustomKey: !isClearingCustomKey,
-                      apiKey: "",
-                      selectedKeySourceModel: "",
-                    }));
-                  }}
-                >
-                  <X className="mr-1 h-3 w-3" />
-                  {isClearingCustomKey ? "Undo clear key" : "Clear custom key"}
-                </Button>
-                {isClearingCustomKey && (
-                  <p className="text-xs text-amber-700 dark:text-amber-300">
-                    Custom key will be removed on save.
-                  </p>
+            {hasCustomKey && !providerChanged && (
+              <Button
+                size="sm"
+                variant={isClearingCustomKey ? "outline" : "ghost"}
+                className={cn(
+                  "h-7 px-2 text-xs",
+                  isClearingCustomKey
+                    ? "border-amber-500/40 text-amber-700 dark:text-amber-300"
+                    : "text-destructive hover:text-destructive",
                 )}
-              </>
+                onClick={() => {
+                  setDraft((current) => ({
+                    ...current,
+                    clearCustomKey: !isClearingCustomKey,
+                    apiKey: "",
+                    selectedKeySourceModel: "",
+                  }));
+                }}
+              >
+                <X className="mr-1 h-3 w-3" />
+                {isClearingCustomKey ? "Undo clear key" : "Clear custom key"}
+              </Button>
+            )}
+            {isClearingCustomKey && (
+              <p className="text-xs text-amber-700 dark:text-amber-300">
+                {providerChanged
+                  ? "Custom key will be removed on save because the provider changed."
+                  : "Custom key will be removed on save."}
+              </p>
             )}
           </div>
         )}
@@ -1201,11 +1269,11 @@ export function ModelConfig() {
 
         {!hasManualApiKey && !hasReuseSource && (
           <p className="text-xs text-muted-foreground">
-            {providerFallbackKey?.hasKey
-              ? `No custom key provided. This model will use the provider key (${keySourceLabel(
-                  providerFallbackKey,
-                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
-              : "No custom key provided. This model will use the provider key (for example from .env) when available."}
+            {keyFallbackHint(
+              hasCustomKey && !isClearingCustomKey,
+              usesConfigKey,
+              providerFallbackKey,
+            )}
           </p>
         )}
       </div>
@@ -1375,8 +1443,6 @@ export function ModelConfig() {
                         baseUrl: provider === "openai" ? current.baseUrl : "",
                         apiKey: "",
                         selectedKeySourceModel: "",
-                        clearCustomKey:
-                          provider === "ollama" ? true : current.clearCustomKey,
                       }
                     : current,
                 );

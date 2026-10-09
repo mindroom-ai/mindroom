@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import gc
+import weakref
 
 import pytest
 
-from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.background_tasks import create_background_task, wait_for_future_until_complete
 
 
 @pytest.mark.asyncio
@@ -77,3 +80,31 @@ async def test_wait_for_future_preserves_shutdown_signal_while_draining_cancella
         pytest.fail("Expected the shutdown signal to propagate")
 
     assert isinstance(observed, SystemExit)
+
+
+_CALLER_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_caller_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_detached_background_task_does_not_retain_its_creator_context() -> None:
+    """A task given its own context must not keep its creator's context alive until it finishes."""
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    owner_ref = weakref.ref(owner)
+    release = asyncio.Event()
+    token = _CALLER_OWNER.set(owner)
+    try:
+        task = create_background_task(release.wait(), name="detached", context=contextvars.Context())
+    finally:
+        _CALLER_OWNER.reset(token)
+    del owner
+    gc.collect()
+
+    try:
+        assert owner_ref() is None
+    finally:
+        release.set()
+        await task

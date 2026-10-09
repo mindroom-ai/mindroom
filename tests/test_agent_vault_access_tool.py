@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _ENV = {
+    "MATRIX_HOMESERVER": "https://example.test",
     "MINDROOM_AGENT_VAULT_ACCESS_API_URL": "http://agent-vault:14321",
     "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN": "owner-token",
     "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault",
@@ -397,6 +398,28 @@ async def test_request_vault_access_without_requester(tmp_path: Path) -> None:
     )
     payload = json.loads(await tool.request_vault_access())
     assert payload["status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requester", ["@alice:evil.example", "@bob@gmail.com:example.test"])
+async def test_request_vault_access_refuses_requesters_outside_this_homeserver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requester: str,
+) -> None:
+    """Only this homeserver's users own an email in the configured domain, so nobody can grant another account."""
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        worker_target=_worker_target(requester=requester),
+    )
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "could not derive an email" in payload["error"]
+    assert api.calls == []
 
 
 @pytest.mark.asyncio

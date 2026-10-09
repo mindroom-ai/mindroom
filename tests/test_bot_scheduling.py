@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import scheduling
 from mindroom.authorization import ResponderCandidatePermissions
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
@@ -478,7 +479,7 @@ class TestBotTaskRestoration:
 
     @pytest.mark.asyncio
     async def test_restore_tasks_on_room_join(self) -> None:
-        """Test that scheduled tasks are restored when joining rooms."""
+        """The started router registers as the scheduled-task runner owner and restores tasks when joining rooms."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -521,6 +522,11 @@ class TestBotTaskRestoration:
                 mock_restore.return_value = 2  # 2 tasks restored
 
                 await bot.start()
+                # New runners use the started router's client in rooms it can serve.
+                assert scheduling._runner_owner == scheduling.ScheduledTaskRunnerOwner(
+                    mock_client,
+                    bot._conversation_reader,
+                )
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 
@@ -576,6 +582,8 @@ class TestBotTaskRestoration:
                 mock_restore.return_value = 0  # No tasks restored
 
                 await bot.start()
+                # Only the router offers its runtime to new scheduled-task runners.
+                assert scheduling._runner_owner is None
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 

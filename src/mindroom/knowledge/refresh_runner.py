@@ -43,7 +43,6 @@ from mindroom.knowledge.github_app_auth import (
     get_runtime_github_app_token_provider,
 )
 from mindroom.knowledge.index_metadata import state_for_publication
-from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_locks import (
     mark_refresh_active,
@@ -83,6 +82,9 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    # Imported where a manager is built, so importing this module (the API does) does not load chromadb.
+    from mindroom.knowledge.manager import KnowledgeManager
 
 
 logger = get_logger(__name__)
@@ -705,6 +707,8 @@ async def _refresh_knowledge_binding_locked(
             start_watchers=False,
             create=True,
         )
+        from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
+
         manager = KnowledgeManager(
             base_id=base_id,
             config=config,
@@ -841,6 +845,8 @@ async def _publish_file_mode_source_metadata_for_resolved(
         start_watchers=False,
         create=True,
     )
+    from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
+
     manager = KnowledgeManager(
         base_id=base_id,
         config=config,
@@ -867,6 +873,8 @@ async def _refresh_file_mode_binding_locked(
         start_watchers=False,
         create=True,
     )
+    from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
+
     manager = KnowledgeManager(
         base_id=key.base_id,
         config=config,

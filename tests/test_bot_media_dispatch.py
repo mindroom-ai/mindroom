@@ -945,6 +945,57 @@ class TestAgentBot(AgentBotTestBase):
         assert payload.attachment_ids == [current_attachment_id, thread_attachment_id, history_attachment_id]
 
     @pytest.mark.asyncio
+    async def test_dispatch_payload_takes_an_edited_thread_root_media_from_history(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An edited root's original media is not added beside the edited revision's media."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        original_content = {"msgtype": "m.image", "body": "old.png", "url": "mxc://localhost/old"}
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "event_id": "$thread",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "room_id": "!test:localhost",
+                    "content": original_content,
+                },
+            ),
+        )
+        _register_payload_image_attachment(
+            tmp_path,
+            attachment_id=_attachment_id_for_event("$thread"),
+            filename="old.png",
+        )
+        revision_attachment_id = _attachment_id_for_event("$root-edit")
+        _register_payload_image_attachment(tmp_path, attachment_id=revision_attachment_id, filename="new.png")
+        root = _visible_message(sender="@user:localhost", event_id="$thread", content=original_content)
+        root.apply_edit(
+            body="new.png",
+            timestamp=1,
+            latest_event_id="$root-edit",
+            content={"msgtype": "m.image", "body": "new.png", "url": "mxc://localhost/new"},
+        )
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="describe this",
+                current_attachment_ids=[],
+                thread_id="$thread",
+                media_thread_id="$thread",
+                thread_history=[root],
+            ),
+        )
+
+        assert payload.attachment_ids == [revision_attachment_id]
+
+    @pytest.mark.asyncio
     async def test_dispatch_payload_inline_media_empty_when_no_attachments(
         self,
         mock_agent_user: AgentMatrixUser,

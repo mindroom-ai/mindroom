@@ -20,7 +20,7 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.kubernetes_config import (
     KubernetesWorkerBackendConfig,
-    credentials_encryption_key_hash,
+    _credentials_encryption_key_hash,
     kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
 )
@@ -48,9 +48,6 @@ _FULL_KUBERNETES_ENV = {
     "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "worker-pvc",
     "MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH": "/srv/worker",
     "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "tenants",
-    "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME": "worker-config",
-    "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY": "worker.yaml",
-    "MINDROOM_KUBERNETES_WORKER_CONFIG_PATH": "/srv/config/worker.yaml",
     "MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS": "900",
     "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS": "120",
     "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX": "tenant-worker",
@@ -102,7 +99,7 @@ def _legacy_kubernetes_backend_config_signature(
     """Hand-assembled pre-refactor signature, kept verbatim as the equivalence oracle."""
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
-    credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
+    credentials_encryption_key_marker = _credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
@@ -125,9 +122,6 @@ def _legacy_kubernetes_backend_config_signature(
         config.storage_pvc_name,
         config.storage_mount_path,
         config.storage_subpath_prefix,
-        config.config_map_name or "",
-        config.config_key,
-        config.config_path,
         str(config.idle_timeout_seconds),
         str(config.ready_timeout_seconds),
         config.name_prefix,
@@ -183,9 +177,9 @@ def test_kubernetes_signature_preserves_config_fields_and_adds_client_identity(
     assert signature[0] == legacy_signature[0]
     assert signature[1] == ""
     assert signature[2] == "null"
-    assert signature[3:17] == legacy_signature[1:15]
-    assert signature[18:] == legacy_signature[15:]
-    assert signature[17].startswith(("in-cluster:", "kubeconfig:"))
+    assert signature[3:14] == legacy_signature[1:12]
+    assert signature[15:] == legacy_signature[12:]
+    assert signature[14].startswith(("in-cluster:", "kubeconfig:"))
 
 
 def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> None:
@@ -377,6 +371,64 @@ def test_kubernetes_runtime_class_changes_cache_identity_only_when_configured(tm
     assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
 
 
+def test_kubernetes_tmp_size_limit_changes_cache_identity_only_when_configured(tmp_path: Path) -> None:
+    """The default /tmp size keeps the existing identity while a configured size replaces the backend."""
+    base = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
+    configured = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, "MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT": "8Gi"},
+    )
+
+    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
+    assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
+
+
+def test_kubernetes_image_pull_secrets_read_chart_list_and_change_identity_only_when_configured(
+    tmp_path: Path,
+) -> None:
+    """The chart's imagePullSecrets list becomes Secret names; unset keeps the existing identity."""
+    env_name = "MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_SECRETS_JSON"
+    base = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
+    configured = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, env_name: '[{"name": "private-registry-pull"}, {"name": "mirror-pull"}]'},
+    )
+
+    assert KubernetesWorkerBackendConfig.from_runtime(base).image_pull_secrets == ()
+    assert KubernetesWorkerBackendConfig.from_runtime(configured).image_pull_secrets == (
+        "private-registry-pull",
+        "mirror-pull",
+    )
+    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
+    assert kubernetes_backend_config_signature(configured, auth_token=None)[:-1] == base_signature
+    with pytest.raises(WorkerBackendError, match="IMAGE_PULL_SECRETS_JSON"):
+        KubernetesWorkerBackendConfig.from_runtime(
+            _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, env_name: '["private-registry-pull"]'}),
+        )
+
+
+def test_kubernetes_user_resources_change_cache_identity_only_when_configured(tmp_path: Path) -> None:
+    """Unset per-user resources keep the existing identity; configured values extend and track it."""
+    env_name = "MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON"
+    base = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
+    empty = _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, env_name: " "})
+    configured = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, env_name: '{"@alice:example.org": {"limits": {"memory": "4Gi"}}}'},
+    )
+    changed = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, env_name: '{"@alice:example.org": {"limits": {"memory": "8Gi"}}}'},
+    )
+
+    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
+    configured_signature = kubernetes_backend_config_signature(configured, auth_token=None)
+    assert kubernetes_backend_config_signature(empty, auth_token=None) == base_signature
+    assert configured_signature[: len(base_signature)] == base_signature
+    assert len(configured_signature) == len(base_signature) + 1
+    assert kubernetes_backend_config_signature(changed, auth_token=None) != configured_signature
+
+
 @pytest.mark.parametrize(
     ("env_name", "changed_value"),
     [
@@ -385,7 +437,6 @@ def test_kubernetes_runtime_class_changes_cache_identity_only_when_configured(tm
         ("MINDROOM_KUBERNETES_WORKER_PORT", "9100"),
         ("MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME", "other-sa"),
         ("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "other-pvc"),
-        ("MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME", "other-config"),
         ("MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS", "60"),
         ("MINDROOM_KUBERNETES_WORKER_NODE_NAME", "node-b"),
         ("MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE", "false"),

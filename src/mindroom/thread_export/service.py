@@ -127,7 +127,10 @@ def _validated_targets(
         authored_output_dir = accumulator.target.output_dir
         try:
             output_dir = canonicalize_output_dir(authored_output_dir)
-            resolved_output_dir = output_dir.resolve()
+            # Preparation never follows a link at the root's own entry, which worker code can replace
+            # in its workspace, so resolving only the ancestors keeps a planted link from claiming
+            # another target's directory.
+            resolved_output_dir = output_dir.parent.resolve() / output_dir.name
         except (OSError, RuntimeError) as exc:
             accumulator.failed_items.append(failure_for_target(f"output directory validation failed: {exc}"))
             logger.warning(

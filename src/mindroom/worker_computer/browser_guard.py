@@ -31,7 +31,6 @@ class BrowserURLVerifier:
         self._allow_loopback = allow_loopback
         self._server: asyncio.Server | None = None
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
-        self._validations: set[asyncio.Task[str]] = set()
 
     async def start(self) -> None:
         """Bind a private ephemeral loopback endpoint before MCP startup."""
@@ -78,12 +77,6 @@ class BrowserURLVerifier:
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
 
-    def _validation_finished(self, task: asyncio.Task[str]) -> None:
-        self._validations.discard(task)
-        if not task.cancelled():
-            # The requesting connection may already have timed out or closed.
-            task.exception()
-
     async def _verify_request(self, reader: StreamReader) -> tuple[int, bool]:  # noqa: C901, PLR0911 - fail-closed HTTP parser
         raw = await reader.readuntil(b"\r\n\r\n")
         if len(raw) > _MAX_BODY:
@@ -113,21 +106,14 @@ class BrowserURLVerifier:
         url = value["url"]
         if not isinstance(url, str) or not 0 < len(url.encode()) <= _MAX_URL:
             return 200, False
-        if len(self._validations) >= _MAX_CONNECTIONS:
-            return 503, False
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                validate_browser_fetch_url,
+        try:
+            # The destination relay resolves and validates every dialed address, so no DNS lookup happens here.
+            validate_browser_fetch_url(
                 url,
                 allow_private_networks=self._allow_private_networks,
                 allow_loopback=self._allow_loopback,
-            ),
-        )
-        self._validations.add(task)
-        task.add_done_callback(self._validation_finished)
-        try:
-            # DNS can outlive the HTTP deadline; keep its slot until it really ends.
-            await asyncio.shield(task)
-        except (ServerFetchUrlError, ValueError, OSError):
+                resolve_hostnames=False,
+            )
+        except (ServerFetchUrlError, ValueError):
             return 200, False
         return 200, True

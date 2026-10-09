@@ -22,94 +22,25 @@
 {{- end -}}
 {{- end }}
 
-{{- define "mindroom.workerBackendEnv" -}}
-{{- $workerBackend := .workerBackend -}}
-{{- $instanceNamespace := .instanceNamespace -}}
-{{- $workerImage := .workerImage -}}
-{{- $workerImagePullPolicy := .workerImagePullPolicy -}}
-{{- $workerServiceAccountName := .workerServiceAccountName -}}
-{{- $controlPlaneNodeName := .controlPlaneNodeName -}}
-{{- $values := .values -}}
-{{- if eq $workerBackend "static_runner" }}
-- name: MINDROOM_SANDBOX_PROXY_URL
-  value: "http://localhost:8766"
-{{- else if eq $workerBackend "kubernetes" }}
-{{- $workerSeccomp := $values.kubernetesWorkerSeccompProfile -}}
-{{- if $workerSeccomp -}}
-{{- if or (not (kindIs "map" $workerSeccomp)) (ne (len $workerSeccomp) 2) (not (hasKey $workerSeccomp "type")) (not (hasKey $workerSeccomp "localhostProfile")) -}}
-{{- fail "kubernetesWorkerSeccompProfile must define exactly type and localhostProfile" -}}
-{{- end -}}
-{{- if ne $workerSeccomp.type "Localhost" -}}
-{{- fail "kubernetesWorkerSeccompProfile.type must be Localhost" -}}
-{{- end -}}
-{{- if not (kindIs "string" $workerSeccomp.localhostProfile) -}}
-{{- fail "kubernetesWorkerSeccompProfile.localhostProfile must be a relative path" -}}
-{{- end -}}
-{{- if or (not (regexMatch "^[^/\\\\]+(/[^/\\\\]+)*$" $workerSeccomp.localhostProfile)) (has "." (splitList "/" $workerSeccomp.localhostProfile)) (has ".." (splitList "/" $workerSeccomp.localhostProfile)) -}}
-{{- fail "kubernetesWorkerSeccompProfile.localhostProfile must be a relative path without traversal segments" -}}
-{{- end -}}
-{{- end -}}
-- name: MINDROOM_WORKER_COMPUTER_ENABLED
-  value: {{ $values.workerComputerEnabled | default false | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_NAMESPACE
-  value: {{ $instanceNamespace | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_IMAGE
-  value: {{ $workerImage | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY
-  value: {{ $workerImagePullPolicy | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_PORT
-  value: {{ $values.kubernetesWorkerPort | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME
-  value: {{ $workerServiceAccountName | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME
-  value: "mindroom-storage-{{ $values.customer }}"
-- name: MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH
-  value: {{ $values.storagePath | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
-  value: {{ $values.kubernetesWorkerStorageSubpathPrefix | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME
-  value: "mindroom-config-{{ $values.customer }}"
-- name: MINDROOM_KUBERNETES_WORKER_CONFIG_KEY
-  value: "config.yaml"
-- name: MINDROOM_KUBERNETES_WORKER_CONFIG_PATH
-  value: "/app/config.yaml"
-{{- if $controlPlaneNodeName }}
-- name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
-  value: {{ $controlPlaneNodeName | quote }}
-{{- end }}
-- name: MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS
-  value: {{ $values.kubernetesWorkerIdleTimeoutSeconds | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
-  value: {{ $values.kubernetesWorkerReadyTimeoutSeconds | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_NAME_PREFIX
-  value: {{ $values.kubernetesWorkerNamePrefix | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
-  value: {{ $values.kubernetesWorkerEnableServiceLinks | quote }}
-{{- with $values.kubernetesWorkerRuntimeClassName }}
-- name: MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME
-  value: {{ . | quote }}
-{{- end }}
-{{- with $workerSeccomp }}
-- name: MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON
-  value: {{ toJson . | quote }}
-{{- end }}
-- name: MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME
-  value: "mindroom-worker-auth-{{ $values.customer }}"
-- name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
-  value: {{ dict "customer" $values.customer | toJson | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
-  value: "mindroom-{{ $values.customer }}"
-{{- end }}
+{{- define "mindroom.ingressControllerPeer" -}}
+- namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ required "ingressControllerNamespace is required" .Values.ingressControllerNamespace | quote }}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+      app.kubernetes.io/name: ingress-nginx
 {{- end }}
 
 {{- define "mindroom.staticRunnerContainer" -}}
 {{- $values := .values -}}
 {{- /*
 The runner executes agent tool code, so it must not see the tenant credential store, Matrix state,
-the live config the primary hot-reloads, or the credentials encryption key.
+the tenant config or its seed ConfigMap, or the credentials encryption key.
 It mounts only agent state from the PVC over its own private storage root,
 and saved tool settings reach it as per-call leases from the primary.
-Its /app/config.yaml is only the seed; each request carries the primary's live config without secrets.
+Each request carries the allowlisted fields runners resolve from the primary's live config.
+Its config path matches the primary's only so config-relative snapshot paths resolve alike; nothing is mounted there.
 */ -}}
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
@@ -126,16 +57,12 @@ Its /app/config.yaml is only the seed; each request carries the primary's live c
         name: {{ include "mindroom.instanceSecretName" $values }}
         key: sandbox_proxy_token
   - name: MINDROOM_CONFIG_PATH
-    value: "/app/config.yaml"
+    value: "{{ $values.storagePath }}/config/config.yaml"
   - name: MINDROOM_STORAGE_PATH
     value: {{ $values.storagePath }}
   - name: HOME
     value: {{ $values.storagePath }}
   volumeMounts:
-  - name: config
-    mountPath: /app/config.yaml
-    subPath: config.yaml
-    readOnly: true
   - name: storage
     mountPath: {{ $values.storagePath }}
     subPath: sandbox-runner
@@ -158,5 +85,6 @@ Its /app/config.yaml is only the seed; each request carries the primary's live c
 
 {{- define "mindroom.staticRunnerVolume" -}}
 - name: sandbox-workspace
-  emptyDir: {}
+  emptyDir:
+    sizeLimit: {{ required "sandboxRunnerWorkspaceSizeLimit is required" .Values.sandboxRunnerWorkspaceSizeLimit | quote }}
 {{- end }}

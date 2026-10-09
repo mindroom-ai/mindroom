@@ -171,7 +171,7 @@ class AccessibilityState:
 
 @dataclass(frozen=True, slots=True)
 class AccessibilityCapture:
-    """One revalidated capture target kept local to the desktop bridge."""
+    """One revalidated capture or pointer target kept local to the desktop bridge."""
 
     state: AccessibilityState
     process_id: int | None
@@ -213,8 +213,12 @@ class AccessibilityBackend(Protocol):
         """Revalidate state and bind capture to its exact local process."""
         ...
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
-        """Validate a fresh state and focus its app before coordinate or keyboard fallback."""
+    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+        """Validate a fresh state, focus its app, and bind coordinate fallback to its process."""
+        ...
+
+    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+        """Validate a fresh state, focus its app, and return a guard to run before each keyboard input."""
         ...
 
     def element_for_action(
@@ -222,8 +226,8 @@ class AccessibilityBackend(Protocol):
         app_id: str,
         state_id: str,
         element_index: int,
-    ) -> AccessibilityElement:
-        """Validate a fresh state and return one indexed element."""
+    ) -> tuple[AccessibilityElement, int | None]:
+        """Validate a fresh state and return one indexed element and the process pointer input must reach."""
         ...
 
     def click_element(self, app_id: str, state_id: str, element_index: int) -> None:
@@ -385,13 +389,39 @@ class MacAccessibilityBackend:
             raise AccessibilityError(msg)
         return stored
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
-        """Revalidate exact state before focusing an allowed target."""
+    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+        """Revalidate exact state before focusing an allowed target, and return the process pointer input must reach."""
+        stored = self._focused_fallback_state(app_id, state_id)
+        process_id = None if stored.application is None else int(stored.application.processIdentifier())
+        return AccessibilityCapture(stored.public, process_id)
+
+    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+        """Focus a revalidated target and return a guard to call right before each keyboard input is posted."""
+        application = self._focused_fallback_state(app_id, state_id).application
+        if application is None:
+            return _primary_screen_keyboard_guard
+        input_posted = False
+
+        # Keyboard events go to whichever app is frontmost when they are posted, not to the validated one.
+        def guard() -> None:
+            nonlocal input_posted
+            if application.isActive():
+                input_posted = True
+                return
+            if not input_posted:
+                msg = "The allowed application lost keyboard focus before any input was sent; nothing was typed."
+                raise AccessibilityError(msg)
+            msg = "The allowed application lost keyboard focus; input stopped and its outcome may be partial."
+            raise AccessibilityActionOutcomeUnknownError(msg)
+
+        return guard
+
+    def _focused_fallback_state(self, app_id: str, state_id: str) -> _StoredMacState:
         stored = self._fresh_state(app_id, state_id)
         self._activate(stored.application)
         if stored.application is None:
-            return stored.public
-        return self._fresh_state(app_id, state_id).public
+            return stored
+        return self._fresh_state(app_id, state_id)
 
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Revalidate app identity and window geometry around foreground capture."""
@@ -410,8 +440,8 @@ class MacAccessibilityBackend:
         app_id: str,
         state_id: str,
         element_index: int,
-    ) -> AccessibilityElement:
-        """Return one current element after structural revalidation."""
+    ) -> tuple[AccessibilityElement, int | None]:
+        """Return one current element after structural revalidation, and the process pointer input must reach."""
         current, current_index = self._current_action_state(app_id, state_id, element_index)
         self._require_element_enabled(current, current_index)
         self._activate(current.application)
@@ -421,7 +451,7 @@ class MacAccessibilityBackend:
         if element.bounds is not None and not _rect_center_inside(element.bounds, current.public.window):
             msg = f"Accessibility element {element_index} is outside the allowed app window."
             raise AccessibilityError(msg)
-        return element
+        return element, None if current.application is None else int(current.application.processIdentifier())
 
     def click_element(self, app_id: str, state_id: str, element_index: int) -> None:
         """Perform AXPress only when the fresh element advertises it."""
@@ -966,9 +996,14 @@ class ScreenshotOnlyAccessibilityBackend:
         self._state = _primary_screen_state(self._screen_size(), state_id=uuid4().hex)
         return self._state
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
+    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Validate that coordinate fallback still targets the latest screen geometry."""
-        return self.prepare_capture(app_id, state_id).state
+        return self.prepare_capture(app_id, state_id)
+
+    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+        """Validate that keyboard fallback still targets the latest screen geometry."""
+        self.prepare_fallback(app_id, state_id)
+        return _primary_screen_keyboard_guard
 
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Validate that capture still targets the latest screen geometry."""
@@ -988,7 +1023,7 @@ class ScreenshotOnlyAccessibilityBackend:
         app_id: str,
         state_id: str,
         element_index: int,
-    ) -> AccessibilityElement:
+    ) -> tuple[AccessibilityElement, int | None]:
         """Reject semantic element use when only pixels are available."""
         self.prepare_fallback(app_id, state_id)
         msg = f"Accessibility elements are unavailable; element index {element_index} cannot be used."
@@ -1021,6 +1056,10 @@ class ScreenshotOnlyAccessibilityBackend:
         if app_id != PRIMARY_SCREEN_APP_ID:
             msg = "Semantic application accessibility is currently available only on macOS."
             raise AccessibilityError(msg)
+
+
+def _primary_screen_keyboard_guard() -> None:
+    """Accept any focused app: the primary-screen target already covers the whole screen."""
 
 
 def _wait_for_activation(application: _RunningApplication, *, attempts: int) -> bool:

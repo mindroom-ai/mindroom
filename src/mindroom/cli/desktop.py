@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,14 +21,16 @@ from mindroom.desktop.command_journal import DesktopCommandJournalError, check_c
 from mindroom.desktop.login_method import DesktopLoginMethod
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
+    import nio
     from nio.client.base_client import ClientCallback
 
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.bridge_components import DesktopBridgeComponents
     from mindroom.desktop.native_config import NativeDesktopConfig
     from mindroom.desktop.session import DesktopMatrixSession, DesktopOwnedSession
+    from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 _console = Console()
 _error_console = Console(stderr=True)
@@ -152,7 +154,7 @@ def desktop_login(
         DesktopLoginMethod.AUTO,
         "--login-method",
         case_sensitive=False,
-        help="Matrix login method. Auto uses password when advertised, otherwise browser SSO.",
+        help="Matrix login method. Auto uses browser SSO when advertised, otherwise password.",
     ),
     sso_idp: str | None = typer.Option(
         None,
@@ -449,8 +451,6 @@ def desktop_setup(
 ) -> None:
     """Pair and save the connection shared with the macOS app."""
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
-
-    # Native configuration uses Unix file locks; CLI help must remain portable.
     from mindroom.desktop.native_config import (  # noqa: PLC0415
         NativeBrowserConfig,
         NativeCaptureConfig,
@@ -497,10 +497,13 @@ def desktop_setup(
         path = native_config_path(runtime_paths.storage_root)
         try:
             previous = load_native_config(path)
+            base_revision = previous.revision
         except NativeConfigError as exc:
-            if exc.code != "configuration_missing":
+            # Setup saves fresh settings, so it also repairs a malformed or exposed file.
+            if exc.code not in {"configuration_missing", "configuration_repair_required"}:
                 raise
             previous = None
+            base_revision = exc.revision
         controller = PinnedMatrixDevice(controller_user_id, controller_device_id, controller_ed25519)
         check_controller_binding(
             runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
@@ -510,7 +513,7 @@ def desktop_setup(
         # Saved local authority carries over only for the same controller.
         matching = previous if previous is not None and previous.controller == controller else None
         config = NativeDesktopConfig(
-            revision=previous.revision if previous else 0,
+            revision=base_revision,
             enabled=True,
             controller=controller,
             allowed_requester_ids=(session.user_id,),
@@ -630,10 +633,10 @@ def desktop_access(
     ),
 ) -> None:
     """Save read-only folders and shell requests shared with the macOS app; omitted options keep saved values."""
-    # Native configuration uses Unix file locks; CLI help must remain portable.
     from mindroom.desktop.native_config import (  # noqa: PLC0415
         NativeConfigError,
         native_config_path,
+        require_supported_local_access,
         save_native_config,
     )
 
@@ -646,6 +649,7 @@ def desktop_access(
     try:
         config = _saved_enabled_config(path)
         edited = _edited_local_access(config, allow_folder, clear_folders=clear_folders, shell=shell)
+        require_supported_local_access(edited)
         if edited != config:
             config = save_native_config(path, edited, expected_revision=config.revision)
             changed = True
@@ -886,7 +890,6 @@ def _resolve_run_config(
     browser_timeout_seconds: int | None,
 ) -> NativeDesktopConfig:
     """Resolve one run without combining a new controller with saved authority."""
-    # Native configuration uses Unix file locks; CLI help must remain portable.
     from mindroom.desktop.native_config import (  # noqa: PLC0415
         NativeBrowserConfig,
         NativeCaptureConfig,
@@ -990,6 +993,41 @@ def _validate_browser_options(
         raise typer.Exit(2)
 
 
+async def _open_bridge_client(
+    session: DesktopMatrixSession,
+    runtime_paths: RuntimePaths,
+    http_headers: Mapping[str, str] | None,
+) -> DesktopOwnedSession:
+    """Adopt the saved device's crypto store and durable source for this run."""
+    from mindroom.desktop.session import open_desktop_client  # noqa: PLC0415
+
+    return await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
+
+
+async def _prepare_bridge_client(client: nio.AsyncClient, controller: PinnedMatrixDevice) -> None:
+    """Check the pinned controller's current identity before publishing this device's encryption keys."""
+    from mindroom.desktop.session import prepare_desktop_client  # noqa: PLC0415
+    from mindroom.matrix.olm_to_device import resolve_pinned_device  # noqa: PLC0415
+
+    await resolve_pinned_device(client, controller)
+    await prepare_desktop_client(client)
+
+
+@dataclass(frozen=True, slots=True)
+class _BridgeRunDeps:
+    """macOS and Matrix collaborators of one terminal bridge run; the defaults import their modules on first call."""
+
+    request_permissions: Callable[[], None] = _request_required_desktop_permissions
+    open_client: Callable[
+        [DesktopMatrixSession, RuntimePaths, Mapping[str, str] | None],
+        Awaitable[DesktopOwnedSession],
+    ] = _open_bridge_client
+    prepare_client: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] = _prepare_bridge_client
+
+
+_DEFAULT_BRIDGE_RUN_DEPS = _BridgeRunDeps()
+
+
 async def _run_bridge(
     *,
     runtime_paths: RuntimePaths,
@@ -999,29 +1037,24 @@ async def _run_bridge(
     lease_minutes: int,
     shell_auto_approve_minutes: int | None = None,
     http_headers: Mapping[str, str] | None = None,
+    deps: _BridgeRunDeps = _DEFAULT_BRIDGE_RUN_DEPS,
 ) -> None:
     """Run one terminal-owned bridge for the resolved configuration; control and auto-approval last this run only."""
     from nio import AuthenticatedToDeviceEvent  # noqa: PLC0415
 
     from mindroom.desktop.bridge_components import build_desktop_bridge  # noqa: PLC0415
-    from mindroom.desktop.session import (  # noqa: PLC0415
-        open_desktop_client,
-        prepare_desktop_client,
-    )
-    from mindroom.desktop.shell_prompt import serve_terminal_shell_approvals  # noqa: PLC0415
     from mindroom.desktop.transport import DesktopTransport  # noqa: PLC0415
-    from mindroom.matrix.olm_to_device import resolve_pinned_device  # noqa: PLC0415
 
     # Folder and shell access need no GUI permissions.
     if config.allowed_app_ids:
-        _request_required_desktop_permissions()
+        deps.request_permissions()
     owner = None
     components: DesktopBridgeComponents | None = None
     registration = None
     approvals: asyncio.Task[None] | None = None
     tasks: set[asyncio.Task[None]] = set()
     try:
-        owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
+        owner = await deps.open_client(session, runtime_paths, http_headers)
         client = owner.client
         lease_expiry = round((time.time() + lease_minutes * 60) * 1000) if allow_control else None
         # The builder closes its own providers if it fails; afterwards this function owns them.
@@ -1036,8 +1069,7 @@ async def _run_bridge(
             bridge.grant_local_shell(shell_auto_approve_minutes * 60)
         client.add_to_device_callback(bridge.on_to_device_event, AuthenticatedToDeviceEvent)
         registration = client.to_device_callbacks[-1]
-        await resolve_pinned_device(client, config.controller)
-        await prepare_desktop_client(client)
+        await deps.prepare_client(client, config.controller)
 
         _announce_bridge(
             config,
@@ -1053,6 +1085,9 @@ async def _run_bridge(
             ),
         )
         if config.shell.enabled:
+            # Terminal approval needs termios; the bridge builder already refused shell access without POSIX.
+            from mindroom.desktop.shell_prompt import serve_terminal_shell_approvals  # noqa: PLC0415
+
             approvals = asyncio.create_task(
                 serve_terminal_shell_approvals(bridge, input_fd=_terminal_input_fd(), output=sys.stdout),
                 name="desktop_shell_approvals",

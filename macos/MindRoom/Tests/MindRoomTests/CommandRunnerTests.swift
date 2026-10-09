@@ -6,10 +6,11 @@ final class CommandRunnerTests: XCTestCase {
     @MainActor
     func testWarningOnlyDoctorFeedbackNeedsAttentionWithoutProcessFailure() async {
         let finished = expectation(description: "Doctor finished")
-        let runner = MindRoomCommandRunner(processRunner: { _ in
+        let runner = MindRoomCommandRunner(processRunner: { _, _ in
             CommandResult(exitCode: 0, output: "! OPENAI_API_KEY not set\n6 passed, 0 failed, 1 warning")
         })
         runner.onCommandFinished = { _, _ in finished.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.checkSetup)
         await fulfillment(of: [finished], timeout: 2)
         XCTAssertEqual(runner.feedback?.result.isSuccess, true)
@@ -26,7 +27,7 @@ final class CommandRunnerTests: XCTestCase {
         try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("agents: {}\n".utf8).write(to: config)
         let refreshed = expectation(description: "Status finished")
-        let runner = MindRoomCommandRunner(runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: [:]), processRunner: { _ in
+        let runner = MindRoomCommandRunner(runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: [:]), processRunner: { _, _ in
             try? FileManager.default.removeItem(at: config)
             return CommandResult(exitCode: 0, output: "MindRoom service: not installed")
         })
@@ -40,7 +41,7 @@ final class CommandRunnerTests: XCTestCase {
     @MainActor
     func testFailedStatusCannotReportRunningFromIncidentalOutput() async {
         let refreshed = expectation(description: "Status refreshed")
-        let runner = MindRoomCommandRunner(processRunner: { _ in
+        let runner = MindRoomCommandRunner(processRunner: { _, _ in
             CommandResult(exitCode: 1, output: "Last known service: running; status check failed")
         })
         let observation = runner.$hasRefreshedStatus.filter { $0 }.sink { _ in refreshed.fulfill() }
@@ -65,7 +66,7 @@ final class CommandRunnerTests: XCTestCase {
         let refreshed = expectation(description: "Configuration refreshed")
         let runner = MindRoomCommandRunner(
             runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: [:]),
-            processRunner: { invocation in
+            processRunner: { invocation, _ in
                 if invocation.arguments.contains("doctor") {
                     return CommandResult(exitCode: 0, output: "6 passed, 0 failed")
                 }
@@ -73,6 +74,7 @@ final class CommandRunnerTests: XCTestCase {
             }
         )
         runner.onCommandFinished = { _, _ in checked.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.checkSetup)
         await fulfillment(of: [checked], timeout: 2)
         XCTAssertEqual(runner.setupCheck?.isSuccess, true)
@@ -97,7 +99,7 @@ final class CommandRunnerTests: XCTestCase {
         let checked = expectation(description: "Setup checked")
         let runner = MindRoomCommandRunner(
             runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: [:]),
-            processRunner: { invocation in
+            processRunner: { invocation, _ in
                 if invocation.arguments.contains("doctor") {
                     try? FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 100)], ofItemAtPath: config.path)
                     return CommandResult(exitCode: 0, output: "6 passed, 0 failed")
@@ -106,6 +108,7 @@ final class CommandRunnerTests: XCTestCase {
             }
         )
         runner.onCommandFinished = { _, _ in checked.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.checkSetup)
         await fulfillment(of: [checked], timeout: 2)
         XCTAssertEqual(runner.setupCheck?.isSuccess, false)
@@ -118,7 +121,7 @@ final class CommandRunnerTests: XCTestCase {
         let refreshed = expectation(description: "Fresh status started")
         let releaseFirst = DispatchSemaphore(value: 0)
         let calls = StatusRefreshCalls()
-        let runner = MindRoomCommandRunner(processRunner: { _ in
+        let runner = MindRoomCommandRunner(processRunner: { _, _ in
             if calls.next() == 1 {
                 firstStarted.fulfill()
                 _ = releaseFirst.wait(timeout: .now() + 3)
@@ -144,7 +147,7 @@ final class CommandRunnerTests: XCTestCase {
         let published = expectation(description: "Slow status published")
         let release = DispatchSemaphore(value: 0)
         let calls = StatusRefreshCalls()
-        let runner = MindRoomCommandRunner(processRunner: { _ in
+        let runner = MindRoomCommandRunner(processRunner: { _, _ in
             let call = calls.next()
             XCTAssertEqual(call, 1)
             if call == 1 {
@@ -166,9 +169,64 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     @MainActor
+    func testRuntimeFromAnotherReleaseBlocksSetupAndServiceInstallButNotServiceControl() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        _ = try installFakeUVToolRuntime(home: home, versions: ["python3.13": "2026.9.378"])
+        let recorder = InvocationRecorder()
+        let runner = MindRoomCommandRunner(
+            runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.379"),
+            processRunner: { invocation, _ in
+                recorder.record(invocation.arguments)
+                return CommandResult(exitCode: 0, output: "MindRoom service: installed but not running")
+            }, showSection: { _ in }
+        )
+        await completeFirstStatusRefresh(runner)
+
+        for command in [MindRoomCommand.installService, .checkSetup, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted] {
+            XCTAssertTrue(runner.isBlockedByRuntimeUpdate(command), command.title)
+            runner.run(command)
+            XCTAssertFalse(runner.isRunningCommand, command.title)
+        }
+        for command in [MindRoomCommand.updateRuntime, .startService, .stopService, .restartService] {
+            XCTAssertFalse(runner.isBlockedByRuntimeUpdate(command), command.title)
+        }
+        let updated = expectation(description: "Runtime updated")
+        runner.onCommandFinished = { _, _ in updated.fulfill() }
+        runner.run(.updateRuntime)
+        await fulfillment(of: [updated], timeout: 2)
+        XCTAssertTrue(recorder.arguments.contains(["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom==2026.9.379"]))
+        XCTAssertFalse(recorder.arguments.contains { $0.contains("install") && $0.contains("service") || $0.contains("connect") })
+    }
+
+    @MainActor
+    func testServiceInstallWaitsForFirstStatusRefresh() async {
+        let started = expectation(description: "Status started")
+        let release = DispatchSemaphore(value: 0)
+        let recorder = InvocationRecorder()
+        let runner = MindRoomCommandRunner(processRunner: { invocation, _ in
+            recorder.record(invocation.arguments)
+            if invocation.arguments.contains("status") {
+                started.fulfill()
+                _ = release.wait(timeout: .now() + 3)
+            }
+            return CommandResult(exitCode: 0, output: "MindRoom service: installed but not running")
+        })
+        runner.refreshStatus()
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(runner.isBlockedByRuntimeUpdate(.installService))
+        runner.run(.installService)
+        XCTAssertFalse(runner.isRunningCommand)
+        release.signal()
+        await waitForStatusRefresh(runner)
+        XCTAssertFalse(runner.isBlockedByRuntimeUpdate(.installService))
+        XCTAssertEqual(recorder.arguments, [["mindroom", "service", "status", "--logs", "0"]])
+    }
+
+    @MainActor
     func testWebActionsNavigateInsideApp() {
         var sections: [AppSection] = []
-        let runner = MindRoomCommandRunner(processRunner: { _ in
+        let runner = MindRoomCommandRunner(processRunner: { _, _ in
             XCTFail("Web navigation must not run a process")
             return CommandResult(exitCode: 1, output: "")
         }, showSection: { sections.append($0) })
@@ -179,7 +237,7 @@ final class CommandRunnerTests: XCTestCase {
     @MainActor
     func testCommandCompletionPublishesFailureWithoutBlockingNextAction() async {
         let completed = expectation(description: "Command finished")
-        let runner = MindRoomCommandRunner(processRunner: { _ in
+        let runner = MindRoomCommandRunner(processRunner: { _, _ in
             CommandResult(exitCode: 1, output: "Provider credentials missing")
         })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
@@ -193,18 +251,19 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     @MainActor
-    func testPairHostedInvokesConnectWithOpenBrowser() async {
+    func testPairHostedKeepsApprovalInsideApp() async {
         let completed = expectation(description: "Pairing finished")
         // The runner also refreshes service status on background queues, so record every invocation.
         let recorder = InvocationRecorder()
-        let runner = MindRoomCommandRunner(processRunner: { invocation in
+        let runner = MindRoomCommandRunner(processRunner: { invocation, _ in
             recorder.record(invocation.arguments)
             return CommandResult(exitCode: 0, output: "Paired")
-        })
+        }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
-        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--open-browser"]))
+        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--graceful-cancel"]))
         XCTAssertEqual(runner.feedback?.title, "Pair Chat Account")
         XCTAssertFalse(runner.needsReconnectConfirmation)
     }
@@ -212,12 +271,13 @@ final class CommandRunnerTests: XCTestCase {
     @MainActor
     func testAlreadyConnectedPairingAsksInsteadOfReportingFailure() async {
         let completed = expectation(description: "Pairing refused")
-        let runner = MindRoomCommandRunner(processRunner: { invocation in
+        let runner = MindRoomCommandRunner(processRunner: { invocation, _ in
             invocation.arguments.contains("connect")
                 ? CommandResult(exitCode: MindRoomCommand.alreadyConnectedExitCode, output: "This machine is already connected.")
                 : CommandResult(exitCode: 0, output: "MindRoom service: running (pid 123)")
-        })
+        }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
         XCTAssertTrue(runner.needsReconnectConfirmation)
@@ -229,14 +289,15 @@ final class CommandRunnerTests: XCTestCase {
     func testReconnectHostedForcesPairing() async {
         let completed = expectation(description: "Reconnect finished")
         let recorder = InvocationRecorder()
-        let runner = MindRoomCommandRunner(processRunner: { invocation in
+        let runner = MindRoomCommandRunner(processRunner: { invocation, _ in
             recorder.record(invocation.arguments)
             return CommandResult(exitCode: 0, output: "Paired")
-        })
+        }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.reconnectHosted)
         await fulfillment(of: [completed], timeout: 3)
-        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--open-browser", "--force"]))
+        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--graceful-cancel", "--force"]))
         XCTAssertEqual(runner.feedback?.title, "Reconnect Chat Account")
         XCTAssertEqual(runner.feedback?.result.isSuccess, true)
         XCTAssertFalse(runner.needsReconnectConfirmation)
@@ -269,4 +330,20 @@ private final class StatusRefreshCalls: @unchecked Sendable {
         count += 1
         return count
     }
+}
+
+/// Completes the first status refresh, which commands that need the app's runtime wait for.
+@MainActor
+func completeFirstStatusRefresh(_ runner: MindRoomCommandRunner) async {
+    runner.refreshStatus()
+    await waitForStatusRefresh(runner)
+}
+
+/// Waits for a status refresh that is already in flight to publish.
+@MainActor
+func waitForStatusRefresh(_ runner: MindRoomCommandRunner) async {
+    for _ in 0..<300 where !runner.hasRefreshedStatus {
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertTrue(runner.hasRefreshedStatus)
 }

@@ -16,7 +16,16 @@ jest.mock('@basnijholt/particular-drift/react', () => ({
   ),
 }), { virtual: true })
 
+jest.mock('@/hooks/useDarkMode', () => ({
+  useDarkMode: jest.fn(),
+}))
+
+import { useDarkMode } from '@/hooks/useDarkMode'
 import { HeroParticleBackground } from '../HeroParticleBackground'
+
+beforeEach(() => {
+  ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: true })
+})
 
 describe('HeroParticleBackground', () => {
   it('renders a scoped MindRoom logo particle canvas for the landing hero', () => {
@@ -33,6 +42,18 @@ describe('HeroParticleBackground', () => {
     expect(background).not.toHaveClass('hidden')
     expect(canvas).toHaveAttribute('data-image-url', '/res/branding/mindroom.svg')
     expect(canvas).toHaveAttribute('data-particle-color', '#dda290')
+  })
+
+  it('uses the light MindRoom Chat palette in light mode, except on the dark auth screen', () => {
+    ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
+    const { rerender } = render(<HeroParticleBackground />)
+
+    expect(screen.getByTestId('landing-particle-background').style.getPropertyValue('--particle-backdrop')).toBe('#f6e8d6')
+    expect(screen.getByTestId('particle-canvas')).toHaveAttribute('data-particle-color', '#5636a3')
+
+    rerender(<HeroParticleBackground variant="auth" />)
+
+    expect(screen.getByTestId('particle-canvas')).toHaveAttribute('data-particle-color', '#dda290')
   })
 
   it('can fill the auth screen with the MindRoom particle field', () => {

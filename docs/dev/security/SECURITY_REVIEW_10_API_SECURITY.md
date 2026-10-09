@@ -93,20 +93,10 @@ curl -X POST /webhooks/stripe \
 ```
 
 ### Implementation
-```python
-# main.py
-MAX_REQUEST_BYTES = 1024 * 1024
 
-@app.middleware("http")
-async def enforce_request_size(request: Request, call_next):
-    try:
-        length = int(request.headers.get("content-length", "0") or "0")
-    except ValueError:
-        length = 0
-    if length and length > MAX_REQUEST_BYTES:
-        return JSONResponse({"detail": "Request too large"}, status_code=413)
-    return await call_next(request)
-```
+`RequestSizeLimitMiddleware` in `saas-platform/platform-backend/src/main.py` is an ASGI middleware with a 1 MiB `MAX_REQUEST_BYTES` limit.
+It answers 413 before the route runs when the declared `Content-Length` exceeds the limit.
+It also counts the body bytes actually received, so a chunked body without `Content-Length` gets 413 as soon as a route reads past the limit.
 
 **Endpoint-Specific Limits (optional)**
 ```python

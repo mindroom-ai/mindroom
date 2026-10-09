@@ -88,10 +88,14 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         else:
             actual_status = "error"
 
-        # Update database
+        # Write only while the row keeps the status read before the Kubernetes calls, so a provision that claimed it
+        # meanwhile is never undone.
         now = datetime.now(UTC).isoformat()
         instances_data.update_instance(
-            sb, instance_id, {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
+            sb,
+            instance_id,
+            {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now},
+            expected_status=current_status,
         )
 
         total_time = (time.perf_counter() - start) * 1000
@@ -172,6 +176,9 @@ async def list_user_instances(
     return {"instances": enhanced_instances}
 
 
+_PENDING_DELETION_DETAIL = "This account is pending deletion and cannot run instances"
+
+
 def _existing_instance_response(existing: dict[str, Any], message: str, *, success: bool = True) -> dict[str, Any]:
     """Return provision-route metadata for an instance that already exists."""
     return {
@@ -198,7 +205,11 @@ async def provision_user_instance(
     sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).execute()
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
-    subscription = sub_result.data[0]
+    provisioner_service.refuse_pending_deletion(sb, account_id, _PENDING_DELETION_DETAIL)
+    # Provisioning mints a platform-paid OpenRouter key, so a Stripe-billed status is confirmed with Stripe first.
+    subscription = await instance_lifecycle.verified_subscription(sb, sub_result.data[0]["id"])
+    if subscription is None:
+        raise HTTPException(status_code=404, detail="No subscription found")
     assert_instance_entitlement(subscription, "provision")
 
     inst_result = (
@@ -235,6 +246,7 @@ async def provision_user_instance(
                     "instance_id": existing["instance_id"],  # Reuse the same instance ID
                 },
                 background_tasks=background_tasks,
+                expected_status="deprovisioned",
             )
 
         # Otherwise return existing instance metadata
@@ -272,6 +284,7 @@ async def _verify_instance_ownership_and_run(
         if not sub_result.data:
             raise HTTPException(status_code=404, detail="Subscription not found")
         assert_instance_entitlement(sub_result.data[0], "run")
+        provisioner_service.refuse_pending_deletion(sb, user["account_id"], _PENDING_DELETION_DETAIL)
         if instance.get("lifecycle_stopped_at"):
             # Resuming also re-enables the OpenRouter key and clears the teardown schedule.
             summary = await instance_lifecycle.reconcile_subscription_instances(instance["subscription_id"])
@@ -293,11 +306,16 @@ async def start_user_instance(
     request: Request,  # noqa: ARG001
     instance_id: int,
     user: Annotated[dict, Depends(verify_user)],
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     """Start user's instance."""
-    return await _verify_instance_ownership_and_run(
+    result = await _verify_instance_ownership_and_run(
         instance_id, user, provisioner_service.start_instance, require_active_subscription=True
     )
+    # A stopped instance keeps its old deployment and loses only a key its tier does not include, so once it runs
+    # the lifecycle redeploys it with what its tier pays for.
+    background_tasks.add_task(instance_lifecycle.reconcile_account_instances, user["account_id"])
+    return result
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)

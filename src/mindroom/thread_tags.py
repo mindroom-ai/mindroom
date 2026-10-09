@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
+from mindroom.matrix.room_power import user_power_level
+from mindroom.matrix.room_reconciliation import read_room_creators
 
 logger = get_logger(__name__)
 
@@ -25,7 +27,6 @@ RESOLVED_THREAD_TAG = "resolved"
 AUTOMATIC_THREAD_TAG_EXCLUSIONS = frozenset({RESOLVED_THREAD_TAG})
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
-_DEFAULT_USER_POWER_LEVEL = 0
 _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
@@ -541,31 +542,12 @@ def _required_state_event_power_level(
     return _DEFAULT_STATE_EVENT_POWER_LEVEL
 
 
-def _user_power_level(
-    power_levels_content: Mapping[str, object],
-    *,
-    user_id: str,
-) -> int:
-    """Return the current user's effective Matrix power level for one room."""
-    users = power_levels_content.get("users")
-    if isinstance(users, Mapping):
-        typed_users = cast("Mapping[str, object]", users)
-        user_level = _parse_power_level(typed_users.get(user_id))
-        if user_level is not None:
-            return user_level
-
-    users_default = _parse_power_level(power_levels_content.get("users_default"))
-    if users_default is not None:
-        return users_default
-    return _DEFAULT_USER_POWER_LEVEL
-
-
 def _raise_insufficient_power_level(
     room_id: str,
     *,
     subject_label: str,
     user_id: str,
-    user_power_level: int,
+    user_power_level: float,
     required_power_level: int,
 ) -> None:
     """Raise one consistent insufficient-power error."""
@@ -596,7 +578,8 @@ async def _assert_requester_joined_room(
     raise ThreadTagsError(msg)
 
 
-def _assert_user_can_write_thread_tags(
+async def _assert_user_can_write_thread_tags(
+    client: nio.AsyncClient,
     power_levels_content: Mapping[str, object],
     room_id: str,
     *,
@@ -608,17 +591,21 @@ def _assert_user_can_write_thread_tags(
         power_levels_content,
         event_type=THREAD_TAGS_EVENT_TYPE,
     )
-    user_power_level = _user_power_level(
-        power_levels_content,
-        user_id=user_id,
-    )
-    if user_power_level >= required_power_level:
+    level = user_power_level(power_levels_content, user_id)
+    if level >= required_power_level:
+        return
+    # Room version 12 never lists its creators, whose power is unlimited, so they matter only on a shortfall.
+    creators = await read_room_creators(client, room_id)
+    if creators is None:
+        msg = f"Failed to read the creators of {room_id}"
+        raise ThreadTagsError(msg)
+    if user_id in creators:
         return
     _raise_insufficient_power_level(
         room_id,
         subject_label=subject_label,
         user_id=user_id,
-        user_power_level=user_power_level,
+        user_power_level=level,
         required_power_level=required_power_level,
     )
 
@@ -703,7 +690,8 @@ async def _assert_thread_tags_write_allowed(
         raise ThreadTagsError(msg)
     power_levels_content = response.content
 
-    _assert_user_can_write_thread_tags(
+    await _assert_user_can_write_thread_tags(
+        client,
         power_levels_content,
         room_id,
         subject_label="the Matrix client",
@@ -724,7 +712,8 @@ async def _assert_thread_tags_write_allowed(
         room_id,
         requester_user_id=normalized_requester_user_id,
     )
-    _assert_user_can_write_thread_tags(
+    await _assert_user_can_write_thread_tags(
+        client,
         power_levels_content,
         room_id,
         subject_label="the requester",

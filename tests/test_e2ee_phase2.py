@@ -55,6 +55,7 @@ class TestRoomCreationEncryption:
         """Encrypted creation must include the m.room.encryption state event."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@bot:localhost"
+        client.access_token = None
         client.room_create.return_value = nio.RoomCreateResponse(room_id="!new:localhost")
 
         await create_room(client, "Secure", encrypted=True)
@@ -67,6 +68,7 @@ class TestRoomCreationEncryption:
         """Default creation must stay unencrypted."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@bot:localhost"
+        client.access_token = None
         client.room_create.return_value = nio.RoomCreateResponse(room_id="!new:localhost")
 
         await create_room(client, "Plain")

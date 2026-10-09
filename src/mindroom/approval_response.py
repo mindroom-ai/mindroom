@@ -11,17 +11,20 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
 from mindroom.approval_failure import prepare_approval_failure
+from mindroom.cancellation import cancel_source_from_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
+from mindroom.redaction import redact_sensitive_text
 from mindroom.response_sources import ResponseAttempt
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -30,8 +33,6 @@ from mindroom.tool_approval import (
 )
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
-
-_USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
 
 def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
@@ -246,6 +247,7 @@ class ApprovalResponseCoordinator:
                 tool_name=tool_name,
                 invoking_agent=invoking_agent,
                 toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
+                arguments_digest=approval_arguments_digest(tool.tool_args),
                 expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
                 decision=decisions[tool_call_id][0],
                 reason=(
@@ -255,7 +257,7 @@ class ApprovalResponseCoordinator:
                 ),
                 human_approval_required=decisions[tool_call_id][2],
             )
-            for _tool, tool_call_id, tool_name, invoking_agent in identified
+            for tool, tool_call_id, tool_name, invoking_agent in identified
         )
         if any(call.toolkit_name is None for call in calls):
             msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
@@ -446,7 +448,6 @@ class ApprovalResponseCoordinator:
         reason: str,
         *,
         visible_text: str | None = None,
-        stream_status: str = STREAM_STATUS_COMPLETED,
     ) -> bool:
         """Settle cards and the failure outcome from the owning source worker."""
         current = await self.store.approval_continuation(continuation.approval_id)
@@ -471,20 +472,43 @@ class ApprovalResponseCoordinator:
         )
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
-        visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason)
+        user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
+        visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if user_stop else redact_sensitive_text(reason))
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=current.response_event_id,
                 new_text=visible_reason,
-                extra_content={STREAM_STATUS_KEY: stream_status},
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED if user_stop else STREAM_STATUS_ERROR},
                 delivery_turn_id=current.source_event_ids[0],
                 response_attempt=ResponseAttempt(current.entity_name, current.sources),
                 defer_source_handoff=True,
             ),
         )
         return delivered and await self.store.finish_approval_continuation(current.approval_id)
+
+    async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
+        """End an interrupted continuation's cards and hand its pending sources back to ordinary replay."""
+        manager = approval_manager.get_approval_store()
+        current = await prepare_approval_failure(
+            continuation,
+            reason,
+            request_failure=partial(self.request_failure, continuation),
+            expire_cards=None if manager is None else manager.expire_continuation_cards,
+        )
+        if current is None:
+            return False
+        await cancel_approval_delegations(
+            current,
+            config=self.config(),
+            runtime_paths=self.runtime_paths,
+            reason=reason,
+        )
+        return await self.store.release_approval_continuation(
+            current.approval_id,
+            expected_generation=current.generation,
+        )
 
     async def successful_final_delivery(
         self,

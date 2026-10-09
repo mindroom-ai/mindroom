@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import selectors
@@ -19,11 +20,9 @@ from typing import TYPE_CHECKING
 from mindroom import constants
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
-    CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
-    credentials_encryption_key_value,
     is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
     sandbox_subprocess_system_env,
@@ -38,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
+_TMPDIR_LINK_ROOT = Path("/tmp")  # noqa: S108
 _WORKSPACE_ENV_HOOK_RELATIVE_PATH = Path(".mindroom") / "worker-env.sh"
 _WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS = 10.0
 _WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES = 64 * 1024
@@ -167,6 +167,10 @@ def request_execution_env(
     agent_vault_env = constants.worker_proxy_execution_env(worker_local_env)
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+        if protected_env_names:
+            # The primary's HOME is a host path; a dedicated worker keeps its own HOME until the
+            # workspace HOME contract replaces it, so only the incoming request env drops it.
+            protected_env_names |= {"HOME"}
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
         env.update(agent_vault_env)
         return env
@@ -205,7 +209,6 @@ def tool_runtime_paths_with_request_env(
     execution_env: dict[str, str],
     *,
     include_base_execution_env: bool = True,
-    include_credentials_encryption_key: bool = False,
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one tool-request env snapshot."""
@@ -238,12 +241,6 @@ def tool_runtime_paths_with_request_env(
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
-    if include_credentials_encryption_key:
-        credentials_encryption_key = credentials_encryption_key_value(
-            runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV),
-        )
-        if credentials_encryption_key is not None:
-            process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
@@ -296,6 +293,24 @@ def generic_subprocess_env() -> dict[str, str]:
     return env
 
 
+def worker_tmp_dir(paths: LocalWorkerStatePaths) -> Path:
+    """Return the TMPDIR for one worker's tool subprocesses.
+
+    Chromium binds its SingletonSocket at `$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket`,
+    and a Unix socket path holds at most 107 bytes, which the worker state path alone can exceed.
+    A short link in /tmp keeps socket paths short while temp files stay on the disk-backed state mount.
+    When this process cannot create the link, or the name leads anywhere else, the long path stays.
+    """
+    digest = hashlib.sha256(os.fsencode(paths.tmp_dir)).hexdigest()[:16]
+    link = _TMPDIR_LINK_ROOT / f"mindroom-{digest}"
+    with suppress(OSError):
+        link.symlink_to(paths.tmp_dir)
+    with suppress(OSError):
+        if link.lstat().st_uid == os.geteuid() and link.readlink() == paths.tmp_dir:
+            return link
+    return paths.tmp_dir
+
+
 def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     """Build the subprocess env for one prepared local worker."""
     env = generic_subprocess_env()
@@ -304,7 +319,7 @@ def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
     env["UV_CACHE_DIR"] = str(paths.cache_dir / "uv")
     env["PYTHONPYCACHEPREFIX"] = str(paths.cache_dir / "pycache")
-    env["TMPDIR"] = str(paths.tmp_dir)
+    env["TMPDIR"] = str(worker_tmp_dir(paths))
     env["VIRTUAL_ENV"] = str(paths.venv_dir)
 
     env["PATH"] = constants.subprocess_path_with_prepends(

@@ -9,11 +9,11 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import jwt
 import pytest
+from authlib.integrations import httpx_client as authlib_httpx_client
 from fastapi.testclient import TestClient
 
 from mindroom.api import main
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth import providers as providers_module
 from mindroom.oauth.registry import load_oauth_providers
 from tests.api.test_api import (
     _trusted_upstream_jwks,
@@ -212,9 +212,9 @@ def test_callback_stores_only_that_connection_for_that_requester(
             },
         )
 
-    real_client = providers_module.AsyncOAuth2Client
+    real_client = authlib_httpx_client.AsyncOAuth2Client
     monkeypatch.setattr(
-        providers_module,
+        authlib_httpx_client,
         "AsyncOAuth2Client",
         lambda **kwargs: real_client(transport=httpx.MockTransport(token_endpoint), **kwargs),
     )

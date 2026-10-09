@@ -822,6 +822,7 @@ async def test_native_credentials_follow_authored_agent_scope(
             {"account_name": account},
             credentials_manager=credentials,
             worker_target=user.worker_target,
+            primary_built_tool=True,
         )
         result = await gateway.invoke_tool(user, toolkit="calculator", function="account", arguments={})
         assert result == {"result": account}
@@ -862,6 +863,7 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
                 entry_config=PluginEntryConfig(path="audit.py"),
                 plugin_order=0,
                 discovered_hooks=(before, after),
+                discovered_automations=(),
             ),
         ],
     )
@@ -1058,7 +1060,7 @@ async def test_mcp_body_failure_returns_redacted_error_without_retry(
     failure = (
         RuntimeError(message)
         if failure_kind == "transport"
-        else CallToolResult(isError=True, content=[TextContent(type="text", text=message)])
+        else CallToolResult(is_error=True, content=[TextContent(type="text", text=message)])
     )
     monkeypatch.setattr(
         _FakeClientSession,

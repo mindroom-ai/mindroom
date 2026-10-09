@@ -96,7 +96,7 @@ def _messages_from_call(args: tuple[object, ...], kwargs: dict[str, object]) -> 
 
 
 def _provider_error(status_code: int = 400) -> ModelProviderError:
-    return ModelProviderError(message="inline media is unsupported", status_code=status_code)
+    return ModelProviderError(message="text-only is not a multimodal model", status_code=status_code)
 
 
 def _media_message() -> Message:
@@ -877,13 +877,24 @@ async def test_media_free_stream_does_not_replay_after_output_on_guidance_error(
         ModelProviderError(message="payload too large", status_code=413),
         ModelProviderError(message="server unavailable", status_code=503),
         RuntimeError("request entity too large"),
+        RuntimeError("unknown provider failure"),
+        ModelProviderError(
+            message="Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+            "'message': 'messages.0.content.1.image.source.base64.data: Could not process image'}}",
+            status_code=400,
+        ),
+        ModelProviderError(
+            message="You uploaded an unsupported image. Please make sure your image is valid.",
+            status_code=400,
+        ),
+        ModelProviderError(message="Image does not match the provided media type image/png", status_code=400),
     ],
 )
 async def test_successful_retry_after_non_capability_failure_does_not_teach_route(
     tmp_path: Path,
     error: Exception,
 ) -> None:
-    """Size and transient failures retry once but cannot prove media is unsupported."""
+    """Failures that do not name a missing input capability retry once but cannot prove media is unsupported."""
     model = _load(
         _FakeModel(
             blocking_outcomes=[
@@ -904,12 +915,70 @@ async def test_successful_retry_after_non_capability_failure_does_not_teach_rout
 
 
 @pytest.mark.asyncio
-async def test_untyped_failure_retries_once_and_teaches_after_success(tmp_path: Path) -> None:
-    """Fallback does not depend on provider-specific error wording or exception type."""
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 400 - [{'error': {'code': 400, 'message': "
+        "'The message size (74029796 bytes) exceeds 30.000MB limit.', 'status': 'FAILED_PRECONDITION'}}]",
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': "
+        "\"messages.4.content.3.document.source.base64.media_type: Input should be 'application/pdf'\"}}",
+        "Invalid file data: 'input[7].content[1].file_data'. Expected a base64-encoded data URL with a valid "
+        "file MIME type, but got unsupported MIME type 'application/zip'.",
+    ],
+    ids=["request_size", "claude_document_type", "openai_file_type"],
+)
+async def test_one_rejected_file_does_not_strip_later_pdfs_for_the_route(tmp_path: Path, message: str) -> None:
+    """A rejection naming one file's size or type cannot prove the route rejects every file."""
     model = _load(
         _FakeModel(
             blocking_outcomes=[
-                RuntimeError("unknown provider failure"),
+                ModelProviderError(message=message, status_code=400),
+                ModelResponse(content="recovered"),
+                ModelResponse(content="read the pdf"),
+            ],
+        ),
+        tmp_path,
+    )
+    archive_turn = Message(
+        role="user",
+        content='Unpack this.\n[attachments: att_zip (file, "bundle.zip")]',
+        files=[File(content=b"PK\x03\x04", mime_type="application/zip", filename="bundle.zip")],
+    )
+    pdf_turn = Message(
+        role="user",
+        content='Summarize this.\n[attachments: att_pdf (file, "report.pdf")]',
+        files=[File(content=b"%PDF-1.4", mime_type="application/pdf", filename="report.pdf")],
+    )
+
+    await model.ainvoke(messages=[archive_turn])
+    await model.ainvoke(messages=[pdf_turn])
+
+    assert model.blocking_calls[1][0].files is None
+    pdf_call = model.blocking_calls[2]
+    assert pdf_call[0].files
+    assert len(pdf_call) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+        "'message': 'claude-text-only does not support image input.'}}",
+        "Error code: 400 - {'error': {'message': 'Invalid content type. image_url is only supported by certain "
+        "models.', 'type': 'invalid_request_error', 'param': 'messages.[0].content.[1].type'}}",
+        "Error code: 400 - {'object': 'error', 'message': 'text-only is not a multimodal model'}",
+        "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
+        "Error code: 404 - {'error': {'message': 'No endpoints found that support image input', 'code': 404}}",
+    ],
+    ids=["anthropic", "openai", "vllm", "llama_cpp", "openrouter"],
+)
+async def test_capability_rejection_teaches_route_after_success(tmp_path: Path, message: str) -> None:
+    """A rejection naming the missing input capability lets later requests skip the failed call."""
+    model = _load(
+        _FakeModel(
+            blocking_outcomes=[
+                RuntimeError(message),
                 ModelResponse(content="recovered"),
                 ModelResponse(content="next"),
             ],

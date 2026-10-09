@@ -303,7 +303,7 @@ def test_worker_proxy_schema_reuse(
         original_process(self, strict=strict)
 
     monkeypatch.setattr(Function, "process_entrypoint", count_preparation)
-    wrap_proxy = sandbox_proxy._wrap_async_function if async_proxy else sandbox_proxy._wrap_sync_function
+    wrap_proxy = sandbox_proxy._wrap_async_proxy if async_proxy else sandbox_proxy._wrap_sync_function
 
     def build(owner: _EchoTool) -> Function:
         function = Function(name="echo", entrypoint=owner.echo)

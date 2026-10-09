@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +13,8 @@ from agno.agent import Agent as AgnoAgent
 from agno.team.team import Team as AgnoTeam
 
 import mindroom.custom_tools.todo as todo_module
+import mindroom.custom_tools.todo_template_render as todo_template_render_module
+import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -406,6 +410,27 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     assert any(item["depends_on"] for item in items)
 
 
+def test_mindroom_dev_template_keeps_free_text_params_exactly(tmp_path: Path) -> None:
+    """Quotes, backslashes, and emoji in free-text params should reach the todo titles as typed."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    issue_ref = 'Fix "quoted" C:\\temp 🐛'
+    branch = 'fix/"quoted"'
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(
+            agent=_agent(),
+            name="mindroom-dev",
+            params={"ISSUE_REF": issue_ref, "BRANCH": branch, "REPO": "mindroom"},
+        )
+
+    titles = [item["title"] for item in _read_todos(config)["items"]]
+    assert titles[0] == f"Create living report for {issue_ref} in the repo notes or task file"
+    assert titles[1] == f"Create implementation plan for {issue_ref} on {branch}"
+    assert titles[3] == f"Run focused automated tests for {issue_ref}"
+    assert titles[-1] == f"Push {branch} and open PR if IS_PR is true"
+
+
 def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: Path) -> None:
     """The review-loop template should not force a rerun after first-round approval."""
     config = _config(tmp_path)
@@ -468,6 +493,29 @@ todos:
         tool.apply_template(agent=_agent(), name="bad-dependency-index", params={})
 
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_workspace_template_renders_priority_and_depends_on_from_params(tmp_path: Path) -> None:
+    """Jinja in priority and depends_on values should be validated after rendering, like every other value."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "templated-fields",
+        _template_text(
+            "templated-fields",
+            '  - title: One\n  - title: Two\n    priority: "{{ PRIORITY }}"\n    depends_on: ["{{ DEP }}"]\n',
+        ),
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "high", "DEP": 1})
+        with pytest.raises(ValueError, match=r"document validation failed: todos\.1\.priority"):
+            tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "urgent", "DEP": 1})
+
+    first, second = _read_todos(config)["items"]
+    assert second["priority"] == "high"
+    assert second["depends_on"] == [first["id"]]
 
 
 def test_workspace_template_rejects_dependency_cycle(tmp_path: Path) -> None:
@@ -536,6 +584,265 @@ todos:
     assert "`valid-workspace`" in listing
     assert "`mindroom-dev`" in listing
     assert "`broken`" not in listing
+
+
+# Only Linux enforces the render child's address-space cap; elsewhere workspace templates only substitute.
+_NEEDS_MEMORY_CAP = pytest.mark.skipif(sys.platform != "linux", reason="needs RLIMIT_AS")
+
+
+def _template_text(name: str, todos: str, *, description: str = "Workspace template.") -> str:
+    return f'name: {name}\nversion: "1"\ndescription: "{description}"\ntodos:\n{todos}'
+
+
+@pytest.mark.parametrize(
+    ("templates", "params", "error"),
+    [
+        pytest.param(
+            {"hostile": _template_text("hostile", "  - title: One\n", description="{{ 'a' * 10**10 }}")},
+            {},
+            "memory limit",
+            id="memory",
+            marks=_NEEDS_MEMORY_CAP,
+        ),
+        pytest.param(
+            {"hostile": _template_text("hostile", "  - title: One\n", description="{{ ''.__class__.__mro__ }}")},
+            {},
+            "unsafe template expression",
+            id="sandbox-escape",
+            marks=_NEEDS_MEMORY_CAP,
+        ),
+        pytest.param(
+            {"hostile": _template_text("hostile", "  - title: One\n", description="{{ X }}" * 100)},
+            {"X": "a" * 1000},
+            "templates rendered by one call exceed",
+            id="rendered-size",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text(
+                    "hostile",
+                    '  - sub_template: middle\n    params: {A: "' + "1," * 600 + '", P: "\\\\n    depends_on: ["}\n',
+                ),
+                "middle": _template_text(
+                    "middle",
+                    '  - sub_template: leaf\n    params: {A: "{{A}}", P: "{{P}}"}\n' * 50,
+                ),
+                "leaf": _template_text("leaf", "  - title: a\n  - title: b\n") + "# {{P}}" + "{{A}}" * 53 + "1]\n",
+            },
+            {},
+            "templates rendered by one call exceed",
+            id="rendered-size-across-sub-templates",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text(
+                    "hostile",
+                    "  - sub_template: leaf\n    params: {A: &a [x, x], B: [*a, *a]}\n",
+                ),
+                "leaf": _template_text("leaf", "  - title: Leaf\n"),
+            },
+            {},
+            "aliases",
+            id="aliases",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text("hostile", "  - sub_template: middle\n" * 20),
+                "middle": _template_text("middle", "  - sub_template: leaf\n" * 20),
+                "leaf": _template_text("leaf", "  - title: Leaf\n" * 20),
+            },
+            {},
+            "at most 100 todos",
+            id="fan-out",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text("hostile", "  - sub_template: leaf\n" * 40),
+                "leaf": _template_text("leaf", "  - title: Leaf\n") + "#" * 2048 + "\n",
+            },
+            {},
+            "templates read by one call exceed",
+            id="combined-size",
+        ),
+    ],
+)
+def test_workspace_templates_cannot_make_the_primary_render_unbounded_work(
+    tmp_path: Path,
+    templates: dict[str, str],
+    params: dict[str, str],
+    error: str,
+) -> None:
+    """Worker-written templates render under memory, sandbox, alias, size, and fan-out limits."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for name, text in templates.items():
+        _write_workspace_template(config, name, text)
+
+    with tool_runtime_context(_tool_context(config)), pytest.raises(ValueError, match=error):
+        tool.apply_template(agent=_agent(), name="hostile", params=params, dry_run=True)
+
+
+@_NEEDS_MEMORY_CAP
+def test_workspace_templates_render_jinja_conditionals_and_filters(tmp_path: Path) -> None:
+    """Workspace templates keep full inline Jinja, rendered outside the primary."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "deploy",
+        _template_text(
+            "deploy",
+            "  - title: \"{% if REPO == 'cinny' %}Deploy Cinny{% else %}No deploy for {{ REPO }}{% endif %}\"\n"
+            "  - title: \"Push {{ BRANCH | default('main') | upper }}\"\n"
+            "    depends_on: [1]\n",
+        ),
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        cinny = tool.apply_template(agent=_agent(), name="deploy", params={"REPO": "cinny"}, dry_run=True)
+        other = tool.apply_template(agent=_agent(), name="deploy", params={"REPO": "x"}, dry_run=True)
+
+    assert "- 1. [medium] Deploy Cinny" in cinny
+    assert "- 2. [medium] Push MAIN (depends on 1)" in cinny
+    assert "- 1. [medium] No deploy for x" in other
+
+
+def test_template_renderer_only_substitutes_where_memory_cannot_be_capped() -> None:
+    """Where the address-space limit cannot be installed, expressions are refused before any of them runs."""
+    request = {"template": "{% if true %}x{% endif %}", "params": {}, "max_chars": 100}
+    substitution = {"template": "Fix {{ ISSUE }}", "params": {"ISSUE": "X-1"}, "max_chars": 100}
+
+    refused = todo_template_render_module._render(request, memory_limited=False)
+    rendered = todo_template_render_module._render(substitution, memory_limited=False)
+
+    assert "only substitute" in refused["error"]
+    assert rendered == {"rendered": "Fix X-1"}
+
+
+def test_workspace_template_render_waits_for_another_render_within_its_deadline() -> None:
+    """A render that overlaps another waits for the single slot instead of failing, but never past its time limit."""
+    slots = todo_template_render_module._render_slots
+    render = todo_template_render_module.render_workspace_template
+    slots.acquire()
+    release = threading.Timer(0.2, slots.release)
+    release.start()
+    try:
+        assert render("Fix {{ X }}", {"X": 1}, max_chars=100, timeout_seconds=5) == "Fix 1"
+    finally:
+        release.join()
+
+    slots.acquire()
+    try:
+        with pytest.raises(ValueError, match="time limit"):
+            render("Fix {{ X }}", {"X": 2}, max_chars=100, timeout_seconds=0.1)
+    finally:
+        slots.release()
+
+
+@_NEEDS_MEMORY_CAP
+def test_workspace_template_that_spins_is_stopped_at_the_call_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A template that loops without end is killed when the call's render time runs out."""
+    monkeypatch.setattr(todo_module, "_MAX_TEMPLATE_RENDER_SECONDS", 1.0)
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    loops = "{% for i in range(100000) %}{% for j in range(100000) %}{% endfor %}{% endfor %}"
+    _write_workspace_template(config, "hostile", _template_text("hostile", f"  - title: '{loops}One'\n"))
+
+    with tool_runtime_context(_tool_context(config)), pytest.raises(ValueError, match="time"):
+        tool.apply_template(agent=_agent(), name="hostile", params={}, dry_run=True)
+
+
+def test_workspace_template_file_above_size_cap_is_refused_and_unlisted(tmp_path: Path) -> None:
+    """A workspace template file above 64 KiB is never read in full by the primary."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(config, "oversized", _template_text("oversized", "  - title: One\n") + "#" * 64 * 1024)
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+        with pytest.raises(ValueError, match="exceeds its size limit"):
+            tool.apply_template(agent=_agent(), name="oversized", params={}, dry_run=True)
+
+    assert "`mindroom-dev`" in listing
+    assert "`oversized`" not in listing
+
+
+def test_list_templates_stops_reading_workspace_templates_after_its_budget(tmp_path: Path) -> None:
+    """However many templates worker code plants, one listing reads and returns a bounded amount of their text."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for index in range(20):
+        name = f"planted-{index:02}"
+        _write_workspace_template(config, name, _template_text(name, "  - title: One\n", description="d" * 60 * 1024))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`planted-00`" in listing
+    assert "`planted-19`" not in listing
+    assert "`mindroom-dev`" in listing
+
+
+def test_list_templates_examines_only_the_first_workspace_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """However many entries worker code plants, one listing examines a bounded number of them."""
+    monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 4)
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for index in range(10):
+        name = f"planted-{index:02}"
+        _write_workspace_template(config, name, _template_text(name, "  - title: One\n"))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert listing.count("| `workspace` |") == 4
+    assert "`mindroom-dev`" in listing
+
+
+def test_list_templates_charges_unreadable_workspace_templates_against_its_budget(tmp_path: Path) -> None:
+    """Templates that fail to decode still count, and the unread ones still shadow built-ins of the same name."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    template_dir = _workspace_template_dir(config)
+    template_dir.mkdir(parents=True)
+    for index in range(20):
+        (template_dir / f"invalid-{index:02}.yaml.j2").write_bytes(b"\xff" * 60 * 1024)
+    _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: One\n"))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`mindroom-dev`" not in listing
+    assert "`parallel-review-loop`" in listing
+
+
+@pytest.mark.parametrize("unlisted", ["unscanned", "unparseable"])
+def test_list_templates_hides_builtins_that_unlisted_workspace_templates_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unlisted: str,
+) -> None:
+    """A workspace template the listing leaves out still hides the built-in of its name, because apply_template uses it."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    if unlisted == "unscanned":
+        # The entry scan stops before reaching the template, as when worker code fills the window with other entries.
+        monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 0)
+        _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: Workspace todo\n"))
+    else:
+        _write_workspace_template(config, "mindroom-dev", 'name: mindroom-dev\nversion: "1"\ntodos: [\n')
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`mindroom-dev`" not in listing
+    assert "`parallel-review-loop`" in listing
 
 
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
@@ -670,6 +977,25 @@ todos:
     assert by_title["Child root B"]["depends_on"] == [setup_id]
     assert by_title["Child join"]["depends_on"] == [child_root_a_id, child_root_b_id]
     assert by_title["After child"]["depends_on"] == [child_join_id]
+
+
+def test_repeated_template_dependencies_are_stored_once(tmp_path: Path) -> None:
+    """Each repeat of a sub-template index would add all its terminals again, so a dependency is stored once."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(config, "leaf", _template_text("leaf", "  - title: Leaf\n" * 3))
+    repeated = ", ".join(["1"] * 1000)
+    _write_workspace_template(
+        config,
+        "parent",
+        _template_text("parent", f"  - sub_template: leaf\n  - title: After leaf\n    depends_on: [{repeated}]\n"),
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(agent=_agent(), name="parent", params={})
+
+    items = _read_todos(config)["items"]
+    assert items[-1]["depends_on"] == [item["id"] for item in items[:3]]
 
 
 def test_apply_template_rejects_unknown_assigned_agent(tmp_path: Path) -> None:
@@ -932,6 +1258,53 @@ def test_workspace_template_swapped_after_resolution_is_not_read(
         return resolved
 
     monkeypatch.setattr(todo_module, "_resolve_template_path", resolve_then_swap)
+
+    with tool_runtime_context(_tool_context(config)), pytest.raises((OSError, ValueError)):
+        tool.apply_template(agent=_agent(), name="swapped", params={})
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_workspace_template_is_read_through_an_operator_linked_agents_directory(tmp_path: Path) -> None:
+    """An operator symlink for the agents directory still serves workspace templates."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    agents = runtime_paths_for(config).storage_root / "agents"
+    real_agents = tmp_path / "agents-volume"
+    real_agents.mkdir()
+    agents.symlink_to(real_agents, target_is_directory=True)
+    _write_workspace_template(
+        config,
+        "linked",
+        'name: linked\nversion: "1"\ndescription: Linked template.\ntodos:\n  - title: Linked task\n',
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+        result = tool.apply_template(agent=_agent(), name="linked", params={})
+
+    assert "`linked`" in listing
+    assert "Linked task" in result
+
+
+def test_workspace_template_is_not_read_through_a_replaced_workspace(tmp_path: Path) -> None:
+    """A workspace replaced by a link never supplies templates from the link's target."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "swapped",
+        'name: swapped\nversion: "1"\ndescription: Own template.\ntodos:\n  - title: Own task\n',
+    )
+    workspace = _workspace_template_dir(config).parent.parent
+    victim = tmp_path / "victim-workspace"
+    (victim / "todo" / "templates").mkdir(parents=True)
+    (victim / "todo" / "templates" / "swapped.yaml.j2").write_text(
+        'name: swapped\nversion: "1"\ndescription: Victim.\ntodos:\n  - title: victim-only note\n',
+        encoding="utf-8",
+    )
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(victim, target_is_directory=True)
 
     with tool_runtime_context(_tool_context(config)), pytest.raises((OSError, ValueError)):
         tool.apply_template(agent=_agent(), name="swapped", params={})

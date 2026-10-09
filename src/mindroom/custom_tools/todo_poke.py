@@ -231,8 +231,8 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
     # LEGACY_COMPAT: Todo items without a recorded requester_id.
     # Legacy format: A native `todos.json` item with no `requester_id` key.
     # Last legacy release: v2026.9.292 wrote every item without a requester; replacement: the next release records the title author's `requester_id` on every item it writes.
-    # Handling: The item keeps the authority every release through v2026.9.292 poked it with, the assignee's own internal turn, and shares the internal poke scope and its unchanged dedup key.
-    # Coverage: tests/test_todo_poke.py::test_scan_pokes_legacy_items_as_assignee_turn_with_existing_dedup_state, tests/test_todo_poke.py::test_upgrade_keeps_pre_attribution_dedup_record_for_legacy_work.
+    # Handling: The item still parses so its thread's attributed work keeps poking, but it is never poked itself, because its title may come from a human the assignee refuses; its next write by an admitted requester records an author.
+    # Coverage: tests/test_todo_poke.py::test_scan_never_pokes_items_without_a_recorded_requester.
     requester_id = _require_string(item_data, "requester_id") if "requester_id" in item_data else None
 
     return _TodoItemSnapshot(
@@ -412,23 +412,33 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
+            # Work nobody is recorded as writing could come from a human the assignee refuses.
+            if item.requester_id is None:
+                _warn_state_once(
+                    "todo_poke_requester_unrecorded",
+                    snapshot.source_path,
+                    f"todo {item.item_id} has no recorded requester",
+                    seen_warning_keys,
+                    item_id=item.item_id,
+                    assigned_agent=item.assigned_agent,
+                )
+                continue
             # A human's work pokes as that human so the assignee applies its access policy to them.
-            # Work from internal senders and legacy work shares one poke as the assignee's own turn.
+            # Work from internal senders shares one poke as the assignee's own turn.
             poke_requester = None
-            if item.requester_id is not None:
-                kind = classify_requester(item.requester_id, item.assigned_agent, snapshot.room_id)
-                if kind is TodoPokeRequesterKind.REFUSED:
-                    _warn_state_once(
-                        "todo_poke_requester_refused",
-                        snapshot.source_path,
-                        f"{item.assigned_agent} may not currently act for requester {item.requester_id}",
-                        seen_warning_keys,
-                        item_id=item.item_id,
-                        assigned_agent=item.assigned_agent,
-                    )
-                    continue
-                if kind is TodoPokeRequesterKind.HUMAN:
-                    poke_requester = item.requester_id
+            kind = classify_requester(item.requester_id, item.assigned_agent, snapshot.room_id)
+            if kind is TodoPokeRequesterKind.REFUSED:
+                _warn_state_once(
+                    "todo_poke_requester_refused",
+                    snapshot.source_path,
+                    f"{item.assigned_agent} may not currently act for requester {item.requester_id}",
+                    seen_warning_keys,
+                    item_id=item.item_id,
+                    assigned_agent=item.assigned_agent,
+                )
+                continue
+            if kind is TodoPokeRequesterKind.HUMAN:
+                poke_requester = item.requester_id
             items_by_owner.setdefault((item.assigned_agent, poke_requester), []).append(item)
 
         for assigned_agent, requester_id in sorted(items_by_owner, key=lambda owner: (owner[0], owner[1] or "")):

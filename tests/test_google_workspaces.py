@@ -11,11 +11,11 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from authlib.integrations import httpx_client as authlib_httpx_client
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth import providers as providers_module
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot_sync,
     refresh_oauth_credentials,
@@ -186,7 +186,10 @@ def test_workspace_client_does_not_fall_back_to_existing_client(tmp_path: Path) 
         assert providers["google_gmail"].client_config(paths).client_id == "original"
 
 
-@pytest.mark.parametrize("service", ["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets"])
+@pytest.mark.parametrize(
+    "service",
+    ["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets", "google_tasks"],
+)
 def test_workspace_tool_filters_use_visible_names(tmp_path: Path, service: str) -> None:
     """Function filtering remains usable after adding a workspace prefix."""
     config, paths = _plugin(tmp_path)
@@ -203,7 +206,10 @@ def test_workspace_tool_filters_use_visible_names(tmp_path: Path, service: str) 
         assert set(tool.functions) == {visible}
 
 
-@pytest.mark.parametrize("service", ["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets"])
+@pytest.mark.parametrize(
+    "service",
+    ["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets", "google_tasks"],
+)
 def test_workspace_tools_ignore_global_service_account(tmp_path: Path, service: str) -> None:
     """An explicitly connected workspace must not act as a global delegated account."""
     config, paths = _plugin(tmp_path)
@@ -218,6 +224,7 @@ def test_workspace_tools_ignore_global_service_account(tmp_path: Path, service: 
             "google_drive": ("secondary_google_drive_list_files", {}),
             "google_docs": ("secondary_google_docs_get_document", {"document_id": "test"}),
             "google_sheets": ("secondary_read_sheet", {"spreadsheet_id": "test", "spreadsheet_range": "A1"}),
+            "google_tasks": ("secondary_google_tasks_list_tasks", {}),
         }[service]
         result = json.loads(tool.functions[function_name].entrypoint(**args))
         assert result["oauth_connection_required"] is True
@@ -275,9 +282,9 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
             json={"access_token": "refreshed-access", "token_type": "Bearer", "expires_in": 3600},
         )
 
-    real_client = providers_module.AsyncOAuth2Client
+    real_client = authlib_httpx_client.AsyncOAuth2Client
     monkeypatch.setattr(
-        providers_module,
+        authlib_httpx_client,
         "AsyncOAuth2Client",
         lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
     )
@@ -291,6 +298,7 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
                 {
                     "token": f"{client_id}-access",
                     "refresh_token": f"{client_id}-refresh",
+                    "token_uri": provider.token_url,
                     "client_id": client_id,
                     "scopes": list(provider.scopes),
                     "expires_at": 1,

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     icon="Webhook",
     icon_color="text-amber-500",
     dependencies=["agno"],
-    docs_url="https://docs.mindroom.chat/agent-callbacks/",
+    docs_url="https://docs.mindroom.chat/external-triggers/#agent-callbacks",
     function_names=("mint_callback",),
 )
 def callback_manager_tools() -> type[CallbackManagerTools]:

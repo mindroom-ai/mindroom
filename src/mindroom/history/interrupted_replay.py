@@ -190,6 +190,25 @@ def _render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> s
     return "\n\n".join(parts)
 
 
+def render_stopped_attempt(
+    *,
+    partial_text: str,
+    completed_tools: Sequence[ToolTraceEntry],
+    interrupted_tools: Sequence[ToolTraceEntry],
+) -> str:
+    """Render what one stopped attempt showed, worded as its interrupted replay record would be."""
+    return _render_interrupted_replay_content(
+        build_interrupted_replay_snapshot(
+            user_message=None,
+            user_message_is_structured=False,
+            partial_text=partial_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
+            run_metadata=None,
+        ),
+    )
+
+
 def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[str, Any]:
     metadata = dict(snapshot.run_metadata)
     metadata.update(

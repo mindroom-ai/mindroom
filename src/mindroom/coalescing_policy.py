@@ -12,6 +12,7 @@ from .dispatch_source import (
     VOICE_SOURCE_KIND,
     source_kind_bypasses_coalescing,
 )
+from .timestamp_formatting import normalize_timestamp_ms
 
 if TYPE_CHECKING:
     from .coalescing_batch import PendingEvent
@@ -56,6 +57,20 @@ def pending_event_is_text(pending_event: PendingEvent) -> bool:
     ending in text is complete and a batch ending in media may still grow.
     """
     return pending_event.event.raw_event is None
+
+
+def pending_events_sent_together(earlier: PendingEvent, later: PendingEvent, *, window_seconds: float) -> bool:
+    """Return whether two events were sent within one burst window of each other.
+
+    Local receipt time collapses when sync catch-up or slow voice readiness
+    delivers a backlog at once, so a send burst compares the homeserver's
+    origin timestamps. An event without one is never proven to share a burst.
+    """
+    earlier_ms = normalize_timestamp_ms(earlier.event.server_timestamp)
+    later_ms = normalize_timestamp_ms(later.event.server_timestamp)
+    return (
+        earlier_ms is not None and later_ms is not None and abs(later_ms - earlier_ms) <= round(window_seconds * 1000)
+    )
 
 
 def source_or_event_allows_room_scope_batching(

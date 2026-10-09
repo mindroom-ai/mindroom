@@ -18,6 +18,17 @@ from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.test_claude_native_compaction import _CHECKPOINT, _TEXT, _response, _stream_response
 
 
+def _is_rewritten_compaction(block: dict[str, Any]) -> bool:
+    """Return whether Vertex counting replaced a compaction block with its serialized text."""
+    if block.get("type") != "text":
+        return False
+    try:
+        original = json.loads(block["text"])
+    except (TypeError, ValueError):
+        return False
+    return isinstance(original, dict) and original.get("type") == "compaction"
+
+
 @pytest.mark.asyncio
 @pytest.mark.filterwarnings("ignore:Using Claude with claude-opus-4-6.*:UserWarning")
 @pytest.mark.parametrize("model_id", ["claude-sonnet-4-6", "claude-opus-4-6"])
@@ -41,8 +52,13 @@ async def test_manual_thinking_survives_checkpoint_fallback(
     def respond(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         if "count-tokens" in request.url.path:
-            assert payload["thinking"] == manual
             blocks = [block for message in payload["messages"] for block in message["content"]]
+            if any(_is_rewritten_compaction(block) for block in blocks):
+                # A rewritten block changes a signed thinking turn, so that count runs without thinking.
+                assert "thinking" not in payload
+                assert not any(block["type"] in {"thinking", "redacted_thinking"} for block in blocks)
+            else:
+                assert payload["thinking"] == manual
             tokens = 1000 if "Original launch facts." in json.dumps(blocks) else 20000
             counts.append(tokens)
             return httpx.Response(200, json={"input_tokens": tokens})

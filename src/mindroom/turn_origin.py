@@ -70,9 +70,17 @@ class TurnOrigin:
         }
 
     @property
+    def acting_sender_id(self) -> str | None:
+        """Return the managed sender of a reply it wrote for this turn's human requester, if it is one."""
+        if self.intent == TurnIntent.MANAGED_MESSAGE and self.requester_kind == SenderKind.USER:
+            return self.transport_sender_id
+        return None
+
+    @property
     def blocks_unmentioned_managed_sender(self) -> bool:
         """Return whether an unmentioned managed sender should be treated as chatter."""
-        return self.requester_kind == SenderKind.MANAGED_ENTITY and not self.may_dispatch_without_mention
+        managed_sender = self.requester_kind == SenderKind.MANAGED_ENTITY or self.acting_sender_id is not None
+        return managed_sender and not self.may_dispatch_without_mention
 
     @property
     def may_answer_interactive_prompt(self) -> bool:
@@ -163,14 +171,17 @@ def requester_id_from_trusted_original_sender(
     *,
     original_sender: str | None,
     original_sender_entity_name: str | None,
-    original_sender_is_human: bool,
+    original_sender_is_access_checked: bool,
     source_kind: str | None,
     sender_trusts_original_sender: bool,
 ) -> str | None:
-    """Return original-sender metadata that may act as the dispatch requester."""
+    """Return original-sender metadata that may act as the dispatch requester.
+
+    A relayed human or configured bot account stays the requester, so access applies to it, not the relaying entity.
+    """
     if not sender_trusts_original_sender or not original_sender:
         return None
-    if original_sender_is_human:
+    if original_sender_is_access_checked:
         return original_sender
     if original_sender_entity_name is not None and source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}:
         return original_sender

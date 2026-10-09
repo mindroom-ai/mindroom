@@ -18,7 +18,7 @@ rules:
   # Core resources used by the instance chart and Helm release management
   # Note: Includes configmaps/secrets for Helm releases (sh.helm.release.v1.*)
   - apiGroups: [""]
-    resources: ["configmaps", "secrets", "services", "persistentvolumeclaims", "serviceaccounts"]
+    resources: ["configmaps", "secrets", "services", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
   # Pods and events for monitoring/debugging (read-only for security)

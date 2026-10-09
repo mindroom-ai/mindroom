@@ -441,6 +441,47 @@
           "description": "Allow this agent to modify its own configuration via a tool",
           "title": "Allow Self Config"
         },
+        "automations": {
+          "anyOf": [
+            {
+              "items": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/PromptCurationAutomation"
+                  },
+                  {
+                    "$ref": "#/$defs/DreamingAutomation"
+                  },
+                  {
+                    "$ref": "#/$defs/PluginAutomation"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "name"
+                }
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Automations for this agent, built-in such as prompt_curation or from a plugin; omitted inherits defaults.automations",
+          "title": "Automations"
+        },
+        "skill_learning": {
+          "$ref": "#/$defs/SkillLearningConfig",
+          "default": {
+            "enabled": false,
+            "model": null,
+            "review_interval": 10,
+            "timeout_seconds": 120,
+            "notify": true,
+            "archive_after_days": 30
+          },
+          "description": "Opt-in background reviews that create and maintain learned skills in this agent's workspace"
+        },
         "delegate_to": {
           "default": [],
           "description": "Allowed agents for run_subagent and continue_subagent, including this agent when explicitly listed",
@@ -1188,11 +1229,12 @@
           "title": "Show Stop Button",
           "type": "boolean"
         },
-        "auto_resume_after_restart": {
-          "default": true,
-          "description": "Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
-          "title": "Auto Resume After Restart",
-          "type": "boolean"
+        "max_consecutive_agent_replies": {
+          "default": 50,
+          "description": "Most consecutive agent or team messages in one conversation before mentions in them stop waking other agents and teams; a message from a person resets the count",
+          "minimum": 1,
+          "title": "Max Consecutive Agent Replies",
+          "type": "integer"
         },
         "learning": {
           "default": true,
@@ -1368,6 +1410,28 @@
           "title": "Max Preload Chars",
           "type": "integer"
         },
+        "automations": {
+          "default": [],
+          "description": "Automations, built-in such as prompt_curation or from a plugin, for agents that do not list their own",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/PromptCurationAutomation"
+              },
+              {
+                "$ref": "#/$defs/DreamingAutomation"
+              },
+              {
+                "$ref": "#/$defs/PluginAutomation"
+              }
+            ],
+            "discriminator": {
+              "propertyName": "name"
+            }
+          },
+          "title": "Automations",
+          "type": "array"
+        },
         "tool_output_auto_save_threshold_bytes": {
           "default": 51200,
           "description": "Supported tool outputs larger than this many bytes are automatically saved to the agent workspace and replaced with a compact receipt in the model-visible tool result",
@@ -1411,7 +1475,7 @@
             }
           ],
           "default": 0.2,
-          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.",
+          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.",
           "title": "Thread Summary Temperature"
         },
         "thread_summary_first_threshold": {
@@ -1431,6 +1495,59 @@
       },
       "title": "DefaultsConfig",
       "type": "object"
+    },
+    "DreamingAutomation": {
+      "additionalProperties": false,
+      "description": "Nightly reconciliation of memory/ with new conversations and daily notes.",
+      "properties": {
+        "cron": {
+          "default": "15 3 * * *",
+          "description": "When to check, in the configured timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "name": {
+          "const": "dreaming",
+          "default": "dreaming",
+          "description": "Built-in automation name",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "title": "DreamingAutomation",
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "EmbedderConfig": {
       "description": "Configuration for memory embedder.",
@@ -1647,6 +1764,7 @@
       "discriminator": {
         "mapping": {
           "llm": "#/$defs/LLMJudgmentConfig",
+          "openai_decisions": "#/$defs/OpenAIDecisionsJudgmentConfig",
           "typesafe": "#/$defs/TypeSafeJudgmentConfig"
         },
         "propertyName": "provider"
@@ -1657,6 +1775,9 @@
         },
         {
           "$ref": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        {
+          "$ref": "#/$defs/OpenAIDecisionsJudgmentConfig"
         }
       ]
     },
@@ -2118,9 +2239,12 @@
             "type": "string"
           },
           "default": {},
-          "description": "Extra token request params",
+          "description": "Extra token request params; may include credentials",
           "title": "Extra Token Params",
-          "type": "object"
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
         },
         "client_config_services": {
           "default": [],
@@ -2566,7 +2690,8 @@
           "$ref": "#/$defs/_MemoryFileConfig",
           "default": {
             "path": null,
-            "max_entrypoint_lines": 200
+            "max_entrypoint_lines": 200,
+            "max_entrypoint_tokens": 50000
           },
           "description": "File-backed memory configuration"
         },
@@ -2653,7 +2778,7 @@
       "properties": {
         "judgment": {
           "$ref": "#/$defs/JudgmentConfig",
-          "description": "LLM model alias or TypeSafe backend that makes the decision"
+          "description": "LLM model alias, TypeSafe, or OpenAI Decisions backend that makes the decision"
         },
         "instructions": {
           "default": "",
@@ -2785,7 +2910,7 @@
             }
           ],
           "default": null,
-          "description": "Optional API key (usually from env vars)",
+          "description": "Optional model-specific API key used instead of the provider's shared key",
           "title": "Api Key",
           "x-mindroom": {
             "secret": true
@@ -2821,6 +2946,20 @@
           "default": null,
           "description": "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. An explicit compaction.model or compaction.fallback_model also needs its own context_window for summary generation. On vertexai_claude models it additionally enables request-time fitting that trims replayed history when a request would exceed the window",
           "title": "Context Window"
+        },
+        "stream_idle_timeout_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Seconds a streamed model request may go without a provider event before MindRoom treats it as stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit",
+          "title": "Stream Idle Timeout Seconds"
         }
       },
       "required": [
@@ -2828,6 +2967,39 @@
         "id"
       ],
       "title": "ModelConfig",
+      "type": "object"
+    },
+    "OpenAIDecisionsJudgmentConfig": {
+      "additionalProperties": false,
+      "description": "Use OpenAI Decisions API probabilities.",
+      "properties": {
+        "threshold": {
+          "default": 0.8,
+          "description": "Minimum probability required to accept an answer",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "openai_decisions",
+          "description": "Judge with the OpenAI Decisions API; uses the OpenAI API key",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "OpenAIDecisionsJudgmentConfig",
       "type": "object"
     },
     "ParticipationConfig": {
@@ -3008,6 +3180,74 @@
       "title": "PersonalRoomsConfig",
       "type": "object"
     },
+    "PluginAutomation": {
+      "additionalProperties": false,
+      "description": "An automation a loaded plugin provides; its options mean what the plugin documents.",
+      "properties": {
+        "cron": {
+          "description": "When to check, in the configured timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "name": {
+          "description": "Name of an automation a loaded plugin provides",
+          "not": {
+            "enum": [
+              "prompt_curation",
+              "dreaming"
+            ]
+          },
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "options": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Settings the plugin's automation reads",
+          "title": "Options",
+          "type": "object"
+        }
+      },
+      "required": [
+        "cron",
+        "name"
+      ],
+      "title": "Plugin automation",
+      "type": "object",
+      "x-mindroom": {
+        "union_tag": "plugin"
+      }
+    },
     "PluginEntryConfig": {
       "description": "Normalized plugin entry from the root config.",
       "properties": {
@@ -3047,6 +3287,107 @@
       ],
       "title": "PluginEntryConfig",
       "type": "object"
+    },
+    "ProbabilityJudgmentConfig": {
+      "discriminator": {
+        "mapping": {
+          "openai_decisions": "#/$defs/OpenAIDecisionsJudgmentConfig",
+          "typesafe": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        "propertyName": "provider"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        {
+          "$ref": "#/$defs/OpenAIDecisionsJudgmentConfig"
+        }
+      ]
+    },
+    "PromptCurationAutomation": {
+      "additionalProperties": false,
+      "description": "Daily check that asks the agent to condense its always-loaded prompt files once they grow too large.",
+      "properties": {
+        "cron": {
+          "default": "0 4 * * *",
+          "description": "When to check, in the configured timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "name": {
+          "const": "prompt_curation",
+          "default": "prompt_curation",
+          "description": "Built-in automation name",
+          "title": "Name",
+          "type": "string"
+        },
+        "trigger_tokens": {
+          "default": 50000,
+          "description": "Post the prompt once MEMORY.md and the context files total more than this many estimated tokens",
+          "minimum": 1,
+          "title": "Trigger Tokens",
+          "type": "integer"
+        },
+        "min_reduction": {
+          "default": 0.1,
+          "description": "Smallest fraction of the files' size each pass is asked to remove, at most the 0.25 per-file bound",
+          "exclusiveMinimum": 0,
+          "maximum": 0.25,
+          "title": "Min Reduction",
+          "type": "number"
+        },
+        "max_reduction": {
+          "default": 0.15,
+          "description": "Largest fraction of the files' size one pass may remove before verify asks for a re-check",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Max Reduction",
+          "type": "number"
+        },
+        "max_content_loss": {
+          "default": 0.05,
+          "description": "Largest net drop in total memory content (the files plus memory/**), as a fraction of the files' size, before verify asks for a re-check; detail should move to memory/ instead of being deleted",
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "title": "Max Content Loss",
+          "type": "number"
+        }
+      },
+      "title": "PromptCurationAutomation",
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "RealtimeCallProfile": {
       "additionalProperties": false,
@@ -3299,14 +3640,14 @@
         "judgment": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TypeSafeJudgmentConfig"
+              "$ref": "#/$defs/ProbabilityJudgmentConfig"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Optional JEV responder selection before the LLM router"
+          "description": "Optional System One or OpenAI Decisions responder selection before the LLM router"
         },
         "accept_invites": {
           "anyOf": [
@@ -3338,6 +3679,63 @@
         }
       },
       "title": "RouterConfig",
+      "type": "object"
+    },
+    "SkillLearningConfig": {
+      "additionalProperties": false,
+      "description": "Periodically review standalone agent conversations and maintain learned workspace skills.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Review conversations and maintain learned workspace skills",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Review model alias; defaults to the model of the reviewed response",
+          "title": "Model"
+        },
+        "review_interval": {
+          "default": 10,
+          "description": "Model replies, counting each tool-calling step, between reviews of one conversation",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Review Interval",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 120,
+          "description": "Maximum seconds per review",
+          "maximum": 900,
+          "minimum": 10,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "notify": {
+          "default": true,
+          "description": "Post a notice in the conversation when a review changes skills",
+          "title": "Notify",
+          "type": "boolean"
+        },
+        "archive_after_days": {
+          "default": 30,
+          "description": "Archive learned skills with no use, creation, or skill_manage edit for this many days; 0 keeps them indefinitely",
+          "maximum": 3650,
+          "minimum": 0,
+          "title": "Archive After Days",
+          "type": "integer"
+        }
+      },
+      "title": "SkillLearningConfig",
       "type": "object"
     },
     "SpeechServiceConfig": {
@@ -3650,6 +4048,12 @@
           },
           "title": "Rules",
           "type": "array"
+        },
+        "scheduled_any_arguments": {
+          "default": true,
+          "description": "Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments it was scheduled with",
+          "title": "Scheduled Any Arguments",
+          "type": "boolean"
         }
       },
       "title": "ToolApprovalConfig",
@@ -3692,17 +4096,11 @@
     },
     "TypeSafeJudgmentConfig": {
       "additionalProperties": false,
-      "description": "Use System One probabilities with a task-specific acceptance threshold.",
+      "description": "Use System One probabilities.",
       "properties": {
-        "provider": {
-          "const": "typesafe",
-          "description": "Judge with System One; requires TYPESAFE_API_KEY",
-          "title": "Provider",
-          "type": "string"
-        },
         "threshold": {
           "default": 0.8,
-          "description": "Minimum System One probability required to accept an answer",
+          "description": "Minimum probability required to accept an answer",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Threshold",
@@ -3715,6 +4113,12 @@
           "maximum": 30.0,
           "title": "Timeout Seconds",
           "type": "number"
+        },
+        "provider": {
+          "const": "typesafe",
+          "description": "Judge with System One; requires TYPESAFE_API_KEY",
+          "title": "Provider",
+          "type": "string"
         }
       },
       "required": [
@@ -3966,6 +4370,13 @@
           "minimum": 1,
           "title": "Max Entrypoint Lines",
           "type": "integer"
+        },
+        "max_entrypoint_tokens": {
+          "default": 50000,
+          "description": "Maximum estimated tokens (characters / 4) of whole lines to preload from MEMORY.md",
+          "minimum": 1,
+          "title": "Max Entrypoint Tokens",
+          "type": "integer"
         }
       },
       "title": "_MemoryFileConfig",
@@ -4129,7 +4540,7 @@
           "debounce_ms": 1000
         },
         "show_stop_button": true,
-        "auto_resume_after_restart": true,
+        "max_consecutive_agent_replies": 50,
         "learning": true,
         "learning_mode": "always",
         "compaction": {
@@ -4154,6 +4565,7 @@
         "worker_grantable_credentials": null,
         "allow_self_config": false,
         "max_preload_chars": 50000,
+        "automations": [],
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
           "interval_ramp_seconds": 15.0,
@@ -4186,6 +4598,7 @@
         "llm": null,
         "file": {
           "max_entrypoint_lines": 200,
+          "max_entrypoint_tokens": 50000,
           "path": null
         },
         "search": {
@@ -4267,7 +4680,8 @@
       "default": {
         "default": "auto_approve",
         "timeout_days": 7.0,
-        "rules": []
+        "rules": [],
+        "scheduled_any_arguments": true
       },
       "description": "Tool-approval rules for agent-initiated tool calls"
     },

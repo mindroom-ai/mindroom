@@ -24,6 +24,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, _LargeMessageStrategy
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     DURABLE_FINAL_OUTCOME_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_ERROR,
@@ -41,6 +42,7 @@ from mindroom.delivery_gateway import (
     _segment_transaction_id,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
@@ -68,6 +70,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -663,6 +666,54 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.terminal_status == "completed"
         assert outcome.event_id == "$sent"
         assert send.await_args.args[2]["body"] == "Finding from hook"
+
+    async def test_final_reply_names_its_human_requester(self, tmp_path: Path) -> None:
+        """Entities the reply mentions act for the human the reply was written for."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            await gateway.deliver_final(self._final_request("answer"))
+
+        assert send.await_args.args[2][ACTING_REQUESTER_KEY] == "@user:localhost"
+
+    async def test_final_reply_names_its_bot_account_requester(self, tmp_path: Path) -> None:
+        """Entities the reply mentions apply their access to a configured bot account, as they would to a human."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.runtime.config.bot_accounts = ["@user:localhost"]
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            await gateway.deliver_final(self._final_request("answer"))
+
+        assert send.await_args.args[2][ACTING_REQUESTER_KEY] == "@user:localhost"
+
+    async def test_final_reply_for_an_entity_requester_names_no_requester(self, tmp_path: Path) -> None:
+        """A reply to an agent or system requester leaves mentioned entities acting as today."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        agent_id = entity_identity_registry(gateway.deps.runtime.config, gateway.deps.runtime_paths).current_id("agent")
+        request = self._final_request("answer")
+        request = replace(
+            request,
+            identity=replace(
+                request.identity,
+                response_envelope=request_envelope(
+                    room_id=_ROOM_ID,
+                    reply_to_event_id="$cause",
+                    agent_name="agent",
+                    user_id=agent_id.full_id,
+                ),
+            ),
+        )
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            await gateway.deliver_final(request)
+
+        assert ACTING_REQUESTER_KEY not in send.await_args.args[2]
 
     async def test_silent_schedule_hook_can_replace_a_finding_with_no_reply(self, tmp_path: Path) -> None:
         """The no-report acknowledgment is interpreted after before-response hooks."""
@@ -2015,6 +2066,27 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert stream.await_args.kwargs["terminal_edit"] is not None
         assert stream.await_args.kwargs["terminal_send"] is not None
+
+    async def test_streamed_reply_names_its_human_requester(self, tmp_path: Path) -> None:
+        """A streamed reply carries its human requester like a sent one, without freezing the caller's metadata."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        run_metadata: dict[str, object] = {}
+        request = StreamingDeliveryRequest(
+            target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            response_stream=_empty_stream(),
+            identity=_identity(),
+            extra_content=run_metadata,
+        )
+
+        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
+            await gateway.deliver_stream(request)
+        run_metadata["io.mindroom.ai_run"] = {"model": "late"}
+
+        assert dict(stream.await_args.kwargs["extra_content"]) == {
+            "io.mindroom.ai_run": {"model": "late"},
+            ACTING_REQUESTER_KEY: "@user:localhost",
+        }
+        assert ACTING_REQUESTER_KEY not in run_metadata
 
     async def test_a_stream_that_only_ever_said_thinking_does_not_settle_the_turn(
         self,
@@ -4637,6 +4709,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         """
         turn_store = await _store(journal_store, agent_name="agent")
         await turn_store.record_pending_turn(TurnRecord.create(["$source"], completed=False))
+        await admit_room_event(alice, _ROOM_ID, "$source")
         gateway = _gateway(
             tmp_path,
             alice,
@@ -4664,7 +4737,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
             await send_started.wait()
             # Started while the answer is on the wire, so it derives its record
             # from a memory the acknowledgement has not published into yet.
-            redaction = asyncio.create_task(turn_store.mark_source_redacted("$source"))
+            redaction = asyncio.create_task(turn_store.mark_source_redacted("$source", room_id=_ROOM_ID))
             finish_send.set()
             outcome = await recovery
             await redaction

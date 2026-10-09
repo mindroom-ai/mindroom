@@ -4,21 +4,48 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Let the agent show interactive web pages in the Canvas panel. MindRoom Chat must also turn canvases on (mindroom.canvas.enabled).",
+          "label": "Enable Show Canvas",
+          "name": "enable_show_canvas",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Tell the agent its canvas pages may load libraries from https://cdn.jsdelivr.net/npm/. Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries).",
+          "label": "Enable Canvas Libraries",
+          "name": "enable_canvas_libraries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
-      "description": "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel with open_panel(panel='computer'), open Settings, or show room members. Sends a UI request; does not navigate or control the user's local browser.",
+      "description": "Show parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own worker browser), the Canvas panel (an interactive web page the agent writes, such as a dashboard, slides, or a form, which the user can answer; opt in with enable_show_canvas), the Members panel, or a Settings section. Sends a UI request; does not navigate or control the user's own browser.",
       "display_name": "Chat UI",
       "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
       "executes_code": false,
-      "file_access": "none",
+      "file_access": "agent",
       "function_names": [
         "show_computer",
         "open_settings",
-        "open_panel"
+        "open_panel",
+        "show_canvas",
+        "read_canvas_state"
       ],
       "helper_text": null,
       "icon": "PanelsTopLeft",
@@ -1454,7 +1481,7 @@
       "display_name": "Airflow",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/airflow",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "agent",
       "function_names": [
         "read_dag_file",
         "save_dag_file"
@@ -2456,13 +2483,13 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Default headers sent only to the Base URL (JSON format)",
           "label": "Headers",
           "name": "headers",
           "options": null,
-          "placeholder": null,
+          "placeholder": "{\"X-Api-Key\": \"value\"}",
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -2645,7 +2672,7 @@
           "options": null,
           "placeholder": "{\"ENV_VAR\": \"value\"}",
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -2698,7 +2725,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Whether to verify SSL certificates",
           "label": "Verify SSL",
           "name": "verify_ssl",
@@ -2999,7 +3026,7 @@
         },
         {
           "authored_override": true,
-          "default": "eleven_v3",
+          "default": "eleven_v4",
           "description": null,
           "label": "Model ID",
           "name": "model_id",
@@ -3404,7 +3431,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Directory inside the agent workspace where generated files are saved",
           "label": "Output Directory",
           "name": "output_directory",
           "options": null,
@@ -3920,7 +3947,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": null,
+      "auth_provider": "google_cloud",
       "category": "development",
       "config_fields": [
         {
@@ -3961,15 +3988,18 @@
         },
         {
           "authored_override": true,
-          "default": null,
-          "description": "Optional Google Cloud credentials object passed directly to the toolkit",
-          "label": "Credentials",
-          "name": "credentials",
+          "default": 100,
+          "description": "Maximum rows returned by run_sql_query (1 to 1000)",
+          "label": "Max Rows",
+          "name": "max_rows",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
-          "validation": null
+          "type": "number",
+          "validation": {
+            "max": 1000,
+            "min": 1
+          }
         },
         {
           "authored_override": true,
@@ -4023,11 +4053,15 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "google-cloud-bigquery"
+        "google-cloud-bigquery",
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
       ],
       "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
       "display_name": "Google BigQuery",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_bigquery",
+      "docs_url": "https://cloud.google.com/bigquery/docs/reference/rest",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -4035,12 +4069,13 @@
         "list_tables",
         "run_sql_query"
       ],
-      "helper_text": "Configure dataset, project, and location explicitly. If the toolkit needs credentials, pass them explicitly through saved config or a credentials object.",
+      "helper_text": "Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
       "name": "google_bigquery",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {
@@ -4242,7 +4277,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Allow updating existing spreadsheets",
+          "description": "Allow updating and formatting existing spreadsheets",
           "label": "Enable Update Operations",
           "name": "update",
           "options": null,
@@ -4259,7 +4294,7 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Read, create, and update Google Sheets spreadsheets",
+      "description": "Read, create, update, and format Google Sheets spreadsheets",
       "display_name": "Google Sheets",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
       "executes_code": false,
@@ -4267,7 +4302,8 @@
       "function_names": [
         "create_sheet",
         "read_sheet",
-        "update_sheet"
+        "update_sheet",
+        "batch_update_sheet"
       ],
       "helper_text": null,
       "icon": "SiGooglesheets",
@@ -4401,7 +4437,7 @@
       "display_name": "Groq",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/groq",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "agent",
       "function_names": [
         "generate_speech",
         "transcribe_audio",
@@ -4931,7 +4967,7 @@
       "display_name": "MoviePy Video Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/moviepy",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "agent",
       "function_names": [
         "create_caption_clips",
         "create_srt",
@@ -5257,7 +5293,7 @@
       "display_name": "OpenAI",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/openai",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "agent",
       "function_names": [
         "generate_image",
         "generate_speech",
@@ -6353,7 +6389,7 @@
         {
           "authored_override": true,
           "default": "charts",
-          "description": null,
+          "description": "Directory inside the agent workspace where charts are saved",
           "label": "Output Directory",
           "name": "output_dir",
           "options": null,
@@ -6444,7 +6480,7 @@
       "display_name": "Visualization",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/visualization",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "create_bar_chart",
         "create_histogram",
@@ -6497,7 +6533,7 @@
       "display_name": "Web Browser Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/web-browser",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "open_page"
       ],
@@ -7027,7 +7063,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "OAuth access token with required scopes (user-read-private, playlist-modify-public, playlist-modify-private)",
+          "description": "OAuth access token with the scopes the toolkit uses (user-read-private, user-top-read, user-read-currently-playing, playlist-read-private, playlist-modify-public, playlist-modify-private, user-modify-playback-state)",
           "label": "Access Token",
           "name": "access_token",
           "options": null,
@@ -7095,6 +7131,7 @@
       "icon": "SiSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -7865,7 +7902,7 @@
       ],
       "description": "Create a single-use script that wakes this agent when background work finishes",
       "display_name": "Callback Manager",
-      "docs_url": "https://docs.mindroom.chat/agent-callbacks/",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/#agent-callbacks",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8330,7 +8367,7 @@
       ],
       "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8563,6 +8600,18 @@
           "required": false,
           "type": "number",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 104857600,
+          "description": "Maximum file or export size to download into the agent workspace in bytes.",
+          "label": "Max Download Size",
+          "name": "max_download_size",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": true,
@@ -8593,6 +8642,65 @@
       "icon": "SiGoogledrive",
       "icon_color": "text-green-600",
       "name": "google_drive",
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": "google_tasks",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow listing task lists and tasks.",
+          "label": "Read Tasks",
+          "name": "read_tasks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating, updating, completing, and deleting tasks.",
+          "label": "Manage Tasks",
+          "name": "manage_tasks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "List, create, update, complete, and delete tasks in the connected user's Google Tasks",
+      "display_name": "Google Tasks",
+      "docs_url": "https://developers.google.com/workspace/tasks/reference/rest",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "google_tasks_create_task",
+        "google_tasks_delete_task",
+        "google_tasks_list_task_lists",
+        "google_tasks_list_tasks",
+        "google_tasks_update_task"
+      ],
+      "helper_text": null,
+      "icon": "SiGoogletasks",
+      "icon_color": "text-blue-600",
+      "name": "google_tasks",
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -8905,7 +9013,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -9127,13 +9235,39 @@
         "cancel_schedule",
         "edit_schedule",
         "list_schedules",
-        "schedule"
+        "run_scheduled_call",
+        "schedule",
+        "schedule_tool_call"
       ],
       "helper_text": null,
       "icon": "Calendar",
       "icon_color": "text-emerald-500",
       "name": "scheduler",
       "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Create and change the agent's workspace skills",
+      "display_name": "Skill Manage",
+      "docs_url": null,
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "skill_manage"
+      ],
+      "helper_text": null,
+      "icon": "Brain",
+      "icon_color": "text-emerald-500",
+      "name": "skill_manage",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -9151,7 +9285,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "url",
+          "type": "password",
           "validation": null
         },
         {
@@ -9809,7 +9943,7 @@
       "display_name": "AgentQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/agentql",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "custom_scrape_website",
         "scrape_website"
@@ -9937,7 +10071,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -10295,7 +10429,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Optional host target directory for browser screenshots, PDFs, and downloads. Defaults to the active storage path's browser/ directory. The desktop target instead uses its local storage path's desktop-browser/ directory.",
+          "description": "Optional host target directory for browser screenshots, PDFs, and downloads. Defaults to the browser/ directory in the agent's state root, which is requester-scoped for private agents. The desktop target instead uses its local storage path's desktop-browser/ directory.",
           "label": "Output Directory",
           "name": "output_dir",
           "options": null,
@@ -10391,7 +10525,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. With worker routing, this controls the agent's worker browser. To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). The user's local browser requires the separately configured desktop target.",
+      "description": "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. With worker routing, this controls the agent's worker browser. If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel; use chat_ui.open_panel(panel='computer') only to show it again. The user's local browser requires the separately configured desktop target.",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "executes_code": false,
@@ -10428,7 +10562,7 @@
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [],
-      "description": "Native Playwright browser tools in an isolated worker Computer",
+      "description": "Native Playwright browser tools in an isolated worker Computer. If you have chat_ui, your first call in a conversation already shows the user the Computer panel; use chat_ui.open_panel(panel='computer') only to show it again.",
       "display_name": "Browser MCP",
       "docs_url": null,
       "executes_code": false,
@@ -11863,18 +11997,6 @@
       "config_fields": [
         {
           "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Include Summary",
-          "name": "include_summary",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Article Length",
@@ -11920,7 +12042,7 @@
       "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "get_article_data",
         "read_article"

@@ -13,7 +13,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.orchestration.computer_runtime import _authorize_computer
+from mindroom.orchestration.computer_runtime import _authorize_computer, computer_browser_provider
 from mindroom.worker_computer.auth import MatrixOpenIDToken, verify_openid
 from mindroom.worker_computer.sessions import ComputerError
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -209,3 +209,46 @@ def test_computer_selects_exactly_one_browser_provider(tmp_path: Path, tools: li
             paths,
         )
         assert "user_agent" in target.spec.worker_key
+
+
+@pytest.mark.parametrize(
+    ("backend", "tools", "worker_tools", "provider", "status"),
+    [
+        ("docker", ["browser"], ["browser"], "browser", None),
+        ("kubernetes", ["browser_mcp"], ["browser_mcp"], "browser_mcp", None),
+        ("static", ["browser"], ["browser"], None, 503),
+        ("docker", ["browser", "browser_mcp"], ["browser", "browser_mcp"], None, 409),
+        ("docker", ["shell"], ["shell"], None, 409),
+        ("docker", ["browser"], [], None, 503),
+    ],
+)
+def test_computer_browser_provider_matches_api_checks(
+    tmp_path: Path,
+    backend: str,
+    tools: list[str],
+    worker_tools: list[str],
+    provider: str | None,
+    status: int | None,
+) -> None:
+    """The shared worker computer check returns the provider or raises the API's exact errors."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": backend},
+    )
+    config = Config(
+        agents={
+            "writer": AgentConfig(
+                display_name="Writer",
+                tools=tools,
+                worker_tools=worker_tools,
+                worker_scope="user_agent",
+            ),
+        },
+    )
+    if status is None:
+        assert computer_browser_provider("writer", config, paths) == provider
+    else:
+        with pytest.raises(ComputerError) as error:
+            computer_browser_provider("writer", config, paths)
+        assert error.value.status_code == status

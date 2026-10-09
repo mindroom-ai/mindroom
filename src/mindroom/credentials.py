@@ -17,6 +17,7 @@ import secrets
 import stat
 import threading
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,8 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -60,12 +63,16 @@ _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 # collide with a requester directory inside the primary-runtime scoped store.
 _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME = "_agents"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
+# Securing one dormant worker store takes several filesystem round trips, which on network
+# storage with thousands of workers made the primary's first credential access take seconds.
+_WORKER_STORE_HARDENING_CONCURRENCY = 16
 _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
 _AES_GCM_NONCE_SIZE = 12
 logger = get_logger(__name__)
 
 __all__ = [
     "CredentialsManager",
+    "StoredCredentialsUpdate",
     "WorkerCredentialPathError",
     "delete_scoped_credentials",
     "get_runtime_credentials_manager",
@@ -73,10 +80,12 @@ __all__ = [
     "list_worker_grantable_shared_services",
     "load_scoped_credentials",
     "load_worker_grantable_shared_credentials",
+    "remove_worker_service_credentials",
     "runtime_credentials_manager_key",
     "save_scoped_credentials",
     "scoped_credentials_path",
     "sync_shared_credentials_to_worker",
+    "update_stored_service_credentials",
     "validate_service_name",
 ]
 
@@ -351,21 +360,65 @@ def _drop_planted_entry(path: Path) -> None:
         raise WorkerCredentialPathError(msg) from exc
 
 
-def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
-    """Return real credential directories belonging to existing workers."""
+@dataclass(frozen=True, slots=True)
+class _WorkerCredentialPaths:
+    """Credential directories of existing workers, and those that could not be inspected."""
+
+    existing: tuple[Path, ...]
+    uninspectable: tuple[Path, ...]
+
+
+def _worker_credential_paths(storage_root: Path) -> _WorkerCredentialPaths:
+    """Return real credential directories belonging to existing workers, and those that could not be inspected."""
     workers_root = storage_root / "workers"
     if workers_root.is_symlink() or not workers_root.is_dir():
-        return ()
+        return _WorkerCredentialPaths(existing=(), uninspectable=())
 
-    paths: list[Path] = []
+    existing: list[Path] = []
+    uninspectable: list[Path] = []
     for worker_root in workers_root.iterdir():
         if worker_root.is_symlink() or not worker_root.is_dir():
             continue
         for directory_name in (WORKER_CREDENTIALS_DIRNAME, WORKER_SHARED_CREDENTIALS_DIRNAME):
             credential_path = worker_root / directory_name
-            if not credential_path.is_symlink() and credential_path.is_dir():
-                paths.append(credential_path)
-    return tuple(paths)
+            try:
+                # Path.is_dir() and is_symlink() hide permission errors on newer Pythons.
+                mode = credential_path.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # Worker code may make its own root unsearchable, which hides only that worker's store.
+                logger.warning("Skipping an uninspectable worker credential path", path=str(credential_path))
+                uninspectable.append(credential_path)
+                continue
+            if stat.S_ISDIR(mode):
+                existing.append(credential_path)
+    return _WorkerCredentialPaths(existing=tuple(existing), uninspectable=tuple(uninspectable))
+
+
+def _harden_worker_credential_store(credential_path: Path) -> None:
+    """Secure one dormant worker store, warning instead of failing when worker code locked it."""
+    try:
+        _ensure_private_directory(credential_path, harden_existing=True)
+        _harden_existing_credential_files(credential_path)
+    except OSError as exc:
+        # Worker code owns its store and may change its modes, which must never stop the primary.
+        logger.warning("Cannot secure a worker credential store", path=str(credential_path), error=str(exc))
+
+
+def _harden_worker_credential_stores(credential_paths: tuple[Path, ...]) -> None:
+    """Secure every dormant worker store before returning, overlapping their filesystem round trips."""
+    if len(credential_paths) < 2:
+        for credential_path in credential_paths:
+            _harden_worker_credential_store(credential_path)
+        return
+    with ThreadPoolExecutor(
+        max_workers=min(_WORKER_STORE_HARDENING_CONCURRENCY, len(credential_paths)),
+        thread_name_prefix="mindroom-credential-hardening",
+    ) as executor:
+        # Consuming the results re-raises anything but the per-store OSError that is only logged.
+        for _ in executor.map(_harden_worker_credential_store, credential_paths):
+            pass
 
 
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:
@@ -418,12 +471,14 @@ class CredentialsManager:
         )
 
         credential_paths = {self.base_path, self.shared_base_path}
+        worker_credential_paths: tuple[Path, ...] = ()
         if self.current_worker_key is None and self.base_path.name == "credentials":
             _reject_linked_primary_credential_directories(credential_paths)
-            credential_paths.update(_existing_worker_credential_paths(self.storage_root))
+            worker_credential_paths = _worker_credential_paths(self.storage_root).existing
         for credential_path in credential_paths:
             _ensure_private_directory(credential_path, harden_existing=True)
             _harden_existing_credential_files(credential_path)
+        _harden_worker_credential_stores(worker_credential_paths)
 
     @property
     def storage_root(self) -> Path:
@@ -450,6 +505,7 @@ class CredentialsManager:
     def for_primary_runtime_scope(self, requester_id: str, agent_name: str | None) -> CredentialsManager:
         """Return a primary-runtime-only scoped credentials manager."""
         requester_dir = _scoped_credentials_dir_part(requester_id)
+        # Config reserves "_shared" as an entity name, so no agent's store collides with the requester-wide one.
         agent_dir = _scoped_credentials_dir_part(agent_name or "_shared")
         scoped_path = self.storage_root / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
         return CredentialsManager(
@@ -744,6 +800,99 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
         return manager
 
 
+@dataclass(frozen=True, slots=True)
+class StoredCredentialsUpdate:
+    """How one update across every credential store went."""
+
+    rewritten: int
+    unreadable: int
+
+
+def update_stored_service_credentials(
+    runtime_paths: RuntimePaths,
+    service: str,
+    update: Callable[[dict[str, Any]], dict[str, Any] | None],
+) -> StoredCredentialsUpdate:
+    """Rewrite one service's document in the primary store and every existing worker store.
+
+    ``update`` returns the replacement document, or None to leave that store unchanged.
+    Worker directories are read and written through the same no-follow reads, encryption
+    policy, and atomic replacement as every other operation. A document that exists but
+    cannot be read, for example under a different encryption key, is counted, not skipped silently.
+    """
+    manager = get_runtime_credentials_manager(runtime_paths)
+    normalized_service = validate_service_name(service)
+    rewritten = 0
+    unreadable = 0
+    for directory in (manager.base_path, *_worker_credential_paths(manager.storage_root).existing):
+        credentials_path = directory / f"{normalized_service}{_CREDENTIALS_FILE_SUFFIX}"
+        try:
+            payload = _read_credentials_payload(credentials_path)
+            credentials = None if payload is None else manager.decode_credentials(normalized_service, payload)
+        except (OSError, TypeError, ValueError, InvalidTag) as exc:
+            logger.warning(
+                "Stored credentials could not be read for an update",
+                service=normalized_service,
+                path=str(credentials_path),
+                error_type=type(exc).__name__,
+            )
+            unreadable += 1
+            continue
+        if credentials is None:
+            continue
+        updated = update(credentials)
+        if updated is not None:
+            manager._save_credentials_file(normalized_service, credentials_path, updated)
+            rewritten += 1
+    return StoredCredentialsUpdate(rewritten=rewritten, unreadable=unreadable)
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerCredentialsRemoval:
+    """How removing services from every worker's own credential store went."""
+
+    removed: int
+    failed: int
+
+
+def remove_worker_service_credentials(
+    runtime_paths: RuntimePaths,
+    services: frozenset[str],
+) -> _WorkerCredentialsRemoval:
+    """Delete these services' documents from every existing worker's own store without reading them.
+
+    Shared-credential mirrors are left alone, because every worker sync rewrites them from the granted services.
+    A store that cannot be inspected, opened, or cleaned, for example one whose worker root or directory worker code
+    made unsearchable, is counted, not skipped silently.
+    """
+    manager = get_runtime_credentials_manager(runtime_paths)
+    file_names = {f"{validate_service_name(service)}{_CREDENTIALS_FILE_SUFFIX}" for service in services}
+    worker_paths = _worker_credential_paths(manager.storage_root)
+    removed = 0
+    failed = sum(1 for directory in worker_paths.uninspectable if directory.name == WORKER_CREDENTIALS_DIRNAME)
+    for directory in worker_paths.existing:
+        if directory.name != WORKER_CREDENTIALS_DIRNAME:
+            continue
+        try:
+            with open_directory_within_root(directory) as directory_fd:
+                for name in file_names:
+                    try:
+                        entry_mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(entry_mode):
+                        os.unlink(name, dir_fd=directory_fd)
+                        removed += 1
+        except OSError as exc:
+            logger.warning(
+                "A worker credential store could not be cleaned",
+                path=str(directory),
+                error_type=type(exc).__name__,
+            )
+            failed += 1
+    return _WorkerCredentialsRemoval(removed=removed, failed=failed)
+
+
 def _shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
     """Return the shared credential layer for one execution context."""
     if credentials_manager.shared_base_path == credentials_manager.base_path:
@@ -908,8 +1057,9 @@ def _primary_runtime_scoped_credentials_manager(
     *,
     manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget,
+    primary_built_tool: bool = False,
 ) -> CredentialsManager | None:
-    policy = credential_service_policy(service, worker_target.worker_scope)
+    policy = credential_service_policy(service, worker_target.worker_scope, primary_built_tool=primary_built_tool)
     if policy.uses_primary_runtime_agent_scoped_credentials:
         agent_name = worker_target.routing_agent_name
         if not agent_name:
@@ -920,6 +1070,9 @@ def _primary_runtime_scoped_credentials_manager(
         return None
     identity = worker_target.execution_identity
     if identity is None or identity.requester_id is None:
+        if policy.primary_built_tool:
+            # Without a requester there is no requester store, so only shared settings apply.
+            return None
         msg = f"Primary-runtime scoped credentials for {service} require a requester identity"
         raise ValueError(msg)
     agent_name = worker_target.routing_agent_name if worker_target.worker_scope == "user_agent" else None
@@ -932,21 +1085,27 @@ def _scoped_credentials_target_manager(
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
     worker_credentials_manager: CredentialsManager | None = None,
+    primary_built_tool: bool = False,
 ) -> CredentialsManager:
     manager = credentials_manager
     if worker_target is None or worker_target.worker_scope is None:
         return manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
 
-    if credential_service_policy(service, worker_target.worker_scope).uses_local_shared_credentials:
+    policy = credential_service_policy(service, worker_target.worker_scope, primary_built_tool=primary_built_tool)
+    if policy.uses_local_shared_credentials:
         return manager.shared_manager()
 
     primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
         service,
         manager=manager,
         worker_target=worker_target,
+        primary_built_tool=primary_built_tool,
     )
     if primary_runtime_manager is not None:
         return primary_runtime_manager
+    if policy.primary_built_tool:
+        msg = f"Settings for {service} require a requester identity"
+        raise ValueError(msg)
 
     worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
         credentials_manager=manager,
@@ -978,12 +1137,14 @@ def load_scoped_credentials(
     allowed_shared_services: frozenset[str] | None = None,
     worker_credentials_manager: CredentialsManager | None = None,
     allow_shared_mirror: bool = True,
+    primary_built_tool: bool = False,
 ) -> dict[str, Any] | None:
     """Load scoped overrides over the service's permitted shared credential layer.
 
     Callers with an authorized worker store can supply it without resolving it
     again. Dashboard reads disable ``allow_shared_mirror`` so their committed
     allowlist still applies when the base manager has a separate shared layer.
+    Settings of a tool the primary builds (``primary_built_tool``) never come from the worker store.
     """
     manager = credentials_manager
     shared_manager = _shared_credentials_manager(manager)
@@ -1000,18 +1161,17 @@ def load_scoped_credentials(
         service,
         manager=manager,
         worker_target=worker_target,
+        primary_built_tool=primary_built_tool,
     )
-    uses_local_shared_credentials = credential_service_policy(
-        service,
-        worker_target.worker_scope,
-    ).uses_local_shared_credentials
+    policy = credential_service_policy(service, worker_target.worker_scope, primary_built_tool=primary_built_tool)
+    uses_local_shared_credentials = policy.uses_local_shared_credentials
     worker_manager = None
-    if primary_runtime_manager is None and not uses_local_shared_credentials:
+    if primary_runtime_manager is None and not uses_local_shared_credentials and not policy.primary_built_tool:
         worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
             credentials_manager=manager,
             worker_target=worker_target,
         )
-    if primary_runtime_manager is not None:
+    if primary_runtime_manager is not None and not policy.primary_built_tool:
         shared_credentials = None
     elif uses_local_shared_credentials or (allow_shared_mirror and manager.shared_base_path != manager.base_path):
         shared_credentials = shared_manager.load_credentials(service)
@@ -1033,6 +1193,7 @@ def save_scoped_credentials(
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
     worker_credentials_manager: CredentialsManager | None = None,
+    primary_built_tool: bool = False,
 ) -> None:
     """Save to the service's scope, reusing an already authorized worker store when supplied."""
     normalized_service = validate_service_name(service)
@@ -1041,6 +1202,7 @@ def save_scoped_credentials(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
         worker_credentials_manager=worker_credentials_manager,
+        primary_built_tool=primary_built_tool,
     )
     target_manager.save_credentials(normalized_service, credentials)
 
@@ -1051,6 +1213,7 @@ def delete_scoped_credentials(
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
     worker_credentials_manager: CredentialsManager | None = None,
+    primary_built_tool: bool = False,
 ) -> None:
     """Delete from the service's scope, reusing an already authorized worker store when supplied."""
     normalized_service = validate_service_name(service)
@@ -1059,5 +1222,6 @@ def delete_scoped_credentials(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
         worker_credentials_manager=worker_credentials_manager,
+        primary_built_tool=primary_built_tool,
     )
     target_manager.delete_credentials(normalized_service)
