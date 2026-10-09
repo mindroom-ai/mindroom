@@ -2783,6 +2783,50 @@ async def test_newer_registration_during_refill_invalidates_older_selected_snaps
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("registration_order", ["older_first", "newer_first"])
+async def test_edits_of_two_messages_of_one_turn_let_the_newer_edit_regenerate(
+    journal_store: EventJournalStore,
+    registration_order: str,
+) -> None:
+    """Two messages of one coalesced turn edited before either regeneration claims: the newer edit still runs.
+
+    Each edit selected only its own text, so the older one yields to the newer
+    one; neither rejecting the other leaves the reply unregenerated.
+    """
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_responded_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_ids=("$first", "$user_msg"),
+            source_event_prompts={"$first": "FIRST", "$user_msg": "SECOND"},
+        ),
+    )
+    older_revision, newer_revision = (10, "$first-edit"), (20, "$second-edit")
+    if registration_order == "older_first":
+        older = await store.register_edit_revision("$first", older_revision)
+        newer = await store.register_edit_revision("$user_msg", newer_revision)
+    else:
+        newer = await store.register_edit_revision("$user_msg", newer_revision)
+        older = await store.register_edit_revision("$first", older_revision)
+    assert older is not None
+    assert newer is not None
+    older_snapshot = replace(
+        older,
+        source_event_prompts={"$first": "FIRST_EDIT", "$user_msg": "SECOND"},
+        source_event_revisions={"$first": older_revision},
+    )
+    newer_snapshot = replace(
+        newer,
+        source_event_prompts={"$first": "FIRST", "$user_msg": "SECOND_EDIT"},
+        source_event_revisions={"$user_msg": newer_revision},
+    )
+
+    assert await store.prepare_edit_snapshot(record=older_snapshot, driving_revision_id="$first-edit") is True
+    assert await store.prepare_edit_snapshot(record=newer_snapshot, driving_revision_id="$second-edit") is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["driver", "sibling", "newer"])
 async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
     journal_store: EventJournalStore,

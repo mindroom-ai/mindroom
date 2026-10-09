@@ -755,8 +755,10 @@ class TurnStore:
     ) -> bool:
         """Return whether an edit's snapshot must not run, after tombstone reconciliation under the response lock.
 
-        A redaction it consumed, or a newer revision registered since it was
-        built, stops it: that newer edit regenerates on its own.
+        A redaction it consumed, or a revision registered since it was built
+        that is newer than its own edit, stops it: that newer edit regenerates
+        on its own. A sibling's older edit that it does not carry does not, or
+        two messages of one turn edited at once would each stop the other.
         """
         assert record.conversation_target is not None
         await self._register_context_revisions(record.source_event_ids[0], thread_history)
@@ -771,9 +773,17 @@ class TurnStore:
         sanitized = self._sanitize_candidate(record, current)
         if any(self._is_revision_redacted(event_id) for event_id in consumed_revision_ids):
             return True
+        driving = next(
+            (
+                revision
+                for revision in (record.source_event_revisions or {}).values()
+                if revision[1] == driving_revision_id
+            ),
+            None,
+        )
         for source in record.replay_source_event_ids:
             latest = current.revision_watermark(source)
-            if latest is None:
+            if latest is None or (driving is not None and latest < driving):
                 continue
             replay = (current.revision_replay or {}).get(latest[1])
             selected = next(

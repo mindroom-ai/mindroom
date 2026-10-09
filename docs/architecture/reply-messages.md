@@ -174,6 +174,7 @@ Edits:
 - Only a text message is edited in the coalescing queue: an edit of a queued media message's caption changes nothing.
 - An edit applied to a message still in the coalescing queue lives in memory, so a crash before the flush answers the original text.
 - A coalesced turn whose messages come from more than one requester, or carry a delegated speaker, never regenerates; an edit of an earlier message of the latest coalesced turn regenerates the whole turn.
+- When two messages of one coalesced turn are edited before either regeneration claims the reply, only the newer edit regenerates, and the earlier message keeps its original text in that answer.
 - A regeneration whose history was redacted meanwhile is suppressed instead of rebuilt.
 - An edit a `message:received` hook suppresses still counts as its message's newest revision, so a later edit of another message of the same coalesced turn regenerates nothing.
 - A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply's exit applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
