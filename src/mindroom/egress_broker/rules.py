@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from urllib.parse import parse_qsl, quote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule  # noqa: TC001
 
@@ -134,6 +134,64 @@ def match_rule(config: EgressBrokerConfig, host: str, port: int, path: str) -> R
     return RuleMatch(service=service_name, rule=rule)
 
 
+def _inject_query_param(target: bytes, param_name: str, template: str, secret: str) -> bytes:
+    """Inject a query parameter with template substitution.
+
+    Preserves exact encoding of other parameters byte-for-byte.
+    Replaces all occurrences of the param with one at the first occurrence position.
+    """
+    target_str = target.decode("latin-1")
+    parsed = urlparse(target_str)
+    path = parsed.path
+    raw_query = parsed.query
+
+    if not raw_query:
+        # No existing query string, just append the new param
+        value = template.replace("{secret}", secret)
+        encoded_value = quote(value, safe="")
+        new_target_str = f"{path}?{param_name}={encoded_value}"
+        return new_target_str.encode("latin-1")
+
+    # Split query on "&" to preserve exact encoding of other params
+    param_pairs = raw_query.split("&")
+    first_index = None
+    filtered_pairs = []
+
+    # Find first occurrence and filter out all occurrences
+    for _i, pair in enumerate(param_pairs):
+        # Split on first "=" to get name and value
+        if "=" in pair:
+            pair_name, _ = pair.split("=", 1)
+            decoded_name = unquote(pair_name)
+        else:
+            # Handle param without value (e.g., "?flag")
+            decoded_name = unquote(pair)
+
+        if decoded_name == param_name:
+            if first_index is None:
+                first_index = len(filtered_pairs)
+            # Skip this param (remove all occurrences)
+        else:
+            filtered_pairs.append(pair)
+
+    # Build the new param with template applied and encoded once
+    value = template.replace("{secret}", secret)
+    encoded_value = quote(value, safe="")
+    new_param = f"{param_name}={encoded_value}"
+
+    # Insert at first occurrence position or append
+    if first_index is not None:
+        filtered_pairs.insert(first_index, new_param)
+    else:
+        filtered_pairs.append(new_param)
+
+    # Rebuild query string
+    new_query = "&".join(filtered_pairs)
+    new_target_str = f"{path}?{new_query}"
+
+    return new_target_str.encode("latin-1")
+
+
 def inject_credentials(
     headers: list[tuple[bytes, bytes]],
     target: bytes,
@@ -176,35 +234,8 @@ def inject_credentials(
     if auth.type == "query":
         # auth.name is guaranteed non-None by validators
         assert auth.name is not None
-        # Parse target to extract path and query
-        target_str = target.decode("latin-1")
-        parsed = urlparse(target_str)
-        path = parsed.path
-        query_params = parse_qsl(parsed.query, keep_blank_values=True)
-
-        # Find first occurrence of the param
-        param_name = auth.name
-        first_index = None
-        for i, (key, _) in enumerate(query_params):
-            if key == param_name:
-                first_index = i
-                break
-
-        # Remove all occurrences of the param
-        filtered_params = [(k, v) for k, v in query_params if k != param_name]
-
-        # Insert the secret at the first occurrence position (or append if not found)
-        secret_encoded = quote(secret, safe="")
-        if first_index is not None:
-            filtered_params.insert(first_index, (param_name, secret_encoded))
-        else:
-            filtered_params.append((param_name, secret_encoded))
-
-        # Rebuild query string
-        new_query = urlencode(filtered_params)
-        new_target_str = f"{path}?{new_query}" if new_query else path
-
-        return new_headers, new_target_str.encode("latin-1")
+        new_target = _inject_query_param(target, auth.name, auth.template, secret)
+        return new_headers, new_target
 
     # Should never reach here if auth is valid
     return new_headers, target

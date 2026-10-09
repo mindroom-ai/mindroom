@@ -200,6 +200,42 @@ def test_inject_query_replaces_client_value() -> None:
     assert new_target == b"/v1?key=s3cret&a=1"
 
 
+def test_inject_query_custom_template() -> None:
+    """Query injection applies template before encoding."""
+    auth = EgressAuth(type="query", name="token", template="Bearer {secret}")
+    headers: list[tuple[bytes, bytes]] = []
+    target = b"/api?token=old"
+
+    new_headers, new_target = inject_credentials(headers, target, auth, "s3cret")
+    assert new_headers == headers
+    assert new_target == b"/api?token=Bearer%20s3cret"
+
+
+def test_inject_query_special_characters() -> None:
+    """Query injection URL-encodes special characters once."""
+    auth = EgressAuth(type="query", name="key")
+    headers: list[tuple[bytes, bytes]] = []
+    target = b"/v1?key=old"
+
+    new_headers, new_target = inject_credentials(headers, target, auth, "a b&c")
+    assert new_headers == headers
+    # Space becomes %20, & becomes %26 (single encoding)
+    assert new_target == b"/v1?key=a%20b%26c"
+
+
+def test_inject_query_preserves_other_params_encoding() -> None:
+    """Query injection preserves exact encoding of other params."""
+    auth = EgressAuth(type="query", name="key")
+    headers: list[tuple[bytes, bytes]] = []
+    # Other param "a" uses %20 encoding for space
+    target = b"/v1?a=hello%20world&key=x"
+
+    new_headers, new_target = inject_credentials(headers, target, auth, "secret")
+    assert new_headers == headers
+    # "a=hello%20world" preserved byte-for-byte, not changed to "a=hello+world"
+    assert new_target == b"/v1?a=hello%20world&key=secret"
+
+
 def test_inject_replaces_client_authorization() -> None:
     """Credential injection replaces any existing Authorization header."""
     auth = EgressAuth(type="bearer")
