@@ -247,9 +247,9 @@ function UsersCard({
             {statusError}
           </p>
         )}
-        <div className="overflow-x-auto">
+        <div>
           <table className="w-full text-sm">
-            <thead className="text-left text-xs text-muted-foreground">
+            <thead className="hidden text-left text-xs text-muted-foreground sm:table-header-group">
               <tr>
                 <th className="py-2 pr-3 font-medium">User</th>
                 <th className="py-2 pr-3 font-medium">Spend</th>
@@ -272,9 +272,14 @@ function UsersCard({
                 const fraction =
                   limit == null ? 0 : limit === 0 ? 1 : Math.min(userSpend / limit, 1);
                 return (
-                  <tr key={userId} className="border-t border-border/60">
-                    <td className="py-2 pr-3 font-mono">{userId}</td>
-                    <td className="py-2 pr-3">
+                  <tr
+                    key={userId}
+                    className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border/60 py-3 sm:table-row sm:py-0"
+                  >
+                    <td className="w-full break-all font-mono sm:w-auto sm:py-2 sm:pr-3">
+                      {userId}
+                    </td>
+                    <td className="sm:py-2 sm:pr-3">
                       <div>{formatUsd(userSpend)}</div>
                       {limit != null && (
                         <div
@@ -288,7 +293,7 @@ function UsersCard({
                         </div>
                       )}
                     </td>
-                    <td className="py-2 pr-3">
+                    <td className="sm:py-2 sm:pr-3">
                       <UsdInput
                         label={`Monthly cap for ${userId}`}
                         value={overrides[userId]}
@@ -297,7 +302,7 @@ function UsersCard({
                         onCommit={value => updateConfigValue(['budgets', 'users', userId], value)}
                       />
                     </td>
-                    <td className="py-2">
+                    <td className="sm:py-2">
                       {over ? (
                         <Badge variant="destructive">
                           Over budget, using {budgets.fallback_model}
@@ -365,9 +370,9 @@ function ModelPricesCard({
           never swapped for the fallback.
         </CardDescription>
       </CardHeader>
-      <CardContent className="overflow-x-auto">
+      <CardContent>
         <table className="w-full text-sm">
-          <thead className="text-left text-xs text-muted-foreground">
+          <thead className="hidden text-left text-xs text-muted-foreground sm:table-header-group">
             <tr>
               <th className="py-2 pr-3 font-medium">Model</th>
               {PRICE_FIELDS.map(([field, label]) => (
@@ -383,20 +388,29 @@ function ModelPricesCard({
               .map(modelName => {
                 const model = config.models[modelName];
                 return (
-                  <tr key={modelName} className="border-t border-border/60">
-                    <td className="py-2 pr-3">
+                  <tr
+                    key={modelName}
+                    className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border/60 py-3 sm:table-row sm:py-0"
+                  >
+                    <td className="col-span-2 sm:py-2 sm:pr-3">
                       <div className="font-medium">{modelName}</div>
                       <div className="font-mono text-xs text-muted-foreground">
                         {model.provider} / {model.id}
                       </div>
                     </td>
                     {PRICE_FIELDS.map(([field, label]) => (
-                      <td key={field} className="py-2 pr-3">
+                      <td key={field} className="sm:py-2 sm:pr-3">
+                        <span
+                          aria-hidden="true"
+                          className="mb-1 block text-xs text-muted-foreground sm:hidden"
+                        >
+                          {label}
+                        </span>
                         <UsdInput
                           label={`${modelName} ${label.toLowerCase()} price`}
                           value={model.pricing?.[field]}
                           placeholder={field.startsWith('cache') ? '= input' : '-'}
-                          className="w-24"
+                          className="w-full sm:w-24"
                           onCommit={value => setPrice(modelName, field, value)}
                         />
                       </td>
