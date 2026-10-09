@@ -10,6 +10,7 @@ from mindroom.logging_config import get_logger
 from mindroom.orchestration.computer_runtime import computer_browser_provider
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.worker_computer.sessions import ComputerError
 
 if TYPE_CHECKING:
@@ -47,7 +48,10 @@ def attach_computer_announcement(
             return toolkit
     except ComputerError:
         return toolkit
-    announce = _announcement_hook(toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None)
+    announce = _announcement_hook(
+        agent_name,
+        toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
+    )
     for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
         hooks = list(function.tool_hooks or [])
         if announce not in hooks:
@@ -56,17 +60,30 @@ def attach_computer_announcement(
 
 
 def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:
-    # browser_control help and actions only return reference data, so they must not use up the announcement.
-    if name == "browser_control" and str(args.get("action", "")).strip().lower() in {"actions", "help"}:
-        return False
+    if name == "browser_control":
+        # Imported here, not at module level, so that loading agents does not load Playwright.
+        from mindroom.custom_tools.browser import is_reference_action  # noqa: PLC0415
+
+        # help and actions only return reference data, so they must not use up the announcement.
+        if is_reference_action(args.get("action")):
+            return False
     # Desktop browser calls stay on the primary and drive the user's own browser, not the computer.
     return placement is None or not placement.runs_on_primary(name, args)
 
 
-def _announcement_hook(placement: SupportsPrimaryCallPlacement | None) -> Callable[..., Awaitable[object]]:
+def _runs_as(agent_name: str) -> bool:
+    # A team member's browser runs under the response owner's context, and the notice would name the owner.
+    context = get_tool_runtime_context()
+    return context is None or context.agent_name == agent_name
+
+
+def _announcement_hook(
+    agent_name: str,
+    placement: SupportsPrimaryCallPlacement | None,
+) -> Callable[..., Awaitable[object]]:
     async def announce_computer(name: str, func: Callable[..., object], args: dict[str, Any]) -> object:
         try:
-            if _uses_computer(name, args, placement):
+            if _runs_as(agent_name) and _uses_computer(name, args, placement):
                 await show_computer_once()
         except Exception:
             logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)

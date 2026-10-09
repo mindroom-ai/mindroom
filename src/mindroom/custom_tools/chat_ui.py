@@ -82,18 +82,13 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
     "open_panel": (
         "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
         "browser that browser_control drives with target='host'. The user can watch you on a real website or take "
-        "over, for example to log in. Your first worker browser call in a conversation (browser_control with "
-        "target='host', or any browser_mcp function) already shows the user this panel; call "
-        "open_panel(panel='computer') only to show it again, for example when the user should log in or after "
-        "they closed it. "
+        "over, for example to log in. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_computer": (
         "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
         "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
-        "example to log in. Your first worker browser call in a conversation (browser_control with "
-        "target='host', or any browser_mcp function) already shows the user this panel; call show_computer() "
-        "only to show it again, for example when the user should log in or after they closed it."
+        "example to log in."
     ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "

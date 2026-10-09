@@ -68,7 +68,10 @@ def make_chat_ui_context(
     """Build the explicit stable runtime used by Chat UI tool tests and export."""
     config = bind_runtime_paths(
         Config(
-            agents={"researcher": AgentConfig(display_name="Researcher")},
+            agents={
+                "researcher": AgentConfig(display_name="Researcher"),
+                "general": AgentConfig(display_name="General"),
+            },
             teams=(
                 {
                     "research": TeamConfig(

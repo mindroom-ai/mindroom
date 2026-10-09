@@ -144,6 +144,9 @@ Expose only this gateway; the worker's display has no public listener.
 - **Stop** closes the browser and display and ends the session.
   **Start computer** creates a fresh session; profiles and files remain.
 
+The room header in MindRoom Chat shows a Computer button once the agent has shown its computer in that conversation.
+Before that, and on phones, open it from the room's More menu with **Show Computer**.
+
 Changing room, thread, account, or selected agent closes the old viewer.
 On desktop the panel sits beside the conversation and closes the Members drawer; on mobile it fills the screen and has a close button.
 Keyboard input over a controlled screen goes to the browser, not the composer.

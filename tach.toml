@@ -2098,6 +2098,7 @@ depends_on = [
     "mindroom.orchestration.computer_runtime",
     "mindroom.runtime_env_policy",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.runtime_context",
     "mindroom.worker_computer.sessions",
 ]
 visibility = ["mindroom.agents"]

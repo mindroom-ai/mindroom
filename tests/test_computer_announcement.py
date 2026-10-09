@@ -10,6 +10,7 @@ import pytest
 from agno.tools import Toolkit
 from agno.tools.function import FunctionCall
 
+import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
@@ -209,6 +210,30 @@ async def test_browser_mcp_functions_announce(tmp_path: Path, events: list[str])
     assert await _call(toolkit, "browser_snapshot") == "snapshot"
 
     assert events == ["announced", "navigate https://example.org", "announced", "snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_team_member_browser_call_does_not_announce_the_response_owners_computer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[str],
+) -> None:
+    """A member's browser runs under the response owner's context, and a notice would name the owner."""
+    monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", set())
+    config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
+    toolkit = _attach(_fake_browser(events), "browser", config, runtime_paths)
+    owner = make_chat_ui_context(tmp_path / "owner", agent_name="general")
+    member = make_chat_ui_context(tmp_path / "member", agent_name="researcher")
+    assert owner.client.user_id != member.client.user_id
+
+    with tool_runtime_context(owner):
+        assert await _call(toolkit, "browser_control", action="open") == "open done"
+    owner.client.room_send.assert_not_awaited()
+
+    with tool_runtime_context(member):
+        assert await _call(toolkit, "browser_control", action="open") == "open done"
+    member.client.room_send.assert_awaited_once()
+    assert events == ["open on default", "open on default"]
 
 
 @pytest.mark.asyncio
