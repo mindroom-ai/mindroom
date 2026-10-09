@@ -44,7 +44,12 @@ from mindroom.delegation.lifecycle import (
     settle_child_response,
     start_child_turn,
 )
-from mindroom.delegation.personas import caller_toolkit_names, missing_persona_tool, resolve_persona_request
+from mindroom.delegation.personas import (
+    caller_toolkit_names,
+    missing_persona_tool,
+    no_longer_available,
+    resolve_persona_request,
+)
 from mindroom.delegation.recovery import interrupt_child, read_child_run, resolve_subagent
 from mindroom.delegation.sessions import (
     SubagentSessionError,
@@ -682,10 +687,10 @@ async def _resolve_follow_up_target(
     if retained is None and previous_child.persona is not None:
         missing = missing_persona_tool(
             previous_child.persona.tools,
-            caller_toolkit_names(caller_identity.agent_name, config, delegation_depth=depth),
+            caller_toolkit_names(caller_identity.agent_name, _current_config(config), delegation_depth=depth),
         )
         if missing is not None:
-            return f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
+            return no_longer_available(missing)
     return _DelegationTarget(
         previous_child.child_agent_name,
         task,
@@ -735,12 +740,22 @@ def _resolve_fresh_target(
         model=model,
         minimal=bool(minimal),
         workspace_root=workspace.root if workspace is not None else None,
-        available_toolkits=caller_toolkit_names(caller_identity.agent_name, config, delegation_depth=depth),
+        available_toolkits=caller_toolkit_names(
+            caller_identity.agent_name,
+            _current_config(config),
+            delegation_depth=depth,
+        ),
         cap=context.persona_tools if (context := get_tool_runtime_context()) is not None else None,
     )
     if isinstance(request, str):
         return request
     return _DelegationTarget(child_name, task, None, request.agent_mode, request.persona, request.model)
+
+
+def _current_config(config: Config) -> Config:
+    """Use the live config that authorization and execution use, not the response's snapshot."""
+    context = get_tool_runtime_context()
+    return context.current_config if context is not None else config
 
 
 def _validate_child_scope(

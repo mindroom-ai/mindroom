@@ -283,6 +283,11 @@ def validate_persona_tools(
         raise PersonaError(msg)
 
 
+def no_longer_available(entry: str) -> str:
+    """Explain why a follow-up cannot run after the caller lost a tool its subagent names."""
+    return f"Subagent tool '{entry}' is no longer available to you; start a new subagent."
+
+
 def self_only_refusal(agent_name: str) -> str:
     """Explain that a caller may author only its own subagents."""
     return f"Cannot author a subagent for '{agent_name}': system_prompt, tools, and profile apply only to yourself."
@@ -316,6 +321,11 @@ def resolve_persona_request(  # noqa: PLR0911
     authors stay within them, and it cannot start an unauthored copy with every caller tool.
     """
     mode: AgentMode = "minimal" if minimal else "standard"
+    # Some models fill every optional argument; empty values author nothing.
+    system_prompt = system_prompt or None
+    profile = profile or None
+    if system_prompt is None and profile is None and not tools:
+        tools = None
     if system_prompt is None and tools is None and profile is None:
         if cap is not None and agent_name == caller_name:
             return (

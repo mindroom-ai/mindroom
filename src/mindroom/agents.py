@@ -1449,7 +1449,7 @@ def _persona_tool_policy(
 ) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
     """Narrow this agent's own tools to an authored persona's subset; its principal is unchanged."""
     persona_filter = persona_function_filter(persona)
-    if persona is None or persona.tools is None or persona_filter is None:
+    if persona is None or persona_filter is None:
         return tool_function_filter, disabled_tool_names
     available = caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth)
     unused = persona_disabled_toolkits(persona, available)

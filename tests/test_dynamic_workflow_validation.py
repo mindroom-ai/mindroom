@@ -698,3 +698,16 @@ def test_subagent_participant_mode_must_be_a_known_string(mode: object) -> None:
     """A non-string mode is a validation error, not a crash."""
     with pytest.raises(DynamicWorkflowError, match="field 'mode' must be 'standard' or 'minimal'"):
         validate_workflow_spec(_spec(participants=[{"id": "writer", "system_prompt": "P", "mode": mode}]))
+
+
+def test_function_level_permission_grants_cover_matching_participant_tools() -> None:
+    """A permissions.tools entry can grant one function, which a participant may then name."""
+    participants = [{"id": "writer", "system_prompt": "P", "tools": ["file.read_file"]}]
+    validate_workflow_spec(_spec(participants=participants, permissions={"tools": ["file.read_file"]}))
+    with pytest.raises(DynamicWorkflowError, match=r"not granted by permissions\.tools"):
+        validate_workflow_spec(
+            _spec(
+                participants=[{"id": "writer", "system_prompt": "P", "tools": ["file"]}],
+                permissions={"tools": ["file.read_file"]},
+            ),
+        )

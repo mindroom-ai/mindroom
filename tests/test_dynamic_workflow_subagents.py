@@ -11,6 +11,7 @@ import yaml
 from agno.models.response import ModelResponse
 
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
@@ -167,21 +168,15 @@ async def test_unapproved_gated_participant_tool_is_rejected(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-async def test_null_tools_participant_hides_gated_and_infrastructure_tools(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without a tool list a participant gets the caller's pre-approved tools and nothing that could pause."""
-    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file", "calculator"])
+async def test_participant_without_tools_gets_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant uses only the tools it names, so one that names none is offered no functions."""
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}, "file", "calculator"])
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
-    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files."}]))
+    run = await workflow.run(_spec([{"id": "thinker", "system_prompt": "Think."}]))
 
     assert run["status"] == "completed", run
-    [offered] = workflow.model.offered
-    assert "read_file" in offered
-    assert "add" not in offered
-    assert not {"create_workflow", "run_subagent", "update_own_config"} & set(offered)
+    assert workflow.model.offered == [[]]
 
 
 @pytest.mark.asyncio
@@ -358,71 +353,41 @@ async def test_participant_runs_the_profile_validated_at_run_start(
 
 
 @pytest.mark.asyncio
-async def test_unbuildable_caller_toolkit_does_not_fail_participants_without_tools(
+async def test_named_toolkits_are_built_once_per_run_with_their_configured_functions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A caller toolkit that cannot be built is skipped for a participant that names no tools."""
-    import mindroom.agents as agents_module  # noqa: PLC0415 - patched where both builders look it up
-
-    original = agents_module.build_agent_toolkit
-
-    def build(tool_name: str, *args: object, **kwargs: object) -> object:
-        if tool_name == "calculator":
-            msg = "No module named 'missing_extra'"
-            raise ImportError(msg)
-        return original(tool_name, *args, **kwargs)
-
-    workflow = _Workflow(
-        tmp_path,
-        monkeypatch,
-        _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file", "calculator"]),
-    )
-    monkeypatch.setattr(agents_module, "build_agent_toolkit", build)
-
-    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files."}]))
-
-    assert run["status"] == "completed", run
-    assert "read_file" in workflow.model.offered[0]
-
-
-@pytest.mark.asyncio
-async def test_participant_approval_overlay_never_builds_declared_toolkits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Approval grants for declared toolkits come from their metadata, so no extra toolkit is built."""
+    """Approval checks see a named toolkit's configured functions, built once for every step of the run."""
     import mindroom.custom_tools.dynamic_workflow as workflow_module  # noqa: PLC0415 - patched where it is looked up
 
     built: list[list[str]] = []
     original = workflow_module._resolve_participant_toolkits
 
-    def resolve(context: object, tool_names: list[str], **kwargs: object) -> object:
+    def resolve(context: object, tool_names: list[str]) -> object:
         built.append(list(tool_names))
-        return original(context, tool_names, **kwargs)
+        return original(context, tool_names)
 
     monkeypatch.setattr(workflow_module, "_resolve_participant_toolkits", resolve)
-    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file", "calculator"]}}, "file", "calculator"])
+    config = _config(
+        tools=[
+            {"dynamic_workflow": {"allowed_tools": ["file"]}},
+            {"file": {"include_tools": ["read_file", "list_files"]}},
+        ],
+    )
+    config = config.model_copy(
+        update={
+            "tool_approval": config.tool_approval.model_copy(
+                update={"rules": [ApprovalRuleConfig(match="save_file", action="require_approval")]},
+            ),
+        },
+    )
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
-    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files."}]))
+    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files.", "tools": ["file"]}], steps=2))
 
     assert run["status"] == "completed", run
-    assert all(not names for names in built)
-
-
-@pytest.mark.asyncio
-async def test_toolless_participant_respects_permission_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-empty permissions.tools also narrows a participant that names no tools."""
-    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file", "calculator"]}}, "file", "calculator"])
-    workflow = _Workflow(tmp_path, monkeypatch, config)
-
-    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files."}], tools=["file"]))
-
-    assert run["status"] == "completed", run
-    [offered] = workflow.model.offered
-    assert "read_file" in offered
-    assert "add" not in offered
+    assert built == [["file"]]
+    assert all("read_file" in offered and "save_file" not in offered for offered in workflow.model.offered)
 
 
 @pytest.mark.asyncio
@@ -449,10 +414,13 @@ def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) 
     entity_ids(config, paths)
     context = replace(_delegate_runtime_context(config, paths, execution_identity=_identity()), persona_tools=("file",))
 
-    request, named = workflow_module._participant_request(context, {"id": "p", "system_prompt": "P"}, workflow_id="w")
+    request = workflow_module._participant_request(
+        context,
+        {"id": "p", "system_prompt": "P", "tools": ["file"]},
+        workflow_id="w",
+    )
     assert request.persona is not None
     assert request.persona.tools == ("file",)
-    assert named is None
     with pytest.raises(DynamicWorkflowError, match="unknown tool 'calculator'"):
         workflow_module._participant_request(
             context,

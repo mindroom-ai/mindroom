@@ -31,7 +31,7 @@ A persona is a typed value with these fields:
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `system_prompt` | string, 1 byte to 64 KiB UTF-8 | required | The child's entire system message, sent byte for byte |
-| `tools` | list of strings or null | null | Toolkit names (`gmail`) or single functions (`gmail.search_emails`); null means every tool the caller has |
+| `tools` | list of strings or null | null | Toolkit names (`gmail`) or single functions (`gmail.search_emails`); null means every tool the caller has, except for workflow participants, where it means none |
 | `model` | configured model alias or null | null | Same rule as today's `run_subagent(model=...)` |
 | `mode` | `standard` or `minimal` | `standard` | Same rule as today's `run_subagent(minimal=...)` |
 | `description` | string up to 1,024 characters | required for profiles, optional elsewhere | One line shown to the parent when listing profiles |
@@ -159,9 +159,8 @@ Authorization stays with each entry point, while capability comes only from the 
 - A standard persona started through `delegate` in Matrix pauses for approval exactly as today's standard children do.
 - A minimal persona hides approval-gated tools, as minimal children do today.
 - A workflow participant cannot pause, so its gated functions must be pre-approved through the caller's `dynamic_workflow` `allowed_tools`, and a participant whose `tools` entry names a function, or a toolkit with any function, that may require approval and is not pre-approved fails the run at its first step.
-- The approval overlay is built from the participant's toolkits, which are constructed once per step to learn their function names, because approval rules match function names.
+- The approval overlay is built from the toolkits a participant names, constructed once per participant per run off the event loop, because approval rules match the functions those toolkits actually expose.
 - A pause that still reaches a participant, for example through `mindroom-agent` from a pre-approved shell, settles the child as failed and fails the step.
-- When a workflow participant's `tools` is null, gated functions that are not pre-approved are hidden instead of rejected.
 - Workflow participants also keep the existing exclusion of agent-infrastructure tools such as `delegate`, `dynamic_workflow`, `memory`, and `self_config`, because they cannot pause or own a nested response.
 
 ## Dynamic Workflow refactor
@@ -190,11 +189,10 @@ This removes the workflow's own agent construction, toolkit resolution, and run 
 ### Rule changes
 
 - Participant tools must be a subset of the caller's tools; today they may name any registered tool the caller lacks, which this refactor closes.
-- A participant without `tools` gets every caller toolkit except the infrastructure toolkits, frozen into its persona at its first step, and functions that are not pre-approved stay hidden.
+- A participant uses only the tools it names, inline or in its profile; one that names none gets no tools, as before this change.
 - Participant models follow the delegate rule, any configured model alias, instead of the caller's active model only.
-- A non-empty `permissions.tools` must list every toolkit a participant names, inline or in its profile, and `permissions.models` still caps participant models.
+- A non-empty `permissions.tools` must list every toolkit or `toolkit.function` a participant names, inline or in its profile, and `permissions.models` still caps participant models.
 - The run validates every participant when it starts and runs exactly those validated personas and models, so a profile edited during the run changes nothing.
-- A caller toolkit that cannot be built is skipped for a participant that names no tools, as agent construction skips it.
 
 ### Stored revision conversion
 

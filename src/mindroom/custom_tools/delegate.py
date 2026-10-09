@@ -20,6 +20,7 @@ from mindroom.delegation.personas import (
     caller_toolkit_names,
     list_profiles,
     missing_persona_tool,
+    no_longer_available,
     render_profile_listing,
     resolve_persona_request,
 )
@@ -342,7 +343,7 @@ class DelegateTools(Toolkit):
                 caller_toolkit_names(self._agent_name, config, delegation_depth=self._delegation_depth),
             )
             if missing is not None:
-                return f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
+                return no_longer_available(missing)
         owner = self._caller_identity()
         provenance = _DIRECT_DELEGATION_PROVENANCE.get()
         parent = provenance[-1] if provenance else None

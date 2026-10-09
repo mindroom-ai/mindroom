@@ -20,7 +20,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _resolve_delegation_target, drive_delegations
+from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.personas import PersonaRequest, resolve_persona_request
+from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -496,3 +498,129 @@ async def test_native_nested_persona_stays_within_running_child_tools(tmp_path: 
     assert not isinstance(inherited, str)
     assert inherited.persona is not None
     assert inherited.persona.tools == ("delegate", "file")
+
+
+def test_empty_authoring_arguments_mean_a_plain_copy(tmp_path: Path) -> None:
+    """A model that fills every optional argument with empty values still starts a plain copy."""
+    request = resolve_persona_request(
+        caller_name="leader",
+        agent_name="leader",
+        system_prompt="",
+        tools=[],
+        profile="",
+        model=None,
+        minimal=False,
+        workspace_root=_workspace(tmp_path),
+        available_toolkits=["file"],
+    )
+    assert request == PersonaRequest(persona=None, model=None, agent_mode="standard")
+
+
+@pytest.mark.asyncio
+async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> None:
+    """A native follow-up refuses once the caller's current config lost a persona tool."""
+    paths = _runtime_paths(tmp_path)
+    with_file = _config()
+    without_file = _config(tools=())
+    identity = _identity()
+    child = prepare_child_turn(
+        "leader",
+        "leader",
+        "Read.",
+        owner=identity,
+        config=with_file,
+        runtime_paths=paths,
+        depth=0,
+        persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",)),
+    )
+    await reserve_subagent_turn(child, owner=identity, runtime_paths=paths)
+    child.status = "completed"
+    await update_subagent_turn(child, paths)
+    follow_up = ToolExecution(
+        tool_name="continue_subagent",
+        tool_args={"subagent_id": child.subagent_id, "message": "Again"},
+    )
+
+    with tool_runtime_context(_delegate_runtime_context(without_file, paths, execution_identity=identity)):
+        result = await _resolve_delegation_target(
+            follow_up,
+            None,
+            caller_identity=identity,
+            config=with_file,
+            runtime_paths=paths,
+            depth=0,
+        )
+
+    assert result == "Subagent tool 'file' is no longer available to you; start a new subagent."
+
+
+@pytest.mark.asyncio
+async def test_native_authored_child_cannot_start_an_unauthored_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on the native path, an authored child's nested plain copy is refused."""
+    config = _config(tools=("file", "calculator"))
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    model = _ToolRecordingModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("run_subagent", "nested", task="Plain copy.")]),
+            ModelResponse(content="Child finished."),
+        ],
+    )
+    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
+    identity = _identity()
+    toolkit = DelegateTools(
+        "leader",
+        ["leader"],
+        paths,
+        config,
+        execution_identity=identity,
+        workspace_root=_workspace(tmp_path),
+    )
+    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    storage = create_session_storage("leader", config, paths, identity)
+    parent = Agent(
+        name="leader",
+        db=storage,
+        tools=[toolkit],
+        model=DelegationModel(
+            id="test-parent",
+            responses=[
+                ModelResponse(
+                    tool_calls=[
+                        _call(
+                            "run_subagent",
+                            "delegate",
+                            task="Coordinate.",
+                            system_prompt="P",
+                            tools=["delegate", "file"],
+                        ),
+                    ],
+                ),
+                ModelResponse(content="Parent finished."),
+            ],
+        ),
+    )
+    try:
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+            completed = await drive_delegations(
+                parent,
+                response,
+                run_child=run_delegated_child_response,
+                agent_name="leader",
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+            )
+    finally:
+        storage.close()
+
+    assert completed.status == RunStatus.completed
+    assert model.system_prompts == ["P", "P"]
+    tool_results = [str(message.content) for message in model.seen_messages if message.role == "tool"]
+    assert any("stays within your tools" in text for text in tool_results)
+    assert len(list((paths.storage_root / "subagent_sessions").glob("*.json"))) == 1

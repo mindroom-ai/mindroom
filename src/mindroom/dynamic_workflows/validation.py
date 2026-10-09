@@ -542,7 +542,7 @@ def _validate_participant_tool_grants(spec: dict[str, object], participants: lis
         return
     for participant in participants:
         for tool_name in cast("list[str]", participant.get("tools") or []):
-            if tool_name.partition(".")[0] not in granted:
+            if tool_name.partition(".")[0] not in granted and tool_name not in granted:
                 participant_id = participant["id"]
                 msg = f"Participant '{participant_id}' tool '{tool_name}' is not granted by permissions.tools."
                 raise DynamicWorkflowError(msg)

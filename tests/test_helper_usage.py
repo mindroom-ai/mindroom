@@ -503,6 +503,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             run_scope="sample-workflow",
             children={},
             resolved={},
+            approvals={},
         )
         assert result.content == "Sample output."
         loaded = (get_team_session if caller.endswith("team") else get_agent_session)(storage, context.session_id)

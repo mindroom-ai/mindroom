@@ -117,7 +117,7 @@ Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset o
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
 It sees exactly the authored prompt, with no role, instructions, date, memories, or tool guidance added, plus the task and the schemas of its tools.
-With `minimal=True`, an explicit `tools` list must include `shell`, because a minimal child works through Bash, and it can still read the caller's configured instructions on demand with `mindroom-agent context`.
+[Minimal subagents](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) describes what an authored subagent started with `minimal=True` needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent that has `delegate` can author further copies only within its own tools, a copy without `tools` inherits them, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
@@ -168,7 +168,7 @@ Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mind
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
-For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, and the SHA-256 of its system prompt, and `transcript.md` shows that prompt.
+For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
 These files are audit exports that MindRoom never reads, so editing or deleting them does not affect the delegation.
 
 ## [`dynamic_workflow`]
@@ -205,7 +205,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, or `invite_router`; omitting `tools` gives it every other caller tool that can run without approval.
+    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, or `invite_router`, and a participant that names no tools, inline or in its profile, gets none.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     It runs with the caller's credentials, worker routing, and plugin hooks, and a participant used by several steps continues one session.
     Each run uses the prompt, tools, and model its participants had when the run started, even if a profile changes during the run.
@@ -222,7 +222,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
   - `max_runtime_seconds` is 1 to 3600 and defaults to 3600; a run that exceeds it fails.
   - `max_total_agents` is 1 to 16, defaults to 16, and caps the number of `agent_step` entries.
   - `max_concurrent_agents` is 1 to 8 and is only validated, because steps never run in parallel.
-  - `models` lists the models participants may use, and a non-empty `tools` limits every participant to those toolkits, whether it names them inline, in its profile, or not at all.
+  - `models` lists the models participants may use, and a non-empty `tools` lists every toolkit or `toolkit.function` a participant may name, inline or in its profile.
   - `data` must keep `matrix_history: none`, `attachments: none`, and `knowledge_bases: []`, because direct workflow data grants are not supported yet; participants can still reach such data through granted tools such as `matrix_message`.
 
 ```python
@@ -274,7 +274,7 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Workflow participants cannot pause for human approval, so a run fails when a tool a participant names has a function that would require approval, and a participant without `tools` never sees such functions.
+Workflow participants cannot pause for human approval, so a run fails when a tool a participant names has a function that would require approval.
 Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
 Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
 
