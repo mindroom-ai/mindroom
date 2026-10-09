@@ -668,7 +668,7 @@ def _create_state_tables(db: sqlite3.Connection, state_path: Path) -> None:
     # LEGACY_COMPAT: provisioning state kept as one JSON file rewritten on every change
     # Legacy format: a JSON object with `pair_sessions` and `connections` lists at the configured state path, by default /var/lib/mindroom-local-provisioning/state.json; selected on the first start with a new database when the `.json` file of the same name exists beside it, or when the configured state path still names that file.
     # Last legacy release: unversioned service state; the service runs from a repository checkout, every revision before this change wrote that file, and this change replaces it with one SQLite row per record.
-    # Handling: every record is imported through the current row readers in the transaction that creates the tables, and the file is never read again; a state path ending in .json opens the .sqlite3 database beside it, so deployments still configured with the old path import the same way and never overwrite the file.
+    # Handling: every record except pair sessions from the removed browser-initiated flow (see the marker in _load_state_unlocked) is imported through the current row readers in the transaction that creates the tables, and the file is never read again; a state path ending in .json opens the .sqlite3 database beside it, so deployments still configured with the old path import the same way and never overwrite the file.
     # Coverage: tests/test_local_mindroom_provisioning_service.py::test_first_start_imports_the_legacy_state_file_once, tests/test_local_mindroom_provisioning_service.py::test_legacy_json_state_path_opens_the_database_beside_it.
     legacy_state_path = state_path.with_suffix(".json")
     if legacy_state_path.exists():
