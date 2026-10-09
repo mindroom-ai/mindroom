@@ -34,7 +34,7 @@ Attachment IDs (`att_*`) are limited to the current conversation and IDs registe
 
 ## [`matrix_room`]
 
-`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None)` reads room data and never writes.
+`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False)` reads room data and never writes.
 Use `matrix_message` or `matrix_api` for writes.
 
 | Action | Returns |
@@ -42,7 +42,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
-| `threads` | Thread-root previews with sender, timestamp, reply count, latest activity, the current `summary` (or `null`), and `summary_pinned`; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token` |
+| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread |
 | `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](matrix-message.md#agent-conversations) to address that agent.
@@ -156,7 +156,7 @@ A pinned thread receives no automatic summaries or automatic topic tags; add tag
 
 The tool returns an error without posting when it cannot read the thread's complete history, which always happens for threads longer than 2,000 messages or 16 MiB of content.
 
-To retitle many threads, start from `matrix_room(action="threads")`: each row has the thread's current `summary` and `summary_pinned`, which is `true` for a title set manually, so threads can be chosen without reading them before calling `set_thread_summary(summary, thread_id=...)` for each one.
+To retitle many threads, start from `matrix_room(action="threads", include_summaries=True)`: each row has the thread's current `summary` and `summary_pinned`, which is `true` when the title is pinned, so threads can be chosen without reading them before calling `set_thread_summary(summary, thread_id=...)` for each one.
 Both fields are omitted for a thread whose complete history cannot be read, the same threads `set_thread_summary` refuses.
 
 ```python

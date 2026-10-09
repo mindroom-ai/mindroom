@@ -13,6 +13,7 @@ import pytest
 from aiohttp import ClientError
 
 import mindroom.tools  # noqa: F401
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
@@ -21,12 +22,14 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.access_schema_support import membership_config
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_relation_lookup,
     runtime_paths_for,
     serve_conversation_reader,
@@ -168,6 +171,7 @@ async def test_matrix_room_rejects_unsupported_action() -> None:
         ({"action": None}, "invalid", "action must be a string"),
         ({"action": "threads", "limit": "3"}, "threads", "limit must be an integer"),
         ({"action": "room-info", "room_id": 123}, "room-info", "room_id must be a string"),
+        ({"action": "threads", "include_summaries": "yes"}, "threads", "include_summaries must be a boolean"),
     ],
 )
 async def test_matrix_room_rejects_malformed_arguments(
@@ -500,6 +504,8 @@ async def test_threads_happy_path() -> None:
     assert payload["threads"][0]["reply_count"] == 5
     assert payload["threads"][1]["thread_id"] == "$thread2"
     assert payload["threads"][1]["reply_count"] == 2
+    assert "summary" not in payload["threads"][0]
+    ctx.conversation_reader.read_strict.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1130,8 +1136,6 @@ async def test_threads_includes_latest_activity_ts() -> None:
             "latest_activity_ts": 5678,
             "body_preview": "Resolved root message body",
             "reply_count": 4,
-            "summary": None,
-            "summary_pinned": False,
         },
     ]
     mock_preview.assert_awaited_once()
@@ -1237,8 +1241,6 @@ async def test_threads_skips_malformed_roots() -> None:
             "timestamp": 1234,
             "body_preview": "Resolved root message body",
             "reply_count": 4,
-            "summary": None,
-            "summary_pinned": False,
         },
     ]
     mock_preview.assert_awaited_once_with(
@@ -1291,6 +1293,11 @@ def _summary_notice(
     )
 
 
+def _edited(message: ResolvedVisibleMessage, edit: ResolvedVisibleMessage) -> ResolvedVisibleMessage:
+    message.apply_edit(body=edit.body, timestamp=edit.timestamp, latest_event_id=edit.event_id, content=edit.content)
+    return message
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("summaries", "expected_summary", "expected_pinned"),
@@ -1316,6 +1323,18 @@ def _summary_notice(
             False,
             id="later-unpinned",
         ),
+        pytest.param(
+            [
+                _edited(
+                    _summary_notice("$manual", "Manual title", 3000, model="manual", pinned=True),
+                    _summary_notice("$manual-edit", "Edited title", 5000, model="manual", pinned=True),
+                ),
+                _summary_notice("$auto", "Automatic title", 4000),
+            ],
+            "Edited title",
+            True,
+            id="edited-after-later-summary",
+        ),
     ],
 )
 async def test_threads_show_current_summary_and_pin_state(
@@ -1335,7 +1354,7 @@ async def test_threads_show_current_summary_and_pin_state(
     serve_conversation_reader(ctx.conversation_reader, history, room_id="!room:localhost", thread_id="$thread1")
 
     with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
-        payload = json.loads(await tool.matrix_room(action="threads"))
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
 
     assert payload["status"] == "ok"
     thread = payload["threads"][0]
@@ -1362,13 +1381,69 @@ async def test_threads_omit_summary_when_thread_history_is_incomplete(failure: s
         ctx.conversation_reader.read_strict.side_effect = RuntimeError("history unavailable")
 
     with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
-        payload = json.loads(await tool.matrix_room(action="threads"))
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
 
     assert payload["status"] == "ok"
     thread = payload["threads"][0]
     assert thread["thread_id"] == "$thread1"
     assert "summary" not in thread
     assert "summary_pinned" not in thread
+
+
+def _human_pin_context(tmp_path: Path, *, sender: str, room_cached: bool) -> ToolRuntimeContext:
+    """Return a context whose thread holds one manual pinned title written by a person."""
+    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    client = make_matrix_client_mock()
+    if not room_cached:
+        client.rooms = {}
+    ctx = make_test_tool_runtime_context(
+        agent_name="talent",
+        target=MessageTarget.resolve(room_id="!room:x", thread_id="$thread1", reply_to_event_id=None),
+        requester_id="@owner:example.com",
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        room=None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+    notice = _summary_notice("$human", "Human title", 3000, model="manual", pinned=True)
+    notice.sender = sender
+    history = [_thread_message("$thread1", "Thread root", 1000), notice]
+    serve_conversation_reader(ctx.conversation_reader, history, room_id="!room:x", thread_id="$thread1")
+    return ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_threads_show_title_pinned_by_a_person(tmp_path: Path) -> None:
+    """A title a person pinned shows up like one the agent pinned."""
+    tool = MatrixRoomTools()
+    ctx = _human_pin_context(tmp_path, sender="@owner:example.com", room_cached=True)
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["summary"] == "Human title"
+    assert payload["threads"][0]["summary_pinned"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_threads_omit_summary_while_pin_authority_is_pending(tmp_path: Path) -> None:
+    """A person's pin that room membership cannot yet authorize leaves the fields out instead of guessing."""
+    tool = MatrixRoomTools()
+    ctx = _human_pin_context(tmp_path, sender="@outsider:example.com", room_cached=False)
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["thread_id"] == "$thread1"
+    assert "summary" not in payload["threads"][0]
+    assert "summary_pinned" not in payload["threads"][0]
 
 
 @pytest.mark.asyncio

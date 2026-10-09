@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, replace
@@ -37,6 +38,7 @@ class _MatrixRoomRequest:
     event_type: str | None
     state_key: str | None
     page_token: str | None
+    include_summaries: bool
 
 
 class MatrixRoomTools(Toolkit):
@@ -48,6 +50,8 @@ class MatrixRoomTools(Toolkit):
     _RATE_LIMIT_MAX_ACTIONS: ClassVar[int] = 20
     _DEFAULT_THREAD_LIMIT: ClassVar[int] = 20
     _MAX_THREAD_LIMIT: ClassVar[int] = 50
+    # Each summary reads a whole thread, which is a homeserver walk the first time; a few at once keep a full page fast.
+    _SUMMARY_READ_CONCURRENCY: ClassVar[int] = 6
     _MAX_STATE_EVENTS: ClassVar[int] = 100
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {"room-info", "members", "agents", "threads", "state"},
@@ -156,21 +160,37 @@ class MatrixRoomTools(Toolkit):
         latest_activity_ts = self._thread_latest_activity_ts(event)
         if latest_activity_ts is not None:
             payload["latest_activity_ts"] = latest_activity_ts
-        current_summary = await current_thread_summary(
-            context.client,
-            room_id,
-            event_id,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            conversation_reader=context.conversation_reader,
-            entity_name=context.agent_name,
-            membership_index=context.require_agent_reply_memberships(),
-            trusted_sender_ids=trusted_sender_ids,
-        )
-        if current_summary is not None:
-            payload["summary"] = current_summary.summary
-            payload["summary_pinned"] = current_summary.pinned
         return payload
+
+    async def _add_current_summaries(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        threads: list[dict[str, object]],
+        trusted_sender_ids: frozenset[str],
+    ) -> None:
+        membership_index = context.require_agent_reply_memberships()
+        reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
+
+        async def add_current_summary(thread: dict[str, object]) -> None:
+            async with reads:
+                current_summary = await current_thread_summary(
+                    context.client,
+                    room_id,
+                    cast("str", thread["thread_id"]),
+                    config=context.config,
+                    runtime_paths=context.runtime_paths,
+                    conversation_reader=context.conversation_reader,
+                    entity_name=context.agent_name,
+                    membership_index=membership_index,
+                    trusted_sender_ids=trusted_sender_ids,
+                )
+            if current_summary is not None:
+                thread["summary"] = current_summary.summary
+                thread["summary_pinned"] = current_summary.pinned
+
+        await asyncio.gather(*(add_current_summary(thread) for thread in threads))
 
     @classmethod
     def _check_rate_limit(
@@ -238,6 +258,7 @@ class MatrixRoomTools(Toolkit):
         event_type: object,
         state_key: object,
         page_token: object,
+        include_summaries: object,
     ) -> _MatrixRoomRequest | str:
         if not isinstance(action, str):
             return cls._input_error("invalid", "action must be a string.")
@@ -253,6 +274,8 @@ class MatrixRoomTools(Toolkit):
             return normalized_fields
         if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool)):
             return cls._input_error(normalized_action, "limit must be an integer when provided.")
+        if not isinstance(include_summaries, bool):
+            return cls._input_error(normalized_action, "include_summaries must be a boolean.")
         normalized_room_id, normalized_event_type, normalized_state_key, normalized_page_token = normalized_fields
         return _MatrixRoomRequest(
             action=normalized_action,
@@ -261,6 +284,7 @@ class MatrixRoomTools(Toolkit):
             event_type=normalized_event_type,
             state_key=normalized_state_key,
             page_token=normalized_page_token,
+            include_summaries=include_summaries,
         )
 
     async def _dispatch_action(
@@ -288,6 +312,7 @@ class MatrixRoomTools(Toolkit):
                 room_id=resolved_room_id,
                 limit=self._thread_limit(request.limit),
                 page_token=request.page_token or None,
+                include_summaries=request.include_summaries,
             )
         return await self._state(
             context,
@@ -405,6 +430,7 @@ class MatrixRoomTools(Toolkit):
         room_id: str,
         limit: int,
         page_token: str | None,
+        include_summaries: bool,
     ) -> str:
         try:
             thread_roots, next_token = await get_room_threads_page(
@@ -443,6 +469,13 @@ class MatrixRoomTools(Toolkit):
             )
             if thread_info is not None:
                 threads_list.append(thread_info)
+        if include_summaries:
+            await self._add_current_summaries(
+                context,
+                room_id=room_id,
+                threads=threads_list,
+                trusted_sender_ids=trusted_sender_ids,
+            )
 
         return self._payload(
             "ok",
@@ -550,6 +583,7 @@ class MatrixRoomTools(Toolkit):
         event_type: str | None = None,
         state_key: str | None = None,
         page_token: str | None = None,
+        include_summaries: bool = False,
     ) -> str:
         """Inspect Matrix room metadata, available agents, members, threads, and state.
 
@@ -561,13 +595,14 @@ class MatrixRoomTools(Toolkit):
           To start a conversation, use matrix_message(recipient=name, message="...").
           This lists conversation targets; run_subagent separately lists your allowed subagents.
         - threads: List thread roots with preview, sender, timestamp, reply count, and latest activity when available.
-          Each row also has summary (the current thread title, or null) and summary_pinned (true when set manually,
-          so automatic summaries keep it); both are omitted when the thread's full history is unavailable.
+          With include_summaries=True, each row also has summary (the current thread title, or null) and
+          summary_pinned (true when that title is pinned, so automatic summaries leave it alone); both are omitted
+          when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.
           Use page_token from a previous response's next_token to paginate.
         - state: Read room state. If event_type is given, return that specific state event.
           If omitted, return a summary of all state events (m.room.member events are elided).
 
-        room_id defaults to the current room. limit applies to threads (default 20, max 50).
+        room_id defaults to the current room. limit (default 20, max 50) and include_summaries apply to threads.
         """
         context = get_tool_runtime_context()
         if context is None:
@@ -581,6 +616,7 @@ class MatrixRoomTools(Toolkit):
             event_type=event_type,
             state_key=state_key,
             page_token=page_token,
+            include_summaries=include_summaries,
         )
         if isinstance(request, str):
             return request

@@ -366,6 +366,19 @@ def _parse_summary_generated_at(metadata: dict[str, object]) -> datetime | None:
         return None
 
 
+def _summary_event_order(
+    message: ResolvedVisibleMessage,
+    metadata: dict[str, object],
+    position: int,
+) -> tuple[int, datetime, int] | None:
+    """Return the key that orders summary notices, or ``None`` for one without a usable ``generated_at``."""
+    generated_at = _parse_summary_generated_at(metadata)
+    if generated_at is None:
+        return None
+    event_timestamp = message.edited_timestamp if message.edited_timestamp is not None else message.timestamp
+    return (event_timestamp, generated_at, position)
+
+
 def _recover_pin_state(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -400,11 +413,9 @@ def _recover_pin_state(
         recorded = metadata.get("pinned")
         if not isinstance(recorded, bool):
             continue
-        generated_at = _parse_summary_generated_at(metadata)
-        if generated_at is None:
+        decision = _summary_event_order(message, metadata, position)
+        if decision is None:
             continue
-        event_timestamp = message.edited_timestamp if message.edited_timestamp is not None else message.timestamp
-        decision = (event_timestamp, generated_at, position)
         if newest_decision is None or decision > newest_decision:
             newest_decision = decision
             pinned = recorded
@@ -1144,16 +1155,22 @@ async def current_thread_summary(
         entity_name,
         membership_index,
     )
+    newest_summary: tuple[int, datetime, int] | None = None
     summary: str | None = None
     try:
-        for message in thread_history:
+        for position, message in enumerate(thread_history):
             metadata = _summary_pin_metadata(
                 message,
                 trusted_sender_ids=trusted_sender_ids,
                 human_sender_allowed=human_sender_allowed,
                 thread_id=thread_id,
             )
-            if metadata is not None:
+            if metadata is None:
+                continue
+            # Ordered like pin decisions, so an edited summary is current from its edit onward.
+            order = _summary_event_order(message, metadata, position)
+            if order is not None and (newest_summary is None or order > newest_summary):
+                newest_summary = order
                 text = metadata.get("summary")
                 summary = text if isinstance(text, str) and text else message.body
         pinned = _recover_pin_state(
