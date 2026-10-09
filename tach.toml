@@ -6948,6 +6948,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.delegation.personas"
+depends_on = [
+    "mindroom.path_confinement",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.skills",
+]
+
+[[modules]]
 path = "mindroom.delegation.state"
 depends_on = []
 
