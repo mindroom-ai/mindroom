@@ -34,6 +34,7 @@ from mindroom.shell_supervisor import (
     poll_command_via_supervisor,
     run_command_via_supervisor,
 )
+from mindroom.text_templates import template_pattern
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -107,7 +108,7 @@ WORKING_METHOD_NOTE = (
 )
 
 _CWD_PREFIX = "[cwd: {cwd}]\n"
-_CWD_PREFIX_PATTERN = re.compile(r"\[cwd: (?P<cwd>[^\n]*)\]\n")
+_CWD_PREFIX_PATTERN = template_pattern(_CWD_PREFIX, cwd="[^\n]*")
 
 
 def split_cwd_prefix(text: str) -> tuple[str | None, str]:
@@ -512,7 +513,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 return ToolOutputFileHandled(message)
             if cwd is None:
                 return message
-            return f"[cwd: {cwd}]\n{message}"
+            return _CWD_PREFIX.format(cwd=cwd) + message
 
         async def check_shell_command(self, handle: str, wait: int = 0) -> str:
             """Poll the status of a backgrounded shell command.

@@ -187,3 +187,44 @@ def test_typographic_punctuation_matches_ascii_patch_lines(tmp_path: Path) -> No
 
     assert result.startswith("Success.")
     assert (tmp_path / "doc.txt").read_text() == "bye\n"
+
+
+@pytest.mark.parametrize(
+    ("setup", "hunk"),
+    [
+        ("dir", "*** Add File: pkg\n+x\n"),
+        ("file", "*** Add File: blocker/inner.txt\n+x\n"),
+        ("dir", "*** Update File: b.txt\n*** Move to: pkg\n@@\n-b\n+B\n"),
+        ("none", "*** Add File: new/inner.txt\n+x\n*** Add File: new\n+y\n"),
+    ],
+    ids=["add-over-directory", "parent-is-a-file", "move-onto-directory", "file-over-planned-directory"],
+)
+def test_predictable_write_failures_change_nothing(tmp_path: Path, setup: str, hunk: str) -> None:
+    """A patch whose later write must fail is refused before an earlier hunk changes anything."""
+    (tmp_path / "a.txt").write_text("a\n")
+    (tmp_path / "b.txt").write_text("b\n")
+    if setup == "dir":
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "keep.txt").write_text("k\n")
+    elif setup == "file":
+        (tmp_path / "blocker").write_text("f\n")
+    before = _tree(tmp_path)
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        f"*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n+A\n{hunk}*** End Patch",
+    )
+
+    assert result.startswith("apply_patch verification failed: ")
+    assert _tree(tmp_path) == before
+
+
+def test_delete_binary_file(tmp_path: Path) -> None:
+    """Deleting needs no text, so a binary file deletes."""
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Delete File: logo.png\n*** End Patch",
+    )
+
+    assert result == "Success. Updated the following files:\nD logo.png"
+    assert not (tmp_path / "logo.png").exists()

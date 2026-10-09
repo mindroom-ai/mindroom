@@ -109,7 +109,7 @@ def request_params_with_deferred_tool_search(
         tool_dict = _as_dict(tool)
         if (
             tool_dict is not None
-            and tool_dict.get("type") == "function"
+            and tool_dict.get("type") in {"function", "custom"}
             and tool_dict.get("name") in deferred_tool_names
         ):
             deferred_tools.append({**tool_dict, "defer_loading": True})

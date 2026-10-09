@@ -769,11 +769,12 @@ class CodingTools(Toolkit):
         for hunk in hunks:
             resolved = self._patch_path(hunk.path)
             if isinstance(hunk, AddFile):
+                self._check_patch_target(resolved, hunk.path, overlay)
                 overlay[resolved] = hunk.contents
                 writes.append((resolved, hunk.contents.encode("utf-8")))
                 added.append(f"A {hunk.path}")
             elif isinstance(hunk, DeleteFile):
-                self._patch_source(resolved, hunk.path, overlay, action="delete")
+                self._check_patch_source(resolved, hunk.path, overlay, action="delete")
                 overlay[resolved] = None
                 writes.append((resolved, None))
                 deleted.append(f"D {hunk.path}")
@@ -781,6 +782,7 @@ class CodingTools(Toolkit):
                 original = self._patch_source(resolved, hunk.path, overlay, action="update")
                 new_contents = updated_contents(original, hunk.path, hunk.chunks)
                 target = resolved if hunk.move_to is None else self._patch_path(hunk.move_to)
+                self._check_patch_target(target, hunk.move_to or hunk.path, overlay)
                 overlay[target] = new_contents
                 writes.append((target, new_contents.encode("utf-8")))
                 if target != resolved:
@@ -798,18 +800,38 @@ class CodingTools(Toolkit):
             raise PatchError(blocked_git_metadata_message("applying patch", path))
         return resolved
 
-    def _patch_source(self, resolved: Path, path: str, overlay: dict[Path, str | None], *, action: str) -> str:
-        """Return the current text of a file a hunk changes, as earlier hunks of the same patch left it."""
+    def _check_patch_target(self, resolved: Path, path: str, overlay: dict[Path, str | None]) -> None:
+        """Refuse a write that must fail, onto a directory or below a file, as earlier hunks leave the tree."""
+        planned_directory = any(
+            resolved in planned.parents for planned, contents in overlay.items() if contents is not None
+        )
+        if planned_directory or (resolved not in overlay and resolved.is_dir()):
+            msg = f"Failed to write file {path}: Is a directory"
+            raise PatchError(msg)
+        for parent in resolved.parents:
+            planned_file = overlay.get(parent) is not None
+            if planned_file or (parent not in overlay and parent.exists() and not parent.is_dir()):
+                msg = f"Failed to write file {path}: {format_path_for_output(parent, self.base_dir)} is a file"
+                raise PatchError(msg)
+
+    def _check_patch_source(self, resolved: Path, path: str, overlay: dict[Path, str | None], *, action: str) -> None:
+        """Refuse a hunk whose file does not exist as earlier hunks of the same patch left it."""
         if resolved in overlay:
-            contents = overlay[resolved]
-            if contents is None:
+            if overlay[resolved] is None:
                 msg = f"Failed to read file to {action} {path}: No such file or directory"
                 raise PatchError(msg)
-            return contents
+            return
         if not resolved.is_file():
             reason = "Is a directory" if resolved.is_dir() else "No such file or directory"
             msg = f"Failed to read file to {action} {path}: {reason}"
             raise PatchError(msg)
+
+    def _patch_source(self, resolved: Path, path: str, overlay: dict[Path, str | None], *, action: str) -> str:
+        """Return the current text of a file a hunk changes, as earlier hunks of the same patch left it."""
+        self._check_patch_source(resolved, path, overlay, action=action)
+        contents = overlay.get(resolved)
+        if contents is not None:
+            return contents
         try:
             return read_resolved_file(self.base_dir, resolved).decode("utf-8")
         except (OSError, ValueError) as e:

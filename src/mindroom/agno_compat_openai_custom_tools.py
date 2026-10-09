@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from agno.models.message import Message
+
 # AGNO_COMPAT: Responses custom tool calls are dropped.
 # Reason: Agno 3.0.9 sends custom tool definitions unchanged but parses only `function_call` output
 # items, stream and non-stream, and replays every call as `function_call`, so a freeform call such as
@@ -65,16 +67,30 @@ def _custom_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def replay_custom_tool_items(formatted_input: list[Any], tools: Sequence[Any] | None) -> list[Any]:
-    """Return Agno's formatted Responses input with calls to this request's custom tools in their own item types."""
+def replay_custom_tool_items(
+    formatted_input: list[Any],
+    tools: Sequence[Any] | None,
+    messages: Sequence[Message],
+) -> list[Any]:
+    """Return Agno's formatted Responses input with calls to this request's custom tools in their own item types.
+
+    Call IDs come from the whole history, because a stored-response continuation sends a result without its call.
+    """
     custom_names = {tool.get("name") for tool in tools or [] if isinstance(tool, dict) and tool.get("type") == "custom"}
+    if not custom_names:
+        return formatted_input
     custom_call_ids = {
+        call_id
+        for message in messages
+        for call in message.tool_calls or []
+        if call.get("function", {}).get("name") in custom_names
+        for call_id in (call.get("call_id"), call.get("id"))
+        if isinstance(call_id, str)
+    } | {
         item.get("call_id")
         for item in formatted_input
         if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in custom_names
     }
-    if not custom_call_ids:
-        return formatted_input
     return [
         _custom_item(item)
         if isinstance(item, dict)

@@ -15,6 +15,7 @@ from mindroom.agno_compat_tool_dialect import install_tool_dialect
 from mindroom.codex_model import CodexResponses
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.openai_tool_search import request_params_with_deferred_tool_search
 from mindroom.tool_dialect_codex import CODEX_DIALECT
 
 if TYPE_CHECKING:
@@ -170,3 +171,51 @@ async def test_reasoning_order_survives_custom_call(
 
     kinds = [item.get("type") for item in provider.requests[1]["input"] if item.get("type")]
     assert kinds[-3:] == ["reasoning", "custom_tool_call", "custom_tool_call_output"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.asyncio
+async def test_stored_continuation_sends_custom_output(tmp_path: Path, *, stream: bool) -> None:
+    """A stored-response continuation that omits the call still answers it with a custom tool output."""
+    provider = _Provider([_CUSTOM_CALL])
+    coding = CodingTools(base_dir=str(tmp_path))
+    _set_toolkit_approval_origin(coding, "coding")
+    async with AsyncOpenAI(
+        api_key="test",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(provider.respond)),
+    ) as client:
+        model = MindRoomOpenAIResponses(id="gpt-6-astra", async_client=client, store=True)
+        install_tool_dialect(model, CODEX_DIALECT)
+        agent = Agent(model=model, tools=[coding], telemetry=False)
+        if stream:
+            async for _ in agent.arun("Create hello.txt.", stream=True):
+                pass
+        else:
+            await agent.arun("Create hello.txt.")
+
+    second = provider.requests[1]
+    outputs = [item for item in second["input"] if str(item.get("type", "")).endswith("_output")]
+    assert outputs == [
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_patch",
+            "output": "Success. Updated the following files:\nA hello.txt",
+        },
+    ]
+
+
+def test_deferred_custom_tool_is_deferred() -> None:
+    """A deferred toolkit's freeform apply_patch loads on demand like its function tools."""
+    custom = {"type": "custom", "name": "apply_patch", "description": "patch", "format": {"type": "grammar"}}
+    function = {"type": "function", "name": "read_file", "description": "read", "parameters": {"type": "object"}}
+
+    prepared = request_params_with_deferred_tool_search(
+        {"tools": [custom, function]},
+        frozenset({"apply_patch", "read_file"}),
+    )
+
+    assert prepared["tools"] == [
+        {"type": "tool_search"},
+        {**custom, "defer_loading": True},
+        {**function, "defer_loading": True},
+    ]
