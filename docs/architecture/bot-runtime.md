@@ -317,7 +317,7 @@ An interrupted edit regeneration also stays pending but starts over, because a n
 Each bot instance ends what an earlier instance left running from the reply records at startup (see [Reply messages](reply-messages.md#lifetime)); a reply whose sources still replay waits for its replay.
 Same-requester supersession of a replay follows its reply's records (see [Reply messages](reply-messages.md#lifetime)).
 When every current source is deleted, the reply records end a reply that has not answered and owe the redaction of what it showed, and stale history for a surviving request retries canonical preparation with a refreshed payload.
-An approval continuation keeps its reply even when all source messages are deleted; the approval card remains the explicit consent surface.
+Deleting every source message of a reply an approval holds cancels that approval, as a Stop would, and removes the reply (see [Reply messages](reply-messages.md#approvals)).
 
 Policy approval events eligible for timed grants expose a canonical `approval_scope` containing an opaque scope ID, entity, invoking agent, and concrete operation (including MCP server and remote tool when applicable).
 One-shot-only approvals omit this optional scope and remain individually reviewable.

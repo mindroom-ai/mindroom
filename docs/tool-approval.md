@@ -48,7 +48,7 @@ tool_approval:
 - A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](scheduling.md#pre-approved-tool-calls).
 
 While approval is pending, the agent stops typing and counts as still responding in that conversation: later messages to it there wait until the approval ends and get a ⏳ reaction, while other conversations and agents carry on.
-Stopping the reply with 🛑, or editing or deleting the message it answers, cancels the approval and expires its card; deleting the message also removes the reply.
+Stopping the reply with 🛑, or deleting the message it answers, cancels the approval and expires its card, and deleting the message also removes the reply; an edit that regenerates the reply cancels it too (see [Message Edits](configuration/threads.md#message-edits)).
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
 

@@ -2963,20 +2963,32 @@ class ResponseRunner:
 
         While it waits it rechecks that each approval holding the conversation
         still exists, so a hold whose end never reached this bot, as after a
-        cancellation or a departure it did not see, cannot keep it waiting.
+        departure it did not see, cannot keep it waiting. The first recheck
+        waits a full interval, so a pause still committing is not mistaken for
+        an ended approval.
         """
         while True:
-            for approval_id in self._lifecycle_coordinator.approval_holds(room_id, thread_id):
-                if await self.deps.approval_store.approval_continuation(approval_id) is None:
-                    self._lifecycle_coordinator.release_approval_hold(approval_id)
             try:
                 await asyncio.wait_for(
                     self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id),
                     timeout=_APPROVAL_HOLD_RECHECK_SECONDS,
                 )
             except TimeoutError:
+                await self._release_ended_approval_holds(room_id, thread_id)
                 continue
             return
+
+    async def _release_ended_approval_holds(self, room_id: str, thread_id: str | None) -> None:
+        """Release the holds of a conversation whose approvals no longer exist."""
+        for approval_id in self._lifecycle_coordinator.approval_holds(room_id, thread_id):
+            try:
+                ended = await self.deps.approval_store.approval_continuation(approval_id) is None
+            except Exception:
+                # The journal is unreachable: keep waiting, and recheck on the next interval.
+                self.deps.logger.warning("approval_hold_recheck_failed", approval_id=approval_id, exc_info=True)
+                return
+            if ended:
+                self._lifecycle_coordinator.release_approval_hold(approval_id)
 
     def reserve_waiting_human_message(
         self,

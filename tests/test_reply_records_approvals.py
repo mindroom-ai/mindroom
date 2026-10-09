@@ -254,10 +254,11 @@ async def test_a_hold_whose_approval_is_gone_does_not_keep_its_conversation_wait
         runner = unwrap_extracted_collaborator(bot._response_runner)
         runner._lifecycle_coordinator.hold_for_approval("approval-gone", target)
         assert runner.is_held_for_approval(target)
-        await asyncio.wait_for(
-            runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id),
-            timeout=5,
-        )
+        with patch("mindroom.response_runner._APPROVAL_HOLD_RECHECK_SECONDS", 0.01):
+            await asyncio.wait_for(
+                runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id),
+                timeout=5,
+            )
         assert not runner.is_held_for_approval(target)
 
 

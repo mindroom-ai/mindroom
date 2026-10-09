@@ -564,14 +564,30 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
         else:
-            self._mark_waiting_for_approval(target, envelope)
+            self._mark_waiting_for_approval(room, prepared_event.source, target, envelope)
             return _IngressAdmissionOutcome.DEFERRED
 
-    def _mark_waiting_for_approval(self, target: MessageTarget, envelope: MessageEnvelope) -> None:
+    def _mark_waiting_for_approval(
+        self,
+        room: nio.MatrixRoom,
+        source: dict[str, Any],
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+    ) -> None:
         """React ⏳ to a human message that waits because a pending approval holds its conversation."""
         if not envelope.origin.may_answer_interactive_prompt or not self.deps.response_runner.is_held_for_approval(
             target,
         ):
+            return
+        mentioned_agents, am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+            source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        if mentioned_agents and not am_i_mentioned:
+            # A message for another agent does not wait for this one.
             return
         create_background_task(
             self.deps.delivery_gateway.send_judgment_reaction(
@@ -629,7 +645,7 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
         else:
-            self._mark_waiting_for_approval(target, envelope)
+            self._mark_waiting_for_approval(room, event.source, target, envelope)
             return _IngressAdmissionOutcome.DEFERRED
 
     async def _should_skip_router_before_shared_ingress_work(
@@ -2628,7 +2644,7 @@ class TurnController:
         else:
             reservation_released_or_handed_off = True
             claim_transferred = True
-            self._mark_waiting_for_approval(normalized_target, envelope)
+            self._mark_waiting_for_approval(room, event.source, normalized_target, envelope)
             return ready
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
