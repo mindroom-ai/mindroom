@@ -27,9 +27,11 @@ from mindroom.delegation.personas import (
     PersonaError,
     PersonaRequest,
     caller_toolkit_names,
+    declared_function_names,
     inline_persona,
     load_profile,
     missing_persona_tool,
+    persona_allows,
     require_minimal_shell,
     validate_persona_tools,
 )
@@ -773,21 +775,26 @@ async def _participant_function_owners(
     allowed = _workflow_allowed_tools(context)
     _reject_unapproved_participant_tools(context, entries, allowed=allowed)
     names = sorted({entry.partition(".")[0] for entry in entries})
-    functions = {
-        name: metadata.function_names
-        for name in names
-        if (metadata := TOOL_METADATA.get(name)) is not None and metadata.function_names
-    }
+    functions = {name: declared for name in names if (declared := declared_function_names(name)) is not None}
     built = await asyncio.to_thread(
         _resolve_participant_toolkits,
         context,
         [name for name in names if name not in functions],
     )
     functions |= {name: (*toolkit.functions, *toolkit.async_functions) for name, toolkit in built.items()}
+    return _selected_function_owners(entries, functions)
+
+
+def _selected_function_owners(
+    entries: tuple[str, ...],
+    functions: Mapping[str, tuple[str, ...]],
+) -> dict[str, frozenset[str]]:
+    """Map each function the participant selected to every selected toolkit that exposes it."""
     owners: dict[str, set[str]] = {}
     for name, function_names in functions.items():
         for function_name in function_names:
-            owners.setdefault(function_name, set()).add(name)
+            if persona_allows(entries, name, function_name):
+                owners.setdefault(function_name, set()).add(name)
     return {function_name: frozenset(toolkits) for function_name, toolkits in owners.items()}
 
 

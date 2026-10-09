@@ -23,6 +23,13 @@ from mindroom.delegation.personas import (
     validate_persona_tools,
 )
 from mindroom.delegation.state import SubagentPersona
+from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.declarations import (
+    ToolAuthoredOverrideValidator,
+    ToolCategory,
+    ToolFileAccess,
+    ToolMetadata,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -304,3 +311,23 @@ def test_function_level_cap_admits_only_named_functions() -> None:
         with pytest.raises(PersonaError) as error:
             validate_persona_tools((entry,), ["gmail", "file", "calculator"], cap)
         assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.search_emails, file."
+
+
+def test_mcp_function_entries_are_not_checked_against_bridge_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An MCP toolkit learns its functions when built, so a function entry for it is accepted by name."""
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        "mcp_demo",
+        ToolMetadata(
+            name="mcp_demo",
+            display_name="Demo",
+            description="Demo MCP server",
+            category=ToolCategory.DEVELOPMENT,
+            file_access=ToolFileAccess.NONE,
+            authored_override_validator=ToolAuthoredOverrideValidator.MCP,
+            function_names=("mcp_demo_connect",),
+        ),
+    )
+    validate_persona_tools(("mcp_demo.demo_echo",), ["mcp_demo"])
+    with pytest.raises(PersonaError):
+        validate_persona_tools(("mcp_other.demo_echo",), ["mcp_demo"])

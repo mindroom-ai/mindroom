@@ -2390,3 +2390,17 @@ def test_minimal_spec_example_in_tool_description_is_valid(tmp_path: Path) -> No
 
     assert payload["status"] == "ok"
     assert payload["workflow_id"] == "my_flow"
+
+
+def test_participant_function_owners_count_only_selected_functions() -> None:
+    """A function a participant did not select never makes a selected function look shared."""
+    owners = dynamic_workflow_module._selected_function_owners(
+        ("file.read_file", "python.run_python_code"),
+        {"file": ("read_file", "save_file"), "python": ("read_file", "run_python_code")},
+    )
+    assert owners == {"read_file": frozenset({"file"}), "run_python_code": frozenset({"python"})}
+    whole = dynamic_workflow_module._selected_function_owners(
+        ("file", "python"),
+        {"file": ("read_file",), "python": ("read_file",)},
+    )
+    assert whole == {"read_file": frozenset({"file", "python"})}

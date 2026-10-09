@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.delegation.state import SubagentPersona
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.declarations import ToolAuthoredOverrideValidator
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skills import SkillMarkdownError, parse_skill_markdown, workspace_entry_names
 
@@ -239,6 +240,21 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
     return [entry.name for entry in surface.runtime_tool_configs if not config.is_tool_preset(entry.name)]
 
 
+def declared_function_names(toolkit: str) -> tuple[str, ...] | None:
+    """Return the functions a toolkit declares up front, or None when they are known only once it is built.
+
+    An MCP toolkit discovers its functions from its server, so its metadata may list only bridge functions.
+    """
+    metadata = TOOL_METADATA.get(toolkit)
+    if (
+        metadata is None
+        or not metadata.function_names
+        or metadata.authored_override_validator == ToolAuthoredOverrideValidator.MCP
+    ):
+        return None
+    return metadata.function_names
+
+
 def persona_allows(entries: tuple[str, ...], toolkit: str, function: str) -> bool:
     """Return whether persona entries keep one function of one concrete toolkit."""
     return toolkit in entries or f"{toolkit}.{function}" in entries
@@ -258,13 +274,9 @@ def missing_persona_tool(
     available = set(available_toolkits)
     for entry in tools or ():
         toolkit, separator, function = entry.partition(".")
-        metadata = TOOL_METADATA.get(toolkit)
+        declared = declared_function_names(toolkit)
         known = toolkit in available and (
-            not separator
-            or (
-                bool(function)
-                and (metadata is None or not metadata.function_names or function in metadata.function_names)
-            )
+            not separator or (bool(function) and (declared is None or function in declared))
         )
         if not known or not _within_cap(entry, cap):
             return entry
