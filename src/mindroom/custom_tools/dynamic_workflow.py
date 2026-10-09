@@ -716,9 +716,10 @@ async def _aexecute_subagent_participant(
     if missing is not None:
         msg = f"Dynamic Workflow participant '{participant_id}' tool '{missing}' is no longer available to you."
         raise DynamicWorkflowExecutionError(msg)
+    # Recheck approvals against the current config each step; only the function ownership is cached.
+    _reject_unapproved_participant_tools(context, persona.tools or (), allowed=_workflow_allowed_tools(context))
     if participant_id not in approvals:
         approvals[participant_id] = await _participant_function_owners(context, persona)
-    # Rebuild the overlay from the current config each step; only the function ownership is cached.
     approval_config = _participant_run_config(context, approvals[participant_id])
     owner = build_execution_identity_from_runtime_context(context)
     child = prepare_child_turn(
@@ -766,14 +767,12 @@ async def _participant_function_owners(
     context: ToolRuntimeContext,
     persona: SubagentPersona,
 ) -> dict[str, frozenset[str]]:
-    """Refuse tools a participant could not use without pausing, then map its functions to their toolkits.
+    """Map each function a participant selected to the toolkits that expose it.
 
     Declared toolkits are read from their metadata; only toolkits without declared functions,
     such as MCP servers, are built, off the event loop, to learn what they expose.
     """
     entries = persona.tools or ()
-    allowed = _workflow_allowed_tools(context)
-    _reject_unapproved_participant_tools(context, entries, allowed=allowed)
     names = sorted({entry.partition(".")[0] for entry in entries})
     functions = {name: declared for name in names if (declared := declared_function_names(name)) is not None}
     built = await asyncio.to_thread(

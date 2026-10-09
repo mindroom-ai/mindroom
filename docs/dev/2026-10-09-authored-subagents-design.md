@@ -158,7 +158,7 @@ Authorization stays with each entry point, while capability comes only from the 
 
 - A standard persona started through `delegate` in Matrix pauses for approval exactly as today's standard children do.
 - A minimal persona hides approval-gated tools, as minimal children do today.
-- A workflow participant cannot pause, so every toolkit it names must be pre-approved through the caller's `dynamic_workflow` `allowed_tools`; a single named `toolkit.function` may instead be auto-approved by an operator rule, and a named function an operator rule still gates fails the run at the participant's first step.
+- A workflow participant cannot pause, so every toolkit it names must be pre-approved through the caller's `dynamic_workflow` `allowed_tools`; a single named `toolkit.function` may instead be auto-approved by an operator rule, and a named function an operator rule still gates fails the run at the first step that would run it, including after an operator changes the policy mid-run.
 - The approval overlay's auto-approve rules come from declared tool metadata; only toolkits without declared functions, such as MCP servers, are built once per participant per run off the event loop to learn their functions, and the overlay is rebuilt from the current config each step.
 - A pause that still reaches a participant, for example through `mindroom-agent` from a pre-approved shell, settles the child as failed and fails the step.
 - Workflow participants also keep the existing exclusion of agent-infrastructure tools such as `delegate`, `dynamic_workflow`, `memory`, and `self_config`, because they cannot pause or own a nested response.

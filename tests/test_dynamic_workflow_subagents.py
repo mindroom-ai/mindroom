@@ -430,6 +430,50 @@ async def test_named_function_an_operator_gates_fails_loudly(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
+async def test_later_step_fails_when_its_named_function_becomes_gated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator gating a named function during a run fails the next step instead of silently hiding the function."""
+    auto = _config(tools=["dynamic_workflow", "calculator"])
+    auto = auto.model_copy(
+        update={
+            "tool_approval": auto.tool_approval.model_copy(
+                update={"rules": [ApprovalRuleConfig(match="add", action="auto_approve")]},
+            ),
+        },
+    )
+    gated = auto.model_copy(
+        update={
+            "tool_approval": auto.tool_approval.model_copy(
+                update={"rules": [ApprovalRuleConfig(match="add", action="require_approval")]},
+            ),
+        },
+    )
+    workflow = _Workflow(tmp_path, monkeypatch, auto)
+    live = [auto]
+    record = workflow.model
+
+    def load_model(*_args: object) -> _ToolRecordingModel:
+        live[0] = gated
+        return record
+
+    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+    context = _delegate_runtime_context(auto, workflow.paths, execution_identity=_identity())
+    monkeypatch.setattr(
+        workflow,
+        "context",
+        lambda: tool_runtime_context(replace(context, config_provider=lambda: live[0])),
+    )
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator.add"]}], steps=2))
+
+    assert run["status"] == "failed", run
+    assert "add require approval and cannot suspend" in run["error"]
+    assert workflow.model.offered == [["add"]]
+
+
+@pytest.mark.asyncio
 async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant turn that fails still links its step to the delegation record it wrote."""
     workflow = _Workflow(tmp_path, monkeypatch, _config(), responses=[])
