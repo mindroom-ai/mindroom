@@ -366,27 +366,16 @@ def _parse_summary_generated_at(metadata: dict[str, object]) -> datetime | None:
         return None
 
 
-def _summary_event_order(
-    message: ResolvedVisibleMessage,
-    metadata: dict[str, object],
-    position: int,
-) -> tuple[int, datetime, int] | None:
-    """Return the key that orders summary notices, or ``None`` for one without a usable ``generated_at``."""
-    generated_at = _parse_summary_generated_at(metadata)
-    if generated_at is None:
-        return None
-    event_timestamp = message.edited_timestamp if message.edited_timestamp is not None else message.timestamp
-    return (event_timestamp, generated_at, position)
-
-
-def _recover_pin_state(
+def _recover_summary_state(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     trusted_sender_ids: Collection[str],
     human_sender_allowed: Callable[[str], bool] | None = None,
     thread_id: str | None = None,
-) -> bool:
-    """Return the newest durable pin decision recorded in summary metadata.
+) -> _CurrentThreadSummary:
+    """Return the newest summary text and the newest durable pin decision in summary metadata.
+
+    Both use the same order, so an edited summary is current from its edit onward.
 
     A later ``pinned: false`` summary releases a thread that an earlier summary
     pinned, so the newest decision has to win. Summaries that omit the key state
@@ -399,6 +388,8 @@ def _recover_pin_state(
     reflect a backward scan rather than send order. It remains the separate
     display clock used by summary readers and writers.
     """
+    newest_summary: tuple[int, datetime, int] | None = None
+    summary: str | None = None
     newest_decision: tuple[int, datetime, int] | None = None
     pinned = False
     for position, message in enumerate(thread_history):
@@ -410,16 +401,36 @@ def _recover_pin_state(
         )
         if metadata is None:
             continue
+        generated_at = _parse_summary_generated_at(metadata)
+        if generated_at is None:
+            continue
+        event_timestamp = message.edited_timestamp if message.edited_timestamp is not None else message.timestamp
+        order = (event_timestamp, generated_at, position)
+        if newest_summary is None or order > newest_summary:
+            newest_summary = order
+            text = metadata.get("summary")
+            summary = text if isinstance(text, str) and text else message.body
         recorded = metadata.get("pinned")
-        if not isinstance(recorded, bool):
-            continue
-        decision = _summary_event_order(message, metadata, position)
-        if decision is None:
-            continue
-        if newest_decision is None or decision > newest_decision:
-            newest_decision = decision
+        if isinstance(recorded, bool) and (newest_decision is None or order > newest_decision):
+            newest_decision = order
             pinned = recorded
-    return pinned
+    return _CurrentThreadSummary(summary=summary, pinned=pinned)
+
+
+def _recover_pin_state(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool] | None = None,
+    thread_id: str | None = None,
+) -> bool:
+    """Return the newest durable pin decision recorded in summary metadata."""
+    return _recover_summary_state(
+        thread_history,
+        trusted_sender_ids=trusted_sender_ids,
+        human_sender_allowed=human_sender_allowed,
+        thread_id=thread_id,
+    ).pinned
 
 
 def _human_summary_authorizer(
@@ -1132,20 +1143,9 @@ async def current_thread_summary(
     Returns ``None`` rather than guessing when the complete history cannot be
     read, which always happens for threads longer than one projected page, or
     when room membership needed to authorize a human pin is still pending.
-    The read is the projected one manual writes use: the first read of a
-    conversation walks it on the homeserver once, and later reads stay local.
     """
-    try:
-        thread_history = await complete_thread_history(conversation_reader, room_id, thread_id)
-    except Exception as exc:
-        logger.warning(
-            "Thread history unavailable for current summary",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-        return None
-    if not thread_history.is_full_history:
+    thread_history = await _countable_thread_history(conversation_reader, room_id, thread_id)
+    if thread_history is None:
         return None
     human_sender_allowed = _human_summary_authorizer(
         client,
@@ -1155,25 +1155,8 @@ async def current_thread_summary(
         entity_name,
         membership_index,
     )
-    newest_summary: tuple[int, datetime, int] | None = None
-    summary: str | None = None
     try:
-        for position, message in enumerate(thread_history):
-            metadata = _summary_pin_metadata(
-                message,
-                trusted_sender_ids=trusted_sender_ids,
-                human_sender_allowed=human_sender_allowed,
-                thread_id=thread_id,
-            )
-            if metadata is None:
-                continue
-            # Ordered like pin decisions, so an edited summary is current from its edit onward.
-            order = _summary_event_order(message, metadata, position)
-            if order is not None and (newest_summary is None or order > newest_summary):
-                newest_summary = order
-                text = metadata.get("summary")
-                summary = text if isinstance(text, str) and text else message.body
-        pinned = _recover_pin_state(
+        return _recover_summary_state(
             thread_history,
             trusted_sender_ids=trusted_sender_ids,
             human_sender_allowed=human_sender_allowed,
@@ -1181,7 +1164,6 @@ async def current_thread_summary(
         )
     except ReplyMembershipPendingError:
         return None
-    return _CurrentThreadSummary(summary=summary, pinned=pinned)
 
 
 async def _countable_thread_history(
@@ -1189,7 +1171,7 @@ async def _countable_thread_history(
     room_id: str,
     thread_id: str,
 ) -> ThreadHistoryResult | None:
-    """Return history an automatic pass may count, or nothing.
+    """Return complete thread history, or nothing when it is unavailable or a page of a longer thread.
 
     An automatic pass moves the durable baseline on every outcome it reaches,
     so it must not run at all on a count it cannot trust. Both reasons it
