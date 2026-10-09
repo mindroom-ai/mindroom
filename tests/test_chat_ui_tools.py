@@ -559,6 +559,19 @@ async def test_show_computer_once_sends_the_show_computer_notice_once_per_thread
 
 
 @pytest.mark.asyncio
+async def test_explicit_computer_request_still_sends_after_the_first_browser_notice(tmp_path: Path) -> None:
+    """An agent can always show the panel again, for example after the user closed it or to ask for a login."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        await show_computer_once()
+        result = json.loads(await ChatUITools().open_panel(panel="computer"))
+
+    assert result["status"] == "ok"
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_show_computer_once_announces_each_thread_and_the_room_timeline(tmp_path: Path) -> None:
     """Each thread, and the room timeline itself, gets its own single announcement."""
     contexts = [

@@ -78,14 +78,18 @@ _CHAT_UI_INSTRUCTIONS = (
 _FUNCTION_INSTRUCTIONS: dict[str, str] = {
     "open_panel": (
         "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
-        "browser that browser_control drives with target='host'. Use it to let the user watch you on a real "
-        "website, or take over, for example to log in. "
+        "browser that browser_control drives with target='host'. The user can watch you on a real website or take "
+        "over, for example to log in. Your first browser_control call with target='host' in a conversation "
+        "already shows the user this panel; call open_panel(panel='computer') only to show it again, for example "
+        "when the user should log in or after they closed it. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_computer": (
         "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
-        "browser_control drives with target='host'. Use it to let the user watch you on a real website, or take "
-        "over, for example to log in."
+        "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
+        "example to log in. Your first browser_control call with target='host' in a conversation already shows "
+        "the user this panel; call show_computer() only to show it again, for example when the user should log in "
+        "or after they closed it."
     ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
@@ -106,7 +110,8 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
 # Lines that name another function; each is added only when every function it names is enabled.
 _SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
 _REAL_WEBSITE_HINT = (
-    "To show the user a real website, open it with browser_control and show the Computer panel; a canvas cannot."
+    "To show the user a real website, open it with browser_control, whose first call in a conversation shows the "
+    "Computer panel; a canvas cannot."
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
@@ -370,8 +375,11 @@ class ChatUITools(Toolkit):
         out watching. They can take control, for example to log in; while they have it
         your browser calls are blocked, and when they hand it back you get a message.
         Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
-        and it never opens or controls the user's own browser. Success means the
-        request was sent, not that the client opened the panel.
+        and it never opens or controls the user's own browser. Your first
+        browser_control call with target='host' in a conversation already shows the
+        user this panel; call show_computer only to show it again, for example when
+        the user should log in or after they closed it. Success means the request was
+        sent, not that the client opened the panel.
         """
         validated = self._validated_context("show_computer")
         if isinstance(validated, str):
@@ -410,7 +418,9 @@ class ChatUITools(Toolkit):
         it your browser calls are blocked, and when they hand it back you get a
         message. Opening the panel does not navigate to a URL, send a prompt to
         ChatGPT, or take control, and it never opens or controls the user's own
-        browser: navigate first with browser_control, then open the panel.
+        browser. Your first browser_control call with target='host' in a conversation
+        already shows the user this panel; call open_panel(panel='computer') only to
+        show it again, for example when the user should log in or after they closed it.
 
         panel='members' opens the Members panel, listing the people and agents in
         this room.
@@ -504,7 +514,7 @@ class ChatUITools(Toolkit):
 
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. Without it, show_canvas creates a separate canvas: use one for a
+        canvas ID. Without it, show_canvas creates a separate canvas: use a new canvas for a
         distinct artifact and an update for a new version of the same one. The user can
         switch between this conversation's canvases from the room header. Success means
         the request was sent, not that the user opened or answered it.

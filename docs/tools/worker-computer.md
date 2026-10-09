@@ -7,7 +7,7 @@ icon: lucide/monitor
 Worker Computer gives an agent a visible, persistent Chromium browser inside its dedicated worker, and lets the user watch it, take control, and hand it back from MindRoom Chat's Computer panel.
 Use it when a user wants to see what the agent is doing in a browser, step in for logins or CAPTCHAs, or preview a web app the agent is building.
 The browser shares the worker's files with the agent's shell and file tools.
-Agents with the [`chat_ui`](chat-ui.md) toolkit can open the panel for the user; see [Control the browser, then show it](chat-ui.md#control-the-browser-then-show-it) for that call.
+Agents with the [`chat_ui`](chat-ui.md) toolkit can open the panel for the user; see [Show the worker browser](chat-ui.md#show-the-worker-browser) for that call.
 The first time an agent with `chat_ui` uses its worker browser in a thread, Chat shows a "View computer" notice there and opens the panel by itself under the [same conditions as other Chat UI actions](chat-ui.md#what-the-user-sees).
 
 ## Requirements and opt-in

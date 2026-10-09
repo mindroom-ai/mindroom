@@ -45,14 +45,16 @@ The Computer, Canvas, and Members panels share one place on the screen, so openi
 Requests made in a thread are posted in that thread; requests made at room level stay at room level.
 A sent request returns `UI action request sent.`
 
-## Control the browser, then show it
+## Show the worker browser
 
 The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
-Opening the Computer panel does not navigate or take control, so navigate first and then request the panel:
+The agent's first `browser_control` call with `target="host"` in a conversation already shows the user the Computer panel.
+The agent calls `show_computer()` or `open_panel(panel="computer")` only to show the panel again, for example when the user should log in or after they closed it.
+Opening the Computer panel does not navigate or take control:
 
 ```python
-browser_control(action="open", target="host", targetUrl="https://example.org")
-chat_ui.open_panel(panel="computer")
+browser_control(action="open", target="host", targetUrl="https://example.org")  # shows the panel
+chat_ui.open_panel(panel="computer")  # shows it again, for example for a login
 ```
 
 To control the user's own local browser instead, use the `browser` tool's `desktop` target through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).

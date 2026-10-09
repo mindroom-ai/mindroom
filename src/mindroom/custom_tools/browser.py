@@ -844,7 +844,8 @@ class BrowserTools(Toolkit):
     ) -> str | ToolResult:
         """Control MindRoom's browser state and actions, including worker browser navigation.
 
-        To let the user watch this worker browser, use chat_ui.open_panel(panel='computer').
+        If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel;
+        use chat_ui.open_panel(panel='computer') only to show it again.
         That UI request does not navigate, send a prompt to ChatGPT, or take control.
         The user's local browser is separate and requires the configured desktop target.
 
