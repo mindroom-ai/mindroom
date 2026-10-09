@@ -408,8 +408,11 @@ For shell authentication, use [environment passthrough](#shell-environment-and-p
 
 To let worker-routed `shell` and `python` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
 This works at the network layer, so it covers URLs inside scripts, package CLIs, and subprocesses.
-There are two supported shapes:
+There are three supported shapes:
 
+- **Native egress broker** runs inside the primary runtime and injects secrets from the same credential store workers already use for other tools.
+  See [Brokered Worker Egress](https://docs.mindroom.chat/deployment/egress-broker/) for configuration, secret management, and deployment.
+  This is the recommended option for new deployments; it works with Docker workers and will support Kubernetes workers in a follow-up chart release.
 - **Per-worker Agent Vault egress** (Kubernetes backend), which gives each worker its own vault for per-user or per-agent isolation, described below.
 - **A shared credential-injecting proxy** that you run, configured through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`, the chart's `egressProxy` integration, or the worker proxy environment on other backends.
   The proxy holds the real credential and workers receive only its URL.
