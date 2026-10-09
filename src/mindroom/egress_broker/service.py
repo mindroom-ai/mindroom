@@ -7,6 +7,7 @@ import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.egress_broker import EgressBrokerConfig
@@ -25,7 +26,7 @@ from mindroom.runtime_env_policy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -84,6 +85,18 @@ def _positive_int(name: str, raw: str, *, maximum: int | None = None) -> int:
     return value
 
 
+def _require_proxy_url(name: str, url: str) -> None:
+    """Reject a worker-facing URL that proxy clients cannot use: it needs an http(s) scheme and a host."""
+    try:
+        parts = urlsplit(url)
+        valid = parts.scheme in {"http", "https"} and bool(parts.hostname)
+    except ValueError:
+        valid = False
+    if not valid:
+        msg = f"{name} must be an http:// or https:// URL with a host, such as http://host.docker.internal:8768."
+        raise ValueError(msg)
+
+
 def _broker_settings(runtime_paths: RuntimePaths) -> _BrokerSettings | None:
     """Read and validate the broker env; None when no port is set, so the broker stays off."""
 
@@ -96,6 +109,7 @@ def _broker_settings(runtime_paths: RuntimePaths) -> _BrokerSettings | None:
     if not (url := env("url")):
         msg = f"{EGRESS_BROKER_ENV_BY_KEY['url']} is required when {EGRESS_BROKER_ENV_BY_KEY['port']} is set"
         raise ValueError(msg)
+    _require_proxy_url(EGRESS_BROKER_ENV_BY_KEY["url"], url)
     raw_ttl = env("token_ttl_seconds")
     ttl = _positive_int(EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"], raw_ttl) if raw_ttl else None
     return _BrokerSettings(
@@ -117,15 +131,23 @@ def manage_url(runtime_paths: RuntimePaths) -> str | None:
 
 
 def _egress_config_reader(config_provider: Callable[[], Config | None]) -> Callable[[], EgressBrokerConfig]:
-    """Adapt the primary's config provider to the broker, which reads it once per CONNECT or request."""
+    """Adapt the primary's config provider to the broker, which reads it once per CONNECT or request.
+
+    While the provider has no valid config (it returns None or raises, for example after an invalid edit),
+    the broker keeps the last config it read, so a broken save cannot turn ``deny`` into ``passthrough``.
+    Before any good read the broker has no rules: nothing is injected.
+    """
+    last_good = EgressBrokerConfig()
 
     def read() -> EgressBrokerConfig:
+        nonlocal last_good
         try:
             config = config_provider()
         except Exception:
-            # Without a readable config there are no rules, so nothing is injected anywhere.
-            return EgressBrokerConfig()
-        return config.egress_broker if config is not None else EgressBrokerConfig()
+            return last_good
+        if config is not None:
+            last_good = config.egress_broker
+        return last_good
 
     return read
 
@@ -265,13 +287,14 @@ def execution_env_for_worker(
     *,
     config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
-    credentials_manager: CredentialsManager | None,
+    call_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Return the broker env for one worker-routed call: a fresh scope-bound token, the CA, and placeholders.
 
     Empty when the broker is not running, there is no config, or the target has no worker identity to sign.
-    Placeholders come only from services with a secret in the target's scope, looked up in the store the
-    broker resolves secrets from when the call brings no credentials manager of its own.
+    Placeholders come only from services with a secret in the target's scope, checked in the store the broker
+    injects from. `call_env` is the env the call already carries; overlaying the result on it keeps its Git
+    config entries.
     """
     runtime = _active.runtime
     if runtime is None or config is None or worker_target is None:
@@ -281,10 +304,17 @@ def execution_env_for_worker(
         return {}
     # Check status for the target the broker will rebuild from the token, so both agree on the scope.
     scope_target = claims.to_worker_target()
-    manager = credentials_manager if credentials_manager is not None else runtime.credentials_manager
     placeholder_env: dict[str, str] = {}
     for name, egress_service in config.egress_broker.services.items():
-        if egress_service.placeholder_env and secret_status(manager, scope_target, name).configured:
+        if not egress_service.placeholder_env:
+            continue
+        try:
+            configured = secret_status(runtime.credentials_manager, scope_target, name).configured
+        except Exception as exc:
+            # One unreadable secret must not fail the call; the broker reports it if the service is used.
+            logger.warning("egress_broker_secret_status_failed", service=name, error_type=type(exc).__name__)
+            continue
+        if configured:
             placeholder_env.update(egress_service.placeholder_env)
     return broker_execution_env(
         broker_url=runtime.url,
@@ -292,6 +322,7 @@ def execution_env_for_worker(
         ca_pem=runtime.ca_pem,
         placeholder_env=placeholder_env,
         extra_no_proxy_hosts=primary_callback_hosts(runtime_paths),
+        call_env=call_env,
     )
 
 

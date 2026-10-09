@@ -944,22 +944,38 @@ def _egress_broker_env(
     config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
     routed_worker_key: object,
-    credentials_manager: CredentialsManager | None,
+    call_env: dict[str, str] | None,
 ) -> dict[str, str]:
     """Return the egress broker env for one shell or python call routed to a worker.
 
-    An unscoped target has no worker key of its own, so its token names the worker this call was routed to.
+    An unscoped target has no worker key of its own. Its token names the dedicated worker this call was routed
+    to, or on the shared static runner the unscoped key a dedicated backend would give the agent.
     """
     # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
     from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
 
-    if worker_target is not None and worker_target.worker_key is None and isinstance(routed_worker_key, str):
-        worker_target = replace(worker_target, worker_key=routed_worker_key)
+    if worker_target is not None and worker_target.worker_scope is None and worker_target.worker_key is None:
+        worker_key = routed_worker_key if isinstance(routed_worker_key, str) else _unscoped_worker_key(worker_target)
+        if worker_key is not None:
+            worker_target = replace(worker_target, worker_key=worker_key)
     return execution_env_for_worker(
         runtime_paths,
         config=config,
         worker_target=worker_target,
-        credentials_manager=credentials_manager,
+        call_env=call_env,
+    )
+
+
+def _unscoped_worker_key(worker_target: ResolvedWorkerTarget) -> str | None:
+    identity = worker_target.execution_identity
+    agent_name = worker_target.routing_agent_name or (identity.agent_name if identity is not None else None)
+    if agent_name is None:
+        return None
+    return resolve_unscoped_worker_key(
+        agent_name=agent_name,
+        execution_identity=identity,
+        tenant_id=worker_target.tenant_id,
+        account_id=worker_target.account_id,
     )
 
 
@@ -1035,7 +1051,7 @@ def _call_proxy_sync(
                 config=manager_context.runtime_config,
                 worker_target=worker_target,
                 routed_worker_key=worker_payload.get("worker_key"),
-                credentials_manager=credentials_manager,
+                call_env=execution_env,
             )
         ):
             execution_env = {**(execution_env or {}), **broker_env}

@@ -88,6 +88,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     ORDERLY_SHUTDOWN,
@@ -168,6 +169,7 @@ if TYPE_CHECKING:
     from types import FrameType
 
     import nio
+    from fastapi import FastAPI
 
     from mindroom.config_reload import ConfigReloadStatus
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -2652,7 +2654,23 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(  # noqa: C901, PLR0915 - the primary API and its worker-facing listeners share one lifecycle
+def _committed_config_provider(app: FastAPI) -> Callable[[], Config | None]:
+    """Return a reader of the API's committed config, None while there is none or the current one is invalid.
+
+    The egress broker calls it on its own thread for every CONNECT, so service edits apply without a restart.
+    """
+    from mindroom.api import main as api_main  # noqa: PLC0415
+
+    def read() -> Config | None:
+        try:
+            return api_main.config_lifecycle.read_app_committed_runtime_config(app)[0]
+        except Exception:
+            return None
+
+    return read
+
+
+async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-facing listeners share one lifecycle
     host: str,
     port: int,
     log_level: str,
@@ -2709,14 +2727,6 @@ async def _run_api_server(  # noqa: C901, PLR0915 - the primary API and its work
             gateway_url = await optional_script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
             script_runtime.bind_api(gateway_url)
 
-    def egress_broker_config() -> Config | None:
-        # Called on the broker thread for every CONNECT, so service edits apply without a restart.
-        try:
-            return api_main.config_lifecycle.read_app_committed_runtime_config(api_main.app)[0]
-        except Exception:
-            # No committed config yet, or the current one is invalid.
-            return None
-
     server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
@@ -2724,7 +2734,7 @@ async def _run_api_server(  # noqa: C901, PLR0915 - the primary API and its work
             async with (
                 serve_egress_broker(
                     runtime_paths,
-                    config_provider=egress_broker_config,
+                    config_provider=_committed_config_provider(api_main.app),
                     credentials_manager=get_runtime_credentials_manager(runtime_paths),
                 ),
                 serve_script_gateway_listener(
@@ -3134,6 +3144,11 @@ async def main(  # noqa: PLR0915
                     agent_cli_registry=orchestrator.agent_cli_registry,
                 ),
                 name="api_server",
+            )
+        elif (runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) or "").strip():
+            logger.warning(
+                "egress_broker_not_started",
+                reason="the egress broker runs with the embedded API server, which is disabled",
             )
 
         orchestrator_task = asyncio.create_task(orchestrator.start(), name="orchestrator")

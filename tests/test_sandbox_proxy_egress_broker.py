@@ -17,7 +17,12 @@ from mindroom.egress_broker.secrets import save_secret
 from mindroom.egress_broker.service import serve_egress_broker
 from mindroom.egress_broker.tokens import TokenSigner
 from mindroom.tool_system.runtime_context import WorkerRuntimeContext, worker_runtime_context
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
+    ToolExecutionIdentity,
+    resolve_unscoped_worker_key,
+    resolve_worker_target,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -102,24 +107,33 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
+_ROUTED_UNSCOPED_KEY = "v1:routed:unscoped:code"
+
+
 @pytest.fixture
 def payloads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Route calls to a fake worker whose key is the target's own or, for unscoped targets, the routed one."""
+    """Record every execute payload the sandbox proxy sends; the default backend is the shared static runner."""
     recorded: list[dict[str, Any]] = []
 
     @contextmanager
-    def lease(*_args: object, **_kwargs: object) -> Iterator[None]:
-        yield None
-
-    def routing_payload(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[dict, None]:
-        assert worker_target is not None
-        return {"worker_key": worker_target.worker_key or "v1:default:unscoped:code"}, None
+    def lease(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield object()
 
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", lease)
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", routing_payload)
     monkeypatch.setattr(_RecordingClient, "payloads", recorded, raising=False)
     monkeypatch.setattr(sandbox_proxy_module.httpx, "Client", _RecordingClient)
     return recorded
+
+
+@pytest.fixture
+def dedicated_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route calls to a dedicated worker whose key is the target's own or, for unscoped targets, a routed one."""
+
+    def routing_payload(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[dict, None]:
+        assert worker_target is not None
+        return {"worker_key": worker_target.worker_key or _ROUTED_UNSCOPED_KEY}, None
+
+    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", routing_payload)
 
 
 def _call(
@@ -127,6 +141,7 @@ def _call(
     tool_name: str,
     worker_target: ResolvedWorkerTarget,
     credentials_manager: CredentialsManager,
+    execution_env: dict[str, str] | None = None,
 ) -> None:
     sandbox_proxy_module._call_proxy_sync(
         runtime_paths=runtime_paths,
@@ -135,7 +150,7 @@ def _call(
         args=(),
         kwargs={},
         credentials_manager=credentials_manager,
-        execution_env={"KEEP": "me"} if tool_name == "shell" else None,
+        execution_env=execution_env,
         worker_target=worker_target,
     )
 
@@ -149,6 +164,7 @@ def _token_worker_key(runtime_paths: RuntimePaths, execution_env: dict[str, str]
     return claims.worker_key
 
 
+@pytest.mark.usefixtures("dedicated_routing")
 @pytest.mark.asyncio
 async def test_call_proxy_sync_merges_broker_env_for_shell_only(
     runtime_paths: RuntimePaths,
@@ -161,7 +177,7 @@ async def test_call_proxy_sync_merges_broker_env_for_shell_only(
     save_secret(manager, target, "github", "s3cret")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-            _call(runtime_paths, "shell", target, manager)
+            _call(runtime_paths, "shell", target, manager, {"KEEP": "me"})
             _call(runtime_paths, "file", target, manager)
     shell_payload, file_payload = payloads
     shell_env = shell_payload["execution_env"]
@@ -172,6 +188,7 @@ async def test_call_proxy_sync_merges_broker_env_for_shell_only(
     assert "HTTPS_PROXY" not in file_payload.get("execution_env", {})
 
 
+@pytest.mark.usefixtures("dedicated_routing")
 @pytest.mark.asyncio
 async def test_unscoped_shell_call_signs_routed_worker_key(
     runtime_paths: RuntimePaths,
@@ -186,4 +203,51 @@ async def test_unscoped_shell_call_signs_routed_worker_key(
         with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
             _call(runtime_paths, "shell", target, manager)
     [payload] = payloads
-    assert _token_worker_key(runtime_paths, payload["execution_env"]) == "v1:default:unscoped:code"
+    assert _token_worker_key(runtime_paths, payload["execution_env"]) == _ROUTED_UNSCOPED_KEY
+
+
+@pytest.mark.asyncio
+async def test_static_runner_shell_call_signs_unscoped_worker_key(
+    runtime_paths: RuntimePaths,
+    payloads: list[dict[str, Any]],
+) -> None:
+    """On the shared static runner no worker key is routed, so the token carries the agent's unscoped key."""
+    config = Config(egress_broker={"services": {"github": _GITHUB}})
+    manager = CredentialsManager(runtime_paths.storage_root / "credentials")
+    target = resolve_worker_target(None, "code", _identity())
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
+            _call(runtime_paths, "python", target, manager)
+    [payload] = payloads
+    assert "worker_key" not in payload
+    assert "HTTPS_PROXY" in payload["execution_env"]
+    assert _token_worker_key(runtime_paths, payload["execution_env"]) == resolve_unscoped_worker_key(
+        "code",
+        _identity(),
+    )
+
+
+@pytest.mark.usefixtures("dedicated_routing")
+@pytest.mark.asyncio
+async def test_broker_git_config_appends_to_call_git_config(
+    runtime_paths: RuntimePaths,
+    payloads: list[dict[str, Any]],
+) -> None:
+    """Git config entries the call already carries survive; the broker's proxy entries are appended after them."""
+    config = Config(egress_broker={"services": {"github": _GITHUB}})
+    manager = CredentialsManager(runtime_paths.storage_root / "credentials")
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    call_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.askPass", "GIT_CONFIG_VALUE_0": ""}
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
+            _call(runtime_paths, "shell", target, manager, call_env)
+    [payload] = payloads
+    env = payload["execution_env"]
+    assert env["GIT_CONFIG_COUNT"] == "3"
+    assert [env[f"GIT_CONFIG_KEY_{index}"] for index in range(3)] == [
+        "core.askPass",
+        "http.proxy",
+        "http.proxyAuthMethod",
+    ]
+    assert env["GIT_CONFIG_VALUE_0"] == ""
+    assert env["GIT_CONFIG_VALUE_1"] == env["HTTPS_PROXY"]

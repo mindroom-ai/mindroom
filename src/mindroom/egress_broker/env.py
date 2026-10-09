@@ -27,6 +27,7 @@ def broker_execution_env(
     ca_pem: str,
     placeholder_env: Mapping[str, str],
     extra_no_proxy_hosts: Iterable[str],
+    call_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Return the native broker execution env overlay for worker calls.
 
@@ -34,7 +35,9 @@ def broker_execution_env(
     NO_PROXY with callback hosts and extras, NODE_USE_ENV_PROXY=1, the broker
     CA PEM for runner-side materialization, and placeholder env vars.
 
-    The password is empty (token:@ userinfo format).
+    The password is empty (token:@ userinfo format). `call_env` is the env the
+    call already carries: its Git config entries are kept and the broker's are
+    appended, so overlaying the result on it drops none of them.
     """
     # Import here to avoid circular dependency with constants
     from mindroom.constants import WORKER_EGRESS_NO_PROXY, compose_worker_proxy_env  # noqa: PLC0415
@@ -53,7 +56,8 @@ def broker_execution_env(
 
     # Compose base proxy env
     env = compose_worker_proxy_env(
-        {},  # broker env composed on primary; primary git config must not leak, hence empty
+        # The call's env, never the primary's process env, whose git config must not leak to workers.
+        call_env or {},
         proxy_url=broker_url,
         username=token,
         password="",  # empty password

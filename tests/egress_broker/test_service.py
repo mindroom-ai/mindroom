@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -33,15 +34,15 @@ from mindroom.egress_broker.service import (
 from mindroom.egress_broker.tokens import TokenSigner
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
-from .conftest import audit_records
+from .conftest import audit_records, connect_request, proxy_authorization
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
-    from .conftest import Upstream, UpstreamCA
+    from .conftest import RawResponse, Upstream, UpstreamCA
 
 _THREAD_NAME = "mindroom-egress-broker"
 _PLACEHOLDER = "mindroom-brokered"
@@ -164,7 +165,6 @@ async def test_disabled_without_port(
             runtime_paths,
             config=config,
             worker_target=_target(),
-            credentials_manager=manager,
         )
         assert env == {}
     assert not (tmp_path / "mindroom_data" / "egress_broker").exists()
@@ -195,6 +195,11 @@ async def test_requires_url_when_port_set(
         ("MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS", "0"),
         ("MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS", "-60"),
         ("MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS", "a week"),
+        ("MINDROOM_EGRESS_BROKER_URL", "host.docker.internal:8768"),
+        ("MINDROOM_EGRESS_BROKER_URL", "ftp://broker.example.org:8768"),
+        ("MINDROOM_EGRESS_BROKER_URL", "http://"),
+        ("MINDROOM_EGRESS_BROKER_URL", "http://:8768"),
+        ("MINDROOM_EGRESS_BROKER_URL", "http://[::1"),
     ],
 )
 @pytest.mark.asyncio
@@ -205,7 +210,7 @@ async def test_invalid_settings_refuse_to_start(
     name: str,
     value: str,
 ) -> None:
-    """An invalid port or token TTL raises before any state is written or any thread starts."""
+    """An invalid port, URL, or token TTL raises before any state is written or any thread starts."""
     runtime_paths = tmp_runtime_paths(**{**_broker_env(_free_port()), name: value})
     with pytest.raises(ValueError, match=name):
         async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
@@ -228,7 +233,7 @@ async def test_end_to_end_inject_through_running_service(
     target = _target()
     save_secret(manager, target, "github", "s3cret")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target, credentials_manager=manager)
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
         assert env["GH_TOKEN"] == _PLACEHOLDER
         assert "s3cret" not in str(env)
         response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
@@ -260,7 +265,6 @@ async def test_missing_secret_reports_manage_url(
             runtime_paths,
             config=config,
             worker_target=_target(),
-            credentials_manager=manager,
         )
         response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
     assert response.status_code == 403
@@ -291,10 +295,43 @@ async def test_unreadable_config_tunnels_without_injection(
         raise RuntimeError(msg)
 
     async with serve_egress_broker(runtime_paths, config_provider=broken, credentials_manager=manager):
-        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target, credentials_manager=manager)
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
         response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
     assert response.status_code == 200
     assert "authorization" not in response.json()["headers"]
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream")
+@pytest.mark.asyncio
+async def test_last_good_config_survives_unreadable_config(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    raw_proxy: Callable[[int, bytes], Awaitable[RawResponse]],
+) -> None:
+    """Once the broker has read a config, a provider that raises or has none keeps that config, deny included."""
+    port = _free_port()
+    runtime_paths = tmp_runtime_paths(**_broker_env(port))
+    config = Config(egress_broker={"unmatched_hosts": "deny", "services": {"openai": _OPENAI}})
+    state = {"mode": "good"}
+
+    def provider() -> Config | None:
+        if state["mode"] == "raise":
+            msg = "the saved config is invalid"
+            raise RuntimeError(msg)
+        return config if state["mode"] == "good" else None
+
+    async with serve_egress_broker(runtime_paths, config_provider=provider, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        connect = connect_request(f"localhost:{tls_upstream.port}", authorization=proxy_authorization(_token(env)))
+        responses = []
+        for mode in ("good", "raise", "none"):
+            state["mode"] = mode
+            responses.append(await raw_proxy(port, connect))
+    assert [(response.status, response.json()) for response in responses] == [
+        (403, {"error": "host_not_allowed", "services": ["openai"]}),
+    ] * 3
+    assert tls_upstream.hits == []
 
 
 @pytest.mark.asyncio
@@ -312,27 +349,53 @@ async def test_placeholder_env_only_when_secret_configured(
             runtime_paths,
             config=config,
             worker_target=alice,
-            credentials_manager=manager,
         )
         bob_env = execution_env_for_worker(
             runtime_paths,
             config=config,
             worker_target=_target("@bob:example.org"),
-            credentials_manager=manager,
-        )
-        # A call without its own manager still sees the secrets the broker resolves from.
-        managerless_env = execution_env_for_worker(
-            runtime_paths,
-            config=config,
-            worker_target=alice,
-            credentials_manager=None,
         )
     assert alice_env["GH_TOKEN"] == _PLACEHOLDER
     assert "OPENAI_API_KEY" not in alice_env
-    assert managerless_env["GH_TOKEN"] == _PLACEHOLDER
     assert "GH_TOKEN" not in bob_env
     assert "OPENAI_API_KEY" not in bob_env
     assert bob_env["HTTPS_PROXY"].endswith("@127.0.0.1:" + runtime_paths.process_env["MINDROOM_EGRESS_BROKER_PORT"])
+
+
+@pytest.mark.asyncio
+async def test_secret_status_failure_skips_only_that_service(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret store error for one service drops that service's placeholders, logs only names, and spares the call."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
+    config = _config(github=_GITHUB, openai=_OPENAI)
+    target = _target()
+    save_secret(manager, target, "github", "s3cret")
+    save_secret(manager, target, "openai", "sk-s3cret")
+    real_secret_status = service.secret_status
+
+    def flaky_secret_status(store: CredentialsManager, scope: ResolvedWorkerTarget, name: str) -> object:
+        if name == "openai":
+            msg = "sk-s3cret could not be decrypted"
+            raise OSError(msg)
+        return real_secret_status(store, scope, name)
+
+    monkeypatch.setattr(service, "secret_status", flaky_secret_status)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        with capture_logs() as logs:
+            env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+    assert env["GH_TOKEN"] == _PLACEHOLDER
+    assert "OPENAI_API_KEY" not in env
+    assert "HTTPS_PROXY" in env
+    [warning] = [entry for entry in logs if entry["event"] == "egress_broker_secret_status_failed"]
+    assert warning == {
+        "event": "egress_broker_secret_status_failed",
+        "log_level": "warning",
+        "service": "openai",
+        "error_type": "OSError",
+    }
 
 
 @pytest.mark.asyncio
@@ -345,20 +408,13 @@ async def test_no_env_without_config_or_claims(
     config = _config(github=_GITHUB)
     no_identity = resolve_worker_target("user_agent", "code", None)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        assert (
-            execution_env_for_worker(runtime_paths, config=None, worker_target=_target(), credentials_manager=manager)
-            == {}
-        )
-        assert (
-            execution_env_for_worker(runtime_paths, config=config, worker_target=None, credentials_manager=manager)
-            == {}
-        )
+        assert execution_env_for_worker(runtime_paths, config=None, worker_target=_target()) == {}
+        assert execution_env_for_worker(runtime_paths, config=config, worker_target=None) == {}
         assert (
             execution_env_for_worker(
                 runtime_paths,
                 config=config,
                 worker_target=no_identity,
-                credentials_manager=manager,
             )
             == {}
         )
@@ -419,7 +475,6 @@ async def test_token_ttl_from_env(
             runtime_paths,
             config=config,
             worker_target=_target(),
-            credentials_manager=manager,
         )
     signer = TokenSigner.load_or_create(tmp_path / "mindroom_data" / "egress_broker" / "token.key")
     now = time.time()
@@ -446,6 +501,27 @@ async def test_thread_stops_on_exit(
     assert _broker_threads() == []
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", port), timeout=5).close()
+
+
+@pytest.mark.asyncio
+async def test_error_inside_context_still_stops_broker(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """An exception raised while the broker runs propagates after the thread stops and the holder clears."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
+
+    async def fail_while_running() -> None:
+        async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
+            assert active_ca_pem() is not None
+            msg = "the primary failed"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="the primary failed"):
+        await fail_while_running()
+    assert active_ca_pem() is None
+    assert active_audit_log() is None
+    assert _broker_threads() == []
 
 
 @pytest.mark.asyncio
