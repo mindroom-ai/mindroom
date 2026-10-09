@@ -2174,12 +2174,14 @@ def test_only_a_running_current_span_without_a_waiting_stop_starts_a_tool() -> N
         # An interruption that showed nothing leaves Matrix untouched and its sources retry.
         (False, None, "interrupted", False, None),
         (False, None, "sync_restart", True, None),
-        # Before delivery, anything else shows its note while the sources retry.
+        # Before delivery, an interruption shows its note while the sources retry.
         (False, "$reply", "sync_restart", False, (ReplyState.ACTIVE, NoteKind.RESTART)),
         (False, "$reply", "interrupted", False, (ReplyState.ACTIVE, NoteKind.INTERRUPTED)),
-        (False, None, None, False, (ReplyState.ACTIVE, NoteKind.ERROR)),
         # Once delivery started, the reply ends failed with its note.
         (False, "$reply", "interrupted", True, (ReplyState.FAILED, NoteKind.INTERRUPTED)),
+        # A failure ends the reply failed with its error, whenever it happened; its turn is not retried.
+        (False, None, None, False, (ReplyState.FAILED, NoteKind.ERROR)),
+        (False, "$reply", None, False, (ReplyState.FAILED, NoteKind.ERROR)),
         (False, "$reply", None, True, (ReplyState.FAILED, NoteKind.ERROR)),
     ],
 )

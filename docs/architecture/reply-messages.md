@@ -112,8 +112,9 @@ A restart leaves a reply an approval holds to approval recovery, including a spa
 A cancellation, or a failure the response settles as its outcome, that ends a response before its answer's own terminal write ends its span through one table, `interrupted_end` in `reply_scope.py`:
 
 - A recorded Stop ends the reply `cancelled` with the cancel note, whatever stopped the response.
+- A failure ends the reply `failed` with the error note, before or after delivery started, and its sources settle without a retry.
 - An interruption of a reply that has no event yet leaves Matrix untouched, and its sources stay pending for a retry.
-- Otherwise, before delivery starts, the reply shows its restart, interruption, or error note while its sources retry; once delivery started, it ends `failed` with that note.
+- Otherwise, before delivery starts, the reply shows its restart or interruption note while its sources retry; once delivery started, it ends `failed` with that note.
 
 A regeneration that wrote nothing keeps the answer it was replacing in every case.
 Exceptions raised before the response settles take the exception path instead: a preparation failure after the placeholder ends the reply `failed` with the error note through `dispatch_failed`, a membership or revision change supersedes the span so its sources replay, and any other exception releases the span for a retry.
@@ -177,11 +178,11 @@ Edits:
 - A regeneration whose history was redacted meanwhile is suppressed instead of rebuilt.
 - An edit a `message:received` hook suppresses still counts as its message's newest revision, so an older edit of that message arriving later regenerates nothing, nor does an earlier edit of another message of the same coalesced turn whose regeneration has not claimed the reply yet; a later edit of another message regenerates with the suppressed message's earlier text.
 - A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply's exit applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
-- When the stopped reply's terminal row is still unresolved, or the approval that holds it has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps its cancelled note.
+- When the stopped reply's terminal row is still unresolved, or the approval that holds it has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps what the Stop left: its cancelled note, or an approved answer that was already final.
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
 - While a deferred claim stays blocked by an unresolved row or by the approval it waits for, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves or the approval ends.
 - After a restart, a regeneration may be told about tool calls the attempt before the edit made, which errs toward not repeating a side effect.
-- A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming or held reply, so the reply keeps its partial answer with the cancelled note.
+- A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming or held reply, so the reply keeps what the Stop left, such as its partial answer with the cancelled note.
 
 Tool calls and the restart account:
 
@@ -190,7 +191,6 @@ Tool calls and the restart account:
 
 Delivery and recovery:
 
-- A failure before anything was delivered shows the error note while the turn keeps replaying, so one that recurs on every attempt keeps retrying, and each retry backs off that room's event lane; a regeneration keeps showing the answer it was replacing, without a note, while it retries.
 - A reply row written while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed; after a homeserver outage, an answer near the event size limit can then be refused and end with the delivery-failed note.
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message.
 - An approval the upgrade cancels leaves its Matrix message as it was, which can still show that it waits for approval, and a click on its card does nothing.

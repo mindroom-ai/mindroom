@@ -464,11 +464,11 @@ class TestEditApprovalOwnership:
         assert failing.failure_reason == "cancelled_by_user"
         # The regeneration waits for the approval's settlement, which the Stop woke.
         assert await case.principal.is_pending("$newer-edit")
-        assert retried == []
+        assert ("$newer-edit",) not in retried
         await case.runner.handoff_approval_source("$edit")
         await case.runner.wait_for_source_owned_inbox_responses()
         assert await case.principal.approval_continuation(case.approval.approval_id) is None
-        assert retried == [("$newer-edit",)]
+        assert ("$newer-edit",) in retried
         # The retried edit regenerates the reply in place from the newer text.
         case.bot.client.room_send.reset_mock()
         model = AsyncMock(return_value="Newer answer")
@@ -496,9 +496,9 @@ class TestEditApprovalOwnership:
         assert final is not None
         assert final.permanent_failure_reason is None
         assert not final.retired
-        assert retried == []
+        assert ("$newer-edit",) not in retried
         await case.recover_final(claimed)
-        assert retried == [("$newer-edit",)]
+        assert ("$newer-edit",) in retried
 
     @pytest.mark.parametrize("redaction", [None, "revision", "source"])
     async def test_resume_after_restart(self, approval_case: _ApprovalCase, redaction: str | None) -> None:

@@ -344,8 +344,8 @@ async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behin
     assert _sent_bodies(restarted) == []
 
 
-async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp_path: Path) -> None:
-    """A failure before anything streamed shows its error; the retry answers into the same message as a replay."""
+async def test_an_error_before_delivery_ends_the_reply_failed_without_a_retry(tmp_path: Path) -> None:
+    """A failure before anything streamed shows its error and ends the turn, as a failure during delivery does."""
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with (
@@ -359,33 +359,14 @@ async def test_retry_after_an_error_before_delivery_continues_the_same_reply(tmp
         await runner.generate_response(_plain_request(_target()))
 
     reply = await _reply(bot)
-    assert reply.state is rl.ReplyState.ACTIVE
+    assert reply.state is rl.ReplyState.FAILED
     assert reply.event_id == "$sent1"
-    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.RELEASED]
-    assert await bot._reply_runtime.store.is_pending("$event")
-
-    # The journal retries the sources; the claim finds the reply its first attempt left.
-    retry = _plain_request(_target())
-    with patch_response_runner_module(
-        ai_response=AsyncMock(return_value="Recovered answer."),
-        should_use_streaming=AsyncMock(return_value=False),
-        typing_indicator=_noop_typing,
-    ):
-        assert await runner.generate_response(retry) == "$sent1"
-
-    reply = await _reply(bot)
-    assert reply.state is rl.ReplyState.COMPLETED
-    spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
-    assert [(span.kind, span.outcome) for span in spans] == [
-        (rl.SpanKind.TURN, rl.SpanOutcome.RELEASED),
-        (rl.SpanKind.REPLAY, rl.SpanOutcome.COMPLETED),
-    ]
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
+    assert not await bot._reply_runtime.store.is_pending("$event")
     assert _sent_bodies(bot) == [
         "Thinking...",
         "**[Response interrupted by an error: model down]**",
-        "Recovered answer.",
     ]
-    assert not await bot._reply_runtime.store.is_pending("$event")
 
 
 async def test_sources_that_reach_an_ended_reply_again_run_nothing(tmp_path: Path) -> None:
@@ -585,8 +566,8 @@ async def _admit_edit(bot: AgentBot) -> None:
     )
 
 
-async def test_regeneration_failing_before_its_first_write_is_retried(tmp_path: Path) -> None:
-    """A model error before the regeneration shows anything keeps the old answer and the edit, which a retry answers."""
+async def test_regeneration_failing_before_its_first_write_keeps_the_old_answer(tmp_path: Path) -> None:
+    """A model error before the regeneration shows anything keeps the old answer and settles the edit."""
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
     before = await _reply(bot)
@@ -596,18 +577,11 @@ async def test_regeneration_failing_before_its_first_write_is_retried(tmp_path: 
         await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(side_effect=RuntimeError("model down")))
 
     reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
     assert reply.presentation == before.presentation
-    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.RELEASED]
-    assert await bot._reply_runtime.store.is_pending("$edit")
-    assert _sent_bodies(bot) == ["Thinking...", "First answer."]
-
-    assert await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(return_value="Second answer.")) == (
-        "$sent1"
-    )
-    answered = await _reply(bot)
-    assert answered.state is rl.ReplyState.COMPLETED
-    assert render_body(decode_presentation(answered.presentation))[0] == "Second answer."
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.RESTORED]
     assert not await bot._reply_runtime.store.is_pending("$edit")
+    assert _sent_bodies(bot) == ["Thinking...", "First answer."]
 
 
 async def test_an_edit_regenerates_in_place_the_streaming_answer_it_stopped(tmp_path: Path) -> None:
@@ -784,10 +758,22 @@ async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_
 
 
 async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_left(tmp_path: Path) -> None:
-    """The first gate's rejection of a terminal source ends the released reply, its error, through its records."""
+    """The first gate's rejection of a terminal source ends the released reply, its interruption, through its records."""
     bot = await _streaming_bot(tmp_path)
-    with pytest.raises(RuntimeError, match="model down"):
-        await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=RuntimeError("model down")))
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    preparing = asyncio.Event()
+
+    async def stalled_prepare(*_args: object, **_kwargs: object) -> object:
+        preparing.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    with patch.object(ResponseRunner, "prepare_response_runtime", new=stalled_prepare):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(preparing.wait(), timeout=5)
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
     assert (await _reply(bot)).state is rl.ReplyState.ACTIVE
 
     retry = replace(
@@ -803,7 +789,7 @@ async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_
     bot.client.room_redact.assert_not_awaited()
     assert _sent_bodies(bot) == [
         "Thinking...",
-        "**[Response interrupted by an error: model down]**",
+        "**[Response interrupted]**",
         "**[Response interrupted]**",
     ]
 
@@ -1408,7 +1394,7 @@ async def test_a_replay_that_fails_before_it_streams_keeps_what_the_restart_stop
 
 
 async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt_showed(tmp_path: Path) -> None:
-    """A regeneration a restart stopped after it showed new text is retried, never rolled back by its re-run."""
+    """A regeneration a restart stopped after it showed new text is never rolled back by its re-run, even a failed one."""
     old = await _streaming_bot(tmp_path)
     await _answer(old, _plain_request(_target()), AsyncMock(return_value="First answer."))
     await _admit_edit(old)
@@ -1431,13 +1417,15 @@ async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt
             )
 
         reply = await _reply(restarted)
-        assert reply.state is rl.ReplyState.ACTIVE
-        assert await restarted._reply_runtime.store.is_pending("$edit")
+        assert reply.state is rl.ReplyState.FAILED
+        assert not await restarted._reply_runtime.store.is_pending("$edit")
+        assert "New partial" in render_body(decode_presentation(reply.presentation))[0]
+        assert "First answer." not in render_body(decode_presentation(reply.presentation))[0]
         spans = await restarted._reply_runtime.store.replies.spans(reply.reply_id)
         assert [(span.kind, span.outcome) for span in spans] == [
             (rl.SpanKind.TURN, rl.SpanOutcome.COMPLETED),
             (rl.SpanKind.REGENERATION, rl.SpanOutcome.LOST),
-            (rl.SpanKind.REGENERATION, rl.SpanOutcome.RELEASED),
+            (rl.SpanKind.REGENERATION, rl.SpanOutcome.FAILED),
         ]
     finally:
         response.cancel()

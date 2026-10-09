@@ -884,20 +884,22 @@ def interrupted_end(
 ) -> _NotedEnd | None:
     """Return the noted end of a span whose response was cancelled or failed with a settled outcome.
 
-    ``None`` means the span is released, so its sources retry. ``cancel_source`` is ``None`` for a failure. A recorded Stop ends the reply
-    cancelled, as the rules decide for every exit. An interruption of a reply
-    with no event yet leaves Matrix untouched and its sources retry. Otherwise,
-    before delivery starts, the reply shows its note while its sources retry,
-    so a failure that recurs on every attempt never leaves the reply showing
-    only its placeholder; once delivery started, it ends failed with its note.
+    ``None`` means the span is released, so its sources retry. ``cancel_source``
+    is ``None`` for a failure. A recorded Stop ends the reply cancelled, as the
+    rules decide for every exit. A failure ends the reply failed with its error
+    note, and its turn is not retried. An interruption of a reply with no event
+    yet leaves Matrix untouched and its sources retry; before delivery starts,
+    the reply shows the interruption's note while its sources retry, and once
+    delivery started, it ends failed with that note.
     """
     if reply.unapplied_stop:
         return _NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))
     if cancel_source is None:
-        note = note_segment(NoteKind.ERROR, format_error_note(failure_reason or "interrupted"))
-    else:
-        note = note_segment(interruption_note(cancel_source))
-    if cancel_source is not None and reply.event_id is None:
-        # ``None``: the span is released, so its sources retry.
+        return _NotedEnd(
+            rl.ReplyState.FAILED,
+            note_segment(NoteKind.ERROR, format_error_note(failure_reason or "interrupted")),
+        )
+    if reply.event_id is None:
         return None
+    note = note_segment(interruption_note(cancel_source))
     return _NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)
