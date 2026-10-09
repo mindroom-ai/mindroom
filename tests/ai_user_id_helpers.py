@@ -575,7 +575,7 @@ def _build_response_runner(
 @asynccontextmanager
 async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) -> AsyncIterator[ResponseRequest]:
     """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
-    async with runner._reply_span_scope():
+    async with runner.deps.replies.span_scope():
         claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
         assert claimed is not None
         yield claimed

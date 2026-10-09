@@ -40,8 +40,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle
 from mindroom.streaming import (
-    _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
+    CANCELLED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
@@ -591,7 +591,7 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
     ("stream_status", "terminal_note"),
     [
         (STREAM_STATUS_ERROR, "**[Response interrupted by an error: boom]**"),
-        (STREAM_STATUS_CANCELLED, _CANCELLED_RESPONSE_NOTE),
+        (STREAM_STATUS_CANCELLED, CANCELLED_RESPONSE_NOTE),
     ],
 )
 @pytest.mark.asyncio
@@ -831,7 +831,7 @@ async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) ->
     partial, cancelled = gateway.ops
     assert partial.content["body"] == "Partial answer"
     assert partial.content["msgtype"] == "m.notice"
-    assert cancelled.display_text == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
+    assert cancelled.display_text == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
     assert cancelled.content["msgtype"] == "m.text"
     assert cancelled.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
 
@@ -1157,7 +1157,7 @@ async def test_stopping_a_resumed_stream_keeps_the_stopped_text(config: Config) 
 
     final = gateway.ops[-1]
     assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
-    assert final.display_text == f"{_RESUMED_PREFIX}The second\n\n{_CANCELLED_RESPONSE_NOTE}"
+    assert final.display_text == f"{_RESUMED_PREFIX}The second\n\n{CANCELLED_RESPONSE_NOTE}"
     assert _trace_names(final.content) == ["counter"]
     assert raised.value.accumulated_text.startswith(_RESUMED_PREFIX)
 

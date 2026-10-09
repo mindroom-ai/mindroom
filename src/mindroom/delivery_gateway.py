@@ -103,7 +103,6 @@ from mindroom.reply_presentation import (
     with_trailing_note,
 )
 from mindroom.reply_scope import (
-    NotedEnd,
     ReplyWrite,
     ReplyWriteRefusedError,
     SpanHandle,
@@ -112,7 +111,9 @@ from mindroom.reply_scope import (
     initial_write,
     interrupted_end,
     owed_note_write,
+    release_decision,
     resumed_note_write,
+    suppress_decision,
     terminal_write,
 )
 from mindroom.requester_identity import is_access_checked_requester_id
@@ -764,12 +765,7 @@ class DeliveryGateway:
         """End a stream that showed only its placeholder; the reply's records remove the placeholder."""
         handle = self._live_span()
         if handle is not None:
-            confirms = handle.unconfirmed_progress
-            now_ns = time.time_ns()
-            await self.end_reply_span(
-                handle,
-                lambda reply, span: rl.suppress(reply, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
-            )
+            await self.end_reply_span(handle, suppress_decision(handle))
         return FinalDeliveryOutcome(
             terminal_status="error",
             event_id=None,
@@ -1339,11 +1335,10 @@ class DeliveryGateway:
             cancel_source=cancel_source,
             failure_reason=failure_reason,
             delivery_started=delivery_started,
-            confirms=handle.unconfirmed_progress,
         )
-        if isinstance(end, NotedEnd):
+        if end is not None:
             return await self.end_reply_span_with_note(handle, target, state=end.state, note=end.note)
-        await self.end_reply_span(handle, end)
+        await self.end_reply_span(handle, release_decision(handle))
         return None
 
     async def end_reply_span_with_note(
@@ -2019,12 +2014,7 @@ class DeliveryGateway:
                 note=note,
             )
             return replace(outcome, failure_reason=failure_reason)
-        now_ns = time.time_ns()
-        confirms = handle.unconfirmed_progress
-        await self.end_reply_span(
-            handle,
-            lambda current, span: rl.suppress(current, span, reason="hook_failed", confirms=confirms, now_ns=now_ns),
-        )
+        await self.end_reply_span(handle, suppress_decision(handle, reason="hook_failed"))
         event_id = None if reply is None or reply.placeholder_only else reply.event_id
         return FinalDeliveryOutcome(
             terminal_status="error",
@@ -2044,12 +2034,7 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome:
         """A hook suppressed a reply span's answer."""
         reply = await self.deps.outbox.replies.load(handle.reply_id)
-        now_ns = time.time_ns()
-        confirms = handle.unconfirmed_progress
-        await self.end_reply_span(
-            handle,
-            lambda current, span: rl.suppress(current, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
-        )
+        await self.end_reply_span(handle, suppress_decision(handle))
         event_id = None if reply is None or reply.placeholder_only else reply.event_id
         return FinalDeliveryOutcome(
             terminal_status="cancelled",

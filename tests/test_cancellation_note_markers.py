@@ -12,9 +12,9 @@ from typing import Literal
 import pytest
 
 from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR
-from mindroom.streaming import _CANCELLED_RESPONSE_NOTE as CANCELLED_RESPONSE_NOTE
 from mindroom.streaming import _STREAM_ERROR_RESPONSE_NOTE as STREAM_ERROR_RESPONSE_NOTE
 from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_cancelled_response_update,

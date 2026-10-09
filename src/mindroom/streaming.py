@@ -137,7 +137,6 @@ class StreamingLifecycleSuspensionError(Exception):
 
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
-_CANCELLED_RESPONSE_NOTE = CANCELLED_RESPONSE_NOTE
 INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
@@ -288,7 +287,7 @@ def is_interrupted_partial_reply(text: object) -> bool:
         has_legacy_terminal_suffix(trimmed_text)
         or trimmed_text.endswith(
             (
-                _CANCELLED_RESPONSE_NOTE,
+                CANCELLED_RESPONSE_NOTE,
                 _INTERRUPTED_RESPONSE_NOTE,
                 RESTART_INTERRUPTED_RESPONSE_NOTE,
             ),
@@ -302,7 +301,7 @@ def clean_partial_reply_text(text: str) -> str:
     cleaned = strip_legacy_terminal_suffixes(text.rstrip())
 
     for marker in (
-        _CANCELLED_RESPONSE_NOTE,
+        CANCELLED_RESPONSE_NOTE,
         _INTERRUPTED_RESPONSE_NOTE,
         RESTART_INTERRUPTED_RESPONSE_NOTE,
     ):
@@ -397,7 +396,7 @@ def build_cancelled_response_update(
     if cancel_source == "sync_restart":
         return build_restart_interrupted_body(text), STREAM_STATUS_ERROR
 
-    note = _CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else _INTERRUPTED_RESPONSE_NOTE
+    note = CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else _INTERRUPTED_RESPONSE_NOTE
     # Generic interruptions keep their distinct visible note, but reuse an
     # existing terminal wire status so older clients do not misclassify them.
     stream_status = STREAM_STATUS_CANCELLED if cancel_source == "user_stop" else STREAM_STATUS_ERROR

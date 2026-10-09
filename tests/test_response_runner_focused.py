@@ -2566,7 +2566,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
 
     await runner.deps.replies.take_ownership()
     # The locked turn claims its reply span in the scope every response opens.
-    async with runner._reply_span_scope():
+    async with runner.deps.replies.span_scope():
         prepared_request = await runner._begin_locked_turn(
             request,
             resolved_target=target,

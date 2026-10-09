@@ -49,9 +49,9 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import (
-    _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
+    CANCELLED_RESPONSE_NOTE,
     ProgressPermission,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
@@ -788,7 +788,7 @@ class TestStreamingBehavior:
 
     def test_is_interrupted_partial_reply_detects_terminal_markers(self) -> None:
         """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
-        assert is_interrupted_partial_reply(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply("Draft answer\n\n**[Response interrupted by an error: boom]**")
         assert is_interrupted_partial_reply("Draft [cancelled]   ")
         assert not is_interrupted_partial_reply("Discuss [error] in this sentence")
@@ -797,13 +797,13 @@ class TestStreamingBehavior:
 
     def test_is_interrupted_partial_reply_recognises_all_three_variants(self) -> None:
         """Interrupted partial-reply detection should recognize every live cancel note."""
-        assert is_interrupted_partial_reply(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply(build_restart_interrupted_body("Draft answer"))
 
     def test_clean_partial_reply_text_strips_shared_markers(self) -> None:
         """Shared partial-reply cleanup should normalize cancelled/error/placeholder bodies."""
-        assert clean_partial_reply_text(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == "Draft answer"
+        assert clean_partial_reply_text(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == "Draft answer"
         assert (
             clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
         )
@@ -826,7 +826,7 @@ class TestStreamingBehavior:
 
     def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
         """User-stop labels should collapse to the canonical interrupted replay marker."""
-        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == (
+        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == (
             f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
@@ -2339,7 +2339,7 @@ class TestStreamingBehavior:
 
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
-        assert edited_texts[-1] == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
+        assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
         assert exc_info.value.transport_outcome.terminal_status == "cancelled"
         assert exc_info.value.transport_outcome.failure_reason == "cancelled_by_user"
 

@@ -1620,7 +1620,7 @@ class TestAgentBot(AgentBotTestBase):
             new=AsyncMock(return_value=(requires_human, 60.0)),
         ):
             # The turn's reply span pauses for the approval, as the locked generation does.
-            async with first_runner._reply_span_scope():
+            async with first_runner.deps.replies.span_scope():
                 claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
                 assert claimed_request is not None
                 suspended = await first_runner._suspend_for_approval(

@@ -69,7 +69,7 @@ async def resumed_main_left_approval(
     """
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await adopt_main_left_approval(bot)
-    async with runner._reply_span_scope() as slot:
+    async with runner.deps.replies.span_scope() as slot:
         claimed = await runner._claim_owned_approval(continuation, slot=slot)
         assert claimed is not None
         assert slot.handle is not None

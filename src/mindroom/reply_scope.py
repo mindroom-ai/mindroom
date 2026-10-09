@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -439,7 +439,6 @@ class ReplyRuntime:
         show_tool_calls: bool = True,
         driving_edit_id: str | None = None,
         existing_event_id: str | None = None,
-        approval_id: str | None = None,
         interactive_span_id: str | None = None,
     ) -> SpanHandle | ClaimRefused:
         """Claim the reply one span answers, or say why no span opened."""
@@ -453,7 +452,6 @@ class ReplyRuntime:
                 empty=empty,
             ),
             driving_edit_id=driving_edit_id,
-            approval_id=approval_id,
             interactive_span_id=interactive_span_id,
         )
         # A Stop can reach the span as soon as its claim commits, before its task registers. The claim may
@@ -668,7 +666,6 @@ class ReplyWriteRefusedError(Exception):
 class ReplyWrite:
     """One durable write of a reply, rendered for the revision it names."""
 
-    reply_id: str
     # The span the row is written for; its delivery id keys the row.
     span: rl.Span
     stage: rl.WriteStage
@@ -683,6 +680,11 @@ class ReplyWrite:
     # Records the row coupled to another durable step instead of on its own.
     enqueue: ReplyRowEnqueuer | None = None
 
+    @property
+    def reply_id(self) -> str:
+        """Return the reply the row belongs to."""
+        return self.span.reply_id
+
 
 def _acknowledgement_write(claim: rl.ClaimRequest, shown: Presentation) -> ReplyWrite:
     """Return an interactive selection's acknowledgement, the row that creates its reply."""
@@ -690,7 +692,6 @@ def _acknowledgement_write(claim: rl.ClaimRequest, shown: Presentation) -> Reply
     # Pure: names the reply and the not-yet-current span the row creates.
     created = rl.interactive_acknowledgement(claim, shown=encoded)
     return ReplyWrite(
-        reply_id=claim.new_reply_id,
         span=created.spans[0],
         stage=rl.WriteStage.INITIAL,
         shown=shown,
@@ -723,6 +724,22 @@ def pause_decision(
     )
 
 
+def release_decision(
+    handle: SpanHandle,
+    *,
+    outcome: Literal[rl.SpanOutcome.RELEASED, rl.SpanOutcome.SUPERSEDED] = rl.SpanOutcome.RELEASED,
+) -> Decide:
+    """Return the rule that ends a span with its sources pending for a retry or replay."""
+    confirms = handle.unconfirmed_progress
+    return lambda reply, span: rl.release(reply, span, now_ns=time.time_ns(), outcome=outcome, confirms=confirms)
+
+
+def suppress_decision(handle: SpanHandle, *, reason: Literal["suppressed", "hook_failed"] = "suppressed") -> Decide:
+    """Return the rule that ends a span whose answer must not be shown."""
+    confirms = handle.unconfirmed_progress
+    return lambda reply, span: rl.suppress(reply, span, reason=reason, confirms=confirms, now_ns=time.time_ns())
+
+
 def pause_write(
     handle: SpanHandle,
     shown: Presentation,
@@ -732,7 +749,6 @@ def pause_write(
 ) -> ReplyWrite:
     """Return a reply's pause row, recorded with the continuation that holds the paused run."""
     return ReplyWrite(
-        reply_id=handle.reply_id,
         span=handle.span,
         handle=handle,
         stage=rl.WriteStage.EDIT,
@@ -747,7 +763,6 @@ def initial_write(handle: SpanHandle, shown: Presentation, *, placeholder_only: 
     encoded = encode_presentation(shown)
     revision = handle.reply.revision
     return ReplyWrite(
-        reply_id=handle.reply_id,
         span=handle.span,
         handle=handle,
         stage=rl.WriteStage.INITIAL,
@@ -789,7 +804,6 @@ def terminal_write(
         return rl.fail(reply, span, write, phase="delivery", now_ns=now_ns)
 
     return ReplyWrite(
-        reply_id=handle.reply_id,
         span=handle.span,
         handle=handle,
         stage=rl.WriteStage.FINAL,
@@ -805,7 +819,6 @@ def owed_note_write(reply: rl.Reply, span: rl.Span, shown: Presentation, *, span
     encoded = encode_presentation(shown)
     revision = reply.revision
     return ReplyWrite(
-        reply_id=reply.reply_id,
         span=span,
         stage=rl.WriteStage.EDIT if span_has_final else rl.WriteStage.FINAL,
         shown=shown,
@@ -832,7 +845,6 @@ def approval_note_write(
     encoded = encode_presentation(shown)
     revision = reply.revision
     return ReplyWrite(
-        reply_id=reply.reply_id,
         span=span,
         stage=rl.WriteStage.FINAL,
         shown=shown,
@@ -849,7 +861,7 @@ def approval_note_write(
 
 
 @dataclass(frozen=True, slots=True)
-class NotedEnd:
+class _NotedEnd:
     """A span end that writes its terminal row: what the reply showed, plus one note."""
 
     state: rl.ReplyState
@@ -862,11 +874,10 @@ def interrupted_end(
     cancel_source: CancelSource | None,
     failure_reason: str | None,
     delivery_started: bool,
-    confirms: rl.ProgressConfirmation | None,
-) -> NotedEnd | Decide:
-    """Return how a span ends when its response was cancelled, or failed with a settled outcome.
+) -> _NotedEnd | None:
+    """Return the noted end of a span whose response was cancelled or failed with a settled outcome.
 
-    ``cancel_source`` is ``None`` for a failure. A recorded Stop ends the reply
+    ``None`` means the span is released, so its sources retry. ``cancel_source`` is ``None`` for a failure. A recorded Stop ends the reply
     cancelled, as the rules decide for every exit. An interruption of a reply
     with no event yet leaves Matrix untouched and its sources retry. Otherwise,
     before delivery starts, the reply shows its note while its sources retry,
@@ -874,14 +885,15 @@ def interrupted_end(
     only its placeholder; once delivery started, it ends failed with its note.
     """
     if reply.unapplied_stop:
-        return NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))
+        return _NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))
     if cancel_source is None:
         note = note_segment(NoteKind.ERROR, format_error_note(failure_reason or "interrupted"))
     else:
         note = note_segment(NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED)
     if cancel_source is not None and reply.event_id is None:
-        return lambda current, span: rl.release(current, span, now_ns=time.time_ns(), confirms=confirms)
-    return NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)
+        # ``None``: the span is released, so its sources retry.
+        return None
+    return _NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)
 
 
 def resumed_note_write(handle: SpanHandle, shown: Presentation) -> ReplyWrite:
@@ -893,7 +905,6 @@ def resumed_note_write(handle: SpanHandle, shown: Presentation) -> ReplyWrite:
         confirms=handle.unconfirmed_progress,
     )
     return ReplyWrite(
-        reply_id=handle.reply_id,
         span=handle.span,
         handle=handle,
         stage=rl.WriteStage.EDIT,

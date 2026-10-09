@@ -310,7 +310,7 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
-        async with coordinator._reply_span_scope():
+        async with coordinator.deps.replies.span_scope():
             response_event_id = await coordinator._generate_response_locked(
                 replace(
                     _response_request(
@@ -1279,7 +1279,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
 
         mock_ai.side_effect = fake_ai_response
 
-        async with coordinator._reply_span_scope():
+        async with coordinator.deps.replies.span_scope():
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1364,7 +1364,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             "build_execution_identity",
             side_effect=spy_build_execution_identity,
         ):
-            async with coordinator._reply_span_scope():
+            async with coordinator.deps.replies.span_scope():
                 response_event_id = await coordinator._generate_response_locked(
                     _response_request(prompt="Campground opened", user_id="@owner:localhost"),
                     resolved_target=target,
@@ -1442,7 +1442,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
 
         mock_ai.side_effect = fake_ai_response
 
-        async with coordinator._reply_span_scope():
+        async with coordinator.deps.replies.span_scope():
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1499,7 +1499,7 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async with coordinator._reply_span_scope():
+        async with coordinator.deps.replies.span_scope():
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1571,7 +1571,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             "generate_non_streaming_ai_response",
             new=AsyncMock(side_effect=fake_generate_non_streaming),
         ):
-            async with coordinator._reply_span_scope():
+            async with coordinator.deps.replies.span_scope():
                 resolution = await coordinator._generate_response_locked(
                     _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                     resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1642,7 +1642,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             ),
         )
 
-        async with coordinator._reply_span_scope():
+        async with coordinator.deps.replies.span_scope():
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1730,7 +1730,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             "generate_streaming_ai_response",
             new=AsyncMock(side_effect=fake_generate_streaming),
         ):
-            async with coordinator._reply_span_scope():
+            async with coordinator.deps.replies.span_scope():
                 resolution = await coordinator._generate_response_locked(
                     request,
                     resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1821,7 +1821,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             "generate_streaming_ai_response",
             new=AsyncMock(side_effect=fake_generate_streaming),
         ):
-            async with coordinator._reply_span_scope():
+            async with coordinator.deps.replies.span_scope():
                 resolution = await coordinator._generate_response_locked(
                     request,
                     resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -2004,7 +2004,7 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
         )
         coordinator.generate_streaming_ai_response = AsyncMock(side_effect=RuntimeError("plain boom"))
 
-        async with coordinator._reply_span_scope():
+        async with coordinator.deps.replies.span_scope():
             resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),

@@ -28,7 +28,7 @@ from mindroom.reply_lifecycle import (
     WriteStage,
 )
 from mindroom.reply_presentation import NoteKind, note_segment
-from mindroom.reply_scope import NotedEnd, interrupted_end
+from mindroom.reply_scope import interrupted_end
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2176,21 +2176,14 @@ def test_an_interrupted_response_ends_its_span_by_one_table(
     expected: tuple[ReplyState, NoteKind] | None,
 ) -> None:
     """Stop, restart, interruption, and failure map to one span end, before or after delivery started."""
-    reply, span = _turn()
+    reply, _span = _turn()
     reply = replace(reply, event_id=event_id, stop_receipt_order=1 if stopped else None)
-    end = interrupted_end(
-        reply,
-        cancel_source=cancel_source,
-        failure_reason="boom",
-        delivery_started=delivery_started,
-        confirms=None,
-    )
+    end = interrupted_end(reply, cancel_source=cancel_source, failure_reason="boom", delivery_started=delivery_started)
     if expected is None:
-        assert not isinstance(end, NotedEnd)
-        transition = end(reply, span)
-        assert _span_after(transition, span.span_id).outcome is SpanOutcome.RELEASED
+        # The span is released, so its sources retry.
+        assert end is None
         return
-    assert isinstance(end, NotedEnd)
+    assert end is not None
     assert (end.state, end.note.note) == expected
     if expected[1] is NoteKind.ERROR:
         assert "boom" in end.note.text

@@ -111,6 +111,8 @@ from mindroom.reply_scope import (
     initial_write,
     pause_decision,
     pause_write,
+    release_decision,
+    suppress_decision,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_shutdown_diagnostics import (
@@ -3031,7 +3033,7 @@ class ResponseRunner:
         try:
             resolved_target = request.response_envelope.target
             early_placeholder = _EarlyPlaceholderState()
-            async with self._reply_span_scope() as span_slot:
+            async with self.deps.replies.span_scope() as span_slot:
                 return await self._run_locked_response_in_span(
                     request,
                     span_slot=span_slot,
@@ -3046,17 +3048,11 @@ class ResponseRunner:
             self._in_flight_response_count -= 1
             self._admission_gate.release()
 
-    @asynccontextmanager
-    async def _reply_span_scope(self) -> AsyncIterator[SpanSlot]:
-        """Open the slot a claim fills, so the span it claims is shared with child tasks."""
-        async with self.deps.replies.span_scope() as slot:
-            yield slot
-
     async def _run_locked_response_in_span(
         self,
         request: ResponseRequest,
         *,
-        span_slot: SpanSlot | None,
+        span_slot: SpanSlot,
         resolved_target: MessageTarget,
         early_placeholder: _EarlyPlaceholderState,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
@@ -3075,7 +3071,7 @@ class ResponseRunner:
                 span_slot=span_slot,
             )
         except BaseException as error:
-            handle = None if span_slot is None else span_slot.handle
+            handle = span_slot.handle
             # The locked operation ends its span before the lock is released;
             # this covers what raises outside it.
             await self._exit_unended_span(handle, error, target=resolved_target)
@@ -3083,20 +3079,12 @@ class ResponseRunner:
                 # The span's exit ended the reply with this error, which its records now own.
                 raise PostLockRequestPreparationError(reply_owned=True) from error.__cause__ or error
             raise
-        handle = None if span_slot is None else span_slot.handle
+        handle = span_slot.handle
         if handle is not None and not handle.exited:
             # Every exit path is meant to end its span; one that did not is a bug,
             # and releasing keeps the reply's sources for a retry.
             self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
-            await self.deps.delivery_gateway.end_reply_span(
-                handle,
-                lambda reply, span: rl.release(
-                    reply,
-                    span,
-                    now_ns=time.time_ns(),
-                    confirms=handle.unconfirmed_progress,
-                ),
-            )
+            await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
         return result
 
     async def _run_locked_response_operation(
@@ -3108,13 +3096,9 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
         signal_queued_message: bool,
         acknowledge_deferred: Callable[[str, str], Awaitable[None]],
-        span_slot: SpanSlot | None,
+        span_slot: SpanSlot,
     ) -> str | None:
         """Run one response under its conversation lock, mapping early failures to their outcomes."""
-
-        def span_claimed() -> bool:
-            return span_slot is not None and span_slot.handle is not None
-
         try:
             return await self._lifecycle_coordinator.run_locked_response(
                 target=resolved_target,
@@ -3136,7 +3120,7 @@ class ResponseRunner:
                 signal_queued_message=signal_queued_message and not _is_silent_schedule_response(request),
             )
         except Exception as error:
-            mapped = _post_lock_error(error, early_placeholder, reply_owned=span_claimed())
+            mapped = _post_lock_error(error, early_placeholder, reply_owned=span_slot.handle is not None)
             if mapped is error:
                 raise
             raise mapped from mapped.__cause__
@@ -3146,7 +3130,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         target: MessageTarget,
-        span_slot: SpanSlot | None,
+        span_slot: SpanSlot,
         early_placeholder: _EarlyPlaceholderState,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
@@ -3162,7 +3146,7 @@ class ResponseRunner:
                 locked_operation=locked_operation,
             )
         except BaseException as error:
-            handle = None if span_slot is None else span_slot.handle
+            handle = span_slot.handle
             mapped = (
                 _post_lock_error(error, early_placeholder, reply_owned=handle is not None)
                 if isinstance(error, Exception)
@@ -3217,7 +3201,7 @@ class ResponseRunner:
             ):
                 return await self._settle_unauthorized_approval_continuation(owned)
             # Each claimed generation runs in its own resume span.
-            async with self._reply_span_scope() as resume_slot:
+            async with self.deps.replies.span_scope() as resume_slot:
                 claimed = await self._claim_owned_approval(owned, slot=resume_slot)
                 if claimed is None:
                     return None
@@ -3263,16 +3247,7 @@ class ResponseRunner:
             )
             return
         if isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError)):
-            await gateway.end_reply_span(
-                handle,
-                lambda reply, span: rl.release(
-                    reply,
-                    span,
-                    now_ns=now_ns,
-                    outcome=rl.SpanOutcome.SUPERSEDED,
-                    confirms=confirms,
-                ),
-            )
+            await gateway.end_reply_span(handle, release_decision(handle, outcome=rl.SpanOutcome.SUPERSEDED))
             return
         if isinstance(error, PostLockRequestPreparationError):
             cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
@@ -3291,10 +3266,7 @@ class ResponseRunner:
                 ),
             )
             return
-        await gateway.end_reply_span(
-            handle,
-            lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
-        )
+        await gateway.end_reply_span(handle, release_decision(handle))
 
     async def _claim_reply_span(
         self,
@@ -3308,39 +3280,10 @@ class ResponseRunner:
         claim retries the sources once what blocks it resolves; or nothing runs
         for them, as when the reply already answered the edit or a Stop ended it.
         """
-        replies = self.deps.replies
         slot = current_slot()
         if slot is None:
             return request
-        handle = await self._claim_reply(replies, request, history_scope=history_scope)
-        if handle is ClaimRefused.NOTHING_TO_RUN:
-            self.deps.logger.info(
-                "reply_claim_nothing_to_run",
-                source_event_id=request.response_envelope.source_event_id,
-            )
-            return None
-        if handle is ClaimRefused.RETIRED:
-            # The instance that took the replies over replays these sources.
-            if request.source_handoff is not None:
-                request.source_handoff.set()
-            return None
-        if handle is ClaimRefused.DEFERRED:
-            # The reply's earlier writes resolve first, and their resolution
-            # retries these sources: they stay pending, owned by that wake.
-            if request.source_handoff is not None:
-                request.source_handoff.set()
-            return None
-        slot.handle = handle
-        return request
-
-    async def _claim_reply(
-        self,
-        replies: ReplyRuntime,
-        request: ResponseRequest,
-        *,
-        history_scope: HistoryScope,
-    ) -> SpanHandle | ClaimRefused:
-        return await replies.claim(
+        handle = await self.deps.replies.claim(
             delivery_id=request.response_envelope.source_event_id,
             sources=rl.SpanSources(
                 pending=request.sources.pending_event_ids,
@@ -3355,6 +3298,20 @@ class ResponseRunner:
             existing_event_id=request.existing_event_id,
             interactive_span_id=request.interactive_span_id,
         )
+        if handle is ClaimRefused.NOTHING_TO_RUN:
+            self.deps.logger.info(
+                "reply_claim_nothing_to_run",
+                source_event_id=request.response_envelope.source_event_id,
+            )
+            return None
+        if isinstance(handle, ClaimRefused):
+            # The sources stay pending: the instance that took the replies over
+            # replays them, or the resolution of the reply's earlier writes retries them.
+            if request.source_handoff is not None:
+                request.source_handoff.set()
+            return None
+        slot.handle = handle
+        return request
 
     async def _settle_unauthorized_approval_continuation(
         self,
@@ -4360,21 +4317,13 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """End a span whose settled outcome wrote no terminal row."""
         gateway = self.deps.delivery_gateway
-        confirms = handle.unconfirmed_progress
-        now_ns = time.time_ns()
         if outcome.terminal_status == "suspended":
             # The approval continuation owns the sources until its resume claims the reply.
-            await gateway.end_reply_span(
-                handle,
-                lambda reply, span: rl.release(reply, span, now_ns=now_ns, confirms=confirms),
-            )
+            await gateway.end_reply_span(handle, release_decision(handle))
             return outcome
         if outcome.terminal_status == "completed" or outcome.suppressed:
             # Nothing was answered: a placeholder goes, substantive content stays.
-            await gateway.end_reply_span(
-                handle,
-                lambda reply, span: rl.suppress(reply, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
-            )
+            await gateway.end_reply_span(handle, suppress_decision(handle))
             return outcome
         noted = await gateway.end_interrupted_span(
             handle,
@@ -4438,12 +4387,7 @@ class ResponseRunner:
         handle = current_span()
         if handle is not None and not handle.exited:
             # Nothing to answer: a placeholder goes, as a suppressed answer's does.
-            confirms = handle.unconfirmed_progress
-            now_ns = time.time_ns()
-            await self.deps.delivery_gateway.end_reply_span(
-                handle,
-                lambda reply, span: rl.suppress(reply, span, reason="suppressed", confirms=confirms, now_ns=now_ns),
-            )
+            await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(request, response_kind=response_kind),
             request=request,
@@ -5774,18 +5718,7 @@ class ResponseRunner:
             if handle is not None and not handle.exited:
                 settled_by_reply = True
                 # The declined turn shows nothing; its reply ends while the conversation is still held.
-                confirms = handle.unconfirmed_progress
-                now_ns = time.time_ns()
-                await self.deps.delivery_gateway.end_reply_span(
-                    handle,
-                    lambda reply, span: rl.suppress(
-                        reply,
-                        span,
-                        reason="suppressed",
-                        confirms=confirms,
-                        now_ns=now_ns,
-                    ),
-                )
+                await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
             lifecycle = self._build_lifecycle(
                 identity=self._response_identity(request, response_kind="ai"),
                 request=request,
