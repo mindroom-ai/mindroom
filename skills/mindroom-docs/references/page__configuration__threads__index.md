@@ -146,6 +146,7 @@ To use the OpenAI Decisions API with `gpt-6-luna`, set `provider: openai_decisio
 It uses the same OpenAI API key as OpenAI models, from `OPENAI_API_KEY` or the dashboard, and always calls `api.openai.com`, regardless of any model `base_url`.
 When OpenAI models go through a proxy, that credential holds the proxy's key, which `api.openai.com` rejects; set `credentials_service` to a service holding a real OpenAI key instead.
 A named service that has no key skips the backend; it never falls back to the OpenAI model credential.
+No environment variable fills a custom service name, so add its `api_key` in the dashboard or through [credential seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds).
 
 The LLM backend uses the alias's normal provider credentials and receives no tools, agent system prompt, or agent memory.
 A model alias whose provider adds native tools that cannot be disabled is refused.

@@ -81,7 +81,13 @@ def _probability_client(
         wire, key = SYSTEM_ONE, runtime_paths.env_value("TYPESAFE_API_KEY")
     key = (key or "").strip()
     if not key:
-        logger.info("Judgment fallback", question=question_id, backend=settings.provider, failure="missing_credential")
+        logger.info(
+            "Judgment fallback",
+            question=question_id,
+            backend=settings.provider,
+            failure="missing_credential",
+            credentials_service=getattr(settings, "credentials_service", None),
+        )
         return None
     return JudgmentClient(
         api_key=key,
