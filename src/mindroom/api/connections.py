@@ -18,6 +18,7 @@ from mindroom.api.connection_agents import (
     resolve_connection_agent,
     resolve_connection_user,
 )
+from mindroom.api.egress_credentials import EgressCredentialService  # noqa: TC001
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.users import create_agent_http_client
@@ -27,7 +28,6 @@ from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
-    from mindroom.api.egress_credentials import EgressCredentialService
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata

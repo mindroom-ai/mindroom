@@ -8,16 +8,17 @@ import pytest
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import CredentialsManager
-
-if TYPE_CHECKING:
-    from pathlib import Path
 from mindroom.egress_broker.secrets import (
+    delete_secret,
     egress_credential_service,
     load_secret,
     save_secret,
     secret_status,
 )
 from mindroom.egress_broker.tokens import WorkerClaims
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _manager(tmp_path: Path) -> CredentialsManager:
@@ -219,3 +220,40 @@ def test_egress_credential_service() -> None:
     """egress_credential_service should prefix with 'egress_'."""
     assert egress_credential_service("github") == "egress_github"
     assert egress_credential_service("openai") == "egress_openai"
+
+
+def test_none_target_uses_global_store(tmp_path: Path) -> None:
+    """Passing None as target should use the global (unscoped) store."""
+    manager = _manager(tmp_path)
+
+    # Save with None target
+    save_secret(manager, None, "github", "global-secret")
+
+    # Should be in credentials/egress_github_credentials.json
+    expected_path = tmp_path / "credentials" / "egress_github_credentials.json"
+    assert expected_path.exists()
+
+    # Load with None target
+    loaded = load_secret(manager, None, "github")
+    assert loaded == "global-secret"
+
+    # Check status with None target
+    status = secret_status(manager, None, "github")
+    assert status.configured
+    assert status.updated_at is not None
+
+    # Delete with None target
+    delete_secret(manager, None, "github")
+
+    # Should no longer be configured
+    status = secret_status(manager, None, "github")
+    assert not status.configured
+    assert status.updated_at is None
+
+    # Should NOT be in private_oauth/ or workers/
+    private_oauth_dir = tmp_path / "private_oauth"
+    workers_dir = tmp_path / "workers"
+    if private_oauth_dir.exists():
+        assert list(private_oauth_dir.rglob("egress_github*")) == []
+    if workers_dir.exists():
+        assert list(workers_dir.rglob("egress_github*")) == []

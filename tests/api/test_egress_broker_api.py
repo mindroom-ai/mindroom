@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+
+from mindroom.egress_broker.audit import AuditLog, AuditRecord
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -195,3 +198,141 @@ def test_routes_require_dashboard_auth(broker_test_client: TestClient) -> None:
     response = broker_test_client.get("/api/egress-broker/services")
     # Should get a valid response with broker_test_client which has auth
     assert response.status_code == 200  # Should work with proper config
+
+
+def test_delete_global_secret_flips_status(broker_test_client: TestClient) -> None:
+    """DELETE should flip configured status to false for global secrets."""
+    # Set a global secret
+    response = broker_test_client.put(
+        "/api/egress-broker/services/github/secret",
+        json={"secret": "test-secret"},
+    )
+    assert response.status_code == 204
+
+    # Check it's configured
+    response = broker_test_client.get("/api/egress-broker/services")
+    assert response.status_code == 200
+    services = response.json()["services"]
+    github = next((s for s in services if s["name"] == "github"), None)
+    assert github is not None
+    assert github["configured"] is True
+
+    # Delete it
+    response = broker_test_client.delete("/api/egress-broker/services/github/secret")
+    assert response.status_code == 204
+
+    # Check it's no longer configured
+    response = broker_test_client.get("/api/egress-broker/services")
+    assert response.status_code == 200
+    services = response.json()["services"]
+    github = next((s for s in services if s["name"] == "github"), None)
+    assert github is not None
+    assert github["configured"] is False
+
+
+def test_delete_agent_scoped_secret_flips_status(broker_test_client: TestClient) -> None:
+    """DELETE should flip configured status to false for agent-scoped secrets."""
+    # Set an agent-scoped secret
+    response = broker_test_client.put(
+        "/api/egress-broker/services/github/secret?agent_name=test_agent",
+        json={"secret": "agent-secret"},
+    )
+    assert response.status_code == 204
+
+    # Check it's configured
+    response = broker_test_client.get("/api/egress-broker/services?agent_name=test_agent")
+    assert response.status_code == 200
+    services = response.json()["services"]
+    github = next((s for s in services if s["name"] == "github"), None)
+    assert github is not None
+    assert github["configured"] is True
+
+    # Delete it
+    response = broker_test_client.delete("/api/egress-broker/services/github/secret?agent_name=test_agent")
+    assert response.status_code == 204
+
+    # Check it's no longer configured
+    response = broker_test_client.get("/api/egress-broker/services?agent_name=test_agent")
+    assert response.status_code == 200
+    services = response.json()["services"]
+    github = next((s for s in services if s["name"] == "github"), None)
+    assert github is not None
+    assert github["configured"] is False
+
+
+def test_logs_filtering_with_real_audit_log(
+    broker_test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Test /logs endpoint with real AuditLog and filtering."""
+    # Create a real audit log
+    log_path = tmp_path / "test_audit.sqlite3"
+    audit = AuditLog(log_path)
+
+    # Add some test records
+    audit.record(
+        AuditRecord(
+            at=datetime.now(UTC),
+            kind="request",
+            scope="shared",
+            agent_name="test_agent",
+            requester_id="@user:example.org",
+            method="GET",
+            host="api.github.com",
+            path="/repos",
+            service="github",
+            status=200,
+            bytes_up=100,
+            bytes_down=500,
+            duration_ms=50,
+        ),
+    )
+    audit.record(
+        AuditRecord(
+            at=datetime.now(UTC),
+            kind="request",
+            scope="shared",
+            agent_name="other_agent",
+            requester_id="@user:example.org",
+            method="POST",
+            host="api.openai.com",
+            path="/chat/completions",
+            service="openai",
+            status=200,
+            bytes_up=200,
+            bytes_down=1000,
+            duration_ms=100,
+        ),
+    )
+
+    # Mock active_audit_log to return our test log
+    with patch("mindroom.api.egress_broker.active_audit_log", return_value=audit):
+        # Test filtering by agent_name
+        response = broker_test_client.get("/api/egress-broker/logs?agent_name=test_agent")
+        assert response.status_code == 200
+        records = response.json()["records"]
+        assert len(records) == 1
+        assert records[0]["agent_name"] == "test_agent"
+        assert records[0]["host"] == "api.github.com"
+
+        # Test filtering by host
+        response = broker_test_client.get("/api/egress-broker/logs?host=api.openai.com")
+        assert response.status_code == 200
+        records = response.json()["records"]
+        assert len(records) == 1
+        assert records[0]["host"] == "api.openai.com"
+
+        # Test filtering by service
+        response = broker_test_client.get("/api/egress-broker/logs?service=github")
+        assert response.status_code == 200
+        records = response.json()["records"]
+        assert len(records) == 1
+        assert records[0]["service"] == "github"
+
+        # Test limit
+        response = broker_test_client.get("/api/egress-broker/logs?limit=1")
+        assert response.status_code == 200
+        records = response.json()["records"]
+        assert len(records) == 1
+
+    audit.close()

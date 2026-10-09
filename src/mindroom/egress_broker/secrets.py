@@ -31,15 +31,28 @@ def egress_credential_service(name: str) -> str:
 
 def load_secret(
     manager: CredentialsManager,
-    target: ResolvedWorkerTarget,
+    target: ResolvedWorkerTarget | None,
     name: str,
 ) -> str | None:
-    """Load an egress secret for a worker target.
+    """Load an egress secret for a worker target or the global store.
+
+    Args:
+        manager: Credentials manager
+        target: Worker target, or None for the global (unscoped) store
+        name: Service name
 
     Returns the secret string, or None if not configured.
     Requester-scoped targets (user, user_agent) do not fall back to shared/global.
+
     """
     service = egress_credential_service(name)
+
+    # For global (unscoped) secrets, load directly from the base manager
+    if target is None:
+        credentials = manager.load_credentials(service)
+        if credentials is None:
+            return None
+        return credentials.get("secret")  # type: ignore[return-value]
 
     # For requester-scoped targets, disable shared fallback
     allowed_shared = frozenset() if target.worker_scope in ("user", "user_agent") else None
@@ -60,14 +73,21 @@ def load_secret(
 
 def save_secret(
     manager: CredentialsManager,
-    target: ResolvedWorkerTarget,
+    target: ResolvedWorkerTarget | None,
     name: str,
     secret: str,
 ) -> None:
-    """Save an egress secret for a worker target.
+    """Save an egress secret for a worker target or the global store.
+
+    Args:
+        manager: Credentials manager
+        target: Worker target, or None for the global (unscoped) store
+        name: Service name
+        secret: Secret value to store
 
     Raises ValueError if the secret is empty/whitespace, over 16 KiB,
     or contains ASCII control characters.
+
     """
     # Validate secret
     if not secret or not secret.strip():
@@ -93,6 +113,11 @@ def save_secret(
         "_updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
 
+    # For global (unscoped) secrets, save directly to the base manager
+    if target is None:
+        manager.save_credentials(service, credentials)
+        return
+
     save_scoped_credentials(
         service,
         credentials,
@@ -104,11 +129,23 @@ def save_secret(
 
 def delete_secret(
     manager: CredentialsManager,
-    target: ResolvedWorkerTarget,
+    target: ResolvedWorkerTarget | None,
     name: str,
 ) -> None:
-    """Delete an egress secret for a worker target."""
+    """Delete an egress secret for a worker target or the global store.
+
+    Args:
+        manager: Credentials manager
+        target: Worker target, or None for the global (unscoped) store
+        name: Service name
+
+    """
     service = egress_credential_service(name)
+
+    # For global (unscoped) secrets, delete directly from the base manager
+    if target is None:
+        manager.delete_credentials(service)
+        return
 
     delete_scoped_credentials(
         service,
@@ -128,15 +165,31 @@ class SecretStatus:
 
 def secret_status(
     manager: CredentialsManager,
-    target: ResolvedWorkerTarget,
+    target: ResolvedWorkerTarget | None,
     name: str,
 ) -> SecretStatus:
     """Return the status of an egress secret.
 
+    Args:
+        manager: Credentials manager
+        target: Worker target, or None for the global (unscoped) store
+        name: Service name
+
     Returns whether it is configured and when it was last updated.
     Never returns the secret value.
+
     """
     service = egress_credential_service(name)
+
+    # For global (unscoped) secrets, check the base manager directly
+    if target is None:
+        credentials = manager.load_credentials(service)
+        if credentials is None:
+            return SecretStatus(configured=False, updated_at=None)
+        return SecretStatus(
+            configured=True,
+            updated_at=credentials.get("_updated_at"),  # type: ignore[arg-type]
+        )
 
     # For requester-scoped targets, disable shared fallback
     allowed_shared = frozenset() if target.worker_scope in ("user", "user_agent") else None

@@ -73,7 +73,6 @@ def _load_service_statuses_for_target(
 ) -> list[ServiceStatus]:
     """Build service status list for one target."""
     from mindroom.api import config_lifecycle  # noqa: PLC0415
-    from mindroom.egress_broker.secrets import egress_credential_service  # noqa: PLC0415
 
     config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
     if config is None:
@@ -83,24 +82,14 @@ def _load_service_statuses_for_target(
 
     services: list[ServiceStatus] = []
     for name, service_config in config.egress_broker.services.items():
-        # For global (unscoped) secrets, check the base manager directly
-        if worker_target is None:
-            service = egress_credential_service(name)
-            credentials = target.base_manager.load_credentials(service)
-            configured = credentials is not None
-            updated_at = credentials.get("_updated_at") if credentials else None
-        else:
-            status = secret_status(target.base_manager, worker_target, name)
-            configured = status.configured
-            updated_at = status.updated_at
-
+        status = secret_status(target.base_manager, worker_target, name)
         services.append(
             ServiceStatus(
                 name=name,
                 display_name=service_config.display_name,
                 description=service_config.description,
-                configured=configured,
-                updated_at=updated_at,
+                configured=status.configured,
+                updated_at=status.updated_at,
             ),
         )
 
@@ -138,7 +127,6 @@ def put_service_secret(
     Raises 404 if the service is not configured, 422 if the secret is invalid.
     """
     from mindroom.api import config_lifecycle  # noqa: PLC0415
-    from mindroom.egress_broker.secrets import egress_credential_service  # noqa: PLC0415
 
     config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
     if config is None or name not in config.egress_broker.services:
@@ -151,30 +139,6 @@ def put_service_secret(
     )
 
     worker_target = worker_target_for_credentials_target(target)
-
-    # For global (unscoped) secrets, save directly to the base manager
-    if worker_target is None:
-        from datetime import UTC, datetime  # noqa: PLC0415
-
-        service = egress_credential_service(name)
-        # Validate secret using the same rules as save_secret
-        if not body.secret or not body.secret.strip():
-            raise HTTPException(status_code=422, detail="Secret cannot be empty or whitespace")
-        for char in body.secret:
-            char_ord = ord(char)
-            if char_ord < 0x20 or char_ord == 0x7F:
-                msg = f"Secret contains invalid control character (ord {char_ord})"
-                raise HTTPException(status_code=422, detail=msg)
-        if len(body.secret.encode("utf-8")) > 16 * 1024:
-            msg = f"Secret size exceeds maximum of 16 KiB ({len(body.secret.encode('utf-8'))} bytes)"
-            raise HTTPException(status_code=422, detail=msg)
-
-        credentials = {
-            "secret": body.secret,
-            "_updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        }
-        target.base_manager.save_credentials(service, credentials)
-        return
 
     try:
         save_secret(target.base_manager, worker_target, name, body.secret)
@@ -190,7 +154,6 @@ def delete_service_secret(
 ) -> None:
     """Delete an egress service secret."""
     from mindroom.api import config_lifecycle  # noqa: PLC0415
-    from mindroom.egress_broker.secrets import egress_credential_service  # noqa: PLC0415
 
     config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
     if config is None or name not in config.egress_broker.services:
@@ -203,13 +166,6 @@ def delete_service_secret(
     )
 
     worker_target = worker_target_for_credentials_target(target)
-
-    # For global (unscoped) secrets, delete directly from the base manager
-    if worker_target is None:
-        service = egress_credential_service(name)
-        target.base_manager.delete_credentials(service)
-        return
-
     delete_secret(target.base_manager, worker_target, name)
 
 
