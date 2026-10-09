@@ -47,7 +47,7 @@ tool_approval:
 - An unanswered card expires after its `timeout_days` and the call is denied.
 - A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](scheduling.md#pre-approved-tool-calls).
 
-While approval is pending, the agent stops typing and the conversation can continue.
+While approval is pending, the agent stops typing and the conversation can continue, except in minimal mode, where a command-line tool call waits in place and holds its conversation until you decide.
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
 

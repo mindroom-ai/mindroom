@@ -11,7 +11,7 @@ from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -1002,6 +1002,47 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             await recover()
         assert effects == []
         response.assert_not_awaited()
+
+
+@pytest.mark.parametrize("shutting_down", [False, True])
+@pytest.mark.asyncio
+async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_expire(*, shutting_down: bool) -> None:
+    """The cancelled note reached the room, but only failure settlement expires the approval's pending card."""
+    continuation = SimpleNamespace(
+        approval_id="approval-1",
+        state="failing",
+        failure_reason="cancelled_by_user",
+        runtime_generation=None,
+        cli_call={"kind": "agent_cli"},
+        room_id="!room",
+        source_event_ids=("$source",),
+    )
+    responses = SimpleNamespace(
+        final_delivery=AsyncMock(return_value=SimpleNamespace(permanently_failed=False)),
+        finish_approval=AsyncMock(return_value=True),
+        request_failure=AsyncMock(return_value=None),
+        settle_failure=AsyncMock(return_value=True),
+    )
+    waits = CliApprovalWaits(
+        store=SimpleNamespace(approval_continuation_for_source=AsyncMock(return_value=continuation)),  # type: ignore[arg-type]
+        responses=responses,  # type: ignore[arg-type]
+        runtime_generation="runtime-a",
+        retry_sources=lambda _room_id, _sources: None,
+        claim=AsyncMock(),
+        advance=AsyncMock(),
+    )
+    progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
+
+    with patch("mindroom.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
+        await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
+
+    responses.finish_approval.assert_not_awaited()
+    responses.request_failure.assert_not_awaited()
+    if shutting_down:
+        # Approval recovery settles it at the next start.
+        responses.settle_failure.assert_not_awaited()
+    else:
+        responses.settle_failure.assert_awaited_once_with(continuation, "cancelled_by_user")
 
 
 @pytest.mark.parametrize("permanently_failed", [False, True])

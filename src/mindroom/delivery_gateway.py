@@ -292,9 +292,9 @@ def _owed_answer_outcome() -> FinalDeliveryOutcome:
 
 
 def _with_note(shown: Presentation, note: Segment) -> Presentation:
-    """Return what a reply shows with one note: below its content, or instead of it."""
-    if note.note in {NoteKind.DELIVERY_FAILED, NoteKind.APPROVAL_FAILED}:
-        # These notes replace the reply's body.
+    """Return what a reply shows with one note: below its content, or instead of content Matrix refused."""
+    if note.note is NoteKind.DELIVERY_FAILED:
+        # Matrix refused this content for good, so the note cannot carry it.
         return with_trailing_note(replace(shown, segments=()), note)
     return with_trailing_note(shown, note)
 
@@ -1524,9 +1524,9 @@ class DeliveryGateway:
     ) -> bool:
         """Show a failed approval's note on the reply it paused; ``text`` is an error note's.
 
-        A Stop or failure note replaces the reply's body; an interruption note
-        goes below what the reply showed. Returns whether the note was
-        delivered; the continuation's finish then ends the reply.
+        The note goes below what the reply showed, as on any reply. Returns
+        whether the note was delivered; the continuation's finish then ends the
+        reply.
         """
         while True:
             reply = await self.deps.outbox.replies.for_event(event_id)
@@ -1548,11 +1548,8 @@ class DeliveryGateway:
                 return final is not None and (final.acknowledged_event_id is not None or final.permanently_failed)
             # A Stop recorded meanwhile decides the note, as the finish decides the state.
             shown_note = NoteKind.CANCELLED if reply.unapplied_stop else note
-            shown_before = _shown_before(reply, None)
-            if shown_note in {NoteKind.CANCELLED, NoteKind.ERROR}:
-                shown_before = replace(shown_before, segments=())
             shown = with_trailing_note(
-                shown_before,
+                _shown_before(reply, None),
                 note_segment(shown_note, text if shown_note is NoteKind.ERROR else None),
             )
             state = ReplyState.CANCELLED if shown_note is NoteKind.CANCELLED else ReplyState.FAILED

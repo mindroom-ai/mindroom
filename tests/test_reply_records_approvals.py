@@ -222,7 +222,8 @@ async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: 
         assert reply.state is rl.ReplyState.CANCELLED
         assert not reply.unapplied_stop
         assert await bot.journal_principal().approval_continuation_for_source("$event") is None
-        assert _sent_bodies(bot)[-1] == "**[Response cancelled by user]**"
+        # The Stop keeps what the reply showed and adds its note, as on any reply.
+        assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
 
 
 async def _reply_in(bot: AgentBot, state: rl.ReplyState) -> rl.Reply:
@@ -367,7 +368,8 @@ async def test_stop_during_an_approval_resume_cancels_it_through_its_approval(tm
         ]
         assert await bot.journal_principal().approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
-        assert _sent_bodies(bot)[-1] == "**[Response cancelled by user]**"
+        # The Stop keeps what the reply showed and adds its note, as on any reply.
+        assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
 
 
 async def test_a_shutdown_during_an_approval_resume_leaves_it_for_replay(tmp_path: Path) -> None:
@@ -602,7 +604,8 @@ async def test_a_failure_note_that_could_not_be_sent_is_resent_not_written_again
         assert reply.state is rl.ReplyState.FAILED
         assert reply.reply_sequence == before + 1
         assert reply.confirmed_seq == reply.reply_sequence
-        assert _sent_bodies(bot)[-1] == "Card publication failed"
+        # The failure note goes below what the reply showed.
+        assert _sent_bodies(bot)[-1] == "Reading document\n\nCard publication failed"
 
 
 async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path) -> None:
@@ -622,7 +625,8 @@ async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED
-        assert _sent_bodies(bot)[-1] == "**[Response cancelled by user]**"
+        # The Stop keeps what the reply showed and adds its note, as on any reply.
+        assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
 
 
 async def test_a_pause_whose_send_failed_once_still_waits_for_its_approval(tmp_path: Path) -> None:

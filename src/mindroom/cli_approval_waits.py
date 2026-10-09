@@ -207,7 +207,15 @@ class CliApprovalWaits:
             and (current.state != "claimed" or current.runtime_generation == self.runtime_generation)
         ):
             final = await self.responses.final_delivery(current)
-            if final is not None and not final.permanently_failed:
+            if current.state == "failing":
+                # A Stop or failure fenced the wait: its settlement expires the cards before it ends the reply,
+                # which approval recovery does instead after a shutdown.
+                if not current_task_is_process_shutdown():
+                    await self.responses.settle_failure(
+                        current,
+                        current.failure_reason or "CLI approval response ended before final delivery.",
+                    )
+            elif final is not None and not final.permanently_failed:
                 await self.responses.finish_approval(current.approval_id)
             elif not current_task_is_process_shutdown():
                 # No answer reached the room, including one Matrix refused for good: the approval fails.

@@ -13246,7 +13246,7 @@ tool_approval:
 - An unanswered card expires after its `timeout_days` and the call is denied.
 - A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 
-While approval is pending, the agent stops typing and the conversation can continue.
+While approval is pending, the agent stops typing and the conversation can continue, except in minimal mode, where a command-line tool call waits in place and holds its conversation until you decide.
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
 
@@ -18126,7 +18126,7 @@ Always back up configuration and persistent storage before replacing the running
 Upgrade while no agent is replying.
 Stop the previous backend once in-progress replies have finished, and decide pending tool approvals first: the upgrade cancels every approval still waiting or not yet resumed.
 A cancelled approval's card may stay visible, but clicking it does nothing, its reply keeps what it showed, and the request is not answered, so resend it if needed.
-A reply that was still streaming or being delivered when the previous backend stopped may not finish cleanly, so resend that request if needed.
+A reply that was still streaming or being delivered when the previous backend stopped is answered again after the upgrade, sometimes in a new message, and a tool it had already run can run again, so check the room before resending that request.
 
 ## Upgrading to Nio 1.0
 

@@ -4432,7 +4432,8 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
     assert outcome.terminal_status == "cancelled"
     assert _approval_reply_edits(client) == [
         (STREAM_STATUS_STREAMING, "Checking the report."),
-        (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**"),
+        # The Stop keeps what the reply showed and adds its note.
+        (STREAM_STATUS_CANCELLED, "Checking the report.\n\n**[Response cancelled by user]**"),
     ]
     assert await runner.deps.approval_store.approval_continuation(claimed.approval_id) is None
 
@@ -9047,7 +9048,10 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
 
     assert outcome.terminal_status == "cancelled"
     assert landed == [STREAM_STATUS_CANCELLED]
-    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**")
+    assert _approval_reply_edits(client)[-1] == (
+        STREAM_STATUS_CANCELLED,
+        "Checking the report.\n\n**[Response cancelled by user]**",
+    )
 
 
 @dataclass

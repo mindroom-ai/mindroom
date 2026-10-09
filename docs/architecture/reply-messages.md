@@ -161,7 +161,7 @@ The behavior below follows from deliberate decisions; a change that would restor
 - An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
 - A regeneration that wrote nothing keeps the finished answer it was replacing.
 - A rule that meets a state it does not model never raises: the reply's current work ends `failed` with the error note, while a reply that already ended keeps its end and a stray second create is redacted with the first left bound.
-- After a restart the model is told which tool calls already ran, and nothing blocks a repeated call, so the model can still repeat one rarely (a fast model did in up to 1 of 24 real-model runs), which the owner accepted, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
+- After a restart the model is told which tool calls finished and which were cut short and may have taken effect, to check before repeating them, and nothing blocks a repeated call: a fast model rarely repeated a finished call (up to 1 of 24 real-model runs) but repeated a cut-short call whenever its tools gave it no way to check, which the owner accepted, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
 - An upgrade from an earlier release cannot rule out an approval that release left pending, so it cancels every one: the approval's cards and records are deleted, its sources settle unanswered, and its reply gets no records.
 
 ### Accepted limitations
