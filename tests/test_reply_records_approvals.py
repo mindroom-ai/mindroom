@@ -283,6 +283,7 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
         # wait already ran its settlement, which expired the cards.
         assert wakes == [("$event",)]
         assert await runner.handoff_approval_source("$event") is None
+        assert await bot._journal_store.principal("router@shared").pending_approval_room_ids() == ()
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED

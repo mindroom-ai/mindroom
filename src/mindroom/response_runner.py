@@ -4093,7 +4093,7 @@ class ResponseRunner:
         handle = current_span()
         assert handle is not None, "an approval handoff runs in its reply's span"
         if not handle.exited:
-            # The pause never took: the span ends failed with the note instead of its answer.
+            # The pause never took: the span ends failed with the note below what it showed.
             noted = await self.deps.delivery_gateway.end_reply_span_with_note(
                 handle,
                 target,
