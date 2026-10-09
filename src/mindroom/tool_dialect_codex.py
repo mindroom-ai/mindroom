@@ -129,7 +129,9 @@ def _exec_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
     wire: dict[str, Any] = {"cmd": shlex.join(args) if isinstance(args, list) else str(args or "")}
     if canonical.get("workdir") is not None:
         wire["workdir"] = canonical["workdir"]
-    if isinstance(timeout := canonical.get("timeout"), int | float):
+    _minimum, default, _maximum = _YIELD_MS
+    # Omitting Codex's default keeps a call that left it unset lossless, so history stores it once.
+    if isinstance(timeout := canonical.get("timeout"), int | float) and timeout * 1000 != default:
         wire["yield_time_ms"] = int(timeout * 1000)
     return wire
 
@@ -149,7 +151,7 @@ def _write_stdin_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
     handle = str(canonical.get("handle", ""))
     session_id = _session_id(handle)
     wire: dict[str, Any] = {"session_id": session_id if session_id is not None else handle}
-    if isinstance(wait := canonical.get("wait"), int | float):
+    if isinstance(wait := canonical.get("wait"), int | float) and wait != _EMPTY_POLL_WAIT_SECONDS[0]:
         wire["yield_time_ms"] = int(wait * 1000)
     return wire
 

@@ -11,7 +11,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.shell_execution import _format_background_handle_message, _format_finished_status, _format_running_status
 from mindroom.tool_dialect_claude import CLAUDE_DIALECT
 from mindroom.tool_dialect_codex import CODEX_DIALECT
-from mindroom.tool_dialect_types import DialectArgumentError, WireFunction
+from mindroom.tool_dialect_types import MINDROOM_WIRE_KEY, DialectArgumentError, WireFunction
 from mindroom.tool_dialects import canonical_tool_calls, resolve_tool_dialect, wire_tools
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -217,3 +217,28 @@ def test_stale_kill_names_the_session_id() -> None:
         _render("kill_shell_command", "Error: Unknown handle 'shell:0123abcd'")
         == f"Error: Unknown session ID {0x0123ABCD}"
     )
+
+
+def test_default_waits_need_no_wire_record() -> None:
+    """Calls that leave Codex's default yields unset translate losslessly, so history stores them once."""
+    functions = {
+        "run_shell_command": _function("run_shell_command", "shell"),
+        "check_shell_command": _function("check_shell_command", "shell"),
+    }
+    calls = [
+        {
+            "id": "a",
+            "type": "function",
+            "function": {"name": "exec_command", "arguments": json.dumps({"cmd": "make test"})},
+        },
+        {
+            "id": "b",
+            "type": "function",
+            "function": {"name": "write_stdin", "arguments": json.dumps({"session_id": 1})},
+        },
+    ]
+
+    translated, errors = canonical_tool_calls(CODEX_DIALECT, calls, functions)
+
+    assert errors == []
+    assert [MINDROOM_WIRE_KEY in call for call in translated] == [False, False]

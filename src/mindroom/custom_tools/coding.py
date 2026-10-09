@@ -806,7 +806,13 @@ class CodingTools(Toolkit):
         """Return the path a hunk touches: a link itself when deleting it or after this patch deleted it.
 
         Like Codex, a delete removes the link, not its target, so a later hunk writes a new file in its place.
+        Every hunk path resolves here, so none reaches through a link an earlier hunk deletes.
         """
+        spelled = Path(path) if Path(path).is_absolute() else self.base_dir / path
+        if any(parent in overlay and overlay[parent] is None and parent.is_symlink() for parent in spelled.parents):
+            # The path resolves through a link this patch deletes, so it would reach the link's old target.
+            msg = f"Failed to resolve {path}: a link on its path is deleted earlier in this patch"
+            raise PatchError(msg)
         parent = self._patch_path(str(Path(path).parent))
         link = parent / Path(path).name
         if link.is_symlink() and not is_git_metadata_path(link) and (deleting or link in overlay):
@@ -820,11 +826,6 @@ class CodingTools(Toolkit):
         )
         if planned_directory or (resolved not in overlay and resolved.is_dir()):
             msg = f"Failed to write file {path}: Is a directory"
-            raise PatchError(msg)
-        spelled = Path(path) if Path(path).is_absolute() else self.base_dir / path
-        if any(parent in overlay and overlay[parent] is None and parent.is_symlink() for parent in spelled.parents):
-            # The path resolves through a link this patch deletes, so writing it now would land in the old target.
-            msg = f"Failed to write file {path}: a link on its path is deleted earlier in this patch"
             raise PatchError(msg)
         for parent in resolved.parents:
             planned_file = overlay.get(parent) is not None

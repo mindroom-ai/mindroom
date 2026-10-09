@@ -336,3 +336,28 @@ def test_blank_line_after_end_of_file_is_ignored() -> None:
 
     assert isinstance(hunk, _UpdateFile)
     assert [chunk.is_end_of_file for chunk in hunk.chunks] == [True]
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        "*** Delete File: link/config.txt\n",
+        "*** Update File: link/config.txt\n*** Move to: moved.txt\n@@\n-keep\n+kept\n",
+        "*** Update File: link/config.txt\n@@\n-keep\n+kept\n",
+    ],
+    ids=["delete", "move", "update"],
+)
+def test_paths_through_a_link_deleted_earlier_are_refused(tmp_path: Path, second: str) -> None:
+    """No hunk reaches through a link the same patch deletes earlier, so the old target stays untouched."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "config.txt").write_text("keep\n")
+    (tmp_path / "link").symlink_to("real")
+    before = _tree(tmp_path)
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        f"*** Begin Patch\n*** Delete File: link\n{second}*** End Patch",
+    )
+
+    assert result.startswith("apply_patch verification failed: ")
+    assert _tree(tmp_path) == before
+    assert (tmp_path / "link").is_symlink()
