@@ -535,7 +535,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
     monkeypatch: pytest.MonkeyPatch,
     slow_phase: str,
 ) -> None:
-    """A slow successful check fits, but a later overdue phase revokes at 30 seconds."""
+    """A check slower than five seconds fits, but a later overdue phase revokes at 30 seconds."""
     loop = asyncio.get_running_loop()
     now = 0.0
     monkeypatch.setattr(loop, "time", lambda: now)
@@ -555,7 +555,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
         for phase in ("authorization", "manager", "status"):
             if phase == slow_phase and len(starts) > 1:
                 try:
-                    await asyncio.sleep(4 if len(starts) == 2 else 18)
+                    await asyncio.sleep(9 if len(starts) == 2 else 18)
                 except asyncio.CancelledError:
                     cancelled.append(phase)
                     raise
@@ -573,14 +573,14 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
 
     try:
         await advance(0)
-        await advance(25)
-        assert starts == [0, 25]
-        await advance(29)
-        assert completed == [0, 29]
+        await advance(15)
+        assert starts == [0, 15]
+        await advance(24)
+        assert completed == [0, 24]
         assert not task.done()
-        await advance(50)
-        assert starts == [0, 25, 50]
-        await advance(55)
+        await advance(30)
+        assert starts == [0, 15, 30]
+        await advance(45)
         assert task.done(), "Overdue authorization/worker check must close within 30 seconds"
         await task
         assert cancelled == [slow_phase]
