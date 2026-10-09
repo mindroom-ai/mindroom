@@ -720,8 +720,12 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
+    persona_tools: tuple[str, ...] | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
+
+    ``persona_tools`` holds an authored subagent's tools; its ``delegate`` toolkit
+    keeps the copies it authors within them.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
@@ -795,6 +799,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+                persona_tools=persona_tools,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -1441,25 +1446,28 @@ def _persona_tool_policy(
     delegation_depth: int,
     tool_function_filter: Callable[[Function], bool] | None,
     disabled_tool_names: frozenset[str],
-    required_tool_names: tuple[str, ...],
-) -> tuple[Callable[[Function], bool] | None, frozenset[str], tuple[str, ...]]:
-    """Narrow this agent's own tools to an authored persona's subset; its principal is unchanged.
-
-    Named toolkits load eagerly, so a deferred toolkit the persona names is present from the start.
-    """
+) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
+    """Narrow this agent's own tools to an authored persona's subset; its principal is unchanged."""
     persona_filter = persona_function_filter(persona)
     if persona is None or persona.tools is None or persona_filter is None:
-        return tool_function_filter, disabled_tool_names, required_tool_names
+        return tool_function_filter, disabled_tool_names
     available = caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth)
     unused = persona_disabled_toolkits(persona, available)
-    named = tuple(toolkit for toolkit in available if toolkit not in unused and toolkit not in required_tool_names)
     caller_filter = tool_function_filter
 
     def visible(function: Function) -> bool:
         # Toolkit functions were already narrowed by concrete toolkit name in _assemble_agent_toolkits.
         return persona_filter(function) and (caller_filter is None or caller_filter(function))
 
-    return visible, disabled_tool_names | unused, (*required_tool_names, *named)
+    return visible, disabled_tool_names | unused
+
+
+def _persona_lists_tools(persona: SubagentPersona | None) -> bool:
+    """An explicit persona tool list is small and must be present from the first request.
+
+    So every toolkit, deferred ones and preset members included, loads before it is narrowed.
+    """
+    return persona is not None and persona.tools is not None
 
 
 def _apply_persona(agent: Agent, persona: SubagentPersona) -> None:
@@ -1613,6 +1621,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=dynamic_tool_continuation,
+                persona_tools=persona_tools,
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
@@ -1982,6 +1991,7 @@ def create_agent(
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
     native_deferred_tools = (
         agent_mode == "standard"
+        and not _persona_lists_tools(persona)
         and runtime_model_config is not None
         and (
             native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
@@ -1997,14 +2007,13 @@ def create_agent(
         )
     )
 
-    tool_function_filter, disabled_tool_names, required_tool_names = _persona_tool_policy(
+    tool_function_filter, disabled_tool_names = _persona_tool_policy(
         persona,
         agent_name,
         config,
         delegation_depth=delegation_depth,
         tool_function_filter=tool_function_filter,
         disabled_tool_names=disabled_tool_names,
-        required_tool_names=required_tool_names,
     )
     tool_assembly = _assemble_agent_toolkits(
         agent_name,
@@ -2022,7 +2031,7 @@ def create_agent(
         dynamic_tool_continuation=dynamic_tool_continuation,
         supports_native_tool_approval=supports_native_tool_approval,
         native_deferred_tools=native_deferred_tools,
-        eager_deferred_tools=eager_deferred_tools,
+        eager_deferred_tools=eager_deferred_tools or _persona_lists_tools(persona),
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
         persona_tools=persona.tools if persona is not None else None,

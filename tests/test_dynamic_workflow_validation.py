@@ -691,3 +691,10 @@ def test_collect_errors_does_not_mutate_the_input_spec() -> None:
     collect_workflow_spec_errors(spec)
     assert "permissions" not in spec
     assert "tools" not in spec["participants"][0]
+
+
+@pytest.mark.parametrize("mode", [["standard"], {"standard": True}])
+def test_subagent_participant_mode_must_be_a_known_string(mode: object) -> None:
+    """A non-string mode is a validation error, not a crash."""
+    with pytest.raises(DynamicWorkflowError, match="field 'mode' must be 'standard' or 'minimal'"):
+        validate_workflow_spec(_spec(participants=[{"id": "writer", "system_prompt": "P", "mode": mode}]))

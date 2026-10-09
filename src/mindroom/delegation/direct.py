@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
 from mindroom.delegation.lifecycle import child_run_context, finish_child_turn, reserve_child_turn, start_child_turn
-from mindroom.delegation.sessions import SubagentSessionError, subagent_liveness
+from mindroom.delegation.sessions import subagent_liveness
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
 
@@ -49,6 +49,10 @@ async def run_direct_child_turn(
     async with subagent_liveness(child, runtime_paths):
         try:
             await reserve_child_turn(child, owner=owner, runtime_paths=runtime_paths)
+        except asyncio.CancelledError:
+            await _settle_cancelled(child, config=config, runtime_paths=runtime_paths)
+            raise
+        try:
             await start_child_turn(
                 child,
                 parent_run_id=parent_run_id,
@@ -67,15 +71,9 @@ async def run_direct_child_turn(
                     approval_config=approval_config,
                 )
         except asyncio.CancelledError:
-            await finish_child_turn(
-                child,
-                config=config,
-                runtime_paths=runtime_paths,
-                status="cancelled",
-                reason="Delegation cancelled.",
-            )
+            await _settle_cancelled(child, config=config, runtime_paths=runtime_paths)
             raise
-        except (ResponsePausedForApproval, SubagentSessionError):
+        except ResponsePausedForApproval:
             raise
         except Exception as error:
             logger.exception(
@@ -101,3 +99,13 @@ async def run_direct_child_turn(
         )
         text = response or "Agent completed the task but returned no content."
         return _DirectChildResult(text, receipt, child.status == "completed")
+
+
+async def _settle_cancelled(child: DelegationChild, *, config: Config, runtime_paths: RuntimePaths) -> None:
+    await finish_child_turn(
+        child,
+        config=config,
+        runtime_paths=runtime_paths,
+        status="cancelled",
+        reason="Delegation cancelled.",
+    )

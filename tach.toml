@@ -764,7 +764,7 @@ visibility = [
     "mindroom.approval_execution",
     "mindroom.response_runner",
     "mindroom.teams",
-    "mindroom.custom_tools.delegate",
+    "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.cli_approval_waits",
 ]
@@ -1426,15 +1426,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.delegation.direct",
     "mindroom.delegation.personas",
     "mindroom.delegation.sessions",
     "mindroom.agent_descriptions",
-    "mindroom.ai",
-    "mindroom.logging_config",
     "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
-    "mindroom.response_turn",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
 ]
@@ -7132,6 +7130,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.delegation.direct"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.sessions",
+    "mindroom.logging_config",
+    "mindroom.response_turn",
+]
+
+[[modules]]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.delegation.personas",
@@ -7148,6 +7156,7 @@ visibility = [
     "mindroom.ai",
     "mindroom.agents",
     "mindroom.custom_tools.delegate",
+    "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
     "mindroom.tool_system.dynamic_toolkits",

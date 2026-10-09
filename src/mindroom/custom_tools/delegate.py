@@ -96,6 +96,7 @@ class DelegateTools(Toolkit):
         delegation_depth: int = 0,
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
         workspace_root: Path | None = None,
+        persona_tools: tuple[str, ...] | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
@@ -106,6 +107,8 @@ class DelegateTools(Toolkit):
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(config, runtime_paths, delegate_to, execution_identity)
         self._workspace_root = workspace_root
+        # An authored subagent's own tools cap the copies it authors, on every channel.
+        self._persona_tools = persona_tools
         # A caller that may run itself may also author that copy's prompt, tools, or profile.
         self._authoring = agent_name in delegate_to
 
@@ -242,7 +245,7 @@ class DelegateTools(Toolkit):
                 self._config,
                 delegation_depth=self._delegation_depth,
             ),
-            cap=context.persona_tools if (context := get_tool_runtime_context()) is not None else None,
+            cap=self._persona_tools,
         )
         if isinstance(request, str):
             return request

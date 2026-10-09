@@ -457,3 +457,42 @@ async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypa
         "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
     )
     assert any("pass system_prompt or profile so the copy stays within your tools" in text for text in tool_results)
+
+
+@pytest.mark.asyncio
+async def test_native_nested_persona_stays_within_running_child_tools(tmp_path: Path) -> None:
+    """On the native path an authored child's tools cap the copies it authors."""
+    config = _config(tools=("file", "calculator"))
+    paths = _runtime_paths(tmp_path)
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=_identity()),
+        persona_tools=("delegate", "file"),
+    )
+    options = {"caller_identity": _identity(), "config": config, "runtime_paths": paths, "depth": 1}
+
+    with tool_runtime_context(context):
+        widened = await _resolve_delegation_target(
+            ToolExecution(
+                tool_name="run_subagent",
+                tool_args={"task": "Add.", "system_prompt": "Q", "tools": ["calculator"]},
+            ),
+            None,
+            **options,
+        )
+        unauthored = await _resolve_delegation_target(
+            ToolExecution(tool_name="run_subagent", tool_args={"task": "Plain copy."}),
+            None,
+            **options,
+        )
+        inherited = await _resolve_delegation_target(
+            ToolExecution(tool_name="run_subagent", tool_args={"task": "Read.", "system_prompt": "Q"}),
+            None,
+            **options,
+        )
+
+    assert widened == "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file."
+    assert isinstance(unauthored, str)
+    assert "stays within your tools" in unauthored
+    assert not isinstance(inherited, str)
+    assert inherited.persona is not None
+    assert inherited.persona.tools == ("delegate", "file")

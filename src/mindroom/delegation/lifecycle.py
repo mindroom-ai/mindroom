@@ -344,13 +344,18 @@ def authorize_delegation(  # noqa: PLR0911
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
     caller_allows_target = _caller_grants_child(caller_name, agent_name, active_config, grant)
-    if not caller_allows_target or not is_sender_allowed_for_responder(
-        requester_id,
-        agent_name,
-        authorization_room_id,
-        active_config,
-        runtime_paths,
-        membership_index,
+    # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
+    # the caller already serves, possibly only through a team's access, keeps that access.
+    if not caller_allows_target or (
+        grant == "delegate"
+        and not is_sender_allowed_for_responder(
+            requester_id,
+            agent_name,
+            authorization_room_id,
+            active_config,
+            runtime_paths,
+            membership_index,
+        )
     ):
         reason = (
             "it is no longer an allowed target"

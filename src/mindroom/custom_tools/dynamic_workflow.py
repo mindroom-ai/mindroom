@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -30,6 +30,7 @@ from mindroom.delegation.personas import (
     inline_persona,
     load_profile,
     missing_persona_tool,
+    persona_allows,
     validate_persona_tools,
 )
 from mindroom.delegation.sessions import SubagentSessionError
@@ -672,7 +673,7 @@ def _validate_room_agent_reference_for_context(
         msg = f"Dynamic Workflow room agent participant '{agent_name}' is not available to this requester in this room."
         raise DynamicWorkflowError(msg)
     if participant.get("model") not in (None, ""):
-        msg = "Room agent participants use their configured model; model overrides are only available to ephemeral agents."
+        msg = "Room agent participants use their configured model; model overrides are only available to subagent participants."
         raise DynamicWorkflowError(msg)
     return agent_name
 
@@ -703,14 +704,7 @@ async def _aexecute_subagent_participant(
     if missing is not None:
         msg = f"Dynamic Workflow participant '{participant_id}' tool '{missing}' is no longer available to you."
         raise DynamicWorkflowExecutionError(msg)
-    toolkits = _resolve_participant_toolkits(
-        context,
-        sorted({entry.partition(".")[0] for entry in persona.tools or ()}),
-        skip_unavailable=named_tools is None,
-    )
-    approval_config = _participant_run_config(context, toolkits)
-    if named_tools is not None:
-        _reject_nonresumable_toolkits(toolkits, named_tools, approval_config)
+    approval_config = await _participant_approval_config(context, persona, named_tools)
     owner = build_execution_identity_from_runtime_context(context)
     child = prepare_child_turn(
         context.agent_name,
@@ -744,13 +738,56 @@ async def _aexecute_subagent_participant(
             reason="Dynamic Workflow participants cannot pause for approval.",
         )
         msg = f"Dynamic Workflow participant '{participant_id}' required approval and cannot pause."
-        raise DynamicWorkflowExecutionError(msg) from exc
+        raise DynamicWorkflowExecutionError(msg, delegation_id=child.delegation_id) from exc
     except SubagentSessionError as exc:
         raise DynamicWorkflowExecutionError(str(exc)) from exc
     children[participant_id] = child
     if not result.completed:
-        raise DynamicWorkflowExecutionError(result.text)
+        raise DynamicWorkflowExecutionError(result.text, delegation_id=child.delegation_id)
     return ParticipantOutput(result.text, child.delegation_id)
+
+
+async def _participant_approval_config(
+    context: ToolRuntimeContext,
+    persona: SubagentPersona,
+    named_tools: tuple[str, ...] | None,
+) -> Config:
+    """Pre-approve the participant's allowed functions and refuse named ones that could pause.
+
+    Declared toolkits are read from their metadata; only toolkits without declared functions,
+    such as MCP servers, are built, off the event loop, to learn what they expose.
+    """
+    ensure_tool_registry_loaded(context.runtime_paths, context.config)
+    names = sorted({entry.partition(".")[0] for entry in persona.tools or ()})
+    functions = {
+        name: metadata.function_names
+        for name in names
+        if (metadata := TOOL_METADATA.get(name)) is not None and metadata.function_names
+    }
+    built = await asyncio.to_thread(
+        _resolve_participant_toolkits,
+        context,
+        [name for name in names if name not in functions],
+        skip_unavailable=named_tools is None,
+    )
+    functions |= {name: (*toolkit.functions, *toolkit.async_functions) for name, toolkit in built.items()}
+    owners: dict[str, set[str]] = {}
+    for name, function_names in functions.items():
+        for function_name in function_names:
+            owners.setdefault(function_name, set()).add(name)
+    approval_config = _participant_run_config(context, {name: frozenset(toolkits) for name, toolkits in owners.items()})
+    if named_tools is not None:
+        _reject_nonresumable_toolkits(functions, _natively_confirmed(built), named_tools, approval_config)
+    return approval_config
+
+
+def _natively_confirmed(toolkits: dict[str, Toolkit]) -> frozenset[str]:
+    return frozenset(
+        function.name
+        for toolkit in toolkits.values()
+        for function in (*toolkit.functions.values(), *toolkit.async_functions.values())
+        if function.requires_confirmation is True
+    )
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
@@ -817,18 +854,19 @@ def _participant_request(
 
 
 def _reject_nonresumable_toolkits(
-    toolkits: dict[str, Toolkit],
+    functions: Mapping[str, Iterable[str]],
+    confirmed: frozenset[str],
     entries: tuple[str, ...],
     config: Config,
 ) -> None:
     """Reject named functions that could pause, because a participant cannot suspend for approval."""
     unavailable = sorted(
         {
-            function.name
-            for name, toolkit in toolkits.items()
-            for function in (*toolkit.functions.values(), *toolkit.async_functions.values())
-            if (name in entries or f"{name}.{function.name}" in entries)
-            and (function.requires_confirmation is True or tool_may_require_approval(config, function.name))
+            function_name
+            for name, function_names in functions.items()
+            for function_name in function_names
+            if persona_allows(entries, name, function_name)
+            and (function_name in confirmed or tool_may_require_approval(config, function_name))
         },
     )
     if unavailable:
@@ -902,25 +940,14 @@ def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
             raise DynamicWorkflowError(msg)
 
 
-def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[str, Toolkit]) -> Config:
-    """Return the policy used to reject granted tools that would require suspension."""
-    if not toolkits_by_name:
-        return context.config
+def _participant_run_config(context: ToolRuntimeContext, function_owners: Mapping[str, frozenset[str]]) -> Config:
+    """Return the participant policy: approval by default, with the caller's allowed tools pre-approved."""
     return build_automation_approval_config(
         context.config,
-        function_owners=_toolkit_function_owners(toolkits_by_name),
+        function_owners=function_owners,
         preapproved_toolkits=_workflow_allowed_tools(context),
         never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
     )
-
-
-def _toolkit_function_owners(toolkits_by_name: dict[str, Toolkit]) -> dict[str, frozenset[str]]:
-    """Map each participant function to every already-built toolkit that owns it."""
-    owners: dict[str, set[str]] = {}
-    for toolkit_name, toolkit in toolkits_by_name.items():
-        for function_name in (*toolkit.functions, *toolkit.async_functions):
-            owners.setdefault(function_name, set()).add(toolkit_name)
-    return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
@@ -1042,6 +1069,12 @@ def _validate_workflow_policy_for_context(
             if granted_tools and ungranted:
                 msg = f"Participant '{participant_id}' tool '{ungranted[0]}' is not granted by permissions.tools."
                 raise DynamicWorkflowError(msg)
+            if granted_tools and named_tools is None and request.persona is not None:
+                # permissions.tools also narrows a participant that names no tools of its own.
+                granted = tuple(
+                    entry for entry in request.persona.tools or () if entry.partition(".")[0] in granted_tools
+                )
+                request = replace(request, persona=replace(request.persona, tools=granted))
             if resolved is not None:
                 resolved[participant_id] = (request, named_tools)
             model_name = cast("str", request.model)

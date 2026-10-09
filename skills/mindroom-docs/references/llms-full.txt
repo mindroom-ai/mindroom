@@ -7108,7 +7108,7 @@ Use it for self-contained tasks where the child does not need its role, instruct
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
-A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt as its whole minimal prompt, and its Bash tool description points it to `mindroom-agent`.
+A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt as its whole minimal prompt, its Bash tool description points it to `mindroom-agent`, and an explicit `tools` list for it must include `shell`.
 
 ## Standard mode
 
@@ -12219,6 +12219,7 @@ Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset o
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
 It sees exactly the authored prompt, with no role, instructions, date, memories, or tool guidance added, plus the task and the schemas of its tools.
+With `minimal=True`, an explicit `tools` list must include `shell`, because a minimal child works through Bash, and it can still read the caller's configured instructions on demand with `mindroom-agent context`.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent that has `delegate` can author further copies only within its own tools, a copy without `tools` inherits them, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
@@ -12250,7 +12251,7 @@ Find the three most serious risks in the proposal you are given, each with evide
 `description` is required, `tools`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
 An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt` or `tools`.
 Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters; each file is limited to 64 KiB, and at most 256 profiles are read.
-On the agent's next run, its `delegate` instructions list every profile with its description and every invalid profile with the reason.
+On the agent's next run, its `delegate` instructions list every profile with its description and every invalid profile with the reason, or only how many profiles exist when that list would exceed 2,000 characters, in which case the agent lists `subagents/` itself.
 A subagent keeps the persona it started with, so editing or deleting a profile affects only subagents started afterwards.
 
 Authoring errors:
@@ -12323,7 +12324,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
   - `max_runtime_seconds` is 1 to 3600 and defaults to 3600; a run that exceeds it fails.
   - `max_total_agents` is 1 to 16, defaults to 16, and caps the number of `agent_step` entries.
   - `max_concurrent_agents` is 1 to 8 and is only validated, because steps never run in parallel.
-  - `models` lists the models participants may use, and a non-empty `tools` lists every toolkit a participant may name, including in its profile.
+  - `models` lists the models participants may use, and a non-empty `tools` limits every participant to those toolkits, whether it names them inline, in its profile, or not at all.
   - `data` must keep `matrix_history: none`, `attachments: none`, and `knowledge_bases: []`, because direct workflow data grants are not supported yet; participants can still reach such data through granted tools such as `matrix_message`.
 
 ```python

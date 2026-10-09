@@ -1033,3 +1033,36 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
     assert isinstance(other_agent, str)
     assert isinstance(delegate_rule, str)
     assert isinstance(revoked, str)
+
+
+def test_workflow_grant_runs_for_requester_the_caller_already_serves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow participant is the caller's own copy, so the caller's individual access is not rechecked.
+
+    A requester may reach a team member only through the team's access, which this check would refuse.
+    """
+    monkeypatch.setattr("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", lambda *_args: False)
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"], delegate_to=["leader"])},
+        defaults=DefaultsConfig(tools=[]),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="leader",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="parent-session",
+    )
+    options = {"config": config, "runtime_paths": paths, "execution_identity": identity, "depth": 0}
+
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        workflow = authorize_delegation("leader", "leader", "task", grant="dynamic_workflow", **options)
+        delegate = authorize_delegation("leader", "leader", "task", **options)
+
+    assert isinstance(workflow, Config)
+    assert delegate == "Cannot delegate to 'leader': that agent is not allowed to reply to you."

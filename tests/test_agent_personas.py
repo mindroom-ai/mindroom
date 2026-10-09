@@ -227,3 +227,42 @@ async def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) ->
     assert {"shell", "coding"} <= set(names)
     assert {"run_shell_command", "read_file"} <= set(functions)
     assert "write_file" not in functions
+
+
+@pytest.mark.asyncio
+async def test_persona_loads_named_member_of_deferred_preset(tmp_path: Path) -> None:
+    """A deferred preset member that a persona names is present from the child's first request."""
+    runtime = _runtime(tmp_path, tools=[{"openclaw_compat": {"defer": True}}])
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        persona=inline_persona("P", ["shell"]),
+    )
+    assert "run_shell_command" in await _function_names(agent)
+
+
+@pytest.mark.asyncio
+async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_path: Path) -> None:
+    """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""
+    runtime = _runtime(tmp_path, tools=["file", "calculator"], delegate_to=["helper"])
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        persona=inline_persona("P", ["delegate", "file"]),
+    )
+    [delegate] = [
+        tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "run_subagent" in tool.async_functions
+    ]
+    run_subagent = delegate.async_functions["run_subagent"].entrypoint
+
+    unauthored = await run_subagent(task="Plain copy.")
+    widened = await run_subagent(task="Add.", system_prompt="Q", tools=["calculator"])
+
+    assert "pass system_prompt or profile so the copy stays within your tools" in unauthored
+    assert widened == "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file."

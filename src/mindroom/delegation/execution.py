@@ -763,12 +763,11 @@ def _validate_child_scope(
     ):
         msg = "Delegation child scope no longer matches its parent execution identity"
         raise RuntimeError(msg)
-    if (child.caller_agent_name, child.child_agent_name, child.task, child.depth, child.persona) != (
+    if (child.caller_agent_name, child.child_agent_name, child.task, child.depth) != (
         caller_identity.agent_name,
         target.agent_name,
         target.task,
         depth + 1,
-        target.persona,
     ):
         msg = "Delegation child no longer matches its parent requirement"
         raise RuntimeError(msg)

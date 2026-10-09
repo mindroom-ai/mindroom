@@ -387,7 +387,8 @@ def _validate_subagent_participant(participant: dict[str, object], context: str)
         participant["tools"] = _normalized_tool_names(participant["tools"], f"{context} field 'tools'")
     if participant.get("model") is not None:
         participant["model"] = _required_text(participant, "model", context=context)
-    if participant.get("mode") is not None and participant["mode"] not in _PARTICIPANT_MODES:
+    mode = participant.get("mode")
+    if mode is not None and (not isinstance(mode, str) or mode not in _PARTICIPANT_MODES):
         msg = f"{context} field 'mode' must be 'standard' or 'minimal'."
         raise DynamicWorkflowError(msg)
 

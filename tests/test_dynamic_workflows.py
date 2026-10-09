@@ -230,6 +230,15 @@ def _tool_payload(result: str) -> dict[str, Any]:
     return json.loads(result)
 
 
+def _function_owners(toolkits: dict[str, Toolkit]) -> dict[str, frozenset[str]]:
+    """Map each function name to every toolkit that exposes it, as the participant overlay does."""
+    owners: dict[str, set[str]] = {}
+    for toolkit_name, toolkit in toolkits.items():
+        for function_name in (*toolkit.functions, *toolkit.async_functions):
+            owners.setdefault(function_name, set()).add(toolkit_name)
+    return {function_name: frozenset(names) for function_name, names in owners.items()}
+
+
 def test_dynamic_workflow_tool_registered() -> None:
     """Dynamic Workflow tool metadata should be visible to config and dashboard surfaces."""
     metadata = TOOL_METADATA["dynamic_workflow"]
@@ -2077,7 +2086,7 @@ def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Pa
     toolkit = Toolkit(name="fake_shell")
     toolkit.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, {"shell": toolkit})
+    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"shell": toolkit}))
 
     assert run_config.tool_approval.default == "require_approval"
     assert run_config.tool_approval.rules == []
@@ -2119,11 +2128,12 @@ def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> No
         },
     )
 
+    functions = {"mixed": tuple(toolkit.functions)}
     with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
-        dynamic_workflow_module._reject_nonresumable_toolkits({"mixed": toolkit}, ("mixed",), run_config)
+        dynamic_workflow_module._reject_nonresumable_toolkits(functions, frozenset(), ("mixed",), run_config)
     with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
-        dynamic_workflow_module._reject_nonresumable_toolkits({"mixed": toolkit}, ("mixed.dangerous",), run_config)
-    dynamic_workflow_module._reject_nonresumable_toolkits({"mixed": toolkit}, ("mixed.safe",), run_config)
+        dynamic_workflow_module._reject_nonresumable_toolkits(functions, frozenset(), ("mixed.dangerous",), run_config)
+    dynamic_workflow_module._reject_nonresumable_toolkits(functions, frozenset(), ("mixed.safe",), run_config)
 
 
 def test_non_resumable_participant_rejects_native_confirmation(tmp_path: Path) -> None:
@@ -2135,7 +2145,12 @@ def test_non_resumable_participant_rejects_native_confirmation(tmp_path: Path) -
     )
 
     with pytest.raises(DynamicWorkflowExecutionError, match=r"native_confirmation.*cannot suspend"):
-        dynamic_workflow_module._reject_nonresumable_toolkits({"native": toolkit}, ("native",), context.config)
+        dynamic_workflow_module._reject_nonresumable_toolkits(
+            {"native": tuple(toolkit.functions)},
+            dynamic_workflow_module._natively_confirmed({"native": toolkit}),
+            ("native",),
+            context.config,
+        )
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:
@@ -2159,7 +2174,10 @@ def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> No
     shell = Toolkit(name="fake_shell")
     shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, {"website": website, "shell": shell})
+    run_config = dynamic_workflow_module._participant_run_config(
+        context,
+        _function_owners({"website": website, "shell": shell}),
+    )
 
     assert run_config.tool_approval.default == "require_approval"
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
@@ -2196,7 +2214,7 @@ def test_participant_run_config_pre_approves_dashboard_allowed_tools_for_shared_
     website = Toolkit(name="fake_website")
     website.functions["read_url"] = SimpleNamespace(name="read_url")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, {"website": website})
+    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"website": website}))
 
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
 
@@ -2220,7 +2238,7 @@ def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path
     shell = Toolkit(name="fake_shell")
     shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, {"shell": shell})
+    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"shell": shell}))
 
     assert run_config.tool_approval.default == "require_approval"
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [
@@ -2250,7 +2268,10 @@ def test_participant_run_config_does_not_pre_approve_colliding_function_names(tm
     file = Toolkit(name="fake_file")
     file.functions["read_file"] = SimpleNamespace(name="read_file")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, {"python": python, "file": file})
+    run_config = dynamic_workflow_module._participant_run_config(
+        context,
+        _function_owners({"python": python, "file": file}),
+    )
 
     rules = {rule.match: rule.action for rule in run_config.tool_approval.rules}
     # run_python_code is unique to the pre-approved python toolkit -> auto-approved.
@@ -2280,7 +2301,10 @@ def test_participant_run_config_never_pre_approves_system_mutating_tools(tmp_pat
     website = Toolkit(name="fake_website")
     website.functions["read_url"] = SimpleNamespace(name="read_url")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, {"scheduler": scheduler, "website": website})
+    run_config = dynamic_workflow_module._participant_run_config(
+        context,
+        _function_owners({"scheduler": scheduler, "website": website}),
+    )
 
     assert run_config.tool_approval.default == "require_approval"
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
@@ -2306,7 +2330,7 @@ def test_participant_run_config_preserves_operator_rule_precedence(tmp_path: Pat
     shell = Toolkit(name="fake_shell")
     shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, {"shell": shell})
+    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"shell": shell}))
 
     ordered = [(rule.match, rule.action) for rule in run_config.tool_approval.rules]
     assert ordered[0] == ("run_shell_command", "require_approval")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -77,7 +78,7 @@ class _Workflow:
         entity_ids(config, self.paths)
         self.model = _ToolRecordingModel(
             id="test",
-            responses=responses or [ModelResponse(content=f"Answer {index}.") for index in range(4)],
+            responses=responses if responses is not None else [ModelResponse(content=f"Answer {i}.") for i in range(4)],
         )
         self.models_loaded: list[str] = []
 
@@ -383,3 +384,78 @@ async def test_unbuildable_caller_toolkit_does_not_fail_participants_without_too
 
     assert run["status"] == "completed", run
     assert "read_file" in workflow.model.offered[0]
+
+
+@pytest.mark.asyncio
+async def test_participant_approval_overlay_never_builds_declared_toolkits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval grants for declared toolkits come from their metadata, so no extra toolkit is built."""
+    import mindroom.custom_tools.dynamic_workflow as workflow_module  # noqa: PLC0415 - patched where it is looked up
+
+    built: list[list[str]] = []
+    original = workflow_module._resolve_participant_toolkits
+
+    def resolve(context: object, tool_names: list[str], **kwargs: object) -> object:
+        built.append(list(tool_names))
+        return original(context, tool_names, **kwargs)
+
+    monkeypatch.setattr(workflow_module, "_resolve_participant_toolkits", resolve)
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file", "calculator"]}}, "file", "calculator"])
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files."}]))
+
+    assert run["status"] == "completed", run
+    assert all(not names for names in built)
+
+
+@pytest.mark.asyncio
+async def test_toolless_participant_respects_permission_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-empty permissions.tools also narrows a participant that names no tools."""
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file", "calculator"]}}, "file", "calculator"])
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files."}], tools=["file"]))
+
+    assert run["status"] == "completed", run
+    [offered] = workflow.model.offered
+    assert "read_file" in offered
+    assert "add" not in offered
+
+
+@pytest.mark.asyncio
+async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant turn that fails still links its step to the delegation record it wrote."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config(), responses=[])
+
+    run = await workflow.run(_spec([{"id": "critic", "system_prompt": "Critic prompt", "tools": []}]))
+
+    assert run["status"] == "failed", run
+    with workflow.context():
+        stored = json.loads(await workflow.tools.aget_workflow_run(workflow_id="review", run_id=run["run_id"]))
+    [step] = stored["steps"]
+    assert step["delegation_id"]
+    assert next(workflow.workspace().glob(f".mindroom/delegations/*/{step['delegation_id']}/run.json"))
+
+
+def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) -> None:
+    """A workflow started by an authored subagent can grant participants only that subagent's tools."""
+    import mindroom.custom_tools.dynamic_workflow as workflow_module  # noqa: PLC0415 - private resolution seam
+
+    paths = _runtime_paths(tmp_path)
+    config = _config()
+    entity_ids(config, paths)
+    context = replace(_delegate_runtime_context(config, paths, execution_identity=_identity()), persona_tools=("file",))
+
+    request, named = workflow_module._participant_request(context, {"id": "p", "system_prompt": "P"}, workflow_id="w")
+    assert request.persona is not None
+    assert request.persona.tools == ("file",)
+    assert named is None
+    with pytest.raises(DynamicWorkflowError, match="unknown tool 'calculator'"):
+        workflow_module._participant_request(
+            context,
+            {"id": "p", "system_prompt": "P", "tools": ["calculator"]},
+            workflow_id="w",
+        )

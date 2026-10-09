@@ -138,8 +138,8 @@ Minimal personas keep minimal mode's existing rules: they need the caller's shel
 
 ## Durability and state
 
-`DelegationChild` gains a typed `persona` snapshot holding `source`, `system_prompt`, and `tools`; `model_name` and `agent_mode` keep holding model and mode.
-`source` is `inline`, `profile:<name>`, or `workflow:<workflow_id>/<participant_id>`, and it appears in audit records and errors.
+`DelegationChild` gains a typed `persona` snapshot holding `source_kind`, `source_name`, `system_prompt`, and `tools`; `model_name` and `agent_mode` keep holding model and mode.
+`source_kind` is `inline`, `profile`, or `workflow`, and `source_name` is empty, the profile name, or `<workflow_id>/<participant_id>`; both appear in audit records.
 The snapshot round-trips through the parent's delegation state and the primary-storage subagent session record, so restarts and follow-ups rebuild the same child.
 A retained child without a persona field reads as a configured-agent child; this default carries a `LEGACY_COMPAT` marker like `agent_mode`.
 
@@ -207,7 +207,7 @@ A migrated revision whose tools exceed the caller's tools fails at run time with
 
 ## Audit
 
-The child record's `run.json` gains a `persona` object with `source`, `tools`, and the SHA-256 of `system_prompt`.
+The child record's `run.json` gains a `persona` object with `source_kind`, `source_name`, `tools`, the redacted `system_prompt`, and its SHA-256.
 `transcript.md` includes the system prompt, redacted like the rest of the record, so a reviewer can see exactly how each child was instructed.
 
 ## Security posture

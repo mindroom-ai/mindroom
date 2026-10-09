@@ -294,3 +294,13 @@ def test_list_profiles_marks_non_string_keys_invalid(tmp_path: Path) -> None:
 
     assert [entry.name for entry in entries] == ["critic", "odd"]
     assert isinstance(entries[1], _InvalidPersonaProfile)
+
+
+def test_function_level_cap_admits_only_named_functions() -> None:
+    """A cap that names one function admits that function, not its whole toolkit or a sibling."""
+    cap = ("gmail.search_emails", "file")
+    validate_persona_tools(("gmail.search_emails", "file"), ["gmail", "file"], cap)
+    for entry in ("gmail", "gmail.send_email", "calculator"):
+        with pytest.raises(PersonaError) as error:
+            validate_persona_tools((entry,), ["gmail", "file", "calculator"], cap)
+        assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.search_emails, file."

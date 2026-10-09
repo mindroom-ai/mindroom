@@ -13,7 +13,14 @@ _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
 
 
 class DynamicWorkflowExecutionError(ValueError):
-    """Raised when a Dynamic Workflow step cannot execute."""
+    """Raised when a Dynamic Workflow step cannot execute.
+
+    ``delegation_id`` names the audit record of a participant turn that started before the step failed.
+    """
+
+    def __init__(self, message: str, *, delegation_id: str | None = None) -> None:
+        super().__init__(message)
+        self.delegation_id = delegation_id
 
 
 @dataclass(frozen=True)
@@ -115,7 +122,7 @@ def execute_workflow_spec(
                 participants_by_id=participants_by_id,
             )
         except DynamicWorkflowExecutionError as exc:
-            failed_step = _failed_step(raw_step, str(exc))
+            failed_step = _failed_step(raw_step, str(exc), delegation_id=exc.delegation_id)
             steps.append(failed_step)
             return _DynamicWorkflowExecution(
                 status="failed",
@@ -157,7 +164,7 @@ async def async_execute_workflow_spec(
                 participants_by_id=participants_by_id,
             )
         except DynamicWorkflowExecutionError as exc:
-            failed_step = _failed_step(raw_step, str(exc))
+            failed_step = _failed_step(raw_step, str(exc), delegation_id=exc.delegation_id)
             steps.append(failed_step)
             return _DynamicWorkflowExecution(
                 status="failed",
@@ -448,7 +455,12 @@ def _first_html_report_output(spec: dict[str, object]) -> str | None:
     return None
 
 
-def _failed_step(step: dict[str, object], error: str) -> _DynamicWorkflowStepResult:
+def _failed_step(
+    step: dict[str, object],
+    error: str,
+    *,
+    delegation_id: str | None = None,
+) -> _DynamicWorkflowStepResult:
     now = _utc_now()
     return _DynamicWorkflowStepResult(
         step_id=str(step.get("id", "unknown")),
@@ -458,6 +470,7 @@ def _failed_step(step: dict[str, object], error: str) -> _DynamicWorkflowStepRes
         started_at=now,
         completed_at=now,
         error=error,
+        delegation_id=delegation_id,
     )
 
 
