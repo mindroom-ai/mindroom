@@ -1791,6 +1791,7 @@ class TestStreamingCompletion:
                 test_config,
                 _runtime_paths(),
                 None,
+                model_name="default",
             )
 
         assert isinstance(response, openai_compat._OpenAIStreamingResponse)
@@ -1847,6 +1848,7 @@ class TestStreamingCompletion:
                 runtime_paths,
                 None,
                 None,
+                model_name="default",
                 execution_identity=execution_identity,
             )
 
@@ -3261,6 +3263,7 @@ class TestTeamCompletion:
                 config=team_config,
                 runtime_paths=runtime_paths,
                 thread_history=[],
+                team_model_name="default",
                 execution_identity=execution_identity,
             )
 
@@ -3542,6 +3545,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -3804,6 +3808,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -4275,6 +4280,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -5030,6 +5036,7 @@ class TestTeamCompletion:
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=[],
+                    team_model_name="default",
                 )
 
         assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
@@ -5108,6 +5115,11 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models(
+                        "collab_team",
+                        collaborate_config,
+                        lambda model_name: model_name,
+                    ),
                 )
 
             mock_team_init.assert_called_once()
@@ -5154,6 +5166,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
             mock_team_init.assert_called_once()
@@ -5199,6 +5212,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
         assert mock_team_init.call_args.kwargs["id"] == "coord_team"
@@ -5247,6 +5261,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
         assert team.num_history_runs is None
@@ -5294,6 +5309,7 @@ class TestTeamCompletion:
                 execution_identity=execution_identity,
                 scope_context=scope_context,
                 session_id="openai-team-session",
+                models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
             )
 
         try:
@@ -5359,6 +5375,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
             mock_close.assert_called_once_with(
                 agents=[built_agent],
@@ -5421,6 +5438,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
                 )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge

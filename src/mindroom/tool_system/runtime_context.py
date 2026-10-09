@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -141,6 +142,11 @@ class ToolRuntimeContext:
     def current_config(self) -> Config:
         """Return the managed runtime's current config or this detached snapshot."""
         return self.config_provider() if self.config_provider is not None else self.config
+
+    @property
+    def budget_monitor(self) -> BudgetMonitor | None:
+        """Return the managed runtime's spend monitor; detached contexts have none."""
+        return self.orchestrator.budgets if self.orchestrator is not None else None
 
     def require_agent_reply_memberships(self) -> AgentReplyMembershipIndex:
         """Return the injected index or reject membership-aware extension work."""

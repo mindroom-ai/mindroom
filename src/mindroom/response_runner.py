@@ -34,6 +34,7 @@ from mindroom.approval_response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
+from mindroom.budgets.monitor import budget_model
 from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -131,6 +132,7 @@ from mindroom.streaming import (
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
     TeamMode,
+    TeamTurnModelSelection,
     continue_paused_team_run,
     resolve_team_turn_models,
     select_model_for_team,
@@ -1292,6 +1294,17 @@ class ResponseRunner:
             queue_skill_review=queue_skill_review,
             notify_response_finished=self._response_finished_notifier(request.sources.logical_source_event_ids),
             persist_response_event_id=persist_response_event_id,
+        )
+
+    def _budgeted_model(self, request: ResponseRequest, model_name: str) -> str:
+        """Return the model this request's requester may use under their budget."""
+        orchestrator = self.deps.runtime.orchestrator
+        return budget_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            orchestrator.budgets if orchestrator is not None else None,
+            request.response_envelope.requester_id,
+            model_name,
         )
 
     def _response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
@@ -4301,6 +4314,14 @@ class ResponseRunner:
                 active_model_name=request.scheduled_model,
             )
         )
+        if turn_models is not None:
+            turn_models = TeamTurnModelSelection(
+                team_model_name=self._budgeted_model(request, turn_models.team_model_name),
+                member_model_names={
+                    member: self._budgeted_model(request, model_name)
+                    for member, model_name in turn_models.member_model_names.items()
+                },
+            )
         request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -4889,6 +4910,7 @@ class ResponseRunner:
                 thread_id=response_thread_id,
                 runtime_paths=self.deps.runtime_paths,
             ).model_name
+        active_model_name = self._budgeted_model(request, active_model_name)
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,

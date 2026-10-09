@@ -13,6 +13,7 @@ from agno.run.base import RunStatus
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.budgets.monitor import budget_model
 from mindroom.delegation.audit import (
     child_audit_context,
     child_response_usage,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
     from mindroom.agent_modes import AgentMode
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -324,6 +326,7 @@ def prepare_child_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     depth: int,
+    budget_monitor: BudgetMonitor | None,
     model: str | None = None,
     agent_mode: AgentMode = "standard",
     previous: DelegationChild | None = None,
@@ -332,7 +335,7 @@ def prepare_child_turn(
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the model of the child it continues; callers pass its mode.
+    A follow-up keeps the model of the child it continues unless the owner's budget swaps it; callers pass its mode.
     """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
@@ -345,7 +348,11 @@ def prepare_child_turn(
             session_id=session_id,
         )
     )
-    model_name = (
+    model_name = budget_model(
+        config,
+        runtime_paths,
+        budget_monitor,
+        owner.requester_id,
         previous.model_name
         if previous is not None
         else config.resolve_runtime_model(
@@ -354,7 +361,7 @@ def prepare_child_turn(
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
             runtime_paths=runtime_paths,
-        ).model_name
+        ).model_name,
     )
     return DelegationChild(
         delegation_id=delegation_id,

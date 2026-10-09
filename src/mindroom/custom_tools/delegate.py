@@ -292,6 +292,7 @@ class DelegateTools(Toolkit):
             config=config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
+            budget_monitor=context.budget_monitor if (context := get_tool_runtime_context()) is not None else None,
             model=model,
             agent_mode="minimal" if minimal else "standard",
             previous=continuation,

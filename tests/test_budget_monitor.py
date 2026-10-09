@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.budgets import monitor as monitor_module
-from mindroom.budgets.monitor import BudgetMonitor, BudgetUserStatus, budget_limit_usd
+from mindroom.budgets.monitor import BudgetMonitor, BudgetUserStatus, budget_limit_usd, budget_model
 from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -101,6 +101,12 @@ def _monitor(tmp_path: Path, config: Config, clock: _Clock | None = None) -> tup
     return monitor, current
 
 
+def _decide(monitor: BudgetMonitor, requester_id: str | None, model_name: str) -> str:
+    config = monitor.config_provider()
+    assert config is not None
+    return budget_model(config, monitor.runtime_paths, monitor, requester_id, model_name)
+
+
 async def _until(predicate: Callable[[], bool]) -> None:
     for _ in range(500):
         if predicate():
@@ -135,11 +141,11 @@ async def test_over_budget_requester_gets_fallback_for_priced_models_only(
 ) -> None:
     monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0})
 
-    assert monitor.budget_model(ALICE, "astra") == "luna"
-    assert monitor.budget_model(ALICE_BRIDGE, "astra") == "luna"
-    assert monitor.budget_model(ALICE, "local") == "local"
-    assert monitor.budget_model(BOB, "astra") == "astra"
-    assert monitor.budget_model(None, "astra") == "astra"
+    assert _decide(monitor, ALICE, "astra") == "luna"
+    assert _decide(monitor, ALICE_BRIDGE, "astra") == "luna"
+    assert _decide(monitor, ALICE, "local") == "local"
+    assert _decide(monitor, BOB, "astra") == "astra"
+    assert _decide(monitor, None, "astra") == "astra"
     await monitor.stop()
 
 
@@ -147,7 +153,7 @@ async def test_over_budget_requester_gets_fallback_for_priced_models_only(
 async def test_fallback_model_stays_usable_past_the_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 500.0})
 
-    assert monitor.budget_model(ALICE, "luna") == "luna"
+    assert _decide(monitor, ALICE, "luna") == "luna"
     await monitor.stop()
 
 
@@ -155,7 +161,7 @@ async def test_fallback_model_stays_usable_past_the_cap(tmp_path: Path, monkeypa
 async def test_reaching_the_cap_exactly_applies_the_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 10.0})
 
-    assert monitor.budget_model(ALICE, "astra") == "luna"
+    assert _decide(monitor, ALICE, "astra") == "luna"
     await monitor.stop()
 
 
@@ -164,8 +170,8 @@ async def test_per_user_override_beats_the_default_cap(tmp_path: Path, monkeypat
     config = _config(users={ALICE_BRIDGE: 100.0, BOB: 1.0})
     monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0}, config)
 
-    assert monitor.budget_model(ALICE, "astra") == "astra"
-    assert monitor.budget_model(BOB, "astra") == "luna"
+    assert _decide(monitor, ALICE, "astra") == "astra"
+    assert _decide(monitor, BOB, "astra") == "luna"
     await monitor.stop()
 
 
@@ -183,15 +189,31 @@ def test_no_snapshot_yet_means_zero_spend(tmp_path: Path) -> None:
     monitor, _current = _monitor(tmp_path, _config())
 
     assert monitor.spend_usd(ALICE) == 0.0
-    assert monitor.budget_model(ALICE, "astra") == "astra"
-    assert monitor.budget_model(ALICE, "astra") == "astra"
+    assert _decide(monitor, ALICE, "astra") == "astra"
+
+
+def test_without_a_monitor_only_zero_caps_apply(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+
+    assert budget_model(_config(), paths, None, ALICE, "astra") == "astra"
+    assert budget_model(_config(monthly_limit_usd=0), paths, None, ALICE, "astra") == "luna"
+
+
+def test_disabled_budgets_never_consult_the_monitor(tmp_path: Path) -> None:
+    class _Untouchable:
+        def spend_usd(self, _user_id: str) -> float:
+            raise AssertionError
+
+    config = _config().model_copy(update={"budgets": None})
+
+    assert budget_model(config, _paths(tmp_path), _Untouchable(), ALICE, "astra") == "astra"  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
 async def test_zero_cap_always_uses_the_fallback(tmp_path: Path) -> None:
     monitor, _current = _monitor(tmp_path, _config(monthly_limit_usd=0))
 
-    assert monitor.budget_model(ALICE, "astra") == "luna"
+    assert _decide(monitor, ALICE, "astra") == "luna"
 
 
 @pytest.mark.asyncio
@@ -209,7 +231,7 @@ async def test_previous_month_snapshot_counts_as_zero_after_rollover(
     clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
 
     assert monitor.spend_usd(ALICE) == 0.0
-    assert monitor.budget_model(ALICE, "astra") == "astra"
+    assert _decide(monitor, ALICE, "astra") == "astra"
     scans.release.set()
     await monitor.stop()
 
@@ -254,7 +276,7 @@ async def test_disabled_budgets_never_scan_or_swap(tmp_path: Path, monkeypatch: 
     await _quiet()
 
     assert scans.calls == 1
-    assert monitor.budget_model(ALICE, "astra") == "astra"
+    assert _decide(monitor, ALICE, "astra") == "astra"
     assert monitor.status().to_dict() == {"enabled": False}
     await monitor.stop()
 

@@ -15,6 +15,7 @@ from agno.tools import Toolkit
 
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_from_cached_room
+from mindroom.budgets.monitor import budget_model
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -579,7 +580,13 @@ async def _aexecute_room_agent_participant(
         thread_id=context.resolved_thread_id,
         runtime_paths=context.runtime_paths,
     )
-    active_model_name = runtime_model.model_name
+    active_model_name = budget_model(
+        context.config,
+        context.runtime_paths,
+        context.budget_monitor,
+        context.requester_id,
+        runtime_model.model_name,
+    )
     session_id = _participant_session_id(context, participant_id, run_scope=run_scope)
     participant_context = replace(
         context,
@@ -685,10 +692,16 @@ async def _aexecute_ephemeral_agent_participant(
 ) -> object:
     toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
-    model_name = _resolve_participant_model_name(
-        context,
-        participant.get("model"),
-        default_model=_caller_runtime_model_name(context),
+    model_name = budget_model(
+        context.config,
+        context.runtime_paths,
+        context.budget_monitor,
+        context.requester_id,
+        _resolve_participant_model_name(
+            context,
+            participant.get("model"),
+            default_model=_caller_runtime_model_name(context),
+        ),
     )
     execution_identity = build_execution_identity_from_runtime_context(context)
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)

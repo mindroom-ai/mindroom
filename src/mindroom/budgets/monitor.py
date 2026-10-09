@@ -40,6 +40,45 @@ def budget_limit_usd(config: Config, user_id: str, runtime_paths: RuntimePaths) 
     return budgets.monthly_limit_usd
 
 
+def budget_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    monitor: BudgetMonitor | None,
+    requester_id: str | None,
+    model_name: str,
+) -> str:
+    """Return the model a reply for this requester should use under their budget.
+
+    ``config`` is the snapshot ``model_name`` was resolved from, so the fallback names a model it defines.
+    Without a monitor no spend is known yet, as before the first scan.
+    """
+    budgets = config.budgets
+    if budgets is None or requester_id is None:
+        return model_name
+    model_config = config.models.get(model_name)
+    # Unpriced models add no tracked spend, so swapping them could only raise cost.
+    if model_name == budgets.fallback_model or model_config is None or model_config.pricing is None:
+        return model_name
+    if not is_human_requester_id(requester_id, config, runtime_paths):
+        return model_name
+    limit = budget_limit_usd(config, requester_id, runtime_paths)
+    if limit is None:
+        return model_name
+    canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    spend = monitor.spend_usd(canonical_requester_id) if monitor is not None else 0.0
+    if spend < limit:
+        return model_name
+    logger.info(
+        "budget_fallback_applied",
+        requester_id=canonical_requester_id,
+        model=model_name,
+        fallback_model=budgets.fallback_model,
+        spend_usd=round(spend, 4),
+        limit_usd=limit,
+    )
+    return budgets.fallback_model
+
+
 @dataclass(frozen=True, slots=True)
 class BudgetUserStatus:
     """One requester's month-to-date spend against their cap."""
@@ -133,42 +172,9 @@ class BudgetMonitor:
             await asyncio.gather(task, return_exceptions=True)
 
     def spend_usd(self, user_id: str) -> float:
-        """Return the requester's month-to-date spend from the latest scan of this month."""
+        """Return a canonical requester's month-to-date spend from the latest scan of this month."""
         snapshot = self._current_snapshot()
-        if snapshot is None:
-            return 0.0
-        config = self.config_provider()
-        if config is not None:
-            user_id = resolve_human_requester_alias(user_id, config, self.runtime_paths)
-        return snapshot.spend_usd.get(user_id, 0.0)
-
-    def budget_model(self, requester_id: str | None, model_name: str) -> str:
-        """Return the model a reply for this requester should use under their budget."""
-        config = self.config_provider()
-        if config is None or config.budgets is None or requester_id is None:
-            return model_name
-        fallback_model = config.budgets.fallback_model
-        model_config = config.models.get(model_name)
-        # Unpriced models add no tracked spend, so swapping them could only raise cost.
-        if model_name == fallback_model or model_config is None or model_config.pricing is None:
-            return model_name
-        if not is_human_requester_id(requester_id, config, self.runtime_paths):
-            return model_name
-        limit = budget_limit_usd(config, requester_id, self.runtime_paths)
-        if limit is None:
-            return model_name
-        spend = self.spend_usd(requester_id)
-        if spend < limit:
-            return model_name
-        logger.info(
-            "budget_fallback_applied",
-            requester_id=requester_id,
-            model=model_name,
-            fallback_model=fallback_model,
-            spend_usd=round(spend, 4),
-            limit_usd=limit,
-        )
-        return fallback_model
+        return 0.0 if snapshot is None else snapshot.spend_usd.get(user_id, 0.0)
 
     def status(self) -> BudgetStatus:
         """Return budget settings with each spender's and configured user's month-to-date spend."""

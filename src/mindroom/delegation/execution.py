@@ -875,6 +875,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             config=config,
             runtime_paths=runtime_paths,
             depth=delegation_depth,
+            budget_monitor=context.budget_monitor if (context := get_tool_runtime_context()) is not None else None,
             model=model,
             agent_mode=target.agent_mode,
             previous=target.previous_child,

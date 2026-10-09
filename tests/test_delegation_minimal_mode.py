@@ -20,6 +20,7 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
@@ -89,7 +90,10 @@ def _live_context(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
         context,
         # The parent's reply target stays on the child's runtime for its Matrix tools.
         target=replace(context.target, reply_to_event_id="$parent-reply"),
-        orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()),
+        orchestrator=SimpleNamespace(
+            agent_cli_registry=TurnToolRegistry(),
+            budgets=BudgetMonitor(runtime_paths=paths, config_provider=lambda: config),
+        ),
         membership_turn_id="$turn",
         correlation_id="correlation",
     )
