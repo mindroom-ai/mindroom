@@ -29,6 +29,10 @@ class DestinationBlockedError(Exception):
     """The destination was blocked by validation policy."""
 
 
+class DestinationUnresolvableError(OSError):
+    """The destination hostname could not be resolved."""
+
+
 async def open_upstream(
     host: str,
     port: int,
@@ -45,6 +49,7 @@ async def open_upstream(
 
     Raises:
         DestinationBlockedError: The destination was blocked by validation policy.
+        DestinationUnresolvableError: The destination hostname could not be resolved.
         OSError: All addresses failed to connect or the connect_timeout elapsed.
         ssl.SSLError: TLS handshake failed (when ssl_context is provided).
 
@@ -59,6 +64,10 @@ async def open_upstream(
             allow_loopback=policy.allow_loopback,
         )
     except ValueError as exc:
+        # Check if this is a resolution failure or a validation failure
+        # ServerFetchUrlError has a reason attribute that distinguishes these
+        if hasattr(exc, "reason") and exc.reason == "dns_resolution_failed":
+            raise DestinationUnresolvableError(str(exc)) from exc
         raise DestinationBlockedError(str(exc)) from exc
 
     if not addresses:

@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.egress_broker.dial import DestinationBlockedError, DialPolicy, open_upstream
+from mindroom.egress_broker.dial import (
+    DestinationBlockedError,
+    DestinationUnresolvableError,
+    DialPolicy,
+    open_upstream,
+)
 
 
 @pytest.mark.asyncio
@@ -151,3 +156,38 @@ async def test_connect_timeout_raises_oserror() -> None:
         policy = DialPolicy(connect_timeout=0.1)
         with pytest.raises((OSError, TimeoutError)):
             await open_upstream("example.com", 443, policy=policy, ssl_context=None)
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_hostname_raises_destination_unresolvable_error() -> None:
+    """Unresolvable hostname raises DestinationUnresolvableError which is an OSError."""
+
+    # Create a mock ValueError that simulates ServerFetchUrlError with reason="dns_resolution_failed"
+    def mock_validated_connect_addresses(*_args: object, **_kwargs: object) -> list[object]:
+        exc = ValueError("URL is not allowed for server-side fetching")
+        exc.reason = "dns_resolution_failed"  # type: ignore[attr-defined]
+        raise exc
+
+    with patch("mindroom.egress_broker.dial.validated_connect_addresses", side_effect=mock_validated_connect_addresses):
+        policy = DialPolicy()
+        with pytest.raises(DestinationUnresolvableError) as exc_info:
+            await open_upstream("nonexistent.invalid", 443, policy=policy, ssl_context=None)
+
+        # Verify it's an OSError subclass
+        assert isinstance(exc_info.value, OSError)
+
+
+@pytest.mark.asyncio
+async def test_blocked_address_still_raises_destination_blocked_error() -> None:
+    """Blocked address raises DestinationBlockedError, not DestinationUnresolvableError."""
+
+    # Create a mock ValueError that simulates ServerFetchUrlError with a validation failure reason
+    def mock_validated_connect_addresses(*_args: object, **_kwargs: object) -> list[object]:
+        exc = ValueError("URL is not allowed for server-side fetching")
+        exc.reason = "private_address"  # type: ignore[attr-defined]
+        raise exc
+
+    with patch("mindroom.egress_broker.dial.validated_connect_addresses", side_effect=mock_validated_connect_addresses):
+        policy = DialPolicy()
+        with pytest.raises(DestinationBlockedError):
+            await open_upstream("10.0.0.1", 443, policy=policy, ssl_context=None)
