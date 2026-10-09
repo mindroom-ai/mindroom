@@ -11,14 +11,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.auth import public_origin, require_connections_user, require_same_origin
+from mindroom.api.auth import require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
+    require_connections_same_origin,
     resolve_connection_agent,
     resolve_connection_user,
 )
-from mindroom.api.egress_credentials import EgressCredentialService  # noqa: TC001
+from mindroom.api.egress_credentials import EgressCredentialService, build_service_for_agent
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.users import create_agent_http_client
@@ -182,9 +183,6 @@ def _agent_connections(
     # Build egress services only if the agent has shell or python
     egress_services: list[EgressCredentialService] = []
     if any(tool in entity.available_tools for tool in ("shell", "python")):
-        from mindroom.api.egress_credentials import build_service_for_agent  # noqa: PLC0415
-
-        can_use = agent_name in user.agent_names
         manager = get_runtime_credentials_manager(user.runtime_paths)
         egress_services = [
             build_service_for_agent(
@@ -193,7 +191,6 @@ def _agent_connections(
                 user.runtime_paths,
                 agent_name,
                 user.owner.requester_id,
-                can_use,
                 manager,
             )
             for service_name in config.egress_broker.services
@@ -231,16 +228,7 @@ def _require_management(context: _Connections, agent_name: str, provider_id: str
 
 
 def _require_same_origin(request: Request, context: _Connections) -> None:
-    public_url = context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
-    expected = public_origin(public_url)
-    if expected is None or not expected.startswith("https://"):
-        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
-    require_same_origin(
-        request,
-        expected,
-        detail="Connection changes require a same-origin request",
-        headers=CONNECTIONS_HEADERS,
-    )
+    require_connections_same_origin(request, context.runtime_paths)
 
 
 @router.get("")

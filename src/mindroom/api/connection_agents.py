@@ -15,12 +15,37 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
 if TYPE_CHECKING:
+    from fastapi import Request
+
     from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 CONNECTIONS_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
+
+
+def require_connections_same_origin(
+    request: Request,
+    runtime_paths: RuntimePaths,
+    *,
+    detail: str = "Connection changes require a same-origin request",
+) -> None:
+    """Reject mutations from another origin (shared helper for connections and egress routes)."""
+    from mindroom.api.auth import public_origin, require_same_origin  # noqa: PLC0415
+
+    public_url = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
+    expected = public_origin(public_url)
+    if expected is None or not expected.startswith("https://"):
+        from fastapi import HTTPException  # noqa: PLC0415
+
+        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
+    require_same_origin(
+        request,
+        expected,
+        detail=detail,
+        headers=CONNECTIONS_HEADERS,
+    )
 
 
 @dataclass(frozen=True)

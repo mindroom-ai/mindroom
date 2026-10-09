@@ -1459,11 +1459,7 @@ depends_on = [
 # enforce both dependency edges and module visibility for each importer.
 [[modules]]
 path = "mindroom.api"
-depends_on = [
-    "mindroom.api.auth",
-    "mindroom.api.config_lifecycle",
-    "mindroom.api.connection_agents",
-]
+depends_on = []
 
 [[modules]]
 path = "mindroom.api.config_lifecycle"
@@ -1649,7 +1645,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.oauth",
     "mindroom.api.connection_agents",
-    "mindroom.api",
+    "mindroom.api.egress_credentials",
     "mindroom.constants",
     "mindroom.oauth",
     "mindroom.oauth.credential_lifecycle",
@@ -1661,11 +1657,25 @@ depends_on = [
 path = "mindroom.api.connection_agents"
 depends_on = [
     "mindroom.access_policy",
+    "mindroom.api.auth",
     "mindroom.authorization",
     "mindroom.matrix.identity",
     "mindroom.mcp_gateway.types",
     "mindroom.requester_identity",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.egress_credentials"
+depends_on = [
+    "mindroom.agent_reply_membership",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.auth",
+    "mindroom.api.connection_agents",
+    "mindroom.authorization",
+    "mindroom.credentials",
+    "mindroom.egress_broker.secrets",
+    "mindroom.requester_identity",
 ]
 
 [[modules]]

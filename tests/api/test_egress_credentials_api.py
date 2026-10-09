@@ -75,6 +75,13 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
                 "private": {"per": "user_agent"},
                 "access": {"users": ["@alice:example.org"]},
             },
+            "other_private": {
+                "display_name": "Other Private",
+                "role": "Another private agent",
+                "tools": ["shell"],
+                "private": {"per": "user"},
+                "access": {"users": ["@mallory:example.org"]},
+            },
         },
     }
     main.initialize_api_app(main.app, paths)
@@ -101,12 +108,14 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
     }
 
 
-def test_works_without_connections_agent(
+@pytest.mark.parametrize("with_connections_agent", [False, True])
+def test_works_with_and_without_connections_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     enforce_turn_authorization: None,  # noqa: ARG001
+    with_connections_agent: bool,
 ) -> None:
-    """The egress routes work when MINDROOM_CONNECTIONS_AGENT is unset but trusted upstream auth is enabled."""
+    """The egress routes work with or without MINDROOM_CONNECTIONS_AGENT set."""
     key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
     monkeypatch.setattr(
@@ -117,6 +126,9 @@ def test_works_without_connections_agent(
         **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
     }
+    if with_connections_agent:
+        env["MINDROOM_CONNECTIONS_AGENT"] = "personal"
+
     paths = _runtime_paths(tmp_path, env)
     payload = {
         "administrators": ["@admin:example.org"],
@@ -157,6 +169,9 @@ def test_works_without_connections_agent(
     assert response.status_code == 200, response.text
     assert len(response.json()["agents"]) == 1
     assert response.json()["agents"][0]["agent_name"] == "personal"
+
+    # Non-admin user should be allowed (personal user gate test)
+    assert "Administrator access required" not in response.text
 
 
 def test_lists_only_usable_shell_or_python_agents(egress_portal: dict[str, Any]) -> None:
@@ -259,16 +274,18 @@ def test_response_never_contains_secret(egress_portal: dict[str, Any]) -> None:
     client = egress_portal["client"]
     alice_headers = egress_portal["headers"]["alice"]
 
-    client.put(
+    put_response = client.put(
         "/api/connections/egress/agents/personal/github",
         json={"secret": "very-secret-token"},
         headers=alice_headers,
     )
+    assert put_response.status_code == 204, put_response.text
 
     response = client.get("/api/connections/egress", headers=alice_headers)
     assert response.status_code == 200, response.text
     assert "very-secret-token" not in response.text
-    assert "secret" not in response.text.lower() or "is_shared" in response.text
+    # "secret" key exists in config but secret value never appears
+    assert '"secret"' not in response.text
 
 
 def test_unknown_agent_or_service_404(egress_portal: dict[str, Any]) -> None:
@@ -314,63 +331,23 @@ def test_portal_catalog_includes_egress_services(egress_portal: dict[str, Any]) 
             assert len(agent["egress_services"]) == 0
 
 
-def test_personal_user_gate_allows_egress_routes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    enforce_turn_authorization: None,  # noqa: ARG001
-) -> None:
-    """Portal enabled, non-admin trusted user can access /api/connections/egress without 403."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
-    monkeypatch.setattr(
-        "mindroom.server_fetch_url.socket.getaddrinfo",
-        lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
+def test_ineligible_agents_return_404(egress_portal: dict[str, Any]) -> None:
+    """Non-usable user or agent without shell/python returns 404."""
+    client = egress_portal["client"]
+    alice_headers = egress_portal["headers"]["alice"]
+
+    # Agent without shell/python -> 404
+    response = client.put(
+        "/api/connections/egress/agents/no_shell/github",
+        json={"secret": "token"},
+        headers=alice_headers,
     )
-    env = {
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
-        "MINDROOM_CONNECTIONS_AGENT": "personal",
-        "MINDROOM_PUBLIC_URL": "https://portal.example.org",
-    }
-    paths = _runtime_paths(tmp_path, env)
-    payload = {
-        "administrators": ["@admin:example.org"],
-        "models": {"default": {"provider": "ollama", "id": "test-model"}},
-        "egress_broker": {
-            "services": {
-                "github": {
-                    "display_name": "GitHub",
-                    "description": "GitHub API",
-                    "rules": [{"host": "api.github.com", "auth": {"type": "bearer"}}],
-                },
-            },
-        },
-        "agents": {
-            "personal": {
-                "display_name": "Personal",
-                "tools": ["shell"],
-                "private": {"per": "user_agent"},
-                "access": {"users": ["@alice:example.org"]},
-            },
-        },
-    }
-    main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    assert response.status_code == 404, response.text
 
-    # Alice is not an admin
-    headers = {
-        "X-Trusted-User": "alice",
-        "X-Trusted-Jwt": _trusted_upstream_jwt(
-            key,
-            user_id="alice",
-            email="alice@example.org",
-            matrix_user_id="@alice:example.org",
-        ),
-        "Origin": "https://portal.example.org",
-    }
-    client = TestClient(main.app, base_url="https://portal.example.org")
-
-    # Should not get 403 "Administrator access required"
-    response = client.get("/api/connections/egress", headers=headers)
-    assert response.status_code == 200, response.text
-    assert "Administrator access required" not in response.text
+    # User without access to private agent -> 404
+    response = client.put(
+        "/api/connections/egress/agents/other_private/github",
+        json={"secret": "token"},
+        headers=alice_headers,
+    )
+    assert response.status_code == 404, response.text

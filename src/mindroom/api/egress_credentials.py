@@ -8,14 +8,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import public_origin, require_connections_user, require_same_origin
-from mindroom.api.connection_agents import CONNECTIONS_HEADERS, build_connection_agent_target
+from mindroom.api.auth import require_connections_user
+from mindroom.api.connection_agents import (
+    CONNECTIONS_HEADERS,
+    build_connection_agent_target,
+    require_connections_same_origin,
+)
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker.secrets import delete_secret, save_secret, secret_status
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -59,17 +64,62 @@ class PutSecretRequest(BaseModel):
     secret: str
 
 
+def _check_agent_eligibility(
+    agent_name: str,
+    requester_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,  # type: ignore[name-defined]
+) -> tuple[bool, bool] | None:
+    """Check if agent is eligible for egress operations.
+
+    Returns (is_shared, can_manage) if eligible, None if not.
+    Eligibility requires: (shell or python) AND is_sender_allowed_for_responder.
+    """
+    entity = config.resolve_entity(agent_name)
+
+    # Must have shell or python
+    if not any(tool in entity.available_tools for tool in ("shell", "python")):
+        return None
+
+    # Must be allowed to use the agent
+    if not is_sender_allowed_for_responder(
+        requester_id,
+        agent_name,
+        None,
+        config,
+        runtime_paths,
+        membership_index,
+    ):
+        return None
+
+    is_shared = entity.execution_scope in {None, "shared"}
+    can_manage = not is_shared or is_sender_allowed_for_agent_credential_management(
+        requester_id,
+        agent_name,
+        config,
+        runtime_paths,
+    )
+
+    return (is_shared, can_manage)
+
+
 def build_service_for_agent(
     name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
     requester_id: str,
-    can_use: bool,  # noqa: ARG001
     manager: CredentialsManager,
 ) -> EgressCredentialService:
-    """Build one service status with authorization and configuration info."""
+    """Build one service status with authorization and configuration info.
+
+    Caller must have already verified eligibility via check_agent_eligibility.
+    """
     service_config = config.egress_broker.services[name]
+
+    # Get is_shared and can_manage from eligibility check
+    # (We recompute here since build_service_for_agent doesn't take those as params)
     entity = config.resolve_entity(agent_name)
     is_shared = entity.execution_scope in {None, "shared"}
     can_manage = not is_shared or is_sender_allowed_for_agent_credential_management(
@@ -110,31 +160,15 @@ def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCrede
 
     agents: list[EgressCredentialAgent] = []
     for agent_name, agent in config.agents.items():
-        entity = config.resolve_entity(agent_name)
-        # Only include agents with shell or python
-        if not any(tool in entity.available_tools for tool in ("shell", "python")):
-            continue
-
-        # Check if user may use this agent
-        can_use = is_sender_allowed_for_responder(
-            human_requester,
+        # Check eligibility: must have shell/python AND be allowed
+        eligibility = _check_agent_eligibility(
             agent_name,
-            None,
+            human_requester,
             config,
             runtime_paths,
             memberships,
         )
-
-        # Check if user may manage credentials for this agent
-        can_manage_agent = is_sender_allowed_for_agent_credential_management(
-            human_requester,
-            agent_name,
-            config,
-            runtime_paths,
-        )
-
-        # Include if user can use OR manage
-        if not can_use and not can_manage_agent:
+        if eligibility is None:
             continue
 
         # Build services
@@ -145,7 +179,6 @@ def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCrede
                 runtime_paths,
                 agent_name,
                 human_requester,
-                can_use,
                 manager,
             )
             for service_name in config.egress_broker.services
@@ -201,50 +234,26 @@ def _resolve_agent_and_service(
     human_requester = resolve_human_requester_alias(requester_id, config, runtime_paths)
     memberships = config_lifecycle.app_state(request.app).agent_reply_memberships
 
-    # Check if user may use this agent
-    can_use = is_sender_allowed_for_responder(
-        human_requester,
+    # Check eligibility: must have shell/python AND be allowed
+    eligibility = _check_agent_eligibility(
         agent_name,
-        None,
+        human_requester,
         config,
         runtime_paths,
         memberships,
     )
+    if eligibility is None:
+        raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
 
-    # Determine scope and management requirements
-    entity = config.resolve_entity(agent_name)
-    is_shared = entity.execution_scope in {None, "shared"}
-    can_manage = not is_shared or is_sender_allowed_for_agent_credential_management(
-        human_requester,
-        agent_name,
-        config,
-        runtime_paths,
-    )
+    _is_shared, can_manage = eligibility
 
     if require_management and not can_manage:
         raise HTTPException(403, "Credential management is required", headers=CONNECTIONS_HEADERS)
-
-    if not can_use and not can_manage:
-        raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
 
     # Always build target for the agent scope
     target = build_connection_agent_target(config, runtime_paths, human_requester, agent_name)
 
     return config, runtime_paths, target
-
-
-def _require_same_origin_for_mutations(request: Request, runtime_paths: RuntimePaths) -> None:
-    """Reject mutations from another origin."""
-    public_url = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
-    expected = public_origin(public_url)
-    if expected is None or not expected.startswith("https://"):
-        raise HTTPException(403, "Egress mutations require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
-    require_same_origin(
-        request,
-        expected,
-        detail="Egress credential changes require a same-origin request",
-        headers=CONNECTIONS_HEADERS,
-    )
 
 
 @router.put("/agents/{agent_name}/{service}", status_code=204)
@@ -256,6 +265,15 @@ def put_egress_secret(
     requester_id: _EgressUser,
 ) -> None:
     """Set or replace an egress service secret for one agent."""
+    # Check same-origin before authorization lookup
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    runtime_paths = snapshot.runtime_paths
+    require_connections_same_origin(
+        request,
+        runtime_paths,
+        detail="Egress credential changes require a same-origin request",
+    )
+
     _config, runtime_paths, target = _resolve_agent_and_service(
         request,
         requester_id,
@@ -263,13 +281,12 @@ def put_egress_secret(
         service,
         require_management=True,
     )
-    _require_same_origin_for_mutations(request, runtime_paths)
 
     manager = get_runtime_credentials_manager(runtime_paths)
     try:
         save_secret(manager, target, service, body.secret)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc), headers=CONNECTIONS_HEADERS) from exc
 
 
 @router.delete("/agents/{agent_name}/{service}", status_code=204)
@@ -280,6 +297,15 @@ def delete_egress_secret(
     requester_id: _EgressUser,
 ) -> None:
     """Delete an egress service secret for one agent."""
+    # Check same-origin before authorization lookup
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    runtime_paths = snapshot.runtime_paths
+    require_connections_same_origin(
+        request,
+        runtime_paths,
+        detail="Egress credential changes require a same-origin request",
+    )
+
     _config, runtime_paths, target = _resolve_agent_and_service(
         request,
         requester_id,
@@ -287,7 +313,6 @@ def delete_egress_secret(
         service,
         require_management=True,
     )
-    _require_same_origin_for_mutations(request, runtime_paths)
 
     manager = get_runtime_credentials_manager(runtime_paths)
     delete_secret(manager, target, service)
