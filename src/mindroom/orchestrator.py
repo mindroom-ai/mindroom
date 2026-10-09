@@ -2652,7 +2652,7 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway listener share one lifecycle
+async def _run_api_server(  # noqa: C901, PLR0915 - the primary API and its worker-facing listeners share one lifecycle
     host: str,
     port: int,
     log_level: str,
@@ -2673,6 +2673,8 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     from mindroom.api import main as api_main  # noqa: PLC0415
     from mindroom.api.agent_cli import bind_agent_cli_registry  # noqa: PLC0415
     from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
+    from mindroom.credentials import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
@@ -2707,16 +2709,31 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
             gateway_url = await optional_script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
             script_runtime.bind_api(gateway_url)
 
+    def egress_broker_config() -> Config | None:
+        # Called on the broker thread for every CONNECT, so service edits apply without a restart.
+        try:
+            return api_main.config_lifecycle.read_app_committed_runtime_config(api_main.app)[0]
+        except Exception:
+            # No committed config yet, or the current one is invalid.
+            return None
+
     server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
         try:
-            async with serve_script_gateway_listener(
-                runtime_paths,
-                host=host,
-                broker=None if script_runtime is None else script_runtime.broker,
-                log_level=log_level,
-                agent_cli_registry=agent_cli_registry,
+            async with (
+                serve_egress_broker(
+                    runtime_paths,
+                    config_provider=egress_broker_config,
+                    credentials_manager=get_runtime_credentials_manager(runtime_paths),
+                ),
+                serve_script_gateway_listener(
+                    runtime_paths,
+                    host=host,
+                    broker=None if script_runtime is None else script_runtime.broker,
+                    log_level=log_level,
+                    agent_cli_registry=agent_cli_registry,
+                ),
             ):
                 await server.serve()
         except SystemExit as exc:
