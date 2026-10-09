@@ -164,7 +164,7 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext, build_exec
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
-from tests.approval_continuation_helpers import claim_continuation, freeze_resume_final
+from tests.approval_continuation_helpers import claim_continuation, freeze_resume_final, resumed_approval
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     make_matrix_client_mock,
@@ -176,12 +176,6 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.history_helpers import RecordingModel
-from tests.legacy_reply_helpers import (
-    adopt_main_left_approval,
-    keep_main_paused_answer,
-    resumed_main_left_approval,
-    store_main_continuation,
-)
 from tests.reply_span_helpers import paused_for_approval, reply_span, response_span
 from tests.response_runner_helpers import (
     _bot,
@@ -1965,10 +1959,9 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
         calls=(),
         state="ready",
     )
-    # An approved run main left; this instance adopts its paused reply and stops while resuming it.
-    await store_main_continuation(store, continuation)
-    await keep_main_paused_answer(store, continuation.approval_id, text="committed partial")
-    async with resumed_main_left_approval(runner_bot, continuation):
+    # An approved run's paused reply; this instance resumes it and stops while resuming it.
+    assert await paused_for_approval(store, continuation, text="committed partial") is not None
+    async with resumed_approval(runner_bot, continuation):
         pass
     # The next instance takes the replies over and settles the interrupted resume.
     bot = _bot(tmp_path)
@@ -2481,9 +2474,8 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
         calls=(),
         state="ready",
     )
-    await store_main_continuation(store, continuation)
-    # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot)
+    assert await paused_for_approval(store, continuation) is not None
+    await bot._reply_runtime.start()
     failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
 
     with (
@@ -2811,9 +2803,8 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         calls=(),
         state="ready",
     )
-    await store_main_continuation(runner.deps.approval_store, continuation)
-    # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot)
+    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    await bot._reply_runtime.start()
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
@@ -3059,9 +3050,8 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
         ),
         state="ready",
     )
-    await store_main_continuation(runner.deps.approval_store, continuation)
-    # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot)
+    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    await bot._reply_runtime.start()
     incomplete = FinalDeliveryOutcome(
         terminal_status="error",
         event_id="$waiting",
@@ -4525,8 +4515,8 @@ async def _resumed_streamable_approval(
             ),
         ),
     )
-    await store_main_continuation(store, continuation)
-    async with resumed_main_left_approval(bot, continuation) as claimed:
+    assert await paused_for_approval(store, continuation) is not None
+    async with resumed_approval(bot, continuation) as claimed:
         yield claimed
 
 
@@ -4818,7 +4808,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         calls=(),
         state="ready",
     )
-    await store_main_continuation(store, continuation)
+    assert await paused_for_approval(store, continuation) is not None
     committed_trace = (
         ToolTraceEntry(
             type="tool_call_started",
@@ -4870,7 +4860,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         _through_the_gateway(runner) as (edit_text, _send_text),
     ):
         # The resume span of the paused reply runs the next generation.
-        async with resumed_main_left_approval(bot, continuation) as current:
+        async with resumed_approval(bot, continuation) as current:
             handle = current_span()
             assert handle is not None
             presentation = await runner._approval_responses.advance_pause(
@@ -5373,7 +5363,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    await store_main_continuation(store, continuation)
+    assert await paused_for_approval(store, continuation) is not None
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
         current = await store.approval_continuation(continuation.approval_id)
@@ -5389,7 +5379,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         raise asyncio.CancelledError
 
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
-    async with resumed_main_left_approval(bot, continuation) as claimed:
+    async with resumed_approval(bot, continuation) as claimed:
         with (
             patch.object(runner, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
             patch.object(runner, "_build_lifecycle", return_value=lifecycle),
@@ -5430,9 +5420,8 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
-    await store_main_continuation(store, continuation)
-    # Every continuation pauses a reply; one stored without records is adopted at start.
-    await adopt_main_left_approval(bot)
+    assert await paused_for_approval(store, continuation) is not None
+    await bot._reply_runtime.start()
 
     async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
         await freeze_resume_final(store, claimed, text="plain final", payload={"body": "plain final"})
@@ -5596,7 +5585,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_member_model_names=(("general", "large"),),
         team_mode="coordinate",
     )
-    await store_main_continuation(runner.deps.approval_store, continuation)
+    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
 
     with (
@@ -5609,7 +5598,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         patch("mindroom.response_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
-        async with resumed_main_left_approval(bot, continuation) as claimed:
+        async with resumed_approval(bot, continuation) as claimed:
             result = await runner._continue_entity_call(
                 claimed,
                 request=_plain_request(target, source_event_id="$source"),
@@ -5770,7 +5759,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         execution_identity={},
         correlation_id="correlation-original",
     )
-    await store_main_continuation(runner.deps.approval_store, continuation)
+    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
     request = replace(
         _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
         correlation_id="correlation-original",
@@ -5809,7 +5798,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
             new=continue_run,
         ),
     ):
-        async with resumed_main_left_approval(bot, continuation) as claimed:
+        async with resumed_approval(bot, continuation) as claimed:
             await runner._continue_entity_call(
                 claimed,
                 request=request,
@@ -9213,7 +9202,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         cli_call={"kind": "agent_cli"},
         show_tool_calls=False,
     )
-    await store_main_continuation(store, continuation)
+    assert await paused_for_approval(store, continuation) is not None
     published = []
     decisions: list[asyncio.Task[None]] = []
 
@@ -9273,7 +9262,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         ),
     ):
         completed: list[tuple[FinalDeliveryOutcome, ApprovalContinuation]] = []
-        async with resumed_main_left_approval(bot, continuation) as claimed:
+        async with resumed_approval(bot, continuation) as claimed:
 
             async def recover_owned() -> None:
                 completed.append(await runner._execute_claimed_approval(claimed, request=request, target=target))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -10,10 +11,12 @@ from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.approval_continuations import ApprovalAdvance
 from mindroom.event_journal.replies import ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
+from tests.conftest import unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
 
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
     from mindroom.event_journal.approval_continuations import ApprovalCall, ApprovalContinuation
 
@@ -57,6 +60,22 @@ async def claim_continuation(
     if owner is not None:
         await principal.replies.write_generation(owner, now_ns=time.time_ns())
     return claimed
+
+
+@asynccontextmanager
+async def resumed_approval(bot: AgentBot, continuation: ApprovalContinuation) -> AsyncIterator[ApprovalContinuation]:
+    """Start the bot, then claim its paused ``continuation`` with its reply's resume span.
+
+    The claim is the one the journal's approval handoff makes, so the claimed
+    continuation runs as the span's attempt for as long as the context is open.
+    """
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await bot._reply_runtime.start()
+    async with runner.deps.replies.span_scope() as slot:
+        claimed = await runner._claim_owned_approval(continuation, slot=slot)
+        assert claimed is not None
+        assert slot.handle is not None
+        yield claimed
 
 
 async def advance_continuation(

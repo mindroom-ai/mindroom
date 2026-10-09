@@ -15,7 +15,6 @@ This page is for contributors: it names the records, the rules that change them,
 | `reply_scope.py` | `ReplyRuntime` (one per bot instance) and `SpanHandle`: claims, span exits, write-ahead, owed writes, and the span slot child tasks share. |
 | `event_journal/reply_messages.py`, `event_journal/reply_spans.py` | Persistence of replies and spans. |
 | `event_journal/replies.py` | `ReplyStore`: each rule applied inside one database transaction, with its in-transaction effects. |
-| `event_journal/legacy_reply_messages.py`, `legacy_reply_messages.py` | One-time adoption of replies an earlier release left paused for approval, and the presentations of what they showed. |
 | `stop.py` | `SpanRegistry`: the task and Agno run of each span this instance executes. |
 | `delivery_gateway.py` | Rendering and sending reply rows, owed notes, Stop buttons, and redactions. |
 
@@ -51,7 +50,6 @@ A call cut short stays started, since it may have taken effect.
 Reply rows are ordinary `matrix_delivery_outbox` rows with `reply_id`, `span_id`, and `reply_sequence`; the stage is `initial` (the create), `final` (the span's terminal write), or `edit`.
 `pending_reply_stops` holds a Stop on an event no reply is bound to yet.
 `reply_principal_generations` holds the bot instance that owns each principal's replies.
-`reply_legacy_classifications` marks principals whose earlier-release replies were adopted.
 `reply_deletion_endings` holds the replies a source deletion ended, with the span it cancelled, until the bot stops that span and delivers what the reply owes.
 
 ## Rules and outcomes
@@ -128,7 +126,7 @@ A terminal row Matrix refused for good, a reply's only message included, ends th
 
 ## Lifetime
 
-Each bot instance writes a fresh generation for its principal at start, then adopts the replies an earlier release left paused for approval once, discarding older continuations of one reply with their sources settled unanswered (the schema upgrade already discarded those whose identity it could not prove or that a newer edit's answer replaced), then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
+Each bot instance writes a fresh generation for its principal at start, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
 A membership departure ends the room's replies `gone` inside the departure fence and cancels their spans afterwards.
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
@@ -164,7 +162,7 @@ The behavior below follows from deliberate decisions; a change that would restor
 - A regeneration that wrote nothing keeps the finished answer it was replacing.
 - A rule that meets a state it does not model never raises: the reply's current work ends `failed` with the error note, while a reply that already ended keeps its end and a stray second create is redacted with the first left bound.
 - After a restart the model is told which tool calls already ran, and nothing blocks a repeated call, so the model can still repeat one rarely (a fast model did in up to 1 of 24 real-model runs), which the owner accepted, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
-- An upgrade from an earlier release runs while no reply is in flight: only replies paused for an approval are adopted, and older, replaced, or unprovable continuations are discarded with their cards and their sources settled unanswered.
+- An upgrade from an earlier release cannot rule out an approval that release left pending, so it cancels every one: the approval's cards and records are deleted, its sources settle unanswered, and its reply gets no records.
 
 ### Accepted limitations
 
@@ -194,7 +192,7 @@ Delivery and recovery:
 - A failure before anything was delivered shows the error note while the turn keeps replaying, so one that recurs on every attempt keeps retrying, and each retry backs off that room's event lane; a regeneration keeps showing the answer it was replacing, without a note, while it retries.
 - A reply row written while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed; after a homeserver outage, an answer near the event size limit can then be refused and end with the delivery-failed note.
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message.
-- A continuation the upgrade discards leaves its Matrix message as it was, which can still show that it waits for approval.
+- An approval the upgrade cancels leaves its Matrix message as it was, which can still show that it waits for approval, and a click on its card does nothing.
 - Deleting every source of a reply an approval holds keeps the reply and its approval cards (see [Approvals](#approvals)).
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed (see [Lifetime](#lifetime)).
 - A note Matrix refused for good is not sent again (I15).

@@ -12,7 +12,7 @@ from uuid import uuid4
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent, replies
 from mindroom.event_journal.replies import ReplyRowRequest
-from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, encode_presentation
+from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, Segment, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
 from mindroom.response_sources import ResponseSources
 from tests.approval_continuation_helpers import claim_continuation
@@ -346,8 +346,18 @@ async def pause_shown_reply(
     principal: PrincipalStore,
     continuation: ApprovalContinuation,
     span: rl.Span,
+    *,
+    text: str = "",
 ) -> ApprovalContinuation | None:
-    """Pause the reply ``span`` shows for ``continuation``, in the transaction that creates the continuation."""
+    """Pause the reply ``span`` shows for ``continuation``, in the transaction that creates the continuation.
+
+    ``text`` is the partial answer the pause shows on the reply, as a delivered edit.
+    """
+    partial = Presentation(
+        segments=(Segment(kind="answer", text=text, span_id=span.span_id),),
+        show_tool_calls=continuation.show_tool_calls,
+    )
+    stage = rl.WriteStage.EDIT if text else None
     enqueued = await principal.pause_for_approval(
         continuation,
         request=ReplyRowRequest(
@@ -356,35 +366,50 @@ async def pause_shown_reply(
             decide=lambda reply, held: rl.pause(
                 reply,
                 held,
-                rl.PauseWrite(shown=reply.presentation, prepared_revision=reply.revision, stage=None),
+                rl.PauseWrite(
+                    shown=encode_presentation(partial) if text else reply.presentation,
+                    prepared_revision=reply.revision,
+                    stage=stage,
+                ),
                 in_place=False,
                 now_ns=time.time_ns(),
             ),
         ),
         room_id=continuation.room_id,
         thread_id=continuation.thread_id,
-        payload={},
+        payload={"msgtype": "m.text", "body": text} if text else {},
     )
     if enqueued is None or not enqueued.transition.applied:
         return None
+    if enqueued.delivery_id is not None:
+        assert await principal.claim_matrix_delivery(delivery_id=enqueued.delivery_id, stage=DeliveryStage.EDIT)
+        await principal.acknowledge_matrix_delivery(
+            delivery_id=enqueued.delivery_id,
+            stage=DeliveryStage.EDIT,
+            event_id=f"{continuation.response_event_id}:paused",
+            delivered_projections=(),
+        )
     return await principal.approval_continuation(continuation.approval_id)
 
 
 async def paused_for_approval(
     principal: PrincipalStore,
     continuation: ApprovalContinuation,
+    *,
+    text: str = "",
 ) -> ApprovalContinuation | None:
     """Pause a reply for ``continuation`` the way a response does, and return the continuation the pause created.
 
     ``None`` means the pause could not take the sources, as
     ``PrincipalStore.pause_for_approval`` reports it. A claimed continuation
     is paused ready and then claimed by its ``runtime_generation``'s resume.
+    ``text`` is the partial answer the paused reply keeps.
     """
     claimed, claimant = continuation.state == "claimed", continuation.runtime_generation
     if claimed:
         continuation = replace(continuation, state="ready", runtime_generation=None)
     span = await reply_shown_for_approval(principal, continuation)
-    paused = None if span is None else await pause_shown_reply(principal, continuation, span)
+    paused = None if span is None else await pause_shown_reply(principal, continuation, span, text=text)
     if paused is None or not claimed:
         return paused
     return await claim_continuation(

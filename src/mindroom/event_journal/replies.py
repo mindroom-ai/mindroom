@@ -211,15 +211,7 @@ def lock_paused_reply(
     source deletion it races locks the source and then the reply; one writer
     per journal runs them one at a time.
     """
-    # LEGACY_COMPAT: Continuations adopted from an earlier release before reply classification names their span.
-    # Legacy format: an approval_continuations row with no span_id, as the schema upgrade leaves every continuation
-    # until its entity's first start classifies it, and for good when that entity never starts again.
-    # Last legacy release: v2026.10.215; replacement: the unreleased durable reply messages name the paused span on
-    # every continuation they create.
-    # Handling: no reply exists for it, so nothing is locked and its settlement reads the adopted identity instead.
-    # Coverage: tests/test_legacy_continuation_identity.py::test_an_unclassified_continuation_settles_its_adopted_sources.
-    if continuation.span_id is None:
-        return None
+    assert continuation.span_id is not None, "a stored continuation names the span whose pause created it"
     span = reply_spans.load(transaction, principal_id, continuation.span_id)
     return None if span is None else reply_messages.lock(transaction, principal_id, span.reply_id)
 
@@ -264,15 +256,14 @@ def approval_finished(
     continuation: approval_continuations.ApprovalContinuation,
     *,
     owner_available: bool,
-) -> AppliedTransition | None:
+) -> AppliedTransition:
     """Apply a finished continuation to the reply it paused, settling the sources its pause held.
 
     Its turn stays unanswered when no owner is left to answer it.
     """
     reply = lock_paused_reply(transaction, principal_id, continuation)
-    if reply is None:
-        return None
-    assert continuation.span_id is not None, "a continuation with a reply names the span that paused it"
+    assert reply is not None, "a continuation's paused reply exists while the continuation does"
+    assert continuation.span_id is not None
     disposition: rl.FailureDisposition | None = None
     if continuation.state == "failing":
         disposition = "cancelled_by_user" if continuation.failure_reason == "cancelled_by_user" else "failed"

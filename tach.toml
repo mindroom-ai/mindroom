@@ -482,7 +482,6 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
-    "mindroom.legacy_reply_messages",
     "mindroom.agent_cli.delegation",
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.approval_recovery",
@@ -528,20 +527,11 @@ depends_on = ["mindroom.constants", "mindroom.reply_lifecycle", "mindroom.stream
 path = "mindroom.reply_scope"
 depends_on = [
     "mindroom.event_journal",
-    "mindroom.legacy_reply_messages",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.stop",
     "mindroom.streaming",
     "mindroom.tool_system.call_record",
-    "mindroom.tool_system.events",
-]
-
-[[modules]]
-path = "mindroom.legacy_reply_messages"
-depends_on = [
-    "mindroom.event_journal",
-    "mindroom.reply_presentation",
     "mindroom.tool_system.events",
 ]
 
@@ -1024,7 +1014,6 @@ visibility = ["mindroom.attachments"]
 path = "mindroom.legacy_delivery_payloads"
 depends_on = ["mindroom.constants"]
 visibility = [
-    "mindroom.event_journal.legacy_response_attempts",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
     "mindroom.event_journal.outbox",
@@ -2812,7 +2801,6 @@ path = "mindroom.response_sources"
 depends_on = []
 visibility = [
     "mindroom.event_journal",
-    "mindroom.event_journal.legacy_response_attempts",
     "mindroom.approval_response",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
@@ -7150,7 +7138,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.event_journal.legacy_response_attempts"
-depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
+depends_on = ["mindroom.event_journal"]
 visibility = ["mindroom.event_journal"]
 
 

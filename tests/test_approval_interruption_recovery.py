@@ -10,14 +10,15 @@ import pytest_asyncio
 
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
-from mindroom.event_journal import ApprovalContinuation, DeliveryStage
+from mindroom.event_journal import ApprovalContinuation
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
+from tests.approval_continuation_helpers import resumed_approval
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import unwrap_extracted_collaborator
-from tests.legacy_reply_helpers import keep_main_paused_answer, resumed_main_left_approval, store_main_continuation
+from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot
 from tests.test_response_runner_focused import _admit_approval_source
 
@@ -31,26 +32,12 @@ if TYPE_CHECKING:
 
 @pytest_asyncio.fixture
 async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalContinuation]]:
-    """Create real journal ownership, an acknowledged visible INITIAL, and this runtime's claim of an adopted approval."""
+    """Create real journal ownership, a paused reply shown as ``$waiting``, and this runtime's claim of its approval."""
     bot = _bot(tmp_path)
     initialize_approval_store(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    await store.enqueue_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.INITIAL,
-        room_id="!room:localhost",
-        thread_id="$thread",
-        payload={"body": "Waiting"},
-    )
-    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
-    await store.acknowledge_matrix_delivery(
-        delivery_id="$source",
-        stage=DeliveryStage.INITIAL,
-        event_id="$waiting",
-        delivered_projections=(),
-    )
     continuation = ApprovalContinuation(
         approval_id="approval-recovery",
         run_id="run-1",
@@ -65,10 +52,9 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
         calls=(),
         state="ready",
     )
-    # An approved run main left; this instance adopts its paused reply and stops while resuming it.
-    await store_main_continuation(store, continuation)
-    await keep_main_paused_answer(store, continuation.approval_id, text="partial answer")
-    async with resumed_main_left_approval(bot, continuation) as claimed:
+    # An approved run's paused reply; this instance resumes it and stops while resuming it.
+    assert await paused_for_approval(store, continuation, text="partial answer") is not None
+    async with resumed_approval(bot, continuation) as claimed:
         assert claimed.state == "claimed"
     # The next instance takes the replies over and recovers the resume the stopped one left.
     restarted = _bot(tmp_path)

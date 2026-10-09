@@ -25,7 +25,6 @@ from . import (
     approval_continuations,
     approval_grants,
     background_approvals,
-    legacy_response_attempts,
     outbox,
     reads,
     scheduled_approvals,
@@ -48,7 +47,6 @@ _CARD_COLUMNS = """
     cards.continuation_generation AS continuation_generation,
     cards.tool_call_id AS tool_call_id,
     paused_reply.entity_name AS continuation_entity_name,
-    continuations.context_json AS continuation_context_json,
     background.run_id AS background_run_id,
     background.call_id AS background_call_id
 """
@@ -905,15 +903,6 @@ def is_terminal_card(
     return row is not None
 
 
-def _continuation_entity_name(row: Row) -> str | None:
-    """Return the entity of a card's continuation: its paused reply's, or the one it was adopted with."""
-    entity_name = cast("str | None", row["continuation_entity_name"])
-    context_json = cast("str | None", row["continuation_context_json"])
-    if entity_name is not None or context_json is None:
-        return entity_name
-    return legacy_response_attempts.adopted_entity_name(json.loads(context_json))
-
-
 def pending_card(
     transaction: Transaction,
     principal_id: str,
@@ -1047,7 +1036,7 @@ def _card(row: Row) -> StoredApprovalCard | None:
         if background_run_id is None:
             target_kind: _ApprovalTargetKind = "continuation"
             card_identity = _native_identity(card)
-            continuation_entity_name = _continuation_entity_name(row)
+            continuation_entity_name = cast("str | None", row["continuation_entity_name"])
         else:
             continuation_entity_name = None
             background_call_id = _required_background_call_id(row)

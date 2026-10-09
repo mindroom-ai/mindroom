@@ -15,7 +15,6 @@ from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import membership_state, outbox, reply_messages, reply_spans
 from .legacy_approval_recovery import deleted_delivery_is_terminal
-from .legacy_response_attempts import legacy_identity
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -332,13 +331,10 @@ def _paused_reply(
     transaction: Transaction,
     principal_id: str,
     row: Row,
-    stored: Mapping[str, object],
 ) -> _PausedReply:
-    """Return what a continuation reads from its paused span's reply, or what it was adopted with."""
+    """Return what a continuation reads from its paused span's reply."""
     span_id = cast("str | None", row["span_id"])
-    if span_id is None:
-        return _PausedReply(**legacy_identity(stored, approval_id=str(row["approval_id"])))
-    span = reply_spans.load(transaction, principal_id, span_id)
+    span = None if span_id is None else reply_spans.load(transaction, principal_id, span_id)
     reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
     if span is None or reply is None or reply.event_id is None:
         message = f"Approval continuation {row['approval_id']!r} lost the reply it paused"
@@ -367,7 +363,7 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
-    identity = _paused_reply(transaction, principal_id, row, stored)
+    identity = _paused_reply(transaction, principal_id, row)
     claim_span_id = cast("str | None", row["claim_span_id"])
     claimed = row["state"] == "ready" and claim_span_id is not None
     claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
@@ -619,19 +615,6 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         continuation = _from_rows(transaction, principal_id, row, tuple(calls_by_approval[approval_id]))
         owners.append((principal_id, continuation))
     return tuple(owners)
-
-
-def for_principal(transaction: Transaction, principal_id: str) -> tuple[ApprovalContinuation, ...]:
-    """Return one principal's continuations, oldest first."""
-    rows = transaction.fetchall(
-        f"""
-        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
-        WHERE principal_id = ?
-        ORDER BY created_at_ns, approval_id/*bytes*/
-        """,  # noqa: S608 - a fixed column list
-        (principal_id,),
-    )
-    return tuple(continuation for _principal_id, continuation in _load_owners(transaction, rows))
 
 
 def all_owners(

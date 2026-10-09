@@ -22,7 +22,6 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.replies import AppliedTransition, Decide, ReplyCreation, TurnCompleted
-from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.logging_config import get_logger
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -390,20 +389,14 @@ class ReplyRuntime:
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
-        Runs before journal replay: replies an earlier release left paused get
-        records first, replay claims continue the replies whose sources are
-        still pending, and the notes this owes are delivered by the outbox
-        recovery after each room syncs.
+        Runs before journal replay: replay claims continue the replies whose
+        sources are still pending, and the notes this owes are delivered by the
+        outbox recovery after each room syncs.
         """
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
-        adopted = await self.store.adopt_legacy_replies(
-            entity_name=self.entity_name,
-            presentations=LEGACY_PRESENTATIONS,
-            now_ns=self.clock(),
-        )
-        for applied in (*adopted, *await self.store.replies.owner_lost(self.generation, now_ns=self.clock())):
+        for applied in await self.store.replies.owner_lost(self.generation, now_ns=self.clock()):
             await self.run_effects(applied.post_commit)
 
     @asynccontextmanager

@@ -1,29 +1,12 @@
-"""Released continuations keep the reply identity they answer across the upgrade that names their span."""
+"""Approvals an earlier release left pending are cancelled by the upgrade that names their paused span."""
 
-import json
 from collections.abc import Sequence
-from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from mindroom.event_journal import (
-    DeliveryStage,
-    EventJournalStore,
-    legacy_response_attempts,
-    postgres_backend,
-    sqlite_backend,
-)
-from mindroom.event_journal.approvals import StoredApprovalCard
-from mindroom.handled_turns import TurnRecordCodec
-from mindroom.history.types import HistoryScope
-from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
-from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import ReplyState
-from mindroom.turn_record import TurnRecord
-from tests.legacy_reply_helpers import store_main_continuation
-from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
+from mindroom.event_journal import legacy_response_attempts, postgres_backend, sqlite_backend
 from tests.test_journal_upgrade_boundary import _LegacyDatabase
 from tests.test_journal_upgrade_boundary import legacy_database as _legacy_database
 
@@ -87,53 +70,49 @@ def _table_query(postgres: bool, table: str) -> str:
     )
 
 
+# A card and a call of the pending approval, as approval cards and calls were kept before the upgrade.
+_CARD_AND_CALL = """
+INSERT INTO approval_cards VALUES ('@router:example.org', '$card', 'approval', 0, 'call', 7);
+INSERT INTO approval_continuation_calls (
+    principal_id, approval_id, generation, tool_call_id, call_ordinal, tool_name, invoking_agent, expires_at_ns
+) VALUES ('@bot:example.org', 'approval', 0, 'call', 0, 'shell', 'bot', 1);
+"""
+
+
+@pytest.mark.parametrize("state", ["waiting", "ready", "claimed", "failing"])
+@pytest.mark.parametrize("owner", [_CONTEXT_OWNER, _ATTEMPT_OWNER], ids=["context", "response-attempt"])
 @pytest.mark.asyncio
-async def test_a_continuation_keeps_the_identity_its_context_held(legacy_database: _LegacyDatabase) -> None:
-    """A continuation from before response attempts answers the reply its context named, across reopens."""
-    legacy_database.execute(_CONTEXT_OWNER)
+async def test_an_approval_an_earlier_release_left_pending_is_cancelled(
+    legacy_database: _LegacyDatabase,
+    owner: str,
+    state: str,
+) -> None:
+    """The upgrade drops the approval with its cards and calls and settles its source; its answer gets no record."""
+    legacy_database.execute(owner)
+    legacy_database.execute(_CARD_AND_CALL)
+    legacy_database.execute(f"UPDATE approval_continuations SET state = '{state}' WHERE approval_id = 'approval'")  # noqa: S608
+    source = "$edit" if owner is _CONTEXT_OWNER else "$first"
     for _ in range(2):
         store = legacy_database.open()
         try:
-            approval = await store.principal("@bot:example.org").approval_continuation("approval")
+            principal = store.principal("@bot:example.org")
+            assert await principal.approval_continuation("approval") is None
+            assert not await principal.is_pending(source)
+            # Nothing edits the answer the approval paused: it keeps what it showed.
+            assert await principal.replies.for_event("$answer") is None
         finally:
             await store.close()
-        assert approval is not None
-        assert approval.span_id is None
-        assert (approval.entity_name, approval.room_id, approval.thread_id, approval.response_event_id) == (
-            "bot",
-            "!room:example.org",
-            "$thread",
-            "$answer",
-        )
-        assert approval.source_event_ids == ("$edit",)
-        assert approval.sources.logical_source_event_ids == ("$source", "$second")
-        assert approval.sources.discovery_event_ids == ("$alias",)
+        assert legacy_database.query("SELECT * FROM approval_cards") == []
+        assert legacy_database.query("SELECT * FROM approval_continuation_calls") == []
 
 
 @pytest.mark.asyncio
-async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legacy_database: _LegacyDatabase) -> None:
-    """The identity v2026.10.201 kept in response attempts moves onto the continuation, and the tables go."""
+async def test_the_upgrade_drops_what_kept_the_identity_of_a_pending_approval(legacy_database: _LegacyDatabase) -> None:
+    """The response attempt tables, the continuation sources, and the continuation's entity column go."""
     legacy_database.execute(_ATTEMPT_OWNER)
-    store = legacy_database.open()
-    try:
-        approval = await store.principal("@bot:example.org").approval_continuation("approval")
-    finally:
-        await store.close()
-    assert approval is not None
-    assert (approval.entity_name, approval.room_id, approval.thread_id, approval.response_event_id) == (
-        "bot",
-        "!room:example.org",
-        None,
-        "$answer",
-    )
-    assert approval.sources.logical_source_event_ids == ("$first", "$second")
-    assert approval.sources.discovery_event_ids == ("$alias",)
-    assert legacy_database.query(_table_query(legacy_database.postgres, "response_attempts")) == []
-    assert legacy_database.query(_table_query(legacy_database.postgres, "response_attempt_sources")) == []
-    # Its held sources moved with its identity; reply classification moves them onto its paused span.
-    assert approval.source_event_ids == ("$first",)
-    assert legacy_database.query(_table_query(legacy_database.postgres, "approval_continuation_sources")) == []
-    # Its entity moved too: the paused reply names it once classified.
+    await legacy_database.open().close()
+    for table in ("response_attempts", "response_attempt_sources", "approval_continuation_sources"):
+        assert legacy_database.query(_table_query(legacy_database.postgres, table)) == []
     assert (
         legacy_database.query(
             "SELECT column_name FROM information_schema.columns "
@@ -145,11 +124,11 @@ async def test_a_continuation_keeps_the_identity_its_response_attempt_held(legac
     )
 
 
-def test_the_adoption_pages_through_every_continuation(
+def test_the_upgrade_cancels_every_approval_in_bounded_pages(
     legacy_database: _LegacyDatabase,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each continuation is adopted in bounded pages."""
+    """Each pending approval is cancelled, a bounded page at a time."""
     legacy_database.execute(_CONTEXT_OWNER)
     legacy_database.execute("""
         INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender,
@@ -184,175 +163,11 @@ def test_the_adoption_pages_through_every_continuation(
     monkeypatch.setattr(legacy_response_attempts, "_PAGE_SIZE", 2)
     with patch.object(transaction_type, "fetchall", bounded_fetchall):
         legacy_database.open()
-    assert page_sizes == [2, 1]
-    identities = legacy_database.query(
-        "SELECT approval_id, context_json FROM approval_continuations ORDER BY approval_id",
-    )
-    assert [approval_id for approval_id, context in identities if '"legacy_identity"' in str(context)] == [
-        "approval",
-        "approval-A",
-        "approval-z",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_an_unprovable_identity_is_discarded_and_its_sources_settle(legacy_database: _LegacyDatabase) -> None:
-    """A continuation whose reply cannot be named is dropped with a warning; the upgrade and every other row go on."""
-    legacy_database.execute(_CONTEXT_OWNER)
-    legacy_database.execute("UPDATE approval_continuations SET context_json = '{}' WHERE approval_id = 'approval'")
-    store = legacy_database.open()
-    try:
-        principal = store.principal("@bot:example.org")
-        assert await principal.approval_continuation("approval") is None
-        assert not await principal.is_pending("$edit")
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_an_unclassified_continuation_settles_its_adopted_sources(legacy_database: _LegacyDatabase) -> None:
-    """A continuation whose entity never classified its reply settles the sources its adopted identity names."""
-    legacy_database.execute(_ATTEMPT_OWNER)
-    legacy_database.execute(
-        "UPDATE approval_continuations SET state = 'failing', failure_reason = 'expired' WHERE approval_id = 'approval'",
-    )
-    store = legacy_database.open()
-    try:
-        principal = store.principal("@bot:example.org")
-        assert await principal.is_pending("$first")
-        # Its failure note reached Matrix, so its settlement may finish it.
-        assert await principal.enqueue_matrix_delivery(
-            delivery_id="$first",
-            stage=DeliveryStage.FINAL,
-            room_id="!room:example.org",
-            thread_id=None,
-            payload={"msgtype": "m.text", "body": "Approval expired."},
+    assert page_sizes == [2, 1, 0]
+    assert legacy_database.query("SELECT approval_id FROM approval_continuations") == []
+    assert (
+        legacy_database.query(
+            "SELECT event_id FROM journal_events WHERE state = 'pending' ORDER BY event_id",
         )
-        assert await principal.claim_matrix_delivery(delivery_id="$first", stage=DeliveryStage.FINAL)
-        await principal.acknowledge_matrix_delivery(
-            delivery_id="$first",
-            stage=DeliveryStage.FINAL,
-            event_id="$note",
-            delivered_projections=(),
-        )
-        assert await principal.finish_approval_continuation("approval") is not None
-        assert await principal.approval_continuation("approval") is None
-        assert not await principal.is_pending("$first")
-    finally:
-        await store.close()
-
-
-# A newer edit's regeneration answered the reply the approval paused, in v2026.10.201.
-_NEWER_ANSWER = """
-INSERT INTO response_attempts VALUES
-    ('@bot:example.org', '$edit', 'bot', '!room:example.org', 7, '$answer', '["$first","$second"]', 2, 5);
-INSERT INTO matrix_delivery_outbox (
-    principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
-    payload_json, result_json, edits_event_id, attempted, retired, acknowledged_event_id, created_at_ns
-) VALUES ('@bot:example.org', '$edit', 'final', 'm.room.message', '!room:example.org', 7, '', 'edit-transaction',
-    '{"body":"* regenerated"}', '{"body":"regenerated"}', '$answer', 1, 0, '$answer-edit', 2);
-"""
-
-
-def _paused_turn_rows() -> str:
-    """Return the placeholder row and turn record v2026.10.201 kept for the turn the approval paused."""
-    record = TurnRecord.create(
-        ["$first", "$second"],
-        requester_id="@user:example.org",
-        response_event_id="$answer",
-        response_owner="bot",
-        conversation_target=MessageTarget.resolve("!room:example.org", None, "$first", room_mode=True),
-        history_scope=HistoryScope(kind="agent", scope_id="bot"),
+        == []
     )
-    stored = json.dumps(TurnRecordCodec._to_ledger_record(record)).replace("'", "''")
-    turns = ",\n".join(
-        f"('bot', '{event_id}', '{record.anchor_event_id}', '{stored}')" for event_id in record.indexed_event_ids
-    )
-    return f"""
-INSERT INTO turn_records VALUES {turns};
-INSERT INTO matrix_delivery_outbox (
-    principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
-    payload_json, attempted, acknowledged_event_id, created_at_ns
-) VALUES ('@bot:example.org', '$first', 'initial', 'm.room.message', '!room:example.org', 7, '', 'first-transaction',
-    '{{"body":"Thinking...","io.mindroom.stream_status":"pending"}}', 1, '$answer', 1);
-"""  # noqa: S608
-
-
-@pytest.mark.parametrize("with_turn_rows", [False, True])
-@pytest.mark.parametrize("failing", [False, True])
-@pytest.mark.asyncio
-async def test_an_approval_a_newer_answer_replaced_is_discarded(
-    legacy_database: _LegacyDatabase,
-    *,
-    failing: bool,
-    with_turn_rows: bool,
-) -> None:
-    """The regenerated answer stands: the approval is dropped at upgrade, never shown again, its source settled.
-
-    One that already failed is dropped too, even after a resume paused it again, so its failure is never
-    published over the newer answer.
-    """
-    legacy_database.execute(_ATTEMPT_OWNER)
-    legacy_database.execute(_NEWER_ANSWER)
-    if with_turn_rows:
-        legacy_database.execute(_paused_turn_rows())
-    if failing:
-        legacy_database.execute(
-            "UPDATE approval_continuations SET state = 'failing', failure_reason = 'expired', generation = 1 "
-            "WHERE approval_id = 'approval'",
-        )
-    store = legacy_database.open()
-    try:
-        principal = store.principal("@bot:example.org")
-        assert await principal.approval_continuation("approval") is None
-        assert not await principal.is_pending("$first")
-        await principal.replies.write_generation("gen-new", now_ns=10)
-        assert (
-            await principal.adopt_legacy_replies(entity_name="bot", presentations=LEGACY_PRESENTATIONS, now_ns=10) == ()
-        )
-        # The newer answer gets no record; nothing regenerates an answer from before the upgrade.
-        assert await principal.replies.for_event("$answer") is None
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_an_approval_a_resume_paused_again_keeps_its_reply_beside_a_newer_answer(
-    legacy_database: _LegacyDatabase,
-) -> None:
-    """An approved resume that paused again may have done so after the edit's answer: its approval stands."""
-    legacy_database.execute(_ATTEMPT_OWNER)
-    legacy_database.execute(_NEWER_ANSWER)
-    legacy_database.execute("UPDATE approval_continuations SET generation = 1 WHERE approval_id = 'approval'")
-    store = legacy_database.open()
-    try:
-        principal = store.principal("@bot:example.org")
-        approval = await principal.approval_continuation("approval")
-        assert approval is not None
-        assert approval.state == "waiting"
-        await principal.replies.write_generation("gen-new", now_ns=10)
-        await principal.adopt_legacy_replies(entity_name="bot", presentations=LEGACY_PRESENTATIONS, now_ns=10)
-        reply = await principal.replies.for_event("$answer")
-        assert reply is not None
-        assert reply.state is ReplyState.PAUSED
-        assert reply.approval_id == "approval"
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_a_card_of_an_unclassified_continuation_names_its_adopted_entity(
-    journal_store: EventJournalStore,
-) -> None:
-    """Until reply classification names its span, a continuation's card is authorized for the entity it adopted."""
-    principal = journal_store.principal("agent@alice")
-    await _ApprovalContinuations.admit_sources(principal)
-    # The run that published its cards still holds it.
-    continuation = replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="runtime-a")
-    await store_main_continuation(principal, continuation)
-    await _ApprovalContinuations.remember_card(principal)
-
-    (card,) = await principal.pending_approval_cards(room_id=continuation.room_id)
-
-    assert isinstance(card, StoredApprovalCard)
-    assert card.continuation_entity_name == continuation.entity_name

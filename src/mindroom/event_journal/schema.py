@@ -385,8 +385,8 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS approval_continuations (
         principal_id TEXT NOT NULL,
         approval_id TEXT NOT NULL UNIQUE,
-        -- The span whose pause created the continuation; null only for one
-        -- adopted from an earlier release until reply classification names it.
+        -- The span whose pause created the continuation. The upgrade that
+        -- added it cancelled every continuation an earlier release left.
         span_id TEXT,
         -- The span that runs a ready continuation once claimed; its records own
         -- the claim's bot instance and outcome.
@@ -547,14 +547,6 @@ _TABLES = (
         room_id TEXT NOT NULL,
         created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, room_id, target_event_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS reply_legacy_classifications (
-        -- Principals whose replies from before reply records were adopted
-        -- once, at the first start that had reply records.
-        principal_id TEXT NOT NULL PRIMARY KEY,
-        classified_at_ns BIGINT NOT NULL
     )
     """,
     """

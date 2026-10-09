@@ -28,8 +28,6 @@ from . import (
     background_approvals,
     interactive_questions,
     journal,
-    legacy_reply_messages,
-    legacy_response_attempts,
     legacy_turn_records,
     membership_hooks,
     outbox,
@@ -1754,24 +1752,6 @@ class PrincipalStore:
         """Return this principal's reply records."""
         return ReplyStore(_backend=self._backend, _principal_id=self._principal_id)
 
-    async def adopt_legacy_replies(
-        self,
-        *,
-        entity_name: str,
-        presentations: legacy_reply_messages.LegacyPresentations,
-        now_ns: int,
-    ) -> tuple[AppliedTransition, ...]:
-        """Give the replies an earlier release left paused records, once per principal."""
-        return await self._backend.write(
-            lambda transaction: legacy_reply_messages.classify(
-                transaction,
-                self._principal_id,
-                entity_name=entity_name,
-                presentations=presentations,
-                now_ns=now_ns,
-            ),
-        )
-
 
 def _turn_membership_is_current(
     transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
@@ -1924,7 +1904,7 @@ def _claim_approval_resume(
     current = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if current is None or current.state != "ready":
         return None, None
-    # Every continuation pauses a reply: its pause, or adoption, recorded it.
+    # Every continuation pauses a reply: the pause that created it recorded the reply.
     applied = replies.claim(
         transaction,
         principal_id,
@@ -1970,11 +1950,12 @@ def _settled_approval(
     owner_available: bool,
 ) -> tuple[PostCommitEffect, ...]:
     """Apply a finished continuation to the reply it paused, whose rule settles the sources the pause held."""
-    applied = replies.approval_finished(transaction, principal_id, continuation, owner_available=owner_available)
-    if applied is not None:
-        return applied.post_commit
-    legacy_response_attempts.settle_unclassified(transaction, principal_id, continuation)
-    return ()
+    return replies.approval_finished(
+        transaction,
+        principal_id,
+        continuation,
+        owner_available=owner_available,
+    ).post_commit
 
 
 class _ReplyRowRefusedError(Exception):

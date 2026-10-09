@@ -7,8 +7,9 @@ Always back up configuration and persistent storage before replacing the running
 ## Upgrading to durable reply records
 
 Upgrade while no agent is replying.
-Stop the previous backend once in-progress replies have finished; replies waiting for a tool approval keep their approval cards across the upgrade and continue once approved.
-A reply that was still streaming, being delivered, or resuming after an approval when the previous backend stopped may not finish cleanly, so resend that request if needed.
+Stop the previous backend once in-progress replies have finished, and decide pending tool approvals first: the upgrade cancels every approval still waiting or not yet resumed.
+A cancelled approval's card may stay visible, but clicking it does nothing, its reply keeps what it showed, and the request is not answered, so resend it if needed.
+A reply that was still streaming or being delivered when the previous backend stopped may not finish cleanly, so resend that request if needed.
 
 ## Upgrading to Nio 1.0
 

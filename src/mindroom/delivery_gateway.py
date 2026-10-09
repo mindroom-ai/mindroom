@@ -1517,7 +1517,9 @@ class DeliveryGateway:
             "interrupted": note_segment(NoteKind.INTERRUPTED),
             "restart": note_segment(NoteKind.RESTART),
         }[reason]
-        while (reply := await self.deps.outbox.replies.for_event(event_id)) is not None:
+        while True:
+            reply = await self.deps.outbox.replies.for_event(event_id)
+            assert reply is not None, "a continuation's paused reply exists while the continuation does"
             if reply.current_span_id is not None and await self._end_span_left_behind(reply, reply.current_span_id):
                 continue
             span = await self.deps.outbox.replies.span(reply.last_span_id)
@@ -1560,8 +1562,6 @@ class DeliveryGateway:
                     continue
                 # The reply ended otherwise; the continuation's finish reads its rows.
                 return True
-        # Only a continuation reply classification has not reached yet has no reply to show the note on.
-        return True
 
     async def _end_span_left_behind(self, reply: rl.Reply, span_id: str) -> bool:
         """End a resume an older bot instance left running on the reply; return whether it ended one."""

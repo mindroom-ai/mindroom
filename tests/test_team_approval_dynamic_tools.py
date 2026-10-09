@@ -49,8 +49,9 @@ from mindroom.teams import (
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from tests.approval_continuation_helpers import resumed_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths, unwrap_extracted_collaborator
-from tests.legacy_reply_helpers import resumed_main_left_approval, store_main_continuation
+from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_openai_native_compaction import _ANSWER, _event, _response
 from tests.test_response_runner_focused import _admit_approval_source
@@ -114,7 +115,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         team_member_names=("alpha", "beta"),
         team_mode="coordinate",
     )
-    await store_main_continuation(runner.deps.approval_store, continuation)
+    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
     progress = AsyncMock()
     with (
@@ -126,7 +127,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         patch("mindroom.response_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
-        async with resumed_main_left_approval(bot, continuation) as claimed:
+        async with resumed_approval(bot, continuation) as claimed:
             result = await runner._continue_entity_call(
                 claimed,
                 request=_plain_request(target, source_event_id="$source"),
