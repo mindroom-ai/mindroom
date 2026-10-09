@@ -111,6 +111,15 @@ _BROWSER_ACTIONS = {
     "help",
 }
 
+# Actions that only return reference data and never use a browser.
+_REFERENCE_ACTIONS = frozenset({"actions", "help"})
+
+
+def is_reference_action(action: object) -> bool:
+    """Return whether a browser_control action only returns reference data and never uses a browser."""
+    return str(action).strip().lower() in _REFERENCE_ACTIONS
+
+
 _ACT_REQUEST_KINDS = (
     "click",
     "type",
@@ -649,8 +658,7 @@ class BrowserTools(Toolkit):
         """Keep Matrix desktop calls with their live context while isolating host calls."""
         if function_name != "browser_control":
             return False
-        action = cast("str", arguments["action"]).strip().lower()
-        if action in {"actions", "help"}:
+        if is_reference_action(arguments["action"]):
             return False
         return (
             self._resolve_target(
@@ -844,7 +852,8 @@ class BrowserTools(Toolkit):
     ) -> str | ToolResult:
         """Control MindRoom's browser state and actions, including worker browser navigation.
 
-        To let the user watch this worker browser, use chat_ui.open_panel(panel='computer').
+        If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel;
+        use chat_ui.open_panel(panel='computer') only to show it again.
         That UI request does not navigate, send a prompt to ChatGPT, or take control.
         The user's local browser is separate and requires the configured desktop target.
 
@@ -891,7 +900,7 @@ class BrowserTools(Toolkit):
         if normalized_action not in _BROWSER_ACTIONS:
             msg = _unknown_browser_action_message(action)
             raise ValueError(msg)
-        if normalized_action in {"actions", "help"}:
+        if normalized_action in _REFERENCE_ACTIONS:
             return json.dumps(_browser_help_payload(normalized_action), sort_keys=True)
         if not isinstance(returnAttachment, bool):
             msg = "returnAttachment must be a boolean."

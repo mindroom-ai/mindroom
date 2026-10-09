@@ -70,20 +70,14 @@ async def _authorize_computer(
     return _resolve_target(requester_id, room_id, agent_user_id, name, config, runtime_paths)
 
 
-def _resolve_target(
-    requester_id: str,
-    room_id: str,
-    agent_user_id: str,
-    name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> ComputerTarget:
+def computer_browser_provider(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> str:
+    """Return the one browser tool that gives this agent a worker computer, or raise the API's error."""
     if primary_worker_backend_name(runtime_paths) not in {"docker", "kubernetes"}:
         raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes worker backend.")
     providers = [
         provider
         for provider in ("browser", "browser_mcp")
-        if config.agent_has_tool_at_execution_scope(name, provider, "user_agent")
+        if config.agent_has_tool_at_execution_scope(agent_name, provider, "user_agent")
     ]
     if len(providers) != 1:
         raise ComputerError(409, "Computer requires exactly one browser provider and explicit user_agent worker scope.")
@@ -94,13 +88,25 @@ def _resolve_target(
     from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool  # noqa: PLC0415
 
     worker_tools = resolve_runtime_worker_tools(
-        name,
+        agent_name,
         config,
         runtime_paths,
-        list(config.resolve_entity(name).available_tools),
+        list(config.resolve_entity(agent_name).available_tools),
     )
     if not sandbox_proxy_enabled_for_tool(provider, runtime_paths=runtime_paths, worker_tools_override=worker_tools):
         raise ComputerError(503, "Computer requires browser tools routed to the worker.")
+    return provider
+
+
+def _resolve_target(
+    requester_id: str,
+    room_id: str,
+    agent_user_id: str,
+    name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ComputerTarget:
+    computer_browser_provider(name, config, runtime_paths)
     identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=name,

@@ -7,7 +7,7 @@ icon: lucide/monitor
 Worker Computer gives an agent a visible, persistent Chromium browser inside its dedicated worker, and lets the user watch it, take control, and hand it back from MindRoom Chat's Computer panel.
 Use it when a user wants to see what the agent is doing in a browser, step in for logins or CAPTCHAs, or preview a web app the agent is building.
 The browser shares the worker's files with the agent's shell and file tools.
-Agents with the [`chat_ui`](chat-ui.md) toolkit can open the panel for the user; see [Control the browser, then show it](chat-ui.md#control-the-browser-then-show-it) for that call.
+Agents with the [`chat_ui`](chat-ui.md) toolkit can open the panel for the user; see [Show the worker browser](chat-ui.md#show-the-worker-browser) for that call.
 
 ## Requirements and opt-in
 
@@ -143,6 +143,9 @@ Expose only this gateway; the worker's display has no public listener.
 - **Close** disconnects this viewer and releases its control; the browser and files stay for later work.
 - **Stop** closes the browser and display and ends the session.
   **Start computer** creates a fresh session; profiles and files remain.
+
+The room header in MindRoom Chat shows a Computer button once the agent has shown its computer in that conversation.
+Before that, and on phones, open it from the room's More menu with **Show Computer**.
 
 Changing room, thread, account, or selected agent closes the old viewer.
 On desktop the panel sits beside the conversation and closes the Members drawer; on mobile it fills the screen and has a close button.
