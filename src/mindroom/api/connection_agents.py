@@ -106,6 +106,32 @@ def resolve_connection_user(
     )
 
 
+def build_connection_agent_target(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    agent_name: str,
+) -> ResolvedWorkerTarget:
+    """Build an agent worker target for authorized connection and credential operations."""
+    identity = build_tool_execution_identity(
+        channel="mcp",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    return build_agent_toolkit_worker_target(
+        config.resolve_entity(agent_name).execution_scope,
+        agent_name,
+        is_private=config.agents[agent_name].private is not None,
+        execution_identity=identity,
+        runtime_paths=runtime_paths,
+    )
+
+
 def resolve_connection_agent(
     user: ConnectionUserContext,
     agent_name: str,

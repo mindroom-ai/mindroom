@@ -1459,7 +1459,11 @@ depends_on = [
 # enforce both dependency edges and module visibility for each importer.
 [[modules]]
 path = "mindroom.api"
-depends_on = []
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+]
 
 [[modules]]
 path = "mindroom.api.config_lifecycle"
@@ -1645,6 +1649,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.oauth",
     "mindroom.api.connection_agents",
+    "mindroom.api",
     "mindroom.constants",
     "mindroom.oauth",
     "mindroom.oauth.credential_lifecycle",
@@ -1712,11 +1717,13 @@ depends_on = [
     "mindroom.api.connections",
     "mindroom.api.thread_exports",
     "mindroom.agent_policy",
+    "mindroom.api",
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.dynamic_workflows",
     "mindroom.api.egress_broker",
+    "mindroom.api.egress_credentials",
     "mindroom.api.external_triggers",
     "mindroom.api.frontend",
     "mindroom.api.homeassistant_integration",

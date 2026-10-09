@@ -27,6 +27,7 @@ from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
+    from mindroom.api.egress_credentials import EgressCredentialService
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata
@@ -66,6 +67,7 @@ class AgentConnections(BaseModel):
     can_use: bool
     services: list[ConnectionService]
     tools: list[ConnectionTool]
+    egress_services: list[EgressCredentialService] = []
 
 
 class ConnectionsCatalog(BaseModel):
@@ -176,6 +178,27 @@ def _agent_connections(
         )
         if tool_name not in service.tools:
             service.tools.append(tool_name)
+
+    # Build egress services only if the agent has shell or python
+    egress_services: list[EgressCredentialService] = []
+    if any(tool in entity.available_tools for tool in ("shell", "python")):
+        from mindroom.api.egress_credentials import build_service_for_agent  # noqa: PLC0415
+
+        can_use = agent_name in user.agent_names
+        manager = get_runtime_credentials_manager(user.runtime_paths)
+        egress_services = [
+            build_service_for_agent(
+                service_name,
+                config,
+                user.runtime_paths,
+                agent_name,
+                user.owner.requester_id,
+                can_use,
+                manager,
+            )
+            for service_name in config.egress_broker.services
+        ]
+
     agent = config.agents[agent_name]
     return AgentConnections(
         agent_name=agent_name,
@@ -184,6 +207,7 @@ def _agent_connections(
         can_use=agent_name in user.agent_names,
         services=list(services.values()),
         tools=tools,
+        egress_services=egress_services,
     )
 
 
