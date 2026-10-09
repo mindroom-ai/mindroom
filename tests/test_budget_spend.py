@@ -33,10 +33,16 @@ def _config() -> Config:
         teams={"engineering": TeamConfig(display_name="Engineering", role="Team", agents=["code"])},
         models={
             "astra": ModelConfig(
-                provider="openai", id="gpt-6-astra", api_key="key", pricing=ModelPricing(input=5, output=30)
+                provider="openai",
+                id="gpt-6-astra",
+                api_key="key",
+                pricing=ModelPricing(input=5, output=30),
             ),
             "luna": ModelConfig(
-                provider="openai", id="gpt-6-luna", api_key="key", pricing=ModelPricing(input=0.2, output=1.25)
+                provider="openai",
+                id="gpt-6-luna",
+                api_key="key",
+                pricing=ModelPricing(input=0.2, output=1.25),
             ),
             "local": ModelConfig(provider="ollama", id="qwen3.8:27b"),
         },
@@ -46,7 +52,9 @@ def _config() -> Config:
 
 def _paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage", process_env={}
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
     )
 
 
@@ -99,7 +107,8 @@ def _run(
 
 
 def _wire(
-    monkeypatch: pytest.MonkeyPatch, rows: dict[UsageStorageSource, tuple[UsageRunNode, ...]]
+    monkeypatch: pytest.MonkeyPatch,
+    rows: dict[UsageStorageSource, tuple[UsageRunNode, ...]],
 ) -> list[float | None]:
     seen_since: list[float | None] = []
     monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: tuple(rows))
@@ -184,7 +193,7 @@ def test_spend_reports_unpriced_models_without_charging(tmp_path: Path, monkeypa
         {
             _source(): (
                 _run("l1", provider=ollama, model="qwen3.8:27b", created_at=NOW, input_tokens=700, output_tokens=300),
-            )
+            ),
         },
     )
 
@@ -202,7 +211,7 @@ def test_spend_ignores_unattributed_usage(tmp_path: Path, monkeypatch: pytest.Mo
         {
             _source(): (
                 _run("x", provider=openai, model="gpt-6-astra", created_at=NOW, requester_id=None, input_tokens=10),
-            )
+            ),
         },
     )
 
@@ -210,7 +219,8 @@ def test_spend_ignores_unattributed_usage(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_spend_charges_team_members_and_helpers_to_the_requester(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config()
     openai = _provider(config, tmp_path, "astra")
