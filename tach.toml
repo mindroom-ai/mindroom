@@ -2095,6 +2095,7 @@ depends_on = [
     "mindroom.custom_tools.chat_ui",
     "mindroom.logging_config",
     "mindroom.orchestration.computer_runtime",
+    "mindroom.runtime_env_policy",
     "mindroom.tool_system.declarations",
     "mindroom.worker_computer.sessions",
 ]

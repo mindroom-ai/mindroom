@@ -48,11 +48,12 @@ def _agent(
     tools: list[str],
     *,
     backend: str = "docker",
+    computer: bool = True,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={"MINDROOM_WORKER_BACKEND": backend},
+        process_env={"MINDROOM_WORKER_BACKEND": backend, "MINDROOM_WORKER_COMPUTER_ENABLED": str(computer).lower()},
     )
     browsers = [tool for tool in tools if tool in {"browser", "browser_mcp"}]
     config = Config(
@@ -208,14 +209,15 @@ async def test_announcement_failure_still_runs_the_browser_call(
 
 
 @pytest.mark.parametrize(
-    ("tools", "tool_name", "backend"),
+    ("tools", "tool_name", "backend", "computer"),
     [
-        (["browser"], "browser", "docker"),
-        (["browser", "chat_ui"], "browser", "static"),
-        (["browser_mcp", "chat_ui"], "browser", "docker"),
-        (["shell", "browser", "chat_ui"], "shell", "docker"),
+        (["browser"], "browser", "docker", True),
+        (["browser", "chat_ui"], "browser", "static", True),
+        (["browser", "chat_ui"], "browser", "docker", False),
+        (["browser_mcp", "chat_ui"], "browser", "docker", True),
+        (["shell", "browser", "chat_ui"], "shell", "docker", True),
     ],
-    ids=["without-chat-ui", "without-computer", "not-the-computer-browser", "other-tool"],
+    ids=["without-chat-ui", "without-computer", "computer-disabled", "not-the-computer-browser", "other-tool"],
 )
 def test_toolkit_unchanged_without_chat_ui_or_computer_or_for_other_tools(
     tmp_path: Path,
@@ -223,9 +225,10 @@ def test_toolkit_unchanged_without_chat_ui_or_computer_or_for_other_tools(
     tools: list[str],
     tool_name: str,
     backend: str,
+    computer: bool,
 ) -> None:
     """Only the browser tool that gives a chat_ui agent its worker computer announces it."""
-    config, runtime_paths = _agent(tmp_path, tools, backend=backend)
+    config, runtime_paths = _agent(tmp_path, tools, backend=backend, computer=computer)
     toolkit = _fake_browser(events)
     function = toolkit.async_functions["browser_control"]
     existing_hook = MagicMock()
